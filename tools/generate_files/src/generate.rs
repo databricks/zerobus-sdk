@@ -284,13 +284,52 @@ fn parse_struct_type(type_str: &str) -> Option<Vec<(String, String)>> {
     fields
         .into_iter()
         .map(|f| {
-            let mut parts = f.splitn(2, ':');
-            match (parts.next(), parts.next()) {
-                (Some(name), Some(type_str)) => {
-                    Some((name.trim().to_string(), type_str.trim().to_string()))
+            let f = f.trim();
+            // Try colon format first (field_name:type)
+            if let Some(colon_pos) = f.find(':') {
+                let name = f[..colon_pos].trim();
+                let type_str = f[colon_pos + 1..].trim();
+                if !name.is_empty() && !type_str.is_empty() {
+                    return Some((name.to_string(), type_str.to_string()));
                 }
-                _ => None,
             }
+
+            // Try space format (field_name TYPE)
+            // Find the first space that's not inside angle brackets
+            let mut depth = 0;
+            let mut split_pos = None;
+            for (i, c) in f.char_indices() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    ' ' if depth == 0 && split_pos.is_none() => {
+                        // Check if this looks like a field name followed by a type
+                        let potential_name = &f[..i];
+                        let potential_type = &f[i + 1..];
+                        // Field name should be a simple identifier (alphanumeric + underscore)
+                        if potential_name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
+                            && !potential_name.is_empty()
+                            && !potential_type.is_empty()
+                        {
+                            split_pos = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(pos) = split_pos {
+                let name = f[..pos].trim();
+                let type_str = f[pos + 1..].trim();
+                if !name.is_empty() && !type_str.is_empty() {
+                    return Some((name.to_string(), type_str.to_string()));
+                }
+            }
+
+            None
         })
         .collect::<Option<Vec<_>>>()
 }
@@ -702,5 +741,48 @@ mod tests {
                 .to_string()
                 .contains("Invalid Protobuf field name '1field'. Cannot start with a digit.")
         );
+    }
+
+    #[test]
+    fn test_struct_space_separated_format() {
+        // Test STRUCT format with space-separated field names and types (Databricks format)
+        let table_info = TableInfo {
+            columns: vec![Column {
+                name: "metadata".to_string(),
+                type_text: "STRUCT<ingest_timestamp TIMESTAMP, pulsar_topic STRING, pulsar_partition INT, pulsar_message_id STRING, pulsar_publish_time BIGINT, pulsar_event_time BIGINT, pulsar_key STRING>".to_string(),
+                nullable: true,
+            }],
+        };
+
+        let dir = tempdir().unwrap();
+        let proto_path = dir.path().join("space_struct.proto");
+        let output_dir = dir.path().to_path_buf();
+
+        generate_proto_file(
+            "SpaceStructMessage",
+            &table_info.columns,
+            &proto_path,
+            &output_dir,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(proto_path.clone()).unwrap();
+        // Verify that the struct was parsed correctly
+        assert!(content.contains("message Metadata"));
+        assert!(content.contains("optional int64 ingest_timestamp"));
+        assert!(content.contains("optional string pulsar_topic"));
+        assert!(content.contains("optional int32 pulsar_partition"));
+        assert!(content.contains("optional string pulsar_message_id"));
+        assert!(content.contains("optional int64 pulsar_publish_time"));
+        assert!(content.contains("optional int64 pulsar_event_time"));
+        assert!(content.contains("optional string pulsar_key"));
+
+        // Also verify that the generated proto is valid and can be compiled.
+        generate_rust_and_descriptor(
+            proto_path.to_str().unwrap(),
+            "SpaceStructMessage",
+            &output_dir,
+        )
+        .unwrap();
     }
 }

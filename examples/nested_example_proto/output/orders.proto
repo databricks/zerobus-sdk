@@ -1,0 +1,36 @@
+syntax = "proto2";
+
+package orders;
+
+message table_Orders {
+	optional int32 id = 1;
+	optional string product_name = 2;
+	optional int32 quantity = 3;
+	optional double price = 4;
+	optional string status = 5;
+	optional int64 created_at = 6;
+	optional int64 updated_at = 7;
+	optional Customer customer = 8;
+	optional Shipping shipping = 9;
+	
+	message Customer {
+		optional string name = 1;
+		optional string email = 2;
+		optional Address address = 3;
+	}
+	
+	message Address {
+		optional string street = 1;
+		optional string city = 2;
+		optional string state = 3;
+		optional string zip_code = 4;
+		optional string country = 5;
+	}
+	
+	message Shipping {
+		optional string method = 1;
+		optional string tracking_number = 2;
+		optional int64 estimated_delivery = 3;
+		optional Address delivery_address = 4;
+	}
+}
