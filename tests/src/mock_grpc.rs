@@ -239,93 +239,101 @@ impl Zerobus for MockZerobusServer {
             while let Some(request_result) = stream.message().await.transpose() {
                 match request_result {
                     Ok(request) => {
-                        if let Some(RequestPayload::IngestRecord(ingest_request)) = request.payload
-                        {
-                            debug!(
-                                "Received IngestRecord request with offset_id: {:?}",
-                                ingest_request.offset_id
-                            );
-                            if let Some(offset_id) = ingest_request.offset_id {
-                                let mut max_offset = max_offset_sent.lock().await;
-                                if offset_id > *max_offset {
-                                    *max_offset = offset_id;
+                        match request.payload {
+                            Some(RequestPayload::IngestRecord(ingest_request)) => {
+                                debug!(
+                                    "Received IngestRecord request with offset_id: {:?}",
+                                    ingest_request.offset_id
+                                );
+
+                                // Update max offset
+                                if let Some(offset_id) = ingest_request.offset_id {
+                                    let mut max_offset = max_offset_sent.lock().await;
+                                    if offset_id > *max_offset {
+                                        *max_offset = offset_id;
+                                    }
                                 }
-                            }
 
-                            {
-                                let mut count = write_count.lock().await;
-                                *count += 1;
-                                debug!("Incremented write count to: {}", *count);
-                            }
+                                // Increment write count
+                                {
+                                    let mut count = write_count.lock().await;
+                                    *count += 1;
+                                    debug!("Incremented write count to: {}", *count);
+                                }
 
-                            if response_index < stream_responses.len() {
-                                match &stream_responses[response_index] {
-                                    MockResponse::RecordAck {
-                                        ack_up_to_offset,
-                                        delay_ms,
-                                    } => {
-                                        if ingest_request.offset_id == Some(*ack_up_to_offset) {
-                                            if *delay_ms > 0 {
-                                                sleep(Duration::from_millis(*delay_ms)).await;
-                                            }
-                                            info!(
-                                                "Sending RecordAck response with ack_up_to_offset: {}",
-                                                ack_up_to_offset
-                                            );
-                                            let response = EphemeralStreamResponse {
-                                                payload: Some(
-                                                    ResponsePayload::IngestRecordResponse(
-                                                        IngestRecordResponse {
-                                                            durability_ack_up_to_offset: Some(
-                                                                *ack_up_to_offset,
-                                                            ),
-                                                        },
-                                                    ),
-                                                ),
-                                            };
-                                            if tx.send(Ok(response)).await.is_err() {
-                                                return;
-                                            }
-                                            response_index += 1;
-                                        }
-                                    }
-                                    MockResponse::CloseStreamSignal {
-                                        duration_seconds,
-                                        delay_ms,
-                                    } => {
-                                        if *delay_ms > 0 {
-                                            sleep(Duration::from_millis(*delay_ms)).await;
-                                        }
-                                        info!(
-                                            "Sending CloseStreamSignal with duration: {}s",
-                                            duration_seconds
-                                        );
-                                        let response = EphemeralStreamResponse {
-                                            payload: Some(ResponsePayload::CloseStreamSignal(
-                                                CloseStreamSignal {
-                                                    duration: Some(ProtobufDuration {
-                                                        seconds: *duration_seconds,
-                                                        nanos: 0,
-                                                    }),
-                                                },
-                                            )),
-                                        };
-                                        if tx.send(Ok(response)).await.is_err() {
-                                            return;
-                                        }
-                                        response_index += 1;
-                                    }
-                                    MockResponse::Error { status, delay_ms } => {
-                                        if *delay_ms > 0 {
-                                            sleep(Duration::from_millis(*delay_ms)).await;
-                                        }
-                                        let _ = tx.send(Err(status.clone())).await;
+                                // Process mock response
+                                if response_index < stream_responses.len() {
+                                    let (should_continue, new_index) = handle_mock_response(
+                                        &stream_responses[response_index],
+                                        ingest_request.offset_id,
+                                        "single record",
+                                        &tx,
+                                        response_index,
+                                    )
+                                    .await;
+                                    response_index = new_index;
+                                    if !should_continue {
                                         return;
                                     }
-                                    _ => {
-                                        response_index += 1;
+                                }
+                            }
+                            Some(RequestPayload::IngestRecordBatch(batch_request)) => {
+                                debug!(
+                                    "Received IngestRecordBatch request with offset_id: {:?}",
+                                    batch_request.offset_id
+                                );
+
+                                // Count records in the batch
+                                let record_count = if let Some(batch) = &batch_request.batch {
+                                    use databricks::zerobus::ingest_record_batch_request::Batch;
+                                    match batch {
+                                        Batch::ProtoEncodedBatch(proto_batch) => {
+                                            proto_batch.records.len()
+                                        }
+                                        Batch::JsonBatch(json_batch) => json_batch.records.len(),
+                                    }
+                                } else {
+                                    0
+                                };
+
+                                debug!("Batch contains {} records", record_count);
+
+                                // Update max offset
+                                if let Some(offset_id) = batch_request.offset_id {
+                                    let mut max_offset = max_offset_sent.lock().await;
+                                    if offset_id > *max_offset {
+                                        *max_offset = offset_id;
                                     }
                                 }
+
+                                // Increment write count by number of records
+                                {
+                                    let mut count = write_count.lock().await;
+                                    *count += record_count as u64;
+                                    debug!(
+                                        "Incremented write count by {} to: {}",
+                                        record_count, *count
+                                    );
+                                }
+
+                                // Process mock response
+                                if response_index < stream_responses.len() {
+                                    let (should_continue, new_index) = handle_mock_response(
+                                        &stream_responses[response_index],
+                                        batch_request.offset_id,
+                                        "batch",
+                                        &tx,
+                                        response_index,
+                                    )
+                                    .await;
+                                    response_index = new_index;
+                                    if !should_continue {
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => {
+                                debug!("Received unknown request type");
                             }
                         }
                     }
@@ -375,4 +383,76 @@ pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn 
     info!("Mock server started successfully at: {}", server_url);
 
     Ok((mock_server, server_url))
+}
+
+/// Helper function to handle mock response processing
+/// Returns (should_continue, new_response_index)
+async fn handle_mock_response(
+    mock_response: &MockResponse,
+    offset: Option<i64>,
+    request_type: &str,
+    tx: &mpsc::Sender<Result<EphemeralStreamResponse, Status>>,
+    current_index: usize,
+) -> (bool, usize) {
+    match mock_response {
+        MockResponse::RecordAck {
+            ack_up_to_offset,
+            delay_ms,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                if *delay_ms > 0 {
+                    sleep(Duration::from_millis(*delay_ms)).await;
+                }
+                info!(
+                    "Sending RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::CloseStreamSignal {
+            duration_seconds,
+            delay_ms,
+        } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            info!(
+                "Sending CloseStreamSignal with duration: {}s",
+                duration_seconds
+            );
+            let response = EphemeralStreamResponse {
+                payload: Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
+                    duration: Some(ProtobufDuration {
+                        seconds: *duration_seconds,
+                        nanos: 0,
+                    }),
+                })),
+            };
+            if tx.send(Ok(response)).await.is_err() {
+                return (false, current_index);
+            }
+            (true, current_index + 1)
+        }
+        MockResponse::Error { status, delay_ms } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            let _ = tx.send(Err(status.clone())).await;
+            (false, current_index)
+        }
+        _ => (true, current_index + 1),
+    }
 }

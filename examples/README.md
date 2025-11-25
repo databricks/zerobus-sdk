@@ -4,17 +4,27 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 
 ## Available Examples
 
-### 1. JSON Example (`basic_example_json/`)
-**Recommended for getting started** - A simpler example that uses JSON for data serialization.
+This directory contains examples for two serialization formats (JSON and Protocol Buffers), each demonstrating both single-record and batch ingestion.
 
+### JSON Examples
+**Recommended for getting started** - Simpler examples that use JSON for data serialization.
+
+- **`basic_example_json/`** - Ingest single records using `ingest_record()`
+- **`basic_example_json_batch/`** - Ingest multiple records at once using `ingest_records()`
+
+**Features:**
 - No schema generation required
 - Direct JSON string ingestion
 - Easier to understand and modify
 - Great for quick prototyping
 
-### 2. Protocol Buffers Example (`basic_example_proto/`)
-A more advanced example that uses Protocol Buffers for type-safe data serialization.
+### Protocol Buffers Examples
+More advanced examples that use Protocol Buffers for type-safe data serialization.
 
+- **`basic_example_proto/`** - Ingest single records using `ingest_record()`
+- **`basic_example_proto_batch/`** - Ingest multiple records at once using `ingest_records()`
+
+**Features:**
 - Schema files already included (generation only needed for custom tables)
 - Type-safe record creation
 - Better for production use cases
@@ -22,12 +32,15 @@ A more advanced example that uses Protocol Buffers for type-safe data serializat
 
 ## Common Features
 
-Both examples demonstrate:
+All examples demonstrate:
 - Creating a stream with OAuth authentication
-- Ingesting a single record
 - Waiting for acknowledgment
 - Properly closing the stream
 - Configuring credentials and endpoints
+
+**When to use single-record vs batch ingestion:**
+- **Single-record (`ingest_record`)**: Use when ingesting records one at a time, or when you need immediate acknowledgment for each record. Each record succeeds or fails independently.
+- **Batch (`ingest_records`)**: Use when you have multiple records to ingest at once for better throughput and efficiency. Uses **all-or-nothing semantics** - the entire batch either succeeds or fails as a unit.
 
 ## Prerequisites
 
@@ -135,6 +148,53 @@ Key differences from the Protocol Buffers example:
 
 ---
 
+## Running the JSON Batch Example
+
+The JSON batch example demonstrates how to ingest multiple JSON records at once for better throughput.
+
+### Navigate to the JSON Batch Example
+
+```bash
+cd examples/basic_example_json_batch
+```
+
+### Run the Example
+
+```bash
+cargo run
+```
+
+**Expected output:**
+
+```
+Batch of 3 records acknowledged with offset Id: 0
+Stream closed successfully
+```
+
+### Code Highlights
+
+The JSON batch example uses `ingest_records()` to send multiple records:
+
+```rust
+let batch: Vec<String> = vec![
+    format!(r#"{{"id": 1, "customer_name": "Alice Smith", ...}}"#),
+    format!(r#"{{"id": 2, "customer_name": "Bob Johnson", ...}}"#),
+    format!(r#"{{"id": 3, "customer_name": "Carol Williams", ...}}"#),
+];
+
+let ack_future = stream.ingest_records(batch).await.unwrap();
+let _ack = ack_future.await.unwrap();
+```
+
+**Key benefits:**
+- Single network call for multiple records
+- Better throughput for bulk data ingestion
+- All records in the batch are acknowledged together
+- More efficient than calling `ingest_record()` multiple times
+- **All-or-nothing semantics**: Either all records succeed or all fail, ensuring consistency
+
+---
+
 ## Running the Protocol Buffers Example
 
 The Protocol Buffers example provides type safety and better performance. **No schema generation needed** - the example already includes all generated files in the `output/` folder.
@@ -192,12 +252,75 @@ Key features:
 
 ---
 
+## Running the Protocol Buffers Batch Example
+
+The Protocol Buffers batch example demonstrates high-throughput batch ingestion with type safety.
+
+### Navigate to the Proto Batch Example
+
+```bash
+cd examples/basic_example_proto_batch
+```
+
+### Run the Example
+
+```bash
+cargo run
+```
+
+**Expected output:**
+
+```
+Batch of 3 records acknowledged with offset Id: 0
+Stream closed successfully
+```
+
+### Code Highlights
+
+The Protocol Buffers batch example uses `ingest_records()` with typed records:
+
+```rust
+let batch: Vec<Vec<u8>> = vec![
+    TableOrders {
+        id: Some(1),
+        customer_name: Some("Alice Smith".to_string()),
+        // ... other fields
+    }
+    .encode_to_vec(),
+    TableOrders {
+        id: Some(2),
+        customer_name: Some("Bob Johnson".to_string()),
+        // ... other fields
+    }
+    .encode_to_vec(),
+    TableOrders {
+        id: Some(3),
+        customer_name: Some("Carol Williams".to_string()),
+        // ... other fields
+    }
+    .encode_to_vec(),
+];
+
+let ack_future = stream.ingest_records(batch).await.unwrap();
+let _ack = ack_future.await.unwrap();
+```
+
+**Key benefits:**
+- Combines batch performance with type safety
+- Optimal for production high-throughput scenarios
+- All records validated at compile time
+- Single acknowledgment for the entire batch
+- **All-or-nothing semantics**: Either all records succeed or all fail, ensuring consistency
+
+---
+
 ## Adapting for Your Custom Table
 
-### For JSON Example
+### For JSON Examples (Single-Record and Batch)
 
-Simply modify the JSON string in `src/main.rs` to match your table's schema:
+Simply modify the JSON string(s) in `src/main.rs` to match your table's schema:
 
+**Single-record example:**
 ```rust
 let json_record = format!(
     r#"{{
@@ -208,11 +331,20 @@ let json_record = format!(
 );
 ```
 
+**Batch example:**
+```rust
+let batch: Vec<String> = vec![
+    format!(r#"{{"your_field_1": "value1", "your_field_2": 123}}"#),
+    format!(r#"{{"your_field_1": "value2", "your_field_2": 456}}"#),
+    format!(r#"{{"your_field_1": "value3", "your_field_2": 789}}"#),
+];
+```
+
 No schema generation needed!
 
-### For Protocol Buffers Example
+### For Protocol Buffers Examples (Single-Record and Batch)
 
-To use your own custom table, you'll need to generate schema files for it and update `src/main.rs`.
+To use your own custom table, you'll need to generate schema files for it and update `src/main.rs`. These steps apply to both `basic_example_proto/` and `basic_example_proto_batch/` examples.
 
 **Step 1: Generate Schema Files for Your Table**
 
@@ -227,6 +359,8 @@ cargo run -- \
   --table "<catalog.schema.your_table>" \
   --output-dir "../../examples/basic_example_proto/output"
 ```
+
+Note: For the batch example, use `--output-dir "../../examples/basic_example_proto_batch/output"` instead.
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema
@@ -278,7 +412,7 @@ let descriptor_proto = load_descriptor_proto(
 **C. Update the record creation:**
 Modify the code to create an instance of your new table struct with your own data.
 
-*Before:*
+*For single-record example - Before:*
 ```rust
 let ack_future = stream.ingest_record(
     TableOrders {
@@ -289,7 +423,7 @@ let ack_future = stream.ingest_record(
 ).await.unwrap();
 ```
 
-*After (for a table named `inventory`):*
+*For single-record example - After (for a table named `inventory`):*
 ```rust
 let ack_future = stream.ingest_record(
     TableInventory {
@@ -298,6 +432,22 @@ let ack_future = stream.ingest_record(
         // ... other fields
     }.encode_to_vec()
 ).await.unwrap();
+```
+
+*For batch example - Before:*
+```rust
+let batch: Vec<Vec<u8>> = vec![
+    TableOrders { id: Some(1), /* ... */ }.encode_to_vec(),
+    TableOrders { id: Some(2), /* ... */ }.encode_to_vec(),
+];
+```
+
+*For batch example - After (for a table named `inventory`):*
+```rust
+let batch: Vec<Vec<u8>> = vec![
+    TableInventory { item_id: Some(123), /* ... */ }.encode_to_vec(),
+    TableInventory { item_id: Some(456), /* ... */ }.encode_to_vec(),
+];
 ```
 
 ---
@@ -334,7 +484,7 @@ let table_properties = TableProperties {
 **JSON Example:**
 ```rust
 let stream_configuration_options = StreamConfigurationOptions {
-    max_inflight_records: 100,
+    max_inflight_requests: 100,
     record_type: RecordType::Json,  // Important for JSON!
     ..Default::default()
 };
@@ -343,7 +493,7 @@ let stream_configuration_options = StreamConfigurationOptions {
 **Protocol Buffers Example:**
 ```rust
 let stream_configuration_options = StreamConfigurationOptions {
-    max_inflight_records: 100,
+    max_inflight_requests: 100,
     ..Default::default()  // RecordType::Proto is the default
 };
 ```
@@ -375,15 +525,15 @@ let mut stream = sdk_handle
 
 Opens a bidirectional gRPC stream with OAuth authentication.
 
-### 5. Ingest Record
+### 5. Ingest Records
 
-**JSON Example:**
+**Single-Record - JSON Example:**
 ```rust
 let json_record = format!(r#"{{"id": 1, "name": "Alice"}}"#);
 let ack_future = stream.ingest_record(json_record).await.unwrap();
 ```
 
-**Protocol Buffers Example:**
+**Single-Record - Protocol Buffers Example:**
 ```rust
 let ack_future = stream
     .ingest_record(
@@ -398,7 +548,25 @@ let ack_future = stream
     .unwrap();
 ```
 
-Returns a future that resolves when the server acknowledges the record.
+**Batch - JSON Example:**
+```rust
+let batch = vec![
+    format!(r#"{{"id": 1, "name": "Alice"}}"#),
+    format!(r#"{{"id": 2, "name": "Bob"}}"#),
+];
+let ack_future = stream.ingest_records(batch).await.unwrap();
+```
+
+**Batch - Protocol Buffers Example:**
+```rust
+let batch = vec![
+    TableOrders { id: Some(1), /* ... */ }.encode_to_vec(),
+    TableOrders { id: Some(2), /* ... */ }.encode_to_vec(),
+];
+let ack_future = stream.ingest_records(batch).await.unwrap();
+```
+
+Returns a future that resolves when the server acknowledges the record(s).
 
 ### 6. Wait for Acknowledgment
 
@@ -418,7 +586,12 @@ Flushes pending records and closes the stream gracefully.
 
 ## Advanced Usage
 
-### Ingest Multiple Records
+### Ingesting Multiple Records
+
+There are two approaches for ingesting multiple records:
+
+#### Approach 1: Using `ingest_record()` in a Loop
+Best for streaming scenarios where records arrive one at a time:
 
 **JSON Example:**
 ```rust
@@ -453,9 +626,51 @@ for i in 0..100 {
 stream.flush().await?;
 ```
 
-## Choosing Between JSON and Protocol Buffers
+#### Approach 2: Using `ingest_records()`
+Best for bulk ingestion when you have all records ready at once:
 
-| Feature | JSON Example | Protocol Buffers Example |
+**JSON Batch Example:**
+```rust
+let mut batch = Vec::new();
+for i in 0..100 {
+    let json_record = format!(
+        r#"{{"id": {}, "customer_name": "Customer {}"}}"#,
+        i, i
+    );
+    batch.push(json_record);
+}
+
+let ack_future = stream.ingest_records(batch).await?;
+let _ack = ack_future.await?;
+```
+
+**Protocol Buffers Batch Example:**
+```rust
+let mut batch = Vec::new();
+for i in 0..100 {
+    batch.push(
+        TableOrders {
+            id: Some(i),
+            customer_name: Some(format!("Customer {}", i)),
+            // ... other fields
+        }
+        .encode_to_vec()
+    );
+}
+
+let ack_future = stream.ingest_records(batch).await?;
+let _ack = ack_future.await?;
+```
+
+**When to use each approach:**
+- **`ingest_record()`**: Records arrive one at a time, need individual acknowledgments, streaming scenarios, when partial failures are acceptable
+- **`ingest_records()`**: All records ready at once, bulk imports, better throughput for large datasets, when you need all-or-nothing consistency (entire batch succeeds or fails together)
+
+## Choosing the Right Example
+
+### JSON vs Protocol Buffers
+
+| Feature | JSON Examples | Protocol Buffers Examples |
 |---------|-------------|-------------------------|
 | **Setup Complexity** | Simple - no schema files needed | Works out of the box (schema files included) |
 | **Type Safety** | Runtime validation only | Compile-time type checking |
@@ -466,7 +681,7 @@ stream.flush().await?;
 
 **Recommendation:** Start with the JSON example for quick prototyping, then migrate to Protocol Buffers for production deployments where type safety and performance matter.
 
-**Note:** Both examples work immediately out of the box. Schema generation is only required when customizing the Protocol Buffers example for your own table.
+**Note:** All examples work immediately out of the box. Schema generation is only required when customizing the Protocol Buffers examples for your own table.
 
 ## Troubleshooting
 
