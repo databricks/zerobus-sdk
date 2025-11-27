@@ -481,7 +481,7 @@ impl ZerobusSdk {
     /// match stream.close().await {
     ///     Err(_) => {
     ///         // Stream failed, recreate it
-    ///         let new_stream = sdk.recreate_stream(stream).await?;
+    ///         let new_stream = sdk.recreate_stream(&stream).await?;
     ///         // Continue using new_stream
     ///     }
     ///     Ok(_) => println!("Stream closed successfully"),
@@ -490,13 +490,13 @@ impl ZerobusSdk {
     /// # }
     /// ```
     #[instrument(level = "debug", skip_all)]
-    pub async fn recreate_stream(&self, stream: ZerobusStream) -> ZerobusResult<ZerobusStream> {
+    pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let records = stream.get_unacked_records().await?;
         let new_stream = self
             .create_stream_with_headers_provider(
-                stream.table_properties,
+                stream.table_properties.clone(),
                 Arc::clone(&stream.headers_provider),
-                Some(stream.options),
+                Some(stream.options.clone()),
             )
             .await?;
         for record in records {
@@ -1266,7 +1266,7 @@ impl ZerobusStream {
     ///         println!("Failed to acknowledge {} records", unacked.len());
     ///         
     ///         // Recreate stream with unacked records
-    ///         let new_stream = sdk.recreate_stream(stream).await?;
+    ///         let new_stream = sdk.recreate_stream(&stream).await?;
     ///     }
     ///     Ok(_) => println!("All records acknowledged"),
     /// }
