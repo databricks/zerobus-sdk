@@ -21,6 +21,7 @@
 ### Internal Changes
 
 ### API Changes
+- `recreate_stream` method in `ZerobusSdk` now accepts a reference to a stream, instead of taking ownership of it.
 - `TableProperties` struct now has `descriptor_proto` field as optional (**breaking change**).
 - Added `HeadersProvider` trait for custom header strategies
 - Added `OAuthHeadersProvider` struct for OAuth 2.0 authentication with Databricks OIDC endpoint
