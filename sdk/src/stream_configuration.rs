@@ -82,6 +82,23 @@ pub struct StreamConfigurationOptions {
     ///
     /// Default: RecordType::Proto
     pub record_type: RecordType,
+
+    /// Maximum time in milliseconds to wait during graceful stream close.
+    ///
+    /// When the server sends a CloseStreamSignal indicating it will close the stream,
+    /// the SDK can enter a "paused" state where it:
+    /// - Continues accepting and buffering new ingest_record() calls
+    /// - Stops sending buffered records to the server
+    /// - Continues processing acknowledgments for in-flight records
+    /// - Waits for either all in-flight records to be acknowledged or the timeout to expire
+    ///
+    /// Configuration values:
+    /// - `None`: Wait for the full server-specified duration (most graceful)
+    /// - `Some(0)`: Immediate recovery, close stream right away (current behavior)
+    /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
+    ///
+    /// Default: `None` (wait for full server duration)
+    pub streamPausedMaxWaitTimeMs: Option<u64>,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -95,6 +112,7 @@ impl Default for StreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             record_type: RecordType::Proto,
+            streamPausedMaxWaitTimeMs: None,
         }
     }
 }

@@ -118,7 +118,7 @@ impl Zerobus for MockZerobusServer {
         let response_indices = Arc::clone(&self.response_indices);
 
         tokio::spawn(async move {
-            let table_name;
+            let mut table_name = String::new();
             let stream_id;
             let mut stream_responses: Vec<MockResponse> = Vec::new();
             let mut response_index = 0;
