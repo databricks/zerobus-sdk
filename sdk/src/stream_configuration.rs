@@ -11,22 +11,22 @@ use crate::databricks::zerobus::RecordType;
 /// use databricks_zerobus_ingest_sdk::StreamConfigurationOptions;
 ///
 /// let options = StreamConfigurationOptions {
-///     max_inflight_records: 50000,
+///     max_inflight_requests: 1_000_000,
 ///     recovery: true,
-///     recovery_timeout_ms: 20000,
+///     recovery_timeout_ms: 20_000,
 ///     recovery_retries: 5,
 ///     ..Default::default()
 /// };
 /// ```
 #[derive(Clone)]
 pub struct StreamConfigurationOptions {
-    /// Maximum number of records that can be sending or pending acknowledgement at any given time.
+    /// Maximum number of requests that can be sending or pending acknowledgement at any given time.
     ///
     /// This limit controls memory usage and backpressure. When this limit is reached,
-    /// `ingest_record()` calls will block until acknowledgments free up space.
+    /// `ingest_record()` and `ingest_records()` calls will block until acknowledgments free up space.
     ///
     /// Default: 1,000,000
-    pub max_inflight_records: usize,
+    pub max_inflight_requests: usize,
 
     /// Whether to enable automatic stream recovery on failure.
     ///
@@ -86,13 +86,13 @@ pub struct StreamConfigurationOptions {
 impl Default for StreamConfigurationOptions {
     fn default() -> Self {
         Self {
-            max_inflight_records: 1_000_000,
+            max_inflight_requests: 1_000_000,
             recovery: true,
-            recovery_timeout_ms: 15000,
-            recovery_backoff_ms: 2000,
+            recovery_timeout_ms: 15_000,
+            recovery_backoff_ms: 2_000,
             recovery_retries: 4,
-            server_lack_of_ack_timeout_ms: 60000,
-            flush_timeout_ms: 300000,
+            server_lack_of_ack_timeout_ms: 60_000,
+            flush_timeout_ms: 300_000,
             record_type: RecordType::Proto,
         }
     }

@@ -32,14 +32,14 @@ struct LandingZoneState<T> {
 /// Key features:
 /// - **Observe before remove**: Items must be observed before removal
 /// - **Reset capability**: Observed items can be moved back to the queue for retry
-/// - **Backpressure**: Enforces a maximum number of inflight items via semaphore
+/// - **Backpressure**: Enforces a maximum number of inflight requests via semaphore
 /// - **Thread-safe**: Safe for concurrent access from multiple tasks
 pub struct LandingZone<T: Clone> {
     /// Synchronizes access to the landing zone.
     state: Arc<std::sync::Mutex<LandingZoneState<T>>>,
     /// Notifies waiting `observe()` calls when new items are added.
     new_item_notify: Arc<Notify>,
-    /// Controls maximum number of inflight records to enforce backpressure.
+    /// Controls maximum number of inflight requests to enforce backpressure.
     semaphore: Arc<Semaphore>,
     /// Tracks semaphore permits to release them when items are removed.
     permits: std::sync::Mutex<VecDeque<OwnedSemaphorePermit>>,
@@ -50,18 +50,18 @@ impl<T: Clone> LandingZone<T> {
     ///
     /// # Arguments
     ///
-    /// * `max_inflight_records` - Maximum number of items that can be in the landing zone
+    /// * `max_inflight_requests` - Maximum number of requests that can be in the landing zone
     ///   (both observed and unobserved) at any time. When this limit is reached, `add()`
     ///   calls will block until items are removed.
-    pub fn new(max_inflight_records: usize) -> Self {
+    pub fn new(max_inflight_requests: usize) -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(LandingZoneState {
-                queue: VecDeque::with_capacity(max_inflight_records),
-                observed_items: VecDeque::with_capacity(max_inflight_records),
+                queue: VecDeque::with_capacity(max_inflight_requests),
+                observed_items: VecDeque::with_capacity(max_inflight_requests),
             })),
             new_item_notify: Arc::new(Notify::new()),
-            semaphore: Arc::new(Semaphore::new(max_inflight_records)),
-            permits: std::sync::Mutex::new(VecDeque::with_capacity(max_inflight_records)),
+            semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
+            permits: std::sync::Mutex::new(VecDeque::with_capacity(max_inflight_requests)),
         }
     }
 
@@ -87,7 +87,7 @@ impl<T: Clone> LandingZone<T> {
 
     /// Adds an item to the queue.
     ///
-    /// This method will block if the maximum number of inflight records has been reached,
+    /// This method will block if the maximum number of inflight requests has been reached,
     /// providing automatic backpressure control.
     ///
     /// # Arguments
@@ -175,7 +175,7 @@ impl<T: Clone> LandingZone<T> {
         state.observed_items.is_empty()
     }
 
-    /// Returns the number of items in the landing zone.
+    /// Returns the number of in-flight requests in the landing zone.
     pub fn len(&self) -> usize {
         let state = self.state.lock().expect("Lock poisoned");
         state.queue.len() + state.observed_items.len()
@@ -359,5 +359,62 @@ mod tests {
 
         // Now add should work.
         lz.add("item4".to_string()).await;
+    }
+
+    #[tokio::test]
+    async fn test_is_observed_empty() {
+        let lz = Arc::new(LandingZone::new(16));
+
+        // Initially, observed queue should be empty
+        assert!(lz.is_observed_empty());
+
+        lz.add("item1".to_string()).await;
+        // Still empty because we haven't observed yet
+        assert!(lz.is_observed_empty());
+
+        lz.observe().await;
+        // Now it should not be empty
+        assert!(!lz.is_observed_empty());
+
+        lz.remove_observed().unwrap();
+        // After removal, should be empty again
+        assert!(lz.is_observed_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_operations() {
+        let lz = Arc::new(LandingZone::new(100));
+
+        // Spawn multiple tasks that add items
+        let mut add_tasks = vec![];
+        for i in 0..10 {
+            let lz_clone = lz.clone();
+            add_tasks.push(tokio::spawn(async move {
+                lz_clone.add(format!("item{}", i)).await;
+            }));
+        }
+
+        // Spawn multiple tasks that observe items
+        let mut observe_tasks = vec![];
+        for _ in 0..10 {
+            let lz_clone = lz.clone();
+            observe_tasks.push(tokio::spawn(async move {
+                lz_clone.observe().await;
+            }));
+        }
+
+        // Wait for all add tasks to complete
+        for task in add_tasks {
+            task.await.unwrap();
+        }
+
+        // Wait for all observe tasks to complete
+        let mut observed_items = vec![];
+        for task in observe_tasks {
+            observed_items.push(task.await);
+        }
+
+        // All 10 items should have been observed
+        assert_eq!(observed_items.len(), 10);
     }
 }

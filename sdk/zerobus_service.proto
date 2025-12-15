@@ -47,6 +47,29 @@ enum RecordType {
 }
 
 /*
+ * Batch of JSON-encoded records.
+ * 
+ * This message contains multiple JSON records that will be ingested together.
+ * Each string in the array represents a complete JSON object.
+ */
+message JsonRecordBatch {
+  // Array of JSON-encoded records.
+  repeated string records = 1;
+}
+
+/*
+ * Batch of protobuf-encoded records.
+ * 
+ * This message contains multiple protobuf-encoded records that will be ingested together.
+ * Each record must be serialized according to the protobuf descriptor provided in the
+ * CreateIngestStreamRequest.
+ */
+message ProtoEncodedRecordBatch {
+  // Array of protobuf-encoded records.
+  repeated bytes records = 1;
+}
+
+/*
  * Request to create a new ephemeral ingestion stream.
  * 
  * This message initiates the streaming session and must be the first message
@@ -112,22 +135,49 @@ message IngestRecordRequest {
 }
 
 /*
+ * Request to ingest a batch of records into the stream.
+ * 
+ * This message is sent by the client after the initial CreateIngestStreamRequest
+ * to stream batches of records for ingestion.
+ */
+message IngestRecordBatchRequest {
+  // Unique identifier for this batch within the stream.
+  optional int64 offset_id = 1;
+  
+  // Batch of serialized records.
+  // The batch can contain multiple records encoded as either protobuf or JSON.
+  oneof batch {
+    // Batch of protobuf-encoded records. Each record must be serialized according to
+    // the protobuf descriptor provided in the CreateIngestStreamRequest.
+    ProtoEncodedRecordBatch proto_encoded_batch = 2;
+    
+    // Batch of JSON-encoded records.
+    JsonRecordBatch json_batch = 3;
+  }
+}
+
+/*
  * A message in the EphemeralStream bidirectional stream.
  * 
  * This message type allows the client to send either stream creation requests
- * or record ingestion requests through the same stream.
+ * or record ingestion requests (individual or batched) through the same stream.
  */
 message EphemeralStreamRequest {
   oneof payload {
     // Initial request to create an ephemeral stream.
     // Must be the first message in the stream.
-    // All subsequent messages should be ingest_record.
+    // All subsequent messages should be ingest_record or ingest_record_batch.
     CreateIngestStreamRequest create_stream = 1;
     
     // Request to ingest a record.
     // Can only be sent after a successful create_stream request.
     // Multiple ingest_record messages can be sent in sequence.
     IngestRecordRequest ingest_record = 2;
+    
+    // Request to ingest a batch of records.
+    // Can only be sent after a successful create_stream request.
+    // Multiple ingest_record_batch messages can be sent in sequence.
+    IngestRecordBatchRequest ingest_record_batch = 3;
   }
 }
 

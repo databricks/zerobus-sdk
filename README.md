@@ -45,6 +45,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Automatic OAuth 2.0 Authentication** - Seamless token management with Unity Catalog
 - **Built-in Recovery** - Automatic retry and reconnection for transient failures
 - **High Throughput** - Configurable inflight record limits for optimal performance
+- **Batch Ingestion** - Ingest multiple records at once with all-or-nothing semantics for maximum throughput
 - **Flexible Serialization** - Support for both JSON (simple) and Protocol Buffers (type-safe) data formats
 - **Type Safety** - Protocol Buffers ensure schema validation at compile time
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
@@ -88,12 +89,17 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-The SDK supports two approaches for data serialization:
+The SDK supports two serialization formats and two ingestion methods:
 
-- **JSON Example** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
-- **Protocol Buffers Example** (Recommended for production): Type-safe approach with schema validation at compile time
+**Serialization:**
+- **JSON** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
+- **Protocol Buffers** (Recommended for production): Type-safe approach with schema validation at compile time
 
-See [`examples/README.md`](examples/README.md) for detailed setup instructions for both approaches.
+**Ingestion Methods:**
+- **Single-record** (`ingest_record`): Ingest records one at a time with per-record acknowledgment
+- **Batch** (`ingest_records`): Ingest multiple records at once with all-or-nothing semantics for higher throughput
+
+See [`examples/README.md`](examples/README.md) for detailed setup instructions and examples for all combinations.
 
 ## Repository Structure
 
@@ -122,10 +128,20 @@ zerobus_rust_sdk/
 │
 ├── examples/
 │   ├── README.md                       # Examples documentation
-│   ├── basic_example_json/             # JSON-based example (simpler)
+│   ├── basic_example_json/             # JSON single-record example
 │   │   ├── src/main.rs                 # Example usage code
 │   │   └── Cargo.toml
-│   └── basic_example_proto/            # Protocol Buffers example (production)
+│   ├── basic_example_json_batch/       # JSON batch ingestion example
+│   │   ├── src/main.rs                 # Example usage code
+│   │   └── Cargo.toml
+│   ├── basic_example_proto/            # Protocol Buffers single-record example
+│   │   ├── src/main.rs                 # Example usage code
+│   │   ├── output/                     # Generated schema files
+│   │   │   ├── orders.proto
+│   │   │   ├── orders.rs
+│   │   │   └── orders.descriptor
+│   │   └── Cargo.toml
+│   └── basic_example_proto_batch/      # Protocol Buffers batch ingestion example
 │       ├── src/main.rs                 # Example usage code
 │       ├── output/                     # Generated schema files
 │       │   ├── orders.proto
@@ -197,9 +213,9 @@ zerobus_rust_sdk/
 
 ### Data Flow
 
-1. **Ingestion** - Your app calls `stream.ingest_record(data)`
-2. **Buffering** - Record is placed in the landing zone with a logical offset
-3. **Sending** - Sender task sends record over gRPC with physical offset
+1. **Ingestion** - Your app calls `stream.ingest_record(data)` or `stream.ingest_records(batch)`
+2. **Buffering** - Records are placed in the landing zone with logical offsets
+3. **Sending** - Sender task sends records over gRPC with physical offsets
 4. **Acknowledgment** - Receiver task gets server ack and resolves the future
 5. **Recovery** - If connection fails, supervisor reconnects and resends unacked records
 
@@ -370,7 +386,7 @@ let table_properties = TableProperties {
 };
 
 let options = StreamConfigurationOptions {
-    max_inflight_records: 10000,
+    max_inflight_requests: 10000,
     recovery: true,
     recovery_timeout_ms: 15000,
     recovery_backoff_ms: 2000,
@@ -388,12 +404,15 @@ let mut stream = sdk.create_stream(
 
 ### 5. Ingest Data
 
-Ingest records by encoding them with Protocol Buffers:
+The SDK provides two ingestion methods:
+
+#### Single Record Ingestion
+
+Ingest records one at a time by encoding them with Protocol Buffers:
 
 ```rust
 use prost::Message;
 
-// Single record
 let record = YourMessage {
     field1: Some("value".to_string()),
     field2: Some(42),
@@ -402,19 +421,43 @@ let record = YourMessage {
 let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
 ```
 
-**Multiple records** for high throughput:
+#### Batch Ingestion
 
-The `ingest_record()` call returns two futures:
-1. The outer future (awaited immediately) confirms the record is queued for sending
-2. The inner future (the acknowledgment) resolves when the server confirms receipt
-
-You don't need to wait for each acknowledgment before sending the next record. Instead, collect the ack futures and flush after N records:
+For higher throughput and all-or-nothing semantics, use `ingest_records()` to ingest multiple records at once:
 
 ```rust
+use prost::Message;
 
-let mut ack_futures = Vec::new();
+let records: Vec<Vec<u8>> = vec![
+    YourMessage { id: Some(1), /* ... */ }.encode_to_vec(),
+    YourMessage { id: Some(2), /* ... */ }.encode_to_vec(),
+    YourMessage { id: Some(3), /* ... */ }.encode_to_vec(),
+];
 
-// Ingest records without blocking on acknowledgments
+let ack_future = stream.ingest_records(records).await?;
+// Returns Some(offset) for non-empty batches, None for empty batches
+let offset = ack_future.await?;
+```
+
+**Batch API Semantics:**
+- **All-or-nothing**: The entire batch succeeds or fails as a unit. If any record in the batch fails, the entire batch is rejected.
+- **Atomic acknowledgment**: You receive a single acknowledgment for the entire batch, not individual records.
+- **Better throughput**: Reduces network overhead by sending multiple records in a single request.
+- **Empty batches**: Ingesting an empty batch is a no-op. The future resolves to `None`.
+- **Preserved on failure**: Batches are preserved as units when retrieving via `get_unacked_batches()` or when reingested via `recreate_stream()`. Note that `get_unacked_records()` flattens batches into individual records.
+
+**High throughput patterns:**
+
+Both `ingest_record()` and `ingest_records()` return two futures:
+1. The outer future (awaited immediately) confirms the record/batch is queued for sending
+2. The inner future (the acknowledgment) resolves when the server confirms receipt
+
+You don't need to wait for each acknowledgment before ingesting more records or batches. Instead, collect the ack futures and flush periodically:
+
+```rust
+let mut ack_futures_cnt = 0;
+
+// Example with single-record ingestion
 for i in 0..100_000 {
     let record = YourMessage {
         id: Some(i),
@@ -424,16 +467,25 @@ for i in 0..100_000 {
 
     // This await only waits for the record to be queued, not for server ack
     let _ack = stream.ingest_record(record.encode_to_vec()).await?;
+    ack_futures_cnt += 1;
 
     // Periodically flush and wait for acks to avoid unbounded memory growth
-    if ack_futures.len() >= 10_000 {
+    if ack_futures_cnt >= 10_000 {
         stream.flush().await?;
+        ack_futures_cnt = 0;
     }
 }
 
-// Flush remaining records
+// Flush and wait for remaining acknowledgments
 stream.flush().await?;
-let results = join_all(ack_futures).await;
+
+// Same pattern works for batch ingestion
+let batches = vec![/* batch1 */, /* batch2 */, /* batch3 */];
+for batch in batches {
+    let _ack = stream.ingest_records(batch).await?;
+    ack_futures_cnt += 1;
+    // ...
+}
 ```
 
 **Parallelizing with multiple streams:**
@@ -460,13 +512,13 @@ for partition in 0..4 {
             None,
         ).await?;
 
-        // Ingest partition data...
+        // Ingest partition data (using single-record or batch ingestion)
         for i in (partition * 25_000)..((partition + 1) * 25_000) {
             let record = YourMessage { id: Some(i), /* ... */ };
             let _ack = stream.ingest_record(record.encode_to_vec()).await?;
         }
 
-        //Clsoe implicitly waits for all acknowledgments from the server.
+        //Close implicitly waits for all acknowledgments from the server.
         stream.close().await?; 
         Ok::<_, ZerobusError>(())
     });
@@ -480,25 +532,42 @@ while let Some(result) = tasks.join_next().await {
 
 ### 6. Handle Acknowledgments
 
-Each `ingest_record()` returns a future that resolves to the record's offset:
+Both `ingest_record()` and `ingest_records()` return a future for acknowledgment:
+- `ingest_record()` resolves to `OffsetId` (the committed offset)
+- `ingest_records()` resolves to `Option<OffsetId>` (None if the batch is empty)
 
 ```rust
 // Fire-and-forget (not recommended for production)
 let ack = stream.ingest_record(data).await?;
 tokio::spawn(ack);
 
-// Wait for specific record
+// Wait for acknowledgment immediately
 let ack = stream.ingest_record(data).await?;
 let offset = ack.await?;
 println!("Record committed at offset: {}", offset);
 
-// Batch wait with error handling
-for ack in ack_futures {
-    match ack.await {
-        Ok(offset) => println!("Success: {}", offset),
-        Err(e) => eprintln!("Failed: {}", e),
-    }
+// For batches, ack returns Option<OffsetId>
+// (None if the batch is empty)
+let batch = vec![data1, data2, data3];
+let ack = stream.ingest_records(batch).await?;
+if let Some(offset) = ack.await? {
+    println!("Last acknowledged offset: {}", offset);
+} else {
+    println!("Empty batch, no records ingested");
 }
+
+// High-throughput: collect acks and check them later
+let mut acks = Vec::new();
+for i in 0..1000 {
+    let ack = stream.ingest_record(record).await?;
+    acks.push(ack);
+}
+for ack in acks {
+    ack.await?;
+}
+
+// Or use flush() to wait for all pending acknowledgments at once
+stream.flush().await?;
 ```
 
 ### 7. Close the Stream
@@ -515,8 +584,16 @@ If the stream fails, retrieve unacknowledged records:
 ```rust
 match stream.close().await {
     Err(_) => {
+        // Option 1: Get individual records (flattened)
         let unacked = stream.get_unacked_records().await?;
-        println!("Failed to ack {} records", unacked.len());
+        let total_records = unacked.count();
+        println!("Failed to ack {} records", total_records);
+        
+        // Option 2: Get records grouped by batch (preserves batch structure)
+        let unacked_batches = stream.get_unacked_batches().await?;
+        let total_records: usize = unacked_batches.iter().map(|batch| batch.get_record_count()).sum();
+        println!("Failed to ack {} records in {} batches", total_records, unacked_batches.len());
+        
         // Retry with a new stream
     }
     Ok(_) => println!("Stream closed successfully"),
@@ -529,19 +606,20 @@ match stream.close().await {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_inflight_records` | `usize` | 1,000,000 | Maximum unacknowledged records in flight |
+| `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
+| `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 
 **Example:**
 
 ```rust
 let options = StreamConfigurationOptions {
-    max_inflight_records: 50000,
+    max_inflight_requests: 50000,
     recovery: true,
     recovery_timeout_ms: 20000,
     recovery_retries: 5,
@@ -591,21 +669,17 @@ match stream.ingest_record(payload).await {
 
 ### Complete Working Examples
 
-The repository provides two complete examples demonstrating different approaches:
+The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
 
-**JSON Example** (`examples/basic_example_json/`)
-- Simpler approach using JSON strings for data serialization
-- No schema generation required
-- Ideal for quick prototyping and getting started
-- Direct JSON string ingestion
+| Example | Serialization | Ingestion | Description |
+|---------|--------------|-----------|-------------|
+| `basic_example_json/` | JSON | Single-record | Simple JSON strings, no schema required |
+| `basic_example_json_batch/` | JSON | Batch | Multiple JSON records with all-or-nothing semantics, no schema required |
+| `basic_example_proto/` | Protocol Buffers | Single-record | Type-safe with compile-time validation |
+| `basic_example_proto_batch/` | Protocol Buffers | Batch | High-throughput batch ingestion with Proto |
 
-**Protocol Buffers Example** (`examples/basic_example_proto/`)
-- Type-safe approach using Protocol Buffers
-- Schema validation at compile time
-- Recommended for production use cases
-- More efficient binary encoding
 
-See [`examples/README.md`](examples/README.md) for detailed comparison and setup instructions for both approaches.
+Check [`examples/README.md`](examples/README.md) for setup instructions and detailed comparisons.
 
 ### Stream Recovery
 
@@ -646,12 +720,14 @@ cargo test -p tests -- --nocapture
 
 1. **Reuse SDK Instances** - Create one `ZerobusSdk` per application and reuse for multiple streams
 2. **Always Close Streams** - Use `stream.close().await?` to ensure all data is flushed
-3. **Tune Inflight Limits** - Adjust `max_inflight_records` based on memory and throughput needs
-4. **Enable Recovery** - Always set `recovery: true` in production environments
-5. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
-6. **Monitor Errors** - Log and alert on non-retryable errors
-7. **Use Batch Ingestion** - For high throughput, ingest many records before waiting for acks
-8. **Validate Schemas** - Use the schema generation tool to ensure type safety
+3. **Choose the Right Ingestion Method**:
+   - Use `ingest_records()` for high throughput when you have multiple records ready
+   - Use `ingest_record()` when processing records individually or need per-record acknowledgment
+4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
+5. **Enable Recovery** - Always set `recovery: true` in production environments
+6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
+7. **Monitor Errors** - Log and alert on non-retryable errors
+8. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
 9. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 10. **Test Recovery** - Simulate failures to verify your error handling logic
 
@@ -704,9 +780,18 @@ Represents an active ingestion stream.
 pub async fn ingest_record(
     &self,
     payload: Vec<u8>
-) -> ZerobusResult<impl Future<Output = ZerobusResult<i64>>>
+) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>>>
 ```
-Ingests a protobuf-encoded record. Returns a future that resolves to the offset ID.
+Ingests a single encoded record (Protocol Buffers or JSON). Returns a future that resolves to the offset ID.
+
+```rust
+pub async fn ingest_records(
+    &self,
+    payloads: Vec<Vec<u8>>
+) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
+```
+Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. 
+Returns a future that resolves to `Some(offset_id)` for non-empty batches, or `None` if the batch is empty.
 
 ```rust
 pub async fn flush(&self) -> ZerobusResult<()>
@@ -719,9 +804,18 @@ pub async fn close(&mut self) -> ZerobusResult<()>
 Flushes and closes the stream gracefully.
 
 ```rust
-pub async fn get_unacked_records(&self) -> ZerobusResult<Vec<Vec<u8>>>
+pub async fn get_unacked_records(&self) -> ZerobusResult<impl Iterator<Item = EncodedRecord>>
 ```
-Returns unacknowledged record payloads. Only call after stream failure.
+Returns an iterator over all unacknowledged records as individual `EncodedRecord` items. This flattens batches into individual records. Only call after stream failure.
+
+```rust
+pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>>
+```
+Returns unacknowledged records grouped by batch, preserving the original batch structure. Records ingested together remain grouped:
+- Each `ingest_record()` call creates a batch containing one record
+- Each `ingest_records()` call creates a batch containing multiple records
+
+Only call after stream failure.
 
 ### `TableProperties`
 
@@ -731,12 +825,12 @@ Configuration for the target table.
 ```rust
 pub struct TableProperties {
     pub table_name: String,
-    pub descriptor_proto: prost_types::DescriptorProto,
+    pub descriptor_proto: Option<prost_types::DescriptorProto>,
 }
 ```
 
 - `table_name` - Full table name (e.g., "catalog.schema.table")
-- `descriptor_proto` - Protocol buffer descriptor loaded from generated files
+- `descriptor_proto` - Optional Protocol buffer descriptor loaded from generated files (required for Proto record type, None for JSON)
 
 ### `StreamConfigurationOptions`
 
@@ -745,13 +839,14 @@ Stream behavior configuration.
 **Fields:**
 ```rust
 pub struct StreamConfigurationOptions {
-    pub max_inflight_records: usize,
+    pub max_inflight_requests: usize,
     pub recovery: bool,
     pub recovery_timeout_ms: u64,
     pub recovery_backoff_ms: u64,
     pub recovery_retries: u32,
     pub flush_timeout_ms: u64,
     pub server_lack_of_ack_timeout_ms: u64,
+    pub record_type: RecordType,
 }
 ```
 
@@ -819,3 +914,6 @@ This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) fi
 ---
 
 For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/databricks/zerobus-sdk-rs).
+
+
+

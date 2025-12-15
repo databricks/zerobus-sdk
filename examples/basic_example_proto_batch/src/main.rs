@@ -52,26 +52,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Failed to create a stream.");
 
-    // Change the values to match your data.
-    let ack_future = stream
-        .ingest_record(
-            TableOrders {
-                id: Some(1),
-                customer_name: Some("Alice Smith".to_string()),
-                product_name: Some("Wireless Mouse".to_string()),
-                quantity: Some(2),
-                price: Some(25.99),
-                status: Some("pending".to_string()),
-                created_at: Some(chrono::Utc::now().timestamp()),
-                updated_at: Some(chrono::Utc::now().timestamp()),
-            }
-            .encode_to_vec(),
-        )
-        .await
-        .unwrap();
+    // Create a batch of records
+    let now = chrono::Utc::now().timestamp();
+    let batch: Vec<Vec<u8>> = vec![
+        TableOrders {
+            id: Some(1),
+            customer_name: Some("Alice Smith".to_string()),
+            product_name: Some("Wireless Mouse".to_string()),
+            quantity: Some(2),
+            price: Some(25.99),
+            status: Some("pending".to_string()),
+            created_at: Some(now),
+            updated_at: Some(now),
+        }
+        .encode_to_vec(),
+        TableOrders {
+            id: Some(2),
+            customer_name: Some("Bob Johnson".to_string()),
+            product_name: Some("Mechanical Keyboard".to_string()),
+            quantity: Some(1),
+            price: Some(89.99),
+            status: Some("shipped".to_string()),
+            created_at: Some(now),
+            updated_at: Some(now),
+        }
+        .encode_to_vec(),
+        TableOrders {
+            id: Some(3),
+            customer_name: Some("Carol Williams".to_string()),
+            product_name: Some("USB-C Hub".to_string()),
+            quantity: Some(3),
+            price: Some(45.00),
+            status: Some("delivered".to_string()),
+            created_at: Some(now),
+            updated_at: Some(now),
+        }
+        .encode_to_vec(),
+    ];
+
+    // Ingest the batch
+    let ack_future = stream.ingest_records(batch).await.unwrap();
 
     let _ack = ack_future.await.unwrap();
-    println!("Record acknowledged with offset Id: 0");
+    println!("Batch of 3 records acknowledged with offset Id: 0");
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");

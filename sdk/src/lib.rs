@@ -29,12 +29,15 @@ use std::sync::Arc;
 use prost::Message;
 use proto_zerobus::ephemeral_stream_request::Payload as RequestPayload;
 use proto_zerobus::ephemeral_stream_response::Payload as ResponsePayload;
-use proto_zerobus::ingest_record_request::Record;
 use proto_zerobus::zerobus_client::ZerobusClient;
 use proto_zerobus::{
-    CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordRequest, IngestRecordResponse, RecordType,
+    ingest_record_batch_request::Batch as IngestRequestBatch,
+    ingest_record_request::Record as IngestRequestRecord, CloseStreamSignal,
+    CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
+    IngestRecordBatchRequest, IngestRecordRequest, IngestRecordResponse, JsonRecordBatch,
+    ProtoEncodedRecordBatch, RecordType,
 };
+use smallvec::{smallvec, SmallVec};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
@@ -77,49 +80,179 @@ pub type ProtoEncodedRecord = Vec<u8>;
 /// A type alias for a JSON-encoded record.
 pub type JsonEncodedRecord = String;
 
-impl From<Vec<u8>> for RecordPayload {
-    fn from(v: Vec<u8>) -> Self {
-        RecordPayload::Proto(v)
-    }
-}
-
-impl From<String> for RecordPayload {
-    fn from(s: String) -> Self {
-        RecordPayload::Json(s)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RecordPayload {
+pub enum EncodedRecord {
     Json(JsonEncodedRecord),
     Proto(ProtoEncodedRecord),
 }
 
-pub trait IntoRecord {
-    fn into_record(self) -> Record;
+impl From<ProtoEncodedRecord> for EncodedRecord {
+    fn from(v: ProtoEncodedRecord) -> Self {
+        EncodedRecord::Proto(v)
+    }
 }
 
-impl IntoRecord for RecordPayload {
-    fn into_record(self) -> Record {
+impl From<JsonEncodedRecord> for EncodedRecord {
+    fn from(s: JsonEncodedRecord) -> Self {
+        EncodedRecord::Json(s)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EncodedBatch {
+    Proto(SmallVec<[ProtoEncodedRecord; 1]>),
+    Json(SmallVec<[JsonEncodedRecord; 1]>),
+}
+
+impl EncodedBatch {
+    /// Try to convert a single record into an encoded batch of the provided type.
+    /// If the record type does not match the provided type, None is returned.
+    fn try_from_record<T: Into<EncodedRecord>>(value: T, record_type: RecordType) -> Option<Self> {
+        match (value.into(), record_type) {
+            (EncodedRecord::Json(s), RecordType::Json) => Some(EncodedBatch::Json(smallvec![s])),
+            (EncodedRecord::Proto(v), RecordType::Proto) => Some(EncodedBatch::Proto(smallvec![v])),
+            _ => None, // todo if record type is unspecified?
+        }
+    }
+
+    /// Try to convert records into an encoded batch of the provided type.
+    /// If the record type does not match the records' type, None is returned.
+    /// The returned batch will be empty if no records are provided.
+    fn try_from_batch<B, R>(batch: B, record_type: RecordType) -> Option<Self>
+    where
+        B: IntoIterator<Item = R>,
+        R: Into<EncodedRecord>,
+    {
+        let mut batch_iter = batch.into_iter();
+        let (lower, upper) = batch_iter.size_hint();
+        let size_hint = upper.unwrap_or(lower);
+
+        match record_type {
+            RecordType::Json => batch_iter
+                .try_fold(
+                    SmallVec::with_capacity(size_hint),
+                    |mut vec, record| match record.into() {
+                        EncodedRecord::Json(value) => {
+                            vec.push(value);
+                            Some(vec)
+                        }
+                        _ => None,
+                    },
+                )
+                .map(EncodedBatch::Json),
+            RecordType::Proto => batch_iter
+                .try_fold(
+                    SmallVec::with_capacity(size_hint),
+                    |mut vec, record| match record.into() {
+                        EncodedRecord::Proto(value) => {
+                            vec.push(value);
+                            Some(vec)
+                        }
+                        _ => None,
+                    },
+                )
+                .map(EncodedBatch::Proto),
+            _ => None, // todo
+        }
+    }
+
+    fn into_request_payload(self, offset_id: OffsetId) -> RequestPayload {
         match self {
-            RecordPayload::Json(json) => Record::JsonRecord(json),
-            RecordPayload::Proto(proto) => Record::ProtoEncodedRecord(proto),
+            EncodedBatch::Proto(records) if records.len() == 1 => {
+                RequestPayload::IngestRecord(IngestRecordRequest {
+                    record: Some(IngestRequestRecord::ProtoEncodedRecord(
+                        records.into_iter().next().unwrap(),
+                    )),
+                    offset_id: Some(offset_id),
+                })
+            }
+            EncodedBatch::Proto(records) => {
+                RequestPayload::IngestRecordBatch(IngestRecordBatchRequest {
+                    batch: Some(IngestRequestBatch::ProtoEncodedBatch(
+                        ProtoEncodedRecordBatch {
+                            records: records.into_vec(),
+                        },
+                    )),
+                    offset_id: Some(offset_id),
+                })
+            }
+            EncodedBatch::Json(records) if records.len() == 1 => {
+                RequestPayload::IngestRecord(IngestRecordRequest {
+                    record: Some(IngestRequestRecord::JsonRecord(
+                        records.into_iter().next().unwrap(),
+                    )),
+                    offset_id: Some(offset_id),
+                })
+            }
+            EncodedBatch::Json(records) => {
+                RequestPayload::IngestRecordBatch(IngestRecordBatchRequest {
+                    batch: Some(IngestRequestBatch::JsonBatch(JsonRecordBatch {
+                        records: records.into_vec(),
+                    })),
+                    offset_id: Some(offset_id),
+                })
+            }
+        }
+    }
+
+    /// Returns the number of records in this batch.
+    pub fn get_record_count(&self) -> usize {
+        match self {
+            EncodedBatch::Proto(records) => records.len(),
+            EncodedBatch::Json(records) => records.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.get_record_count() == 0
+    }
+}
+
+impl IntoIterator for EncodedBatch {
+    type Item = EncodedRecord;
+    type IntoIter = EncodedBatchIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            EncodedBatch::Proto(records) => EncodedBatchIter::Proto(records.into_iter()),
+            EncodedBatch::Json(records) => EncodedBatchIter::Json(records.into_iter()),
         }
     }
 }
 
-/// Logical representation of a record to be ingested.
-/// Contains the payload and the offset on which the record was sent.
+pub enum EncodedBatchIter {
+    Proto(smallvec::IntoIter<[ProtoEncodedRecord; 1]>),
+    Json(smallvec::IntoIter<[JsonEncodedRecord; 1]>),
+}
+
+impl Iterator for EncodedBatchIter {
+    type Item = EncodedRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            EncodedBatchIter::Proto(iter) => iter.next().map(EncodedRecord::Proto),
+            EncodedBatchIter::Json(iter) => iter.next().map(EncodedRecord::Json),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            EncodedBatchIter::Proto(iter) => iter.size_hint(),
+            EncodedBatchIter::Json(iter) => iter.size_hint(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-struct IngestRecord<RecordPayload> {
-    payload: RecordPayload,
+struct IngestRequest {
+    payload: EncodedBatch,
     offset_id: OffsetId,
 }
 
 /// Map of logical offset to oneshot sender used to send acknowledgments back to the client.
 type OneshotMap = HashMap<OffsetId, tokio::sync::oneshot::Sender<ZerobusResult<OffsetId>>>;
 /// Landing zone for ingest records.
-type RecordLandingZone<RecordPayload> = Arc<LandingZone<Box<IngestRecord<RecordPayload>>>>;
+type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
@@ -163,7 +296,7 @@ pub struct ZerobusStream {
     /// The table properties - table name and descriptor of the table.
     pub table_properties: TableProperties,
     /// Logical landing zone that is used to store records that have been sent by user but not yet sent over the network.
-    landing_zone: RecordLandingZone<RecordPayload>,
+    landing_zone: RecordLandingZone,
     /// Map of logical offset to oneshot sender.
     oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
     /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
@@ -176,7 +309,7 @@ pub struct ZerobusStream {
     /// Persistent offset ID receiver to ensure at least one receiver exists, preventing SendError
     _logical_last_received_offset_id_rx: tokio::sync::watch::Receiver<Option<OffsetId>>,
     /// A vector of records that have failed to be acknowledged.
-    failed_records: Arc<RwLock<Vec<RecordPayload>>>,
+    failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
     /// Flag indicating if the stream has been closed.
     is_closed: Arc<AtomicBool>,
     /// Sync mutex to ensure that offset generation and record ingestion happen atomically.
@@ -201,7 +334,7 @@ pub struct ZerobusStream {
 ///     descriptor_proto: Default::default(),
 /// };
 /// let options = StreamConfigurationOptions {
-///     max_inflight_records: 100,
+///     max_inflight_requests: 100,
 ///     ..Default::default()
 /// };
 /// let client_id = "your-client-id".to_string();
@@ -491,7 +624,7 @@ impl ZerobusSdk {
     /// ```
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
-        let records = stream.get_unacked_records().await?;
+        let batches = stream.get_unacked_batches().await?;
         let new_stream = self
             .create_stream_with_headers_provider(
                 stream.table_properties.clone(),
@@ -499,8 +632,8 @@ impl ZerobusSdk {
                 Some(stream.options.clone()),
             )
             .await?;
-        for record in records {
-            let ack = new_stream.ingest_record(record).await?;
+        for batch in batches {
+            let ack = new_stream.ingest_internal(batch).await?;
             tokio::spawn(ack);
         }
         return Ok(new_stream);
@@ -539,8 +672,8 @@ impl ZerobusStream {
 
         let (logical_last_received_offset_id_tx, _logical_last_received_offset_id_rx) =
             tokio::sync::watch::channel(None);
-        let landing_zone = Arc::new(LandingZone::<Box<IngestRecord<RecordPayload>>>::new(
-            options.max_inflight_records,
+        let landing_zone = Arc::new(LandingZone::<Box<IngestRequest>>::new(
+            options.max_inflight_requests,
         ));
 
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -594,11 +727,11 @@ impl ZerobusStream {
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
-        landing_zone: RecordLandingZone<RecordPayload>,
+        landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         logical_last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         is_closed: Arc<AtomicBool>,
-        failed_records: Arc<RwLock<Vec<RecordPayload>>>,
+        failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
@@ -855,7 +988,7 @@ impl ZerobusStream {
         }
     }
 
-    /// Ingests a protobuf-encoded record into the stream.
+    /// Ingests a single record into the stream.
     ///
     /// This method is non-blocking and returns immediately with a future. The record is
     /// queued for transmission and the returned future resolves when the server acknowledges
@@ -863,7 +996,7 @@ impl ZerobusStream {
     ///
     /// # Arguments
     ///
-    /// * `payload` - Protobuf-encoded record bytes (use `prost::Message::encode_to_vec()`)
+    /// * `payload` - A record that can be converted to `EncodedRecord` (either JSON string or protobuf bytes)
     ///
     /// # Returns
     ///
@@ -871,6 +1004,7 @@ impl ZerobusStream {
     ///
     /// # Errors
     ///
+    /// * `InvalidArgument` - If the record type doesn't match stream configuration
     /// * `StreamClosedError` - If the stream has been closed
     /// * Other errors may be returned via the acknowledgment future
     ///
@@ -890,33 +1024,106 @@ impl ZerobusStream {
     /// ```
     pub async fn ingest_record(
         &self,
-        payload: impl Into<RecordPayload>,
-    ) -> ZerobusResult<impl Future<Output = ZerobusResult<i64>>> {
-        // Convert to RecordPayload first
-        let payload: RecordPayload = payload.into();
+        payload: impl Into<EncodedRecord>,
+    ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
+        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
+            .ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Record type does not match stream configuration".to_string(),
+                )
+            })?;
+
+        self.ingest_internal(encoded_batch).await
+    }
+
+    /// Ingests a batch of records into the stream.
+    ///
+    /// This method is non-blocking and returns immediately with a future. The records are
+    /// queued for transmission and the returned future resolves when the server acknowledges
+    /// the entire batch has been durably written.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - An iterator of protobuf-encoded records (each item should be convertible to `EncodedRecord`)
+    ///
+    /// # Returns
+    ///
+    /// A future that resolves to the logical offset ID of the last acknowledged batch.
+    /// If the batch is empty, the future resoles to None.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` - If record types don't match stream configuration
+    /// * `StreamClosedError` - If the stream has been closed
+    /// * Other errors may be returned via the acknowledgment future
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use prost::Message;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// let records = vec![vec![1, 2, 3], vec![4, 5, 6]]; // Example protobuf-encoded data
+    /// // Ingest batch and await acknowledgment
+    /// let ack = stream.ingest_records(records).await?;
+    /// let offset = ack.await?;
+    /// match offset {
+    ///     Some(offset) => println!("Batch written at offset: {}", offset),
+    ///     None => println!("Empty batch - no records written"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ingest_records<I, T>(
+        &self,
+        payload: I,
+    ) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<EncodedRecord>,
+    {
+        let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
+            .ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Record type does not match stream configuration".to_string(),
+                )
+            })?;
+
+        // For non-empty batches, get the future from ingest_internal
+        let ingest_future = if encoded_batch.is_empty() {
+            None
+        } else {
+            Some(self.ingest_internal(encoded_batch).await?)
+        };
+
+        Ok(async move {
+            match ingest_future {
+                Some(fut) => fut.await.map(Option::Some),
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Internal unified method for ingesting records and batches
+    async fn ingest_internal(
+        &self,
+        encoded_batch: EncodedBatch,
+    ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream closed",
             )));
         }
-        match (&payload, self.options.record_type) {
-            (RecordPayload::Json(_), RecordType::Proto) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Json record type is not supported for proto stream".to_string(),
-                ));
-            }
-            (RecordPayload::Proto(_), RecordType::Json) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Proto record type is not supported for json stream".to_string(),
-                ));
-            }
-            _ => {}
-        }
+
         let _guard = self.sync_mutex.lock().await;
 
         let offset_id = self.logical_offset_id_generator.next();
-        debug!(offset_id = offset_id, "Ingesting record");
+        debug!(
+            offset_id = offset_id,
+            record_count = encoded_batch.get_record_count(),
+            "Ingesting record(s)"
+        );
 
         if let Some(stream_id) = self.stream_id.as_ref() {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -925,7 +1132,10 @@ impl ZerobusStream {
                 map.insert(offset_id, tx);
             }
             self.landing_zone
-                .add(Box::new(IngestRecord { payload, offset_id }))
+                .add(Box::new(IngestRequest {
+                    payload: encoded_batch,
+                    offset_id,
+                }))
                 .await;
             let stream_id = stream_id.to_string();
             Ok(async move {
@@ -952,7 +1162,7 @@ impl ZerobusStream {
         mut response_grpc_stream: tonic::Streaming<EphemeralStreamResponse>,
         last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         ack_timeout_ms: u64,
-        landing_zone: RecordLandingZone<RecordPayload>,
+        landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         recovery_enabled: bool,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
@@ -1053,18 +1263,18 @@ impl ZerobusStream {
     /// to get records and sending them through the outbound stream to the gRPC stream.
     fn spawn_sender_task(
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
-        landing_zone: RecordLandingZone<RecordPayload>,
+        landing_zone: RecordLandingZone,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
-                let item = landing_zone.observe().await;
+                let item = landing_zone.observe().await.clone();
+                let offset_id = physical_offset_id_generator.next();
+                let request_payload = item.payload.into_request_payload(offset_id);
+
                 let send_result = outbound_stream
                     .send(EphemeralStreamRequest {
-                        payload: Some(RequestPayload::IngestRecord(IngestRecordRequest {
-                            record: Some(item.payload.clone().into_record()),
-                            offset_id: Some(physical_offset_id_generator.next()),
-                        })),
+                        payload: Some(request_payload),
                     })
                     .await;
 
@@ -1080,9 +1290,9 @@ impl ZerobusStream {
 
     /// Fails all pending records by removing them from the landing zone and sending error to all pending acks promises.
     async fn fail_all_pending_records(
-        landing_zone: RecordLandingZone<RecordPayload>,
+        landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
-        failed_records: Arc<RwLock<Vec<RecordPayload>>>,
+        failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         error: &ZerobusError,
     ) {
         let mut failed_payloads = Vec::with_capacity(landing_zone.len());
@@ -1244,11 +1454,20 @@ impl ZerobusStream {
     /// Returns all records that were ingested but not acknowledged by the server.
     ///
     /// This method should only be called after a stream has failed or been closed.
-    /// It's useful for implementing retry logic or persisting failed records.
+    /// It's useful for implementing custom retry logic or persisting failed records.
+    ///
+    /// **Note:** This method flattens all unacknowledged records into a single iterator,
+    /// losing the original batch grouping.
+    /// If you want to preserve the batch grouping, use `ZerobusStream::get_unacked_batches()` instead.
+    /// If you want to re-ingest unacknowledged records while preserving their batch
+    /// structure, use `ZerobusSdk::recreate_stream()` instead.
+    ///
     ///
     /// # Returns
     ///
-    /// A vector of protobuf-encoded record payloads that weren't acknowledged.
+    /// An iterator over individual `EncodedRecord` items. All unacknowledged records are
+    /// flattened into a single sequence, regardless of how they were originally ingested
+    /// (via `ingest_record()` or `ingest_records()`).
     ///
     /// # Errors
     ///
@@ -1263,9 +1482,10 @@ impl ZerobusStream {
     ///     Err(e) => {
     ///         // Stream failed, get unacked records
     ///         let unacked = stream.get_unacked_records().await?;
-    ///         println!("Failed to acknowledge {} records", unacked.len());
+    ///         let total_records = unacked.into_iter().count();
+    ///         println!("Failed to acknowledge {} records", total_records);
     ///         
-    ///         // Recreate stream with unacked records
+    ///         // For re-ingestion with preserved batch structure, use recreate_stream
     ///         let new_stream = sdk.recreate_stream(&stream).await?;
     ///     }
     ///     Ok(_) => println!("All records acknowledged"),
@@ -1273,7 +1493,30 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_unacked_records(&self) -> ZerobusResult<Vec<RecordPayload>> {
+    pub async fn get_unacked_records(&self) -> ZerobusResult<impl Iterator<Item = EncodedRecord>> {
+        Ok(self
+            .get_unacked_batches()
+            .await?
+            .into_iter()
+            .flat_map(|batch| batch.into_iter()))
+    }
+
+    /// Returns all records that were ingested but not acknowledged by the server, grouped by batch.
+    ///
+    /// This method should only be called after a stream has failed or been closed.
+    /// It's useful for implementing custom retry logic or persisting failed records.
+    ///
+    /// **Note:** This method returns the unacknowledged records as a vector of `EncodedBatch` items,
+    /// where each batch corresponds to how records were ingested:
+    /// - Each `ingest_record()` call creates a single batch containing one record
+    /// - Each `ingest_records()` call creates a single batch containing multiple records
+    ///
+    /// For alternatives, see `ZerobusStream::get_unacked_records()` and `ZerobusSdk::recreate_stream()`.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `EncodedBatch` items. Records are grouped by their original ingestion call.
+    pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>> {
         if self.is_closed.load(Ordering::Relaxed) {
             let failed = self.failed_records.read().await.clone();
             return Ok(failed);

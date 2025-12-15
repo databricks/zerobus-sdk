@@ -46,26 +46,55 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Failed to create a stream.");
 
-    // Change the values to match your data.
+    // Create a batch of JSON records
     let now = chrono::Utc::now().timestamp();
-    let json_record = format!(
-        r#"{{
-            "id": 1,
-            "customer_name": "Alice Smith",
-            "product_name": "Wireless Mouse",
-            "quantity": 2,
-            "price": 25.99,
-            "status": "pending",
-            "created_at": {},
-            "updated_at": {}
-        }}"#,
-        now, now
-    );
+    let batch: Vec<String> = vec![
+        format!(
+            r#"{{
+                "id": 1,
+                "customer_name": "Alice Smith",
+                "product_name": "Wireless Mouse",
+                "quantity": 2,
+                "price": 25.99,
+                "status": "pending",
+                "created_at": {},
+                "updated_at": {}
+            }}"#,
+            now, now
+        ),
+        format!(
+            r#"{{
+                "id": 2,
+                "customer_name": "Bob Johnson",
+                "product_name": "Mechanical Keyboard",
+                "quantity": 1,
+                "price": 89.99,
+                "status": "shipped",
+                "created_at": {},
+                "updated_at": {}
+            }}"#,
+            now, now
+        ),
+        format!(
+            r#"{{
+                "id": 3,
+                "customer_name": "Carol Williams",
+                "product_name": "USB-C Hub",
+                "quantity": 3,
+                "price": 45.00,
+                "status": "delivered",
+                "created_at": {},
+                "updated_at": {}
+            }}"#,
+            now, now
+        ),
+    ];
 
-    let ack_future = stream.ingest_record(json_record).await.unwrap();
+    // Ingest the batch
+    let ack_future = stream.ingest_records(batch).await.unwrap();
 
     let _ack = ack_future.await.unwrap();
-    println!("Record acknowledged with offset Id: 0");
+    println!("Batch of 3 records acknowledged with offset Id: 0");
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");
