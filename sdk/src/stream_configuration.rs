@@ -98,7 +98,7 @@ pub struct StreamConfigurationOptions {
     /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
     ///
     /// Default: `None` (wait for full server duration)
-    pub streamPausedMaxWaitTimeMs: Option<u64>,
+    pub stream_paused_max_wait_time_ms: Option<u64>,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -112,7 +112,7 @@ impl Default for StreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             record_type: RecordType::Proto,
-            streamPausedMaxWaitTimeMs: None,
+            stream_paused_max_wait_time_ms: None,
         }
     }
 }

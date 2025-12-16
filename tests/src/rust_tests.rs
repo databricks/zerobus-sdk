@@ -2877,7 +2877,7 @@ mod failure_scenarios_tests {
                             delay_ms: 0,
                         },
                         MockResponse::RecordAck {
-                            ack_up_to_offset: 1,
+                            ack_up_to_offset: 0,
                             delay_ms: 0,
                         },
                     ],
@@ -2897,6 +2897,7 @@ mod failure_scenarios_tests {
                 recovery: true,
                 recovery_timeout_ms: 5000,
                 recovery_backoff_ms: 100,
+                server_lack_of_ack_timeout_ms: 5000,
                 ..Default::default()
             };
 
@@ -2921,7 +2922,7 @@ mod failure_scenarios_tests {
 
             // Both should eventually succeed after recovery
             assert_eq!(ack1.await?, 0);
-            assert_eq!(ack2.await?, Some(1));
+            assert_eq!(ack2.await?, Some(1)); // SDK returns the highest acknowledged offset in the batch
 
             let write_count = mock_server.get_write_count().await;
             // First stream: 1 single + 3 batch records
@@ -3112,6 +3113,589 @@ mod failure_scenarios_tests {
 
             Ok(())
         }
+    }
+}
+
+mod graceful_close_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_default_graceful_close_waits_for_full_server_duration(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_default_graceful_close_waits_for_full_server_duration");
+
+        const SERVER_DURATION_SECONDS: i64 = 1;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_default_graceful".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: SERVER_DURATION_SECONDS,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..3 {
+            let payload = format!("record-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        // Give time for records to be sent and CloseStreamSignal to be received.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let start_time = std::time::Instant::now();
+        stream.flush().await?;
+        let elapsed = start_time.elapsed();
+
+        assert!(
+            elapsed.as_millis() >= 900,
+            "Expected to wait at least 900ms (most of server duration), but took {}ms",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_millis() <= 1200,
+            "Expected to wait no more than 1200ms, but took {}ms",
+            elapsed.as_millis()
+        );
+        // 3 writes to first stream + 1 resent to second stream.
+        assert_eq!(mock_server.get_write_count().await, 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_immediate_recovery_on_close_signal() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_immediate_recovery_on_close_signal");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_immediate".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 2,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: 2,
+                        delay_ms: 100,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            stream_paused_max_wait_time_ms: Some(0),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..3 {
+            let payload = format!("record-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let start_time = std::time::Instant::now();
+        let payload = format!("record-4").into_bytes();
+        let _ack = stream.ingest_record(payload).await?;
+
+        stream.flush().await?;
+        let elapsed = start_time.elapsed();
+
+        // Should recover immediately, not wait for server's 2 seconds.
+        assert!(
+            elapsed.as_millis() < 500,
+            "Expected immediate recovery (<500ms), but took {}ms",
+            elapsed.as_millis()
+        );
+        assert_eq!(mock_server.get_write_count().await, 5);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_client_max_less_than_server() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_client_max_less_than_server");
+
+        const SERVER_DURATION_SECONDS: i64 = 5;
+        const CLIENT_MAX_WAIT_MS: u64 = 1000;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_client_less".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 2,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: SERVER_DURATION_SECONDS,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 1000,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            server_lack_of_ack_timeout_ms: 5000,
+            stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..4 {
+            let payload = format!("record-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let start_time = std::time::Instant::now();
+        let payload = b"post-signal-record".to_vec();
+        let _ack = stream.ingest_record(payload).await?;
+
+        stream.flush().await?;
+        let elapsed = start_time.elapsed();
+
+        assert!(
+            elapsed.as_millis() >= CLIENT_MAX_WAIT_MS as u128 - 200,
+            "Expected to wait at least {}ms, but only waited {}ms",
+            CLIENT_MAX_WAIT_MS - 200,
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_millis() < (SERVER_DURATION_SECONDS as u64 * 1000) as u128,
+            "Expected to wait less than {}ms (server duration), but waited {}ms",
+            SERVER_DURATION_SECONDS * 1000,
+            elapsed.as_millis()
+        );
+
+        // 5 writes to first stream (records 0-3 + post-signal) + 2 resent to second stream (records 3 and post-signal unacked).
+        assert_eq!(mock_server.get_write_count().await, 7);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_client_max_greater_than_server() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_client_max_greater_than_server");
+
+        const SERVER_DURATION_SECONDS: i64 = 1;
+        const CLIENT_MAX_WAIT_MS: u64 = 2000;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_client_greater".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: SERVER_DURATION_SECONDS,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..3 {
+            let payload = format!("record-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let start_time = std::time::Instant::now();
+        stream.flush().await?;
+        let elapsed = start_time.elapsed();
+
+        assert!(
+            elapsed.as_millis() >= 900,
+            "Expected to wait at least 900ms (server duration), but took {}ms",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Should wait close to server duration (1000ms), not client max, took {}ms",
+            elapsed.as_millis()
+        );
+
+        // 3 writes to first stream + 1 resent to second stream.
+        assert_eq!(mock_server.get_write_count().await, 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_early_recovery_all_acks_received() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_early_recovery_all_acks_received");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_early_recovery".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: 2,
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 2,
+                        delay_ms: 200,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            stream_paused_max_wait_time_ms: Some(2000),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..3 {
+            let payload = format!("record-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        let start_time = std::time::Instant::now();
+        stream.flush().await?;
+        let elapsed = start_time.elapsed();
+
+        // Should complete around 200ms (when acks arrive), not wait for full 2000ms.
+        assert!(
+            elapsed.as_millis() >= 150 && elapsed.as_millis() < 1000,
+            "Expected early recovery around 200ms, but took {}ms",
+            elapsed.as_millis()
+        );
+        assert_eq!(mock_server.get_write_count().await, 3);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_buffered_records_during_pause() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_buffered_records_during_pause");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_buffered".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            stream_paused_max_wait_time_ms: Some(1000),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        for i in 0..2 {
+            let payload = format!("pre-pause-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        for i in 0..2 {
+            let payload = format!("during-pause-{}", i).into_bytes();
+            let _ack = stream.ingest_record(payload).await?;
+        }
+
+        stream.flush().await?;
+
+        // All 4 records should eventually be written (2 pre-pause + 2 buffered during pause).
+        let write_count = mock_server.get_write_count().await;
+        assert!(
+            write_count >= 4,
+            "Expected at least 4 writes (buffered records should be sent after recovery), got {}",
+            write_count
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_error_during_graceful_close() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_error_during_graceful_close");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_error_during_pause".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: 2,
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Error during pause"),
+                        delay_ms: 100,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_recovered_after_error".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: true,
+            stream_paused_max_wait_time_ms: Some(2000),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                TableProperties {
+                    table_name: TABLE_NAME.to_string(),
+                    descriptor_proto: create_test_descriptor_proto(),
+                },
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let mut futures = Vec::new();
+        for i in 0..3 {
+            let payload = format!("record-{}", i).into_bytes();
+            let ack = stream.ingest_record(payload).await?;
+            futures.push(ack);
+        }
+
+        stream.flush().await?;
+
+        let write_count = mock_server.get_write_count().await;
+        assert!(
+            write_count >= 3,
+            "Expected at least 3 writes despite error during pause, got {}",
+            write_count
+        );
+
+        Ok(())
     }
 }
 

@@ -1447,11 +1447,25 @@ impl ZerobusStream {
                     }
                 }
 
-                let message_result = tokio::time::timeout(
-                    Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                    response_grpc_stream.message(),
-                )
-                .await;
+                // During graceful close, race between message timeout and pause deadline.
+                let message_result = if let Some(deadline) = pause_deadline {
+                    tokio::select! {
+                        result = tokio::time::timeout(
+                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                            response_grpc_stream.message(),
+                        ) => result,
+                        _ = tokio::time::sleep_until(deadline) => {
+                            // Deadline reached, loop back to check and return.
+                            continue;
+                        }
+                    }
+                } else {
+                    tokio::time::timeout(
+                        Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                        response_grpc_stream.message(),
+                    )
+                    .await
+                };
                 match message_result {
                     Ok(Ok(Some(ingest_record_response))) => match ingest_record_response.payload {
                         Some(ResponsePayload::IngestRecordResponse(IngestRecordResponse {
@@ -1497,7 +1511,8 @@ impl ZerobusStream {
                                     .map(|d| d.seconds as u64 * 1000 + d.nanos as u64 / 1_000_000)
                                     .unwrap_or(0);
 
-                                let wait_duration_ms = match options.streamPausedMaxWaitTimeMs {
+                                let wait_duration_ms = match options.stream_paused_max_wait_time_ms
+                                {
                                     None => server_duration_ms,
                                     Some(0) => {
                                         // Immediate recovery
@@ -1541,8 +1556,8 @@ impl ZerobusStream {
                         return Err(ZerobusError::StreamClosedError(status));
                     }
                     Err(_timeout) => {
-                        // No message received for server_lack_of_ack_timeout_ms
-                        if !landing_zone.is_observed_empty() {
+                        // No message received for server_lack_of_ack_timeout_ms.
+                        if pause_deadline.is_none() && !landing_zone.is_observed_empty() {
                             error!(
                                 "Server ack timeout: no response for {}ms",
                                 options.server_lack_of_ack_timeout_ms
