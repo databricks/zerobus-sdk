@@ -845,8 +845,7 @@ impl ZerobusStream {
             };
 
             // 5. Handle errors.
-            if result.is_err() {
-                let error = result.err().unwrap();
+            if let Err(error) = result {
                 error!(stream_id = %stream_id, "Stream failure detected: {}", error);
                 let error = match &error {
                     // Mapping this to pass certain e2e tests.
@@ -898,7 +897,7 @@ impl ZerobusStream {
             match key {
                 "x-databricks-zerobus-table-name" => {
                     let table_name = MetadataValue::try_from(value.as_str())
-                        .map_err(|_| ZerobusError::InvalidTableName(key.to_string()))?;
+                        .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
                     stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
                 }
                 "authorization" => {
@@ -928,7 +927,11 @@ impl ZerobusStream {
                 table_properties
                     .descriptor_proto
                     .as_ref()
-                    .unwrap()
+                    .ok_or_else(|| {
+                        ZerobusError::InvalidArgument(
+                            "Descriptor proto is required for Proto record type".to_string(),
+                        )
+                    })?
                     .encode_to_vec(),
             )
         } else {
@@ -1532,5 +1535,111 @@ impl ZerobusStream {
             "Cannot get unacked records from an active stream. Stream must be closed first."
                 .to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_into_request_payload_single_proto_record() {
+        let record = vec![1, 2, 3];
+        let batch = EncodedBatch::Proto(smallvec![record.clone()]);
+        let payload = batch.into_request_payload(42);
+
+        match payload {
+            RequestPayload::IngestRecord(req) => {
+                assert_eq!(req.offset_id, Some(42));
+                match req.record {
+                    Some(IngestRequestRecord::ProtoEncodedRecord(data)) => {
+                        assert_eq!(data, record);
+                    }
+                    _ => panic!("Expected ProtoEncodedRecord"),
+                }
+            }
+            _ => panic!("Expected IngestRecord payload"),
+        }
+    }
+
+    #[test]
+    fn test_into_request_payload_single_json_record() {
+        let record = r#"{"id": 1}"#.to_string();
+        let batch = EncodedBatch::Json(smallvec![record.clone()]);
+        let payload = batch.into_request_payload(123);
+
+        match payload {
+            RequestPayload::IngestRecord(req) => {
+                assert_eq!(req.offset_id, Some(123));
+                match req.record {
+                    Some(IngestRequestRecord::JsonRecord(data)) => {
+                        assert_eq!(data, record);
+                    }
+                    _ => panic!("Expected JsonRecord"),
+                }
+            }
+            _ => panic!("Expected IngestRecord payload"),
+        }
+    }
+
+    #[test]
+    fn test_into_request_payload_batch_proto() {
+        let records = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let batch = EncodedBatch::Proto(SmallVec::from_vec(records.clone()));
+        let payload = batch.into_request_payload(99);
+
+        match payload {
+            RequestPayload::IngestRecordBatch(req) => {
+                assert_eq!(req.offset_id, Some(99));
+                match req.batch {
+                    Some(IngestRequestBatch::ProtoEncodedBatch(proto_batch)) => {
+                        assert_eq!(proto_batch.records, records);
+                    }
+                    _ => panic!("Expected ProtoEncodedBatch"),
+                }
+            }
+            _ => panic!("Expected IngestRecordBatch payload"),
+        }
+    }
+
+    #[test]
+    fn test_into_request_payload_batch_json() {
+        let records = vec![r#"{"id": 1}"#.to_string(), r#"{"id": 2}"#.to_string()];
+        let batch = EncodedBatch::Json(SmallVec::from_vec(records.clone()));
+        let payload = batch.into_request_payload(77);
+
+        match payload {
+            RequestPayload::IngestRecordBatch(req) => {
+                assert_eq!(req.offset_id, Some(77));
+                match req.batch {
+                    Some(IngestRequestBatch::JsonBatch(json_batch)) => {
+                        assert_eq!(json_batch.records, records);
+                    }
+                    _ => panic!("Expected JsonBatch"),
+                }
+            }
+            _ => panic!("Expected IngestRecordBatch payload"),
+        }
+    }
+
+    #[test]
+    fn test_encoded_batch_get_record_count() {
+        let proto_batch = EncodedBatch::Proto(smallvec![vec![1], vec![2], vec![3]]);
+        assert_eq!(proto_batch.get_record_count(), 3);
+
+        let json_batch = EncodedBatch::Json(smallvec!["a".to_string(), "b".to_string()]);
+        assert_eq!(json_batch.get_record_count(), 2);
+
+        let empty_batch = EncodedBatch::Proto(smallvec![]);
+        assert_eq!(empty_batch.get_record_count(), 0);
+    }
+
+    #[test]
+    fn test_encoded_batch_is_empty() {
+        let non_empty = EncodedBatch::Proto(smallvec![vec![1]]);
+        assert!(!non_empty.is_empty());
+
+        let empty = EncodedBatch::Json(smallvec![]);
+        assert!(empty.is_empty());
     }
 }
