@@ -31,7 +31,7 @@ impl DefaultTokenFactory {
         client_secret: &str,
         workspace_id: &str,
     ) -> ZerobusResult<String> {
-        let (catalog, schema, table) = Self::parse_table_name(table_name).unwrap();
+        let (catalog, schema, table) = Self::parse_table_name(table_name)?;
 
         let uc_endpoint = uc_endpoint.to_string();
         let databricks_client_id = client_id.to_string();
@@ -122,21 +122,91 @@ impl DefaultTokenFactory {
     ///
     /// # Errors
     ///
-    /// * `InvalidUCTokenError` - If the table name is missing catalog, schema, or table components
+    /// * `InvalidTableName` - If the table name doesn't have exactly 3 non-empty parts.
     #[allow(clippy::result_large_err)]
     fn parse_table_name(table_name: &str) -> Result<(String, String, String), ZerobusError> {
-        let mut parts = table_name.splitn(3, '.');
+        let parts: Vec<&str> = table_name.split('.').collect();
 
-        let catalog = parts.next().ok_or_else(|| {
-            ZerobusError::InvalidUCTokenError("Missing catalog in table name".to_string())
-        })?;
-        let schema = parts.next().ok_or_else(|| {
-            ZerobusError::InvalidUCTokenError("Missing schema in table name".to_string())
-        })?;
-        let table = parts.next().ok_or_else(|| {
-            ZerobusError::InvalidUCTokenError("Missing table in table name".to_string())
-        })?;
+        if parts.len() != 3 {
+            return Err(ZerobusError::InvalidTableName(format!(
+                "Table name must have exactly 3 parts (catalog.schema.table), found {} parts",
+                parts.len()
+            )));
+        }
+
+        let catalog = parts[0];
+        let schema = parts[1];
+        let table = parts[2];
+
+        if catalog.is_empty() {
+            return Err(ZerobusError::InvalidTableName(
+                "Catalog name cannot be empty".to_string(),
+            ));
+        }
+        if schema.is_empty() {
+            return Err(ZerobusError::InvalidTableName(
+                "Schema name cannot be empty".to_string(),
+            ));
+        }
+        if table.is_empty() {
+            return Err(ZerobusError::InvalidTableName(
+                "Table name cannot be empty".to_string(),
+            ));
+        }
 
         Ok((catalog.to_string(), schema.to_string(), table.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_table_name_valid() {
+        let result = DefaultTokenFactory::parse_table_name("catalog_1.schema_2.table_3");
+        assert!(result.is_ok());
+        let (catalog, schema, table) = result.unwrap();
+        assert_eq!(catalog, "catalog_1");
+        assert_eq!(schema, "schema_2");
+        assert_eq!(table, "table_3");
+    }
+
+    #[test]
+    fn test_parse_table_name_invalid() {
+        let invalid_cases = vec![
+            ("catalog.schema.table.extra", "exactly 3 parts"),
+            ("catalog.schema.table.with.dots", "exactly 3 parts"),
+            ("catalog", "exactly 3 parts"),
+            ("catalog.schema", "exactly 3 parts"),
+            ("", "exactly 3 parts"),
+            (".schema.table", "Catalog name cannot be empty"),
+            ("catalog..table", "Schema name cannot be empty"),
+            ("catalog.schema.", "Table name cannot be empty"),
+            ("..", "Catalog name cannot be empty"),
+            ("..table", "Catalog name cannot be empty"),
+            ("catalog..", "Schema name cannot be empty"),
+        ];
+
+        for (input, expected_error) in invalid_cases {
+            let result = DefaultTokenFactory::parse_table_name(input);
+            assert!(
+                result.is_err(),
+                "Expected '{}' to be invalid, but it was parsed successfully",
+                input
+            );
+            match result {
+                Err(ZerobusError::InvalidTableName(msg)) => {
+                    assert!(
+                        msg.contains(expected_error),
+                        "For input '{}', expected error to contain '{}', but got: '{}'",
+                        input,
+                        expected_error,
+                        msg
+                    );
+                }
+                _ => panic!("Expected InvalidTableName error for '{}'", input),
+            }
+        }
     }
 }

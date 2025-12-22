@@ -15,8 +15,8 @@ pub enum ZerobusError {
     /// Returned when the specified Zerobus endpoint is in invalid format.
     #[error("The specified Zerobus endpoint is in invalid format: {0}.")]
     InvalidZerobusEndpointError(String),
-    /// Returned when the specified Unity Catalog table is invalid.
-    #[error("Specified UC table is invalid: {0}.")]
+    /// Returned when the specified Unity Catalog table name is invalid.
+    #[error("Specified UC table name is invalid: {0}.")]
     InvalidTableName(String),
     /// Returned when the specified Unity Catalog endpoint is in invalid format.
     #[error("Specified UC endpoint is in invalid format: {0}.")]
