@@ -404,7 +404,7 @@ let mut stream = sdk.create_stream(
 
 ### 5. Ingest Data
 
-The SDK provides two ingestion methods:
+The SDK provides multiple ingestion methods:
 
 #### Single Record Ingestion
 
@@ -421,6 +421,43 @@ let record = YourMessage {
 let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
 ```
 
+#### Alternative API: Direct Offset Return
+
+For scenarios where you want to decouple ingestion from acknowledgment tracking, use the `_v2` methods. These return the logical offset directly as an integer instead of a Future:
+
+```rust
+use prost::Message;
+
+let record = YourMessage {
+    field1: Some("value".to_string()),
+    field2: Some(42),
+};
+
+// Returns OffsetId (integer) immediately.
+let offset_id = stream.ingest_record_v2(record.encode_to_vec()).await?;
+
+// Later, you can explicitly wait for acknowledgment using the offset.
+stream.wait_for_offset(offset_id).await?;
+
+// Or collect multiple offsets and wait selectively.
+let mut offsets = Vec::new();
+for i in 0..100 {
+    let record = YourMessage { id: Some(i), /* ... */ };
+    let offset = stream.ingest_record_v2(record.encode_to_vec()).await?;
+    offsets.push(offset);
+}
+
+// Wait for specific offsets.
+for offset in offsets {
+    stream.wait_for_offset(offset).await?;
+}
+```
+
+**When to use `ingest_record_v2()` vs `ingest_record()`:**
+- Use `ingest_record_v2()` when you want the logical offset as an integer and will call `wait_for_offset()` explicitly
+- Use `ingest_record()` when you want the Future returned directly for immediate chaining
+- Both methods have the same performance; the choice depends on your acknowledgment tracking pattern
+
 #### Batch Ingestion
 
 For higher throughput and all-or-nothing semantics, use `ingest_records()` to ingest multiple records at once:
@@ -435,8 +472,24 @@ let records: Vec<Vec<u8>> = vec![
 ];
 
 let ack_future = stream.ingest_records(records).await?;
-// Returns Some(offset) for non-empty batches, None for empty batches
+// Returns Some(offset) for non-empty batches, None for empty batches.
 let offset = ack_future.await?;
+```
+
+Alternatively, use `ingest_records_v2()` to get the offset directly:
+
+```rust
+let records: Vec<Vec<u8>> = vec![
+    YourMessage { id: Some(1), /* ... */ }.encode_to_vec(),
+    YourMessage { id: Some(2), /* ... */ }.encode_to_vec(),
+    YourMessage { id: Some(3), /* ... */ }.encode_to_vec(),
+];
+
+// Returns Some(offset) for non-empty batches, None for empty batches.
+if let Some(offset_id) = stream.ingest_records_v2(records).await? {
+    // Later, wait for this specific batch acknowledgment.
+    stream.wait_for_offset(offset_id).await?;
+}
 ```
 
 **Batch API Semantics:**
@@ -722,8 +775,10 @@ cargo test -p tests -- --nocapture
 1. **Reuse SDK Instances** - Create one `ZerobusSdk` per application and reuse for multiple streams
 2. **Always Close Streams** - Use `stream.close().await?` to ensure all data is flushed
 3. **Choose the Right Ingestion Method**:
-   - Use `ingest_records()` for high throughput when you have multiple records ready
-   - Use `ingest_record()` when processing records individually or need per-record acknowledgment
+   - Use `ingest_records()` for high throughput when you have multiple records ready and want a Future for direct acknowledgment tracking
+   - Use `ingest_records_v2()` for batch ingestion when you want the offset as an integer and will call `wait_for_offset()` separately
+   - Use `ingest_record()` when processing records individually and want a Future for direct chaining
+   - Use `ingest_record_v2()` when processing records individually and want the offset as an integer to use with `wait_for_offset()`
 4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
 5. **Enable Recovery** - Always set `recovery: true` in production environments
 6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
@@ -786,6 +841,14 @@ pub async fn ingest_record(
 Ingests a single encoded record (Protocol Buffers or JSON). Returns a future that resolves to the offset ID.
 
 ```rust
+pub async fn ingest_record_v2(
+    &self,
+    payload: impl Into<EncodedRecord>
+) -> ZerobusResult<OffsetId>
+```
+Alternative API for single record ingestion. Returns the logical offset ID directly as an integer instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly wait for acknowledgment of this offset.
+
+```rust
 pub async fn ingest_records(
     &self,
     payloads: Vec<Vec<u8>>
@@ -793,6 +856,19 @@ pub async fn ingest_records(
 ```
 Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. 
 Returns a future that resolves to `Some(offset_id)` for non-empty batches, or `None` if the batch is empty.
+
+```rust
+pub async fn ingest_records_v2(
+    &self,
+    payloads: Vec<impl Into<EncodedRecord>>
+) -> ZerobusResult<Option<OffsetId>>
+```
+Alternative API for batch ingestion. Returns the logical offset ID directly (or `None` for empty batches) instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly wait for acknowledgment.
+
+```rust
+pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
+```
+Waits for acknowledgment of a specific logical offset. Use this method with offsets returned from `ingest_record_v2()` or `ingest_records_v2()` to explicitly wait for server acknowledgment.
 
 ```rust
 pub async fn flush(&self) -> ZerobusResult<()>
@@ -916,6 +992,3 @@ This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) fi
 ---
 
 For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/databricks/zerobus-sdk-rs).
-
-
-

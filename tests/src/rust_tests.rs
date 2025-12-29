@@ -3699,6 +3699,640 @@ mod graceful_close_tests {
     }
 }
 
+mod api_v2_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_ingest_record_v2_single_record() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_v2_single_record");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // v2 API returns offset directly without nested future
+        let offset = stream
+            .ingest_record_v2(b"test record data".to_vec())
+            .await?;
+
+        assert_eq!(offset, 0);
+
+        // Wait for the record to be acknowledged
+        stream.wait_for_offset(offset).await?;
+
+        assert_eq!(mock_server.get_write_count().await, 1);
+        assert_eq!(mock_server.get_max_offset_sent().await, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_v2_multiple_records() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_v2_multiple_records");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2_multi".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 9,
+                        delay_ms: 200,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let mut offsets = Vec::new();
+        for _ in 0..10 {
+            let offset = stream
+                .ingest_record_v2(b"test record data".to_vec())
+                .await?;
+            offsets.push(offset);
+        }
+
+        // Offsets should be sequential
+        for (i, offset) in offsets.iter().enumerate() {
+            assert_eq!(*offset, i as i64);
+        }
+
+        stream.flush().await?;
+
+        assert_eq!(mock_server.get_write_count().await, 10);
+        assert_eq!(mock_server.get_max_offset_sent().await, 9);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_records_v2_batch() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_records_v2_batch");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2_batch".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let batch = vec![
+            b"record 1".to_vec(),
+            b"record 2".to_vec(),
+            b"record 3".to_vec(),
+        ];
+
+        // v2 API returns Option<offset> directly without nested future
+        let offset = stream.ingest_records_v2(batch).await?;
+
+        assert_eq!(offset, Some(0));
+
+        if let Some(off) = offset {
+            stream.wait_for_offset(off).await?;
+        }
+
+        assert_eq!(mock_server.get_write_count().await, 3);
+        assert_eq!(mock_server.get_max_offset_sent().await, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_records_v2_empty_batch() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_records_v2_empty_batch");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_v2_empty".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            record_type: RecordType::Proto,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest empty batch
+        let empty_batch: Vec<Vec<u8>> = vec![];
+        let offset = stream.ingest_records_v2(empty_batch).await?;
+
+        // Should return None since the batch is empty
+        assert_eq!(offset, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mixed_v1_v2_api_usage() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_mixed_v1_v2_api_usage");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_mixed_api".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 3,
+                        delay_ms: 100,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Mix v1 and v2 API calls
+        let v2_offset1 = stream.ingest_record_v2(b"v2 record 1".to_vec()).await?;
+        assert_eq!(v2_offset1, 0);
+
+        let v1_future = stream.ingest_record(b"v1 record".to_vec()).await?;
+
+        let v2_offset2 = stream.ingest_record_v2(b"v2 record 2".to_vec()).await?;
+        assert_eq!(v2_offset2, 2);
+
+        let v2_offset3 = stream.ingest_record_v2(b"v2 record 3".to_vec()).await?;
+        assert_eq!(v2_offset3, 3);
+
+        // Wait for v1 future
+        let v1_offset = v1_future.await?;
+        assert_eq!(v1_offset, 1);
+
+        stream.flush().await?;
+
+        assert_eq!(mock_server.get_write_count().await, 4);
+        assert_eq!(mock_server.get_max_offset_sent().await, 3);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_v2_with_json() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_v2_with_json");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2_json".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: None,
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            record_type: RecordType::Json,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
+        let offset = stream.ingest_record_v2(json_record).await?;
+
+        assert_eq!(offset, 0);
+        stream.wait_for_offset(offset).await?;
+        assert_eq!(mock_server.get_write_count().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_records_v2_with_json_batch() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_records_v2_with_json_batch");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2_json_batch".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: None,
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            record_type: RecordType::Json,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let json_batch = vec![
+            r#"{"id": 1, "name": "test1"}"#.to_string(),
+            r#"{"id": 2, "name": "test2"}"#.to_string(),
+            r#"{"id": 3, "name": "test3"}"#.to_string(),
+        ];
+
+        let offset = stream.ingest_records_v2(json_batch).await?;
+
+        assert_eq!(offset, Some(0));
+        if let Some(off) = offset {
+            stream.wait_for_offset(off).await?;
+        }
+        assert_eq!(mock_server.get_write_count().await, 3);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_v2_after_close_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_v2_after_close_fails");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_v2_close".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let mut stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        stream.close().await?;
+
+        let ingest_result = stream.ingest_record_v2(b"test record data".to_vec()).await;
+        assert!(matches!(
+            ingest_result,
+            Err(ZerobusError::StreamClosedError(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_records_v2_after_close_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_records_v2_after_close_fails");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_v2_batch_close".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let mut stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        stream.close().await?;
+
+        let batch = vec![b"record 1".to_vec(), b"record 2".to_vec()];
+        let ingest_result = stream.ingest_records_v2(batch).await;
+
+        assert!(matches!(
+            ingest_result,
+            Err(ZerobusError::StreamClosedError(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_v2_blocks_on_inflight_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_v2_blocks_on_inflight_limit");
+
+        const MAX_INFLIGHT_REQUESTS: usize = 10;
+        const ACK_DELAY_MS: u64 = 500;
+        const TOTAL_REQUESTS: usize = MAX_INFLIGHT_REQUESTS + 5;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_v2_blocking".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: (MAX_INFLIGHT_REQUESTS - 1) as i64,
+                        delay_ms: ACK_DELAY_MS,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: (TOTAL_REQUESTS - 1) as i64,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: MAX_INFLIGHT_REQUESTS,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let mut offsets = Vec::new();
+
+        // Send MAX_INFLIGHT_REQUESTS requests
+        for _ in 0..MAX_INFLIGHT_REQUESTS {
+            let offset = stream.ingest_record_v2(b"test data".to_vec()).await?;
+            offsets.push(offset);
+        }
+
+        // The next request should block because we're at the inflight limit
+        let start_time = std::time::Instant::now();
+        let blocking_offset = stream.ingest_record_v2(b"blocking data".to_vec()).await?;
+        let duration = start_time.elapsed();
+
+        offsets.push(blocking_offset);
+
+        assert!(
+            duration.as_millis() >= ACK_DELAY_MS as u128,
+            "The {}th ingest call should block for at least {}ms, but only blocked for {}ms",
+            MAX_INFLIGHT_REQUESTS + 1,
+            ACK_DELAY_MS,
+            duration.as_millis()
+        );
+
+        // Send remaining requests
+        for _ in (MAX_INFLIGHT_REQUESTS + 1)..TOTAL_REQUESTS {
+            let offset = stream.ingest_record_v2(b"more test data".to_vec()).await?;
+            offsets.push(offset);
+        }
+
+        // Verify all offsets are sequential
+        for (i, offset) in offsets.iter().enumerate() {
+            assert_eq!(*offset, i as i64);
+        }
+
+        stream.flush().await?;
+
+        assert_eq!(mock_server.get_write_count().await, TOTAL_REQUESTS as u64);
+        assert_eq!(
+            mock_server.get_max_offset_sent().await,
+            (TOTAL_REQUESTS - 1) as i64
+        );
+
+        Ok(())
+    }
+}
+
 // Arrow Flight tests module
 mod mock_arrow_flight;
 
