@@ -1572,7 +1572,7 @@ impl ZerobusStream {
         })
     }
 
-    /// Spawns a task that continuously sends records to the Ingest API by observing the landing zone
+    /// Spawns a task that continuously sends records to the Zerobus API by observing the landing zone
     /// to get records and sending them through the outbound stream to the gRPC stream.
     fn spawn_sender_task(
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
@@ -1582,12 +1582,11 @@ impl ZerobusStream {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
-                if is_paused.load(Ordering::Relaxed) {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-
-                let item = landing_zone.observe().await.clone();
+                let item = if is_paused.load(Ordering::Relaxed) {
+                    std::future::pending().await // Wait until supervisor task aborts this task.
+                } else {
+                    landing_zone.observe().await.clone()
+                };
                 let offset_id = physical_offset_id_generator.next();
                 let request_payload = item.payload.into_request_payload(offset_id);
 

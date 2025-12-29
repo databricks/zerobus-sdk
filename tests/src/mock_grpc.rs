@@ -194,8 +194,6 @@ impl Zerobus for MockZerobusServer {
                                             break;
                                         }
                                         MockResponse::Error { status, delay_ms } => {
-                                            response_index = idx;
-                                            create_stream_found = true;
                                             if *delay_ms > 0 {
                                                 sleep(Duration::from_millis(*delay_ms)).await;
                                             }
