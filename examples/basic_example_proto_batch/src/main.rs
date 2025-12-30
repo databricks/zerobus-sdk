@@ -98,7 +98,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         offset_id
     );
 
-    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
     let batch_2: Vec<Vec<u8>> = vec![
         TableOrders {
             id: Some(4),
@@ -124,9 +123,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .encode_to_vec(),
     ];
 
+    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
     let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
     if let Some(offset_id) = offset_id {
-        println!("Batch ingested with offset Id: {}", offset_id);
+        println!("Batch sent with offset Id: {}", offset_id);
         // Wait for acknowledgment.
         stream.wait_for_offset(offset_id).await.unwrap();
         println!(

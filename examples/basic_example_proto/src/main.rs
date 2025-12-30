@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
 
-    println!("Record ingested with offset Id: {}", offset_id);
+    println!("Record sent with offset Id: {}", offset_id);
     // Wait for acknowledgment.
     stream.wait_for_offset(offset_id).await.unwrap();
     println!("Record acknowledged with offset Id: {}", offset_id);

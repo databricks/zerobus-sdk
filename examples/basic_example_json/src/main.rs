@@ -67,7 +67,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let offset_id = ack_future.await.unwrap();
     println!("Record acknowledged with offset Id: {}", offset_id);
 
-    // Example 2: Using v2 API, ingest_record_v2 returns offset immediately.
     let json_record_2 = format!(
         r#"{{
             "id": 2,
@@ -81,8 +80,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }}"#,
         now, now
     );
+    // Example 2: Using v2 API, ingest_record_v2 returns offset immediately.
     let offset_id = stream.ingest_record_v2(json_record_2).await.unwrap();
-    println!("Record ingested with offset Id: {}", offset_id);
+    println!("Record sent with offset Id: {}", offset_id);
     // Wait for acknowledgment.
     stream.wait_for_offset(offset_id).await.unwrap();
     println!("Record acknowledged with offset Id: {}", offset_id);

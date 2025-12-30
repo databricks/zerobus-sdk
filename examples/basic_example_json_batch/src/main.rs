@@ -98,7 +98,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         offset_id
     );
 
-    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
     let batch_2: Vec<String> = vec![
         format!(
             r#"{{"id": 4, "customer_name": "David Green", "product_name": "Monitor", "quantity": 1, "price": 299.99, "status": "delivered", "created_at": {}, "updated_at": {}}}"#,
@@ -110,9 +109,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
     ];
 
+    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
     let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
     if let Some(offset_id) = offset_id {
-        println!("Batch ingested with offset Id: {}", offset_id);
+        println!("Batch sent with offset Id: {}", offset_id);
         // Wait for acknowledgment.
         stream.wait_for_offset(offset_id).await.unwrap();
         println!(

@@ -121,7 +121,7 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
-Record ingested with offset Id: 1
+Record sent with offset Id: 1
 Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
@@ -156,7 +156,7 @@ println!("Record acknowledged with offset Id: {}", offset_id);
 let json_record_2 = format!(/* ... */);
 
 let offset_id = stream.ingest_record_v2(json_record_2).await.unwrap();
-println!("Record ingested with offset Id: {}", offset_id);
+println!("Record sent with offset Id: {}", offset_id);
 
 // Wait for acknowledgment when needed
 stream.wait_for_offset(offset_id).await.unwrap();
@@ -190,7 +190,7 @@ cargo run
 
 ```
 Batch of 3 records acknowledged with offset Id: Some(0)
-Batch ingested with offset Id: 1
+Batch sent with offset Id: 1
 Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
@@ -218,7 +218,7 @@ let batch_2: Vec<String> = vec![/* ... */];
 let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
 
 if let Some(offset_id) = offset_id {
-    println!("Batch ingested with offset Id: {}", offset_id);
+    println!("Batch sent with offset Id: {}", offset_id);
     // Wait for acknowledgment when needed
     stream.wait_for_offset(offset_id).await.unwrap();
     println!("Batch {} acknowledged (2 records)", offset_id);
@@ -256,7 +256,7 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
-Record ingested with offset Id: 1
+Record sent with offset Id: 1
 Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
@@ -298,7 +298,7 @@ let offset_id = stream
     .await
     .unwrap();
 
-println!("Record ingested with offset Id: {}", offset_id);
+println!("Record sent with offset Id: {}", offset_id);
 
 // Wait for acknowledgment when needed
 stream.wait_for_offset(offset_id).await.unwrap();
@@ -332,7 +332,7 @@ cargo run
 
 ```
 Batch of 3 records acknowledged with offset Id: Some(0)
-Batch ingested with offset Id: 1
+Batch sent with offset Id: 1
 Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
@@ -375,7 +375,7 @@ let batch_2: Vec<Vec<u8>> = vec![/* ... */];
 let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
 
 if let Some(offset_id) = offset_id {
-    println!("Batch ingested with offset Id: {}", offset_id);
+    println!("Batch sent with offset Id: {}", offset_id);
     // Wait for acknowledgment when needed
     stream.wait_for_offset(offset_id).await.unwrap();
     println!("Batch {} acknowledged (2 records)", offset_id);
