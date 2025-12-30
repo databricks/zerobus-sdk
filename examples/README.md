@@ -34,13 +34,18 @@ More advanced examples that use Protocol Buffers for type-safe data serializatio
 
 All examples demonstrate:
 - Creating a stream with OAuth authentication
+- Two API styles: v1 (future-based) and v2 (immediate offset)
 - Waiting for acknowledgment
 - Properly closing the stream
 - Configuring credentials and endpoints
 
+**API Styles:**
+- **v1 API (`ingest_record` / `ingest_records`)**: Returns a future that resolves to the offset when acknowledged. Best when you need to await each record immediately.
+- **v2 API (`ingest_record_v2` / `ingest_records_v2`)**: Returns the offset immediately, use `wait_for_offset()` when you need to wait for acknowledgment.
+
 **When to use single-record vs batch ingestion:**
-- **Single-record (`ingest_record`)**: Use when ingesting records one at a time, or when you need immediate acknowledgment for each record. Each record succeeds or fails independently.
-- **Batch (`ingest_records`)**: Use when you have multiple records to ingest at once for better throughput and efficiency. Uses **all-or-nothing semantics** - the entire batch either succeeds or fails as a unit.
+- **Single-record (`ingest_record` / `ingest_record_v2`)**: Use when ingesting records one at a time, or when you need immediate acknowledgment for each record. Each record succeeds or fails independently.
+- **Batch (`ingest_records` / `ingest_records_v2`)**: Use when you have multiple records to ingest at once for better throughput and efficiency. Uses **all-or-nothing semantics** - the entire batch either succeeds or fails as a unit.
 
 ## Prerequisites
 
@@ -116,13 +121,16 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
+Record ingested with offset Id: 1
+Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The JSON example uses string-based JSON records:
+The JSON example uses string-based JSON records and demonstrates both API styles:
 
+**V1 API:**
 ```rust
 let json_record = format!(
     r#"{{
@@ -139,6 +147,20 @@ let json_record = format!(
 );
 
 let ack_future = stream.ingest_record(json_record).await.unwrap();
+let offset_id = ack_future.await.unwrap();
+println!("Record acknowledged with offset Id: {}", offset_id);
+```
+
+**V2 API:**
+```rust
+let json_record_2 = format!(/* ... */);
+
+let offset_id = stream.ingest_record_v2(json_record_2).await.unwrap();
+println!("Record ingested with offset Id: {}", offset_id);
+
+// Wait for acknowledgment when needed
+stream.wait_for_offset(offset_id).await.unwrap();
+println!("Record {} acknowledged", offset_id);
 ```
 
 Key differences from the Protocol Buffers example:
@@ -167,14 +189,17 @@ cargo run
 **Expected output:**
 
 ```
-Batch of 3 records acknowledged with offset Id: 0
+Batch of 3 records acknowledged with offset Id: Some(0)
+Batch ingested with offset Id: 1
+Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The JSON batch example uses `ingest_records()` to send multiple records:
+The JSON batch example demonstrates both API styles with `ingest_records()` and `ingest_records_v2()`:
 
+**V1 API:**
 ```rust
 let batch: Vec<String> = vec![
     format!(r#"{{"id": 1, "customer_name": "Alice Smith", ...}}"#),
@@ -183,7 +208,21 @@ let batch: Vec<String> = vec![
 ];
 
 let ack_future = stream.ingest_records(batch).await.unwrap();
-let _ack = ack_future.await.unwrap();
+let offset_id = ack_future.await.unwrap();
+```
+
+**V2 API:**
+```rust
+let batch_2: Vec<String> = vec![/* ... */];
+
+let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
+
+if let Some(offset_id) = offset_id {
+    println!("Batch ingested with offset Id: {}", offset_id);
+    // Wait for acknowledgment when needed
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Batch {} acknowledged (2 records)", offset_id);
+}
 ```
 
 **Key benefits:**
@@ -217,6 +256,8 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
+Record ingested with offset Id: 1
+Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
 
@@ -224,8 +265,9 @@ Schema generation is only needed if you want to customize it for your own table 
 
 ### Code Highlights
 
-The Protocol Buffers example uses strongly-typed structs:
+The Protocol Buffers example uses strongly-typed structs and demonstrates both API styles:
 
+**V1 API:**
 ```rust
 let ack_future = stream
     .ingest_record(
@@ -243,6 +285,24 @@ let ack_future = stream
     )
     .await
     .unwrap();
+
+let offset_id = ack_future.await.unwrap();
+```
+
+**V2 API:**
+```rust
+let offset_id = stream
+    .ingest_record_v2(
+        TableOrders { /* ... */ }.encode_to_vec()
+    )
+    .await
+    .unwrap();
+
+println!("Record ingested with offset Id: {}", offset_id);
+
+// Wait for acknowledgment when needed
+stream.wait_for_offset(offset_id).await.unwrap();
+println!("Record {} acknowledged", offset_id);
 ```
 
 Key features:
@@ -271,14 +331,17 @@ cargo run
 **Expected output:**
 
 ```
-Batch of 3 records acknowledged with offset Id: 0
+Batch of 3 records acknowledged with offset Id: Some(0)
+Batch ingested with offset Id: 1
+Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The Protocol Buffers batch example uses `ingest_records()` with typed records:
+The Protocol Buffers batch example demonstrates both API styles with typed records:
 
+**V1 API:**
 ```rust
 let batch: Vec<Vec<u8>> = vec![
     TableOrders {
@@ -302,7 +365,21 @@ let batch: Vec<Vec<u8>> = vec![
 ];
 
 let ack_future = stream.ingest_records(batch).await.unwrap();
-let _ack = ack_future.await.unwrap();
+let offset_id = ack_future.await.unwrap();
+```
+
+**V2 API:**
+```rust
+let batch_2: Vec<Vec<u8>> = vec![/* ... */];
+
+let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
+
+if let Some(offset_id) = offset_id {
+    println!("Batch ingested with offset Id: {}", offset_id);
+    // Wait for acknowledgment when needed
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Batch {} acknowledged (2 records)", offset_id);
+}
 ```
 
 **Key benefits:**

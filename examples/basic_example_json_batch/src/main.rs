@@ -90,11 +90,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
     ];
 
-    // Ingest the batch
+    // Example 1: Using v1 API, ingest_records returns a future.
     let ack_future = stream.ingest_records(batch).await.unwrap();
+    let offset_id = ack_future.await.unwrap();
+    println!(
+        "Batch of 3 records acknowledged with offset Id: {:?}",
+        offset_id
+    );
 
-    let _ack = ack_future.await.unwrap();
-    println!("Batch of 3 records acknowledged with offset Id: 0");
+    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
+    let batch_2: Vec<String> = vec![
+        format!(
+            r#"{{"id": 4, "customer_name": "David Green", "product_name": "Monitor", "quantity": 1, "price": 299.99, "status": "delivered", "created_at": {}, "updated_at": {}}}"#,
+            now, now
+        ),
+        format!(
+            r#"{{"id": 5, "customer_name": "Emma White", "product_name": "Webcam", "quantity": 2, "price": 59.99, "status": "pending", "created_at": {}, "updated_at": {}}}"#,
+            now, now
+        ),
+    ];
+
+    let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
+    if let Some(offset_id) = offset_id {
+        println!("Batch ingested with offset Id: {}", offset_id);
+        // Wait for acknowledgment.
+        stream.wait_for_offset(offset_id).await.unwrap();
+        println!(
+            "Batch of 2 records acknowledged with offset Id: {}",
+            offset_id
+        );
+    }
+
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");

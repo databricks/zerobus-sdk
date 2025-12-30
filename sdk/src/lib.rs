@@ -1537,12 +1537,6 @@ impl ZerobusStream {
             record_count = encoded_batch.get_record_count(),
             "Ingesting record(s)"
         );
-
-        let (tx, _) = tokio::sync::oneshot::channel();
-        {
-            let mut map = self.oneshot_map.lock().await;
-            map.insert(offset_id, tx);
-        }
         self.landing_zone
             .add(Box::new(IngestRequest {
                 payload: encoded_batch,

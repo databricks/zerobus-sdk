@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Failed to create a stream.");
 
-    // Change the values to match your data.
+    // Example 1: Using v1 API, ingest_record returns a future.
     let ack_future = stream
         .ingest_record(
             TableOrders {
@@ -70,8 +70,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
 
-    let _ack = ack_future.await.unwrap();
-    println!("Record acknowledged with offset Id: 0");
+    let offset_id = ack_future.await.unwrap();
+    println!("Record acknowledged with offset Id: {}", offset_id);
+
+    // Example 2: Using v2 API, ingest_record_v2 returns offset immediately.
+    let offset_id = stream
+        .ingest_record_v2(
+            TableOrders {
+                id: Some(2),
+                customer_name: Some("Bob Jones".to_string()),
+                product_name: Some("USB Cable".to_string()),
+                quantity: Some(5),
+                price: Some(9.99),
+                status: Some("shipped".to_string()),
+                created_at: Some(chrono::Utc::now().timestamp()),
+                updated_at: Some(chrono::Utc::now().timestamp()),
+            }
+            .encode_to_vec(),
+        )
+        .await
+        .unwrap();
+
+    println!("Record ingested with offset Id: {}", offset_id);
+    // Wait for acknowledgment.
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Record acknowledged with offset Id: {}", offset_id);
+
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");
