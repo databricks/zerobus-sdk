@@ -3,8 +3,15 @@ pub mod databricks {
         include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
     }
 }
+/// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
+/// supported for production use. The API may change in future releases.
+#[cfg(feature = "arrow-flight")]
+pub use arrow_config::ArrowStreamConfigurationOptions;
+#[cfg(feature = "arrow-flight")]
+pub use arrow_stream::{
+    ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
+};
 use databricks::zerobus as proto_zerobus;
-
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 pub use headers_provider::HeadersProvider;
@@ -13,12 +20,19 @@ use landing_zone::LandingZone;
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use stream_configuration::StreamConfigurationOptions;
 
+#[cfg(feature = "arrow-flight")]
+mod arrow_config;
+#[cfg(feature = "arrow-flight")]
+mod arrow_metadata;
+#[cfg(feature = "arrow-flight")]
+mod arrow_stream;
 mod default_token_factory;
 mod errors;
 mod headers_provider;
 mod landing_zone;
 mod offset_generator;
 mod stream_configuration;
+mod stream_options;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -29,11 +43,11 @@ use std::sync::Arc;
 use prost::Message;
 use proto_zerobus::ephemeral_stream_request::Payload as RequestPayload;
 use proto_zerobus::ephemeral_stream_response::Payload as ResponsePayload;
+use proto_zerobus::ingest_record_batch_request::Batch as IngestRequestBatch;
+use proto_zerobus::ingest_record_request::Record as IngestRequestRecord;
 use proto_zerobus::zerobus_client::ZerobusClient;
 use proto_zerobus::{
-    ingest_record_batch_request::Batch as IngestRequestBatch,
-    ingest_record_request::Record as IngestRequestRecord, CloseStreamSignal,
-    CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
+    CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordBatchRequest, IngestRecordRequest, IngestRecordResponse, JsonRecordBatch,
     ProtoEncodedRecordBatch, RecordType,
 };
@@ -637,6 +651,245 @@ impl ZerobusSdk {
             tokio::spawn(ack);
         }
         return Ok(new_stream);
+    }
+
+    /// Creates a new Arrow Flight ingestion stream to a Unity Catalog table.
+    ///
+    /// This establishes an Arrow Flight stream for high-performance ingestion of
+    /// Arrow RecordBatches. Authentication is handled automatically using the
+    /// provided OAuth credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_properties` - Table name and Arrow schema
+    /// * `client_id` - OAuth client ID for authentication
+    /// * `client_secret` - OAuth client secret for authentication
+    /// * `options` - Optional Arrow stream configuration (uses defaults if `None`)
+    ///
+    /// # Returns
+    ///
+    /// A `ZerobusArrowStream` ready for ingesting Arrow RecordBatches.
+    ///
+    /// # Errors
+    ///
+    /// * `CreateStreamError` - If stream creation fails
+    /// * `InvalidTableName` - If the table name is invalid or table doesn't exist
+    /// * `InvalidUCTokenError` - If OAuth authentication fails
+    /// * `PermissionDenied` - If credentials lack required permissions
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use std::sync::Arc;
+    /// # use arrow_schema::{Schema as ArrowSchema, Field, DataType};
+    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let schema = Arc::new(ArrowSchema::new(vec![
+    ///     Field::new("id", DataType::Int32, false),
+    ///     Field::new("name", DataType::Utf8, true),
+    /// ]));
+    ///
+    /// let table_props = ArrowTableProperties {
+    ///     table_name: "catalog.schema.table".to_string(),
+    ///     schema,
+    /// };
+    ///
+    /// let stream = sdk.create_arrow_stream(
+    ///     table_props,
+    ///     "client-id".to_string(),
+    ///     "client-secret".to_string(),
+    ///     None,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "arrow-flight")]
+    #[instrument(level = "debug", skip_all)]
+    pub async fn create_arrow_stream(
+        &self,
+        table_properties: ArrowTableProperties,
+        client_id: String,
+        client_secret: String,
+        options: Option<ArrowStreamConfigurationOptions>,
+    ) -> ZerobusResult<ZerobusArrowStream> {
+        let headers_provider = OAuthHeadersProvider::new(
+            client_id,
+            client_secret,
+            table_properties.table_name.clone(),
+            self.workspace_id.clone(),
+            self.unity_catalog_url.clone(),
+        );
+        self.create_arrow_stream_with_headers_provider(
+            table_properties,
+            Arc::new(headers_provider),
+            options,
+        )
+        .await
+    }
+
+    /// Creates a new Arrow Flight stream with a custom headers provider.
+    ///
+    /// This is an advanced method that allows you to implement your own authentication
+    /// logic by providing a custom implementation of the `HeadersProvider` trait.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_properties` - Table name and Arrow schema
+    /// * `headers_provider` - An `Arc` holding your custom `HeadersProvider` implementation
+    /// * `options` - Optional Arrow stream configuration (uses defaults if `None`)
+    ///
+    /// # Returns
+    ///
+    /// A `ZerobusArrowStream` ready for ingesting Arrow RecordBatches.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use async_trait::async_trait;
+    /// # use arrow_schema::{Schema as ArrowSchema, Field, DataType};
+    /// #
+    /// # struct MyHeadersProvider;
+    /// #
+    /// # #[async_trait]
+    /// # impl HeadersProvider for MyHeadersProvider {
+    /// #     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+    /// #         let mut headers = HashMap::new();
+    /// #         headers.insert("authorization", "Bearer my-token".to_string());
+    /// #         Ok(headers)
+    /// #     }
+    /// # }
+    /// #
+    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let schema = Arc::new(ArrowSchema::new(vec![
+    ///     Field::new("id", DataType::Int32, false),
+    /// ]));
+    ///
+    /// let table_props = ArrowTableProperties {
+    ///     table_name: "catalog.schema.table".to_string(),
+    ///     schema,
+    /// };
+    ///
+    /// let headers_provider = Arc::new(MyHeadersProvider);
+    ///
+    /// let stream = sdk.create_arrow_stream_with_headers_provider(
+    ///     table_props,
+    ///     headers_provider,
+    ///     None,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "arrow-flight")]
+    #[instrument(level = "debug", skip_all)]
+    pub async fn create_arrow_stream_with_headers_provider(
+        &self,
+        table_properties: ArrowTableProperties,
+        headers_provider: Arc<dyn HeadersProvider>,
+        options: Option<ArrowStreamConfigurationOptions>,
+    ) -> ZerobusResult<ZerobusArrowStream> {
+        let options = options.unwrap_or_default();
+
+        let stream = ZerobusArrowStream::new(
+            &self.zerobus_endpoint,
+            self.use_tls,
+            table_properties,
+            headers_provider,
+            options,
+        )
+        .await;
+
+        match stream {
+            Ok(stream) => {
+                info!(
+                    table_name = %stream.table_name(),
+                    "Successfully created new Arrow Flight stream"
+                );
+                Ok(stream)
+            }
+            Err(e) => {
+                error!("Arrow Flight stream initialization failed: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Recreates an Arrow Flight stream from a failed or closed stream, replaying any
+    /// unacknowledged batches.
+    ///
+    /// This method is useful when you want to manually recover from a stream failure
+    /// or continue ingestion after closing a stream with unacknowledged batches.
+    /// It creates a new stream with the same configuration and automatically ingests
+    /// any batches that were not acknowledged in the original stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - A reference to the failed or closed Arrow Flight stream
+    ///
+    /// # Returns
+    ///
+    /// A new `ZerobusArrowStream` with the same configuration, with unacked batches
+    /// already queued for ingestion.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidStateError` - If the source stream is still active
+    /// * `CreateStreamError` - If stream creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use arrow_array::RecordBatch;
+    /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusArrowStream) -> Result<(), ZerobusError> {
+    /// // Ingest some batches
+    /// // ...
+    ///
+    /// // Stream fails for some reason
+    /// match stream.flush().await {
+    ///     Err(_) => {
+    ///         // Close the failed stream
+    ///         stream.close().await.ok();
+    ///
+    ///         // Recreate and retry
+    ///         let new_stream = sdk.recreate_arrow_stream(&stream).await?;
+    ///         new_stream.flush().await?;
+    ///     }
+    ///     Ok(_) => {}
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "arrow-flight")]
+    #[instrument(level = "debug", skip_all)]
+    pub async fn recreate_arrow_stream(
+        &self,
+        stream: &ZerobusArrowStream,
+    ) -> ZerobusResult<ZerobusArrowStream> {
+        let batches = stream.get_unacked_batches().await?;
+
+        let new_stream = self
+            .create_arrow_stream_with_headers_provider(
+                stream.table_properties().clone(),
+                stream.headers_provider(),
+                Some(stream.options().clone()),
+            )
+            .await?;
+
+        // Replay unacked batches.
+        for batch in batches {
+            let ack = new_stream.ingest_batch(batch).await?;
+            tokio::spawn(ack);
+        }
+
+        info!(
+            table_name = %new_stream.table_name(),
+            "Successfully recreated Arrow Flight stream"
+        );
+
+        Ok(new_stream)
     }
 
     async fn create_secure_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {

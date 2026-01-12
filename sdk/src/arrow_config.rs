@@ -1,33 +1,36 @@
-use crate::databricks::zerobus::RecordType;
+//! Configuration options for Arrow Flight streams.
+//!
+//! **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
+//! supported for production use. The API may change in future releases.
+
 use crate::stream_options::defaults;
 
-/// Configuration options for stream creation, recovery of broken streams and flushing.
+/// Configuration options for Arrow Flight stream creation and operation.
 ///
-/// These options control the behavior of ingestion streams, including memory limits,
-/// recovery policies, and timeout settings.
+/// These options control the behavior of Arrow Flight ingestion streams, including
+/// backpressure limits, timeout settings, and recovery policies.
 ///
 /// # Examples
 ///
 /// ```
-/// use databricks_zerobus_ingest_sdk::StreamConfigurationOptions;
+/// use databricks_zerobus_ingest_sdk::ArrowStreamConfigurationOptions;
 ///
-/// let options = StreamConfigurationOptions {
-///     max_inflight_requests: 1_000_000,
+/// let options = ArrowStreamConfigurationOptions {
+///     max_inflight_batches: 100,
+///     server_lack_of_ack_timeout_ms: 30_000,
 ///     recovery: true,
-///     recovery_timeout_ms: 20_000,
-///     recovery_retries: 5,
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Clone)]
-pub struct StreamConfigurationOptions {
-    /// Maximum number of requests that can be sending or pending acknowledgement at any given time.
+#[derive(Clone, Debug)]
+pub struct ArrowStreamConfigurationOptions {
+    /// Maximum number of batches that can be in-flight (sent but not acknowledged).
     ///
     /// This limit controls memory usage and backpressure. When this limit is reached,
-    /// `ingest_record()` and `ingest_records()` calls will block until acknowledgments free up space.
+    /// `ingest_batch()` calls will block until acknowledgments free up space.
     ///
-    /// Default: 1,000,000
-    pub max_inflight_requests: usize,
+    /// Default: 1,000
+    pub max_inflight_batches: usize,
 
     /// Whether to enable automatic stream recovery on failure.
     ///
@@ -60,41 +63,39 @@ pub struct StreamConfigurationOptions {
 
     /// Timeout in milliseconds for waiting for server acknowledgements.
     ///
-    /// If no acknowledgement is received within this time (and there are pending records),
-    /// the stream will be considered failed and recovery will be triggered.
+    /// If no acknowledgement is received within this time (and there are pending batches),
+    /// the stream will be considered failed and recovery will be triggered (if enabled).
     ///
     /// Default: 60,000 (60 seconds)
     pub server_lack_of_ack_timeout_ms: u64,
 
     /// Timeout in milliseconds for flush operations.
     ///
-    /// If a flush() call cannot complete within this time, it will return a timeout error.
+    /// If a `flush()` call cannot complete within this time, it will return a timeout error.
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
 
-    /// Type of record to ingest.
+    /// Timeout in milliseconds for stream connection establishment.
     ///
-    /// Supported values:
-    /// - RecordType::Proto
-    /// - RecordType::Json
-    /// - RecordType::Unspecified
+    /// If the Arrow Flight stream cannot be established within this time,
+    /// stream creation will fail.
     ///
-    /// Default: RecordType::Proto
-    pub record_type: RecordType,
+    /// Default: 30,000 (30 seconds)
+    pub connection_timeout_ms: u64,
 }
 
-impl Default for StreamConfigurationOptions {
+impl Default for ArrowStreamConfigurationOptions {
     fn default() -> Self {
         Self {
-            max_inflight_requests: 1_000_000,
+            max_inflight_batches: 1_000,
             recovery: defaults::RECOVERY,
             recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
             recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
             recovery_retries: defaults::RECOVERY_RETRIES,
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
-            record_type: RecordType::Proto,
+            connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
         }
     }
 }

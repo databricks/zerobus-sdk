@@ -36,6 +36,9 @@ pub enum ZerobusError {
     /// Returned when the stream is in an invalid state for a requested operation.
     #[error("Stream is in invalid state: {0}")]
     InvalidStateError(String),
+    /// Returned when a connection or setup operation times out.
+    #[error("Connection timeout: {0}")]
+    ConnectionTimeout(String),
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -75,6 +78,7 @@ impl ZerobusError {
             ZerobusError::InvalidUCTokenError(_) => false,
             ZerobusError::UnexpectedStreamResponseError(_) => true,
             ZerobusError::InvalidStateError(_) => false,
+            ZerobusError::ConnectionTimeout(_) => true,
         }
     }
 }
