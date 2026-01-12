@@ -1483,6 +1483,7 @@ impl ZerobusStream {
                                 }
                             };
                             let mut last_logical_acked_offset = -2;
+                            let mut map = oneshot_map.lock().await;
                             for _offset_to_ack in
                                 (last_acked_offset + 1)..=durability_ack_up_to_offset
                             {
@@ -1490,12 +1491,12 @@ impl ZerobusStream {
                                     let logical_offset = record.offset_id;
                                     last_logical_acked_offset = logical_offset;
 
-                                    let mut map = oneshot_map.lock().await;
                                     if let Some(sender) = map.remove(&logical_offset) {
                                         let _ = sender.send(Ok(logical_offset));
                                     }
                                 }
                             }
+                            drop(map);
                             last_acked_offset = durability_ack_up_to_offset;
                             if last_logical_acked_offset != -2 {
                                 let _ignore_on_channel_break = last_received_offset_id_tx
