@@ -1768,7 +1768,7 @@ impl ZerobusStream {
             loop {
                 if self.is_closed.load(Ordering::Relaxed) {
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!("Stream closed during {}", operation_name),
+                        format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
                 }
 
@@ -1779,7 +1779,7 @@ impl ZerobusStream {
                     let stream_id = match self.stream_id.as_deref() {
                         Some(stream_id) => stream_id,
                         None => {
-                            error!("Stream ID is None during {}", operation_name);
+                            error!("Stream ID is None during {}", operation_name.to_lowercase());
                             "None"
                         }
                     };
