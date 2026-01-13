@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
     ];
 
-    // Example 1: Using v1 API, ingest_records returns a future.
+    // Example 1: ingest_records returns a future that resolves to the offset.
     let ack_future = stream.ingest_records(batch).await.unwrap();
     let offset_id = ack_future.await.unwrap();
     println!(
@@ -109,8 +109,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
     ];
 
-    // Example 2: Using v2 API, ingest_records_v2 returns offset immediately.
-    let offset_id = stream.ingest_records_v2(batch_2).await.unwrap();
+    // Example 2:ingest_record_offset returns the offset immediately.
+    let offset_id = stream.ingest_records_offset(batch_2).await.unwrap();
     if let Some(offset_id) = offset_id {
         println!("Batch sent with offset Id: {}", offset_id);
         // Wait for acknowledgment.

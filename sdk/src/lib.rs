@@ -1324,7 +1324,7 @@ impl ZerobusStream {
     /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
     /// # let my_record = vec![1, 2, 3]; // Example protobuf-encoded data
     /// // Ingest and get offset immediately
-    /// let offset = stream.ingest_record_v2(my_record).await?;
+    /// let offset = stream.ingest_record_offset(my_record).await?;
     ///
     /// // Later, wait for acknowledgment
     /// stream.wait_for_offset(offset).await?;
@@ -1332,7 +1332,7 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn ingest_record_v2(
+    pub async fn ingest_record_offset(
         &self,
         payload: impl Into<EncodedRecord>,
     ) -> ZerobusResult<OffsetId> {
@@ -1442,7 +1442,7 @@ impl ZerobusStream {
     /// let records = vec![vec![1, 2, 3], vec![4, 5, 6]]; // Example protobuf-encoded data
     ///
     /// // Ingest batch and get offset immediately
-    /// if let Some(offset) = stream.ingest_records_v2(records).await? {
+    /// if let Some(offset) = stream.ingest_records_offset(records).await? {
     ///     // Later, wait for batch acknowledgment
     ///     stream.wait_for_offset(offset).await?;
     ///     println!("Batch at offset {} has been acknowledged", offset);
@@ -1450,7 +1450,7 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn ingest_records_v2<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
+    pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
     where
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
@@ -1881,12 +1881,12 @@ impl ZerobusStream {
     /// Waits for server acknowledgment of a specific logical offset.
     ///
     /// This method blocks until the server has acknowledged the record or batch at the
-    /// specified offset. Use this with offsets returned from `ingest_record_v2()` or
-    /// `ingest_records_v2()` to explicitly control when to wait for acknowledgments.
+    /// specified offset. Use this with offsets returned from `ingest_record_offset()` or
+    /// `ingest_records_offset()` to explicitly control when to wait for acknowledgments.
     ///
     /// # Arguments
     ///
-    /// * `offset` - The logical offset ID to wait for (returned from `ingest_record_v2()` or `ingest_records_v2()`)
+    /// * `offset` - The logical offset ID to wait for (returned from `ingest_record_offset()` or `ingest_records_offset()`)
     ///
     /// # Returns
     ///
@@ -1905,7 +1905,7 @@ impl ZerobusStream {
     /// // Ingest multiple records and collect their offsets
     /// let mut offsets = Vec::new();
     /// for i in 0..100 {
-    ///     let offset = stream.ingest_record_v2(vec![i as u8]).await?;
+    ///     let offset = stream.ingest_record_offset(vec![i as u8]).await?;
     ///     offsets.push(offset);
     /// }
     ///

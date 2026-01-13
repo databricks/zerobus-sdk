@@ -3699,13 +3699,13 @@ mod graceful_close_tests {
     }
 }
 
-mod api_v2_tests {
+mod api_offset_tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_ingest_record_v2_single_record() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_record_offset_single_record() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_ingest_record_v2_single_record");
+        info!("Starting test_ingest_record_offset_single_record");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -3714,7 +3714,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2".to_string(),
+                        stream_id: "test_stream_offset".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -3747,9 +3747,9 @@ mod api_v2_tests {
             )
             .await?;
 
-        // v2 API returns offset directly without nested future
+        // ingest_record_offset returns the offset directly without nested future
         let offset = stream
-            .ingest_record_v2(b"test record data".to_vec())
+            .ingest_record_offset(b"test record data".to_vec())
             .await?;
 
         assert_eq!(offset, 0);
@@ -3764,9 +3764,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_record_v2_multiple_records() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_record_offset_multiple_records() -> Result<(), Box<dyn std::error::Error>>
+    {
         setup_tracing();
-        info!("Starting test_ingest_record_v2_multiple_records");
+        info!("Starting test_ingest_record_offset_multiple_records");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -3775,7 +3776,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2_multi".to_string(),
+                        stream_id: "test_stream_offset_multi".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -3811,7 +3812,7 @@ mod api_v2_tests {
         let mut offsets = Vec::new();
         for _ in 0..10 {
             let offset = stream
-                .ingest_record_v2(b"test record data".to_vec())
+                .ingest_record_offset(b"test record data".to_vec())
                 .await?;
             offsets.push(offset);
         }
@@ -3830,9 +3831,9 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_records_v2_batch() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_records_offset_batch() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_ingest_records_v2_batch");
+        info!("Starting test_ingest_records_offset_batch");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -3841,7 +3842,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2_batch".to_string(),
+                        stream_id: "test_stream_offset_batch".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -3880,8 +3881,8 @@ mod api_v2_tests {
             b"record 3".to_vec(),
         ];
 
-        // v2 API returns Option<offset> directly without nested future
-        let offset = stream.ingest_records_v2(batch).await?;
+        // ingest_records_offset returns the offset directly without nested future
+        let offset = stream.ingest_records_offset(batch).await?;
 
         assert_eq!(offset, Some(0));
 
@@ -3896,9 +3897,9 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_records_v2_empty_batch() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_records_offset_empty_batch() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_ingest_records_v2_empty_batch");
+        info!("Starting test_ingest_records_offset_empty_batch");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -3906,7 +3907,7 @@ mod api_v2_tests {
             .inject_responses(
                 TABLE_NAME,
                 vec![MockResponse::CreateStream {
-                    stream_id: "test_stream_v2_empty".to_string(),
+                    stream_id: "test_stream_offset_empty".to_string(),
                     delay_ms: 0,
                 }],
             )
@@ -3935,7 +3936,7 @@ mod api_v2_tests {
 
         // Ingest empty batch
         let empty_batch: Vec<Vec<u8>> = vec![];
-        let offset = stream.ingest_records_v2(empty_batch).await?;
+        let offset = stream.ingest_records_offset(empty_batch).await?;
 
         // Should return None since the batch is empty
         assert_eq!(offset, None);
@@ -3944,9 +3945,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_mixed_v1_v2_api_usage() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_mixed_ingest_record_offset_and_ingest_record(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_mixed_v1_v2_api_usage");
+        info!("Starting test_mixed_ingest_record_offset_and_ingest_record");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -3988,21 +3990,21 @@ mod api_v2_tests {
             )
             .await?;
 
-        // Mix v1 and v2 API calls
-        let v2_offset1 = stream.ingest_record_v2(b"v2 record 1".to_vec()).await?;
-        assert_eq!(v2_offset1, 0);
+        // Mix ingest_record_offset and ingest_record
+        let offset1 = stream.ingest_record_offset(b"record 1".to_vec()).await?;
+        assert_eq!(offset1, 0);
 
-        let v1_future = stream.ingest_record(b"v1 record".to_vec()).await?;
+        let future = stream.ingest_record(b"record".to_vec()).await?;
 
-        let v2_offset2 = stream.ingest_record_v2(b"v2 record 2".to_vec()).await?;
-        assert_eq!(v2_offset2, 2);
+        let offset2 = stream.ingest_record_offset(b"record 2".to_vec()).await?;
+        assert_eq!(offset2, 2);
 
-        let v2_offset3 = stream.ingest_record_v2(b"v2 record 3".to_vec()).await?;
-        assert_eq!(v2_offset3, 3);
+        let offset3 = stream.ingest_record_offset(b"record 3".to_vec()).await?;
+        assert_eq!(offset3, 3);
 
-        // Wait for v1 future
-        let v1_offset = v1_future.await?;
-        assert_eq!(v1_offset, 1);
+        // Wait for future
+        let offset = future.await?;
+        assert_eq!(offset, 1);
 
         stream.flush().await?;
 
@@ -4013,9 +4015,9 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_record_v2_with_json() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_record_offset_with_json() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_ingest_record_v2_with_json");
+        info!("Starting test_ingest_record_offset_with_json");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -4024,7 +4026,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2_json".to_string(),
+                        stream_id: "test_stream_offset_json".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -4059,7 +4061,7 @@ mod api_v2_tests {
             .await?;
 
         let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
-        let offset = stream.ingest_record_v2(json_record).await?;
+        let offset = stream.ingest_record_offset(json_record).await?;
 
         assert_eq!(offset, 0);
         stream.wait_for_offset(offset).await?;
@@ -4069,9 +4071,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_records_v2_with_json_batch() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_records_offset_with_json_batch() -> Result<(), Box<dyn std::error::Error>>
+    {
         setup_tracing();
-        info!("Starting test_ingest_records_v2_with_json_batch");
+        info!("Starting test_ingest_records_offset_with_json_batch");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -4080,7 +4083,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2_json_batch".to_string(),
+                        stream_id: "test_stream_offset_json_batch".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -4120,7 +4123,7 @@ mod api_v2_tests {
             r#"{"id": 3, "name": "test3"}"#.to_string(),
         ];
 
-        let offset = stream.ingest_records_v2(json_batch).await?;
+        let offset = stream.ingest_records_offset(json_batch).await?;
 
         assert_eq!(offset, Some(0));
         if let Some(off) = offset {
@@ -4132,9 +4135,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_record_v2_after_close_fails() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_record_offset_after_close_fails() -> Result<(), Box<dyn std::error::Error>>
+    {
         setup_tracing();
-        info!("Starting test_ingest_record_v2_after_close_fails");
+        info!("Starting test_ingest_record_offset_after_close_fails");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -4142,7 +4146,7 @@ mod api_v2_tests {
             .inject_responses(
                 TABLE_NAME,
                 vec![MockResponse::CreateStream {
-                    stream_id: "test_stream_v2_close".to_string(),
+                    stream_id: "test_stream_offset_close".to_string(),
                     delay_ms: 0,
                 }],
             )
@@ -4172,7 +4176,9 @@ mod api_v2_tests {
 
         stream.close().await?;
 
-        let ingest_result = stream.ingest_record_v2(b"test record data".to_vec()).await;
+        let ingest_result = stream
+            .ingest_record_offset(b"test record data".to_vec())
+            .await;
         assert!(matches!(
             ingest_result,
             Err(ZerobusError::StreamClosedError(_))
@@ -4182,9 +4188,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_records_v2_after_close_fails() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_ingest_records_offset_after_close_fails() -> Result<(), Box<dyn std::error::Error>>
+    {
         setup_tracing();
-        info!("Starting test_ingest_records_v2_after_close_fails");
+        info!("Starting test_ingest_records_offset_after_close_fails");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -4192,7 +4199,7 @@ mod api_v2_tests {
             .inject_responses(
                 TABLE_NAME,
                 vec![MockResponse::CreateStream {
-                    stream_id: "test_stream_v2_batch_close".to_string(),
+                    stream_id: "test_stream_offset_batch_close".to_string(),
                     delay_ms: 0,
                 }],
             )
@@ -4223,7 +4230,7 @@ mod api_v2_tests {
         stream.close().await?;
 
         let batch = vec![b"record 1".to_vec(), b"record 2".to_vec()];
-        let ingest_result = stream.ingest_records_v2(batch).await;
+        let ingest_result = stream.ingest_records_offset(batch).await;
 
         assert!(matches!(
             ingest_result,
@@ -4234,10 +4241,10 @@ mod api_v2_tests {
     }
 
     #[tokio::test]
-    async fn test_ingest_record_v2_blocks_on_inflight_limit(
+    async fn test_ingest_record_offset_blocks_on_inflight_limit(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_ingest_record_v2_blocks_on_inflight_limit");
+        info!("Starting test_ingest_record_offset_blocks_on_inflight_limit");
 
         const MAX_INFLIGHT_REQUESTS: usize = 10;
         const ACK_DELAY_MS: u64 = 500;
@@ -4250,7 +4257,7 @@ mod api_v2_tests {
                 TABLE_NAME,
                 vec![
                     MockResponse::CreateStream {
-                        stream_id: "test_stream_v2_blocking".to_string(),
+                        stream_id: "test_stream_offset_blocking".to_string(),
                         delay_ms: 0,
                     },
                     MockResponse::RecordAck {
@@ -4291,13 +4298,15 @@ mod api_v2_tests {
 
         // Send MAX_INFLIGHT_REQUESTS requests
         for _ in 0..MAX_INFLIGHT_REQUESTS {
-            let offset = stream.ingest_record_v2(b"test data".to_vec()).await?;
+            let offset = stream.ingest_record_offset(b"test data".to_vec()).await?;
             offsets.push(offset);
         }
 
         // The next request should block because we're at the inflight limit
         let start_time = std::time::Instant::now();
-        let blocking_offset = stream.ingest_record_v2(b"blocking data".to_vec()).await?;
+        let blocking_offset = stream
+            .ingest_record_offset(b"blocking data".to_vec())
+            .await?;
         let duration = start_time.elapsed();
 
         offsets.push(blocking_offset);
@@ -4312,7 +4321,9 @@ mod api_v2_tests {
 
         // Send remaining requests
         for _ in (MAX_INFLIGHT_REQUESTS + 1)..TOTAL_REQUESTS {
-            let offset = stream.ingest_record_v2(b"more test data".to_vec()).await?;
+            let offset = stream
+                .ingest_record_offset(b"more test data".to_vec())
+                .await?;
             offsets.push(offset);
         }
 

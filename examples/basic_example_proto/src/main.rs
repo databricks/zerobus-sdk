@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Failed to create a stream.");
 
-    // Example 1: Using v1 API, ingest_record returns a future.
+    // Example 1: ingest_record returns a future that resolves to the offset.
     let ack_future = stream
         .ingest_record(
             TableOrders {
@@ -73,9 +73,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let offset_id = ack_future.await.unwrap();
     println!("Record acknowledged with offset Id: {}", offset_id);
 
-    // Example 2: Using v2 API, ingest_record_v2 returns offset immediately.
+    // Example 2: ingest_record_offset returns the offset immediately.
     let offset_id = stream
-        .ingest_record_v2(
+        .ingest_record_offset(
             TableOrders {
                 id: Some(2),
                 customer_name: Some("Bob Jones".to_string()),

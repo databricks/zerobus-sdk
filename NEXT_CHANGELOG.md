@@ -1,10 +1,10 @@
 # NEXT CHANGELOG
 
-## Release v0.2.1
+## Release v0.4.0
 
 ### New Features and Improvements
 
-- **Alternative Ingestion API with Direct Offset Return**: Added `ingest_record_v2()` and `ingest_records_v2()` methods
+- **Alternative Ingestion API with Direct Offset Return**: Added `ingest_record_offset()` and `ingest_records_offset()` methods
   - Return `OffsetId` (logical offset) directly as an integer instead of wrapping it in a Future
   - Can be used with new `wait_for_offset()` method to block on acknowledgment when needed
   - Allows decoupling record ingestion from acknowledgment tracking
@@ -22,8 +22,8 @@
 
 ### API Changes
 
-- Added `ingest_record_v2()` method to `ZerobusStream` for immediate offset return without Future wrapping
-- Added `ingest_records_v2()` method to `ZerobusStream` for batch ingestion with immediate offset return
+- Added `ingest_record_offset()` method to `ZerobusStream` for immediate offset return without Future wrapping
+- Added `ingest_records_offset()` method to `ZerobusStream` for batch ingestion with immediate offset return
 - Added `wait_for_offset()` method to `ZerobusStream` to wait for acknowledgment of a specific offset
 
 - [**BREAKING**] Added `stream_paused_max_wait_time_ms` to `StreamConfigurationOptions` to configure maximum wait time during graceful stream close (`None` = wait for full server duration, `Some(0)` = immediate recovery, `Some(x)` = wait up to min(x, server_duration) milliseconds)
