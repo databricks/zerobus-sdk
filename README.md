@@ -611,9 +611,10 @@ match stream.close().await {
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
-| `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
+| `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
+| `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait during graceful close (`None` = full server duration, `Some(0)` = immediate, `Some(x)` = min(x, server_duration)) |
 
 **Example:**
 
@@ -844,9 +845,10 @@ pub struct StreamConfigurationOptions {
     pub recovery_timeout_ms: u64,
     pub recovery_backoff_ms: u64,
     pub recovery_retries: u32,
-    pub flush_timeout_ms: u64,
     pub server_lack_of_ack_timeout_ms: u64,
+    pub flush_timeout_ms: u64,
     pub record_type: RecordType,
+    pub stream_paused_max_wait_time_ms: Option<u64>,
 }
 ```
 

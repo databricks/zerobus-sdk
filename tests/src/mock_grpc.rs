@@ -118,7 +118,7 @@ impl Zerobus for MockZerobusServer {
         let response_indices = Arc::clone(&self.response_indices);
 
         tokio::spawn(async move {
-            let table_name;
+            let mut table_name = String::new();
             let stream_id;
             let mut stream_responses: Vec<MockResponse> = Vec::new();
             let mut response_index = 0;
@@ -155,67 +155,70 @@ impl Zerobus for MockZerobusServer {
                                 response_index = *indices.get(&table_name).unwrap_or(&0);
                             }
 
-                            if let Some(mock_response) = stream_responses.get(response_index) {
-                                match mock_response {
-                                    MockResponse::CreateStream {
-                                        stream_id: custom_id,
-                                        delay_ms,
-                                    } => {
-                                        if *delay_ms > 0 {
-                                            sleep(Duration::from_millis(*delay_ms)).await;
+                            // Search for the next CreateStream response starting from response_index.
+                            let mut create_stream_found = false;
+                            for idx in response_index..stream_responses.len() {
+                                if let Some(mock_response) = stream_responses.get(idx) {
+                                    match mock_response {
+                                        MockResponse::CreateStream {
+                                            stream_id: custom_id,
+                                            delay_ms,
+                                        } => {
+                                            response_index = idx;
+                                            create_stream_found = true;
+                                            if *delay_ms > 0 {
+                                                sleep(Duration::from_millis(*delay_ms)).await;
+                                            }
+                                            info!(
+                                                "Sending CreateStream response with stream_id: {} at index {}",
+                                                custom_id, idx
+                                            );
+                                            let response = EphemeralStreamResponse {
+                                                payload: Some(
+                                                    ResponsePayload::CreateStreamResponse(
+                                                        CreateIngestStreamResponse {
+                                                            stream_id: Some(custom_id.clone()),
+                                                        },
+                                                    ),
+                                                ),
+                                            };
+                                            if tx.send(Ok(response)).await.is_err() {
+                                                return;
+                                            }
+                                            response_index += 1;
+
+                                            {
+                                                let mut indices = response_indices.lock().await;
+                                                indices.insert(table_name.clone(), response_index);
+                                            }
+                                            break;
                                         }
-                                        info!(
-                                            "Sending CreateStream response with stream_id: {}",
-                                            custom_id
-                                        );
-                                        let response = EphemeralStreamResponse {
-                                            payload: Some(ResponsePayload::CreateStreamResponse(
-                                                CreateIngestStreamResponse {
-                                                    stream_id: Some(custom_id.clone()),
-                                                },
-                                            )),
-                                        };
-                                        if tx.send(Ok(response)).await.is_err() {
+                                        MockResponse::Error { status, delay_ms } => {
+                                            if *delay_ms > 0 {
+                                                sleep(Duration::from_millis(*delay_ms)).await;
+                                            }
+                                            info!(
+                                                "Sending error response at index {}: {:?}",
+                                                idx, status
+                                            );
+
+                                            {
+                                                let mut indices = response_indices.lock().await;
+                                                indices.insert(table_name.clone(), idx + 1);
+                                            }
+
+                                            let _ = tx.send(Err(status.clone())).await;
                                             return;
                                         }
-                                        response_index += 1;
-
-                                        {
-                                            let mut indices = response_indices.lock().await;
-                                            indices.insert(table_name.clone(), response_index);
-                                        }
-                                    }
-                                    MockResponse::Error { status, delay_ms } => {
-                                        if *delay_ms > 0 {
-                                            sleep(Duration::from_millis(*delay_ms)).await;
-                                        }
-                                        info!(
-                                            "Sending error response at index {}: {:?}",
-                                            response_index, status
-                                        );
-
-                                        {
-                                            let mut indices = response_indices.lock().await;
-                                            indices.insert(table_name.clone(), response_index + 1);
-                                        }
-
-                                        let _ = tx.send(Err(status.clone())).await;
-                                        return;
-                                    }
-                                    _ => {
-                                        let response = EphemeralStreamResponse {
-                                            payload: Some(ResponsePayload::CreateStreamResponse(
-                                                CreateIngestStreamResponse {
-                                                    stream_id: Some(stream_id.clone()),
-                                                },
-                                            )),
-                                        };
-                                        if tx.send(Ok(response)).await.is_err() {
-                                            return;
+                                        _ => {
+                                            // Skip non-CreateStream responses.
+                                            continue;
                                         }
                                     }
                                 }
-                            } else {
+                            }
+
+                            if !create_stream_found {
                                 let response = EphemeralStreamResponse {
                                     payload: Some(ResponsePayload::CreateStreamResponse(
                                         CreateIngestStreamResponse {
@@ -272,6 +275,12 @@ impl Zerobus for MockZerobusServer {
                                     )
                                     .await;
                                     response_index = new_index;
+
+                                    {
+                                        let mut indices = response_indices.lock().await;
+                                        indices.insert(table_name.clone(), response_index);
+                                    }
+
                                     if !should_continue {
                                         return;
                                     }
@@ -327,6 +336,12 @@ impl Zerobus for MockZerobusServer {
                                     )
                                     .await;
                                     response_index = new_index;
+
+                                    {
+                                        let mut indices = response_indices.lock().await;
+                                        indices.insert(table_name.clone(), response_index);
+                                    }
+
                                     if !should_continue {
                                         return;
                                     }
@@ -451,8 +466,8 @@ async fn handle_mock_response(
                 sleep(Duration::from_millis(*delay_ms)).await;
             }
             let _ = tx.send(Err(status.clone())).await;
-            (false, current_index)
+            (false, current_index + 1)
         }
-        _ => (true, current_index + 1),
+        MockResponse::CreateStream { .. } => (true, current_index + 1),
     }
 }

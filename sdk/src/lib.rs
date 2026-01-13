@@ -1063,15 +1063,17 @@ impl ZerobusStream {
             landing_zone_recovery.reset_observe();
 
             // 3. Spawn receiver and sender task.
+            let is_paused = Arc::new(AtomicBool::new(false));
             let mut recv_task = Self::spawn_receiver_task(
                 response_grpc_stream,
                 logical_last_received_offset_id_tx.clone(),
-                options.server_lack_of_ack_timeout_ms,
                 landing_zone_receiver,
                 oneshot_map.clone(),
-                options.recovery,
+                Arc::clone(&is_paused),
+                options.clone(),
             );
-            let mut send_task = Self::spawn_sender_task(tx, landing_zone_sender);
+            let mut send_task =
+                Self::spawn_sender_task(tx, landing_zone_sender, Arc::clone(&is_paused));
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {
@@ -1082,7 +1084,10 @@ impl ZerobusStream {
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
                             format!("Receiver task panicked: {}", e)
                         )),
-                        Ok(Ok(())) => Ok(()),
+                        Ok(Ok(())) => {
+                            info!("Receiver task completed successfully");
+                            Ok(())
+                        }
                     }
                 }
                 send_result = &mut send_task => {
@@ -1417,22 +1422,50 @@ impl ZerobusStream {
     fn spawn_receiver_task(
         mut response_grpc_stream: tonic::Streaming<EphemeralStreamResponse>,
         last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
-        ack_timeout_ms: u64,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
-        recovery_enabled: bool,
+        is_paused: Arc<AtomicBool>,
+        options: StreamConfigurationOptions,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
             let _guard = span.enter();
             let mut last_acked_offset = -1;
+            let mut pause_deadline: Option<tokio::time::Instant> = None;
 
             loop {
-                let message_result = tokio::time::timeout(
-                    Duration::from_millis(ack_timeout_ms),
-                    response_grpc_stream.message(),
-                )
-                .await;
+                if let Some(deadline) = pause_deadline {
+                    let now = tokio::time::Instant::now();
+                    let all_acked = landing_zone.is_observed_empty();
+
+                    if now >= deadline {
+                        info!("Graceful close timeout reached. Triggering recovery.");
+                        return Ok(());
+                    } else if all_acked {
+                        info!("All in-flight records acknowledged during graceful close. Triggering recovery.");
+                        return Ok(());
+                    }
+                }
+
+                // During graceful close, race between message timeout and pause deadline.
+                let message_result = if let Some(deadline) = pause_deadline {
+                    tokio::select! {
+                        result = tokio::time::timeout(
+                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                            response_grpc_stream.message(),
+                        ) => result,
+                        _ = tokio::time::sleep_until(deadline) => {
+                            // Deadline reached, loop back to check and return.
+                            continue;
+                        }
+                    }
+                } else {
+                    tokio::time::timeout(
+                        Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                        response_grpc_stream.message(),
+                    )
+                    .await
+                };
                 match message_result {
                     Ok(Ok(Some(ingest_record_response))) => match ingest_record_response.payload {
                         Some(ResponsePayload::IngestRecordResponse(IngestRecordResponse {
@@ -1450,6 +1483,7 @@ impl ZerobusStream {
                                 }
                             };
                             let mut last_logical_acked_offset = -2;
+                            let mut map = oneshot_map.lock().await;
                             for _offset_to_ack in
                                 (last_acked_offset + 1)..=durability_ack_up_to_offset
                             {
@@ -1457,12 +1491,12 @@ impl ZerobusStream {
                                     let logical_offset = record.offset_id;
                                     last_logical_acked_offset = logical_offset;
 
-                                    let mut map = oneshot_map.lock().await;
                                     if let Some(sender) = map.remove(&logical_offset) {
                                         let _ = sender.send(Ok(logical_offset));
                                     }
                                 }
                             }
+                            drop(map);
                             last_acked_offset = durability_ack_up_to_offset;
                             if last_logical_acked_offset != -2 {
                                 let _ignore_on_channel_break = last_received_offset_id_tx
@@ -1472,16 +1506,37 @@ impl ZerobusStream {
                         Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
                             duration,
                         })) => {
-                            if recovery_enabled {
-                                let duration_ms = duration
+                            if options.recovery {
+                                let server_duration_ms = duration
                                     .as_ref()
-                                    .map(|d| {
-                                        d.seconds as f64 * 1000.0 + d.nanos as f64 / 1_000_000.0
-                                    })
-                                    .unwrap_or(0.0);
+                                    .map(|d| d.seconds as u64 * 1000 + d.nanos as u64 / 1_000_000)
+                                    .unwrap_or(0);
 
-                                info!("Server will close the stream in {:.3}ms. Triggering stream recovery.", duration_ms);
-                                return Ok(());
+                                let wait_duration_ms = match options.stream_paused_max_wait_time_ms
+                                {
+                                    None => server_duration_ms,
+                                    Some(0) => {
+                                        // Immediate recovery
+                                        info!("Server will close the stream in {}ms. Triggering stream recovery.", server_duration_ms);
+                                        return Ok(());
+                                    }
+                                    Some(max_wait) => std::cmp::min(max_wait, server_duration_ms),
+                                };
+
+                                if wait_duration_ms == 0 {
+                                    info!("Server will close the stream. Triggering immediate recovery.");
+                                    return Ok(());
+                                }
+
+                                is_paused.store(true, Ordering::Relaxed);
+                                pause_deadline = Some(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_millis(wait_duration_ms),
+                                );
+                                info!(
+                                    "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
+                                    server_duration_ms, wait_duration_ms
+                                );
                             }
                         }
                         unexpected_message => {
@@ -1502,9 +1557,12 @@ impl ZerobusStream {
                         return Err(ZerobusError::StreamClosedError(status));
                     }
                     Err(_timeout) => {
-                        // No message received for ack_timeout_ms
-                        if !landing_zone.is_observed_empty() {
-                            error!("Server ack timeout: no response for {}ms", ack_timeout_ms);
+                        // No message received for server_lack_of_ack_timeout_ms.
+                        if pause_deadline.is_none() && !landing_zone.is_observed_empty() {
+                            error!(
+                                "Server ack timeout: no response for {}ms",
+                                options.server_lack_of_ack_timeout_ms
+                            );
                             return Err(ZerobusError::StreamClosedError(
                                 tonic::Status::deadline_exceeded("Server ack timeout"),
                             ));
@@ -1515,16 +1573,21 @@ impl ZerobusStream {
         })
     }
 
-    /// Spawns a task that continuously sends records to the Ingest API by observing the landing zone
+    /// Spawns a task that continuously sends records to the Zerobus API by observing the landing zone
     /// to get records and sending them through the outbound stream to the gRPC stream.
     fn spawn_sender_task(
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         landing_zone: RecordLandingZone,
+        is_paused: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
-                let item = landing_zone.observe().await.clone();
+                let item = if is_paused.load(Ordering::Relaxed) {
+                    std::future::pending().await // Wait until supervisor task aborts this task.
+                } else {
+                    landing_zone.observe().await.clone()
+                };
                 let offset_id = physical_offset_id_generator.next();
                 let request_payload = item.payload.into_request_payload(offset_id);
 
