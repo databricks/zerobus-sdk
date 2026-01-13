@@ -2,14 +2,14 @@ mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
-use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 
+use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    databricks::zerobus::RecordType, StreamConfigurationOptions, StreamType, TableProperties,
-    ZerobusError, ZerobusSdk,
+    StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
+use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -884,7 +884,7 @@ mod standard_operation_and_state_management_tests {
     #[tokio::test]
     async fn test_multiple_records_ingestion() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_batch_record_ingestion");
+        info!("Starting test_multiple_records_ingestion");
 
         let (mock_server, server_url) = start_mock_server().await?;
 
@@ -1030,7 +1030,7 @@ mod standard_operation_and_state_management_tests {
         };
 
         let options = StreamConfigurationOptions {
-            record_type: databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType::Proto,
+            record_type: RecordType::Proto,
             ..Default::default()
         };
 
@@ -1090,7 +1090,7 @@ mod standard_operation_and_state_management_tests {
         };
 
         let options = StreamConfigurationOptions {
-            record_type: databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType::Proto,
+            record_type: RecordType::Proto,
             ..Default::default()
         };
 
@@ -2278,8 +2278,8 @@ mod failure_scenarios_tests {
                 _ => panic!("Expected Proto record"),
             }
 
-            for i in 1..6 {
-                match &retrieved_unacked[i] {
+            for (i, record) in retrieved_unacked.iter().enumerate().skip(1).take(5) {
+                match record {
                     databricks_zerobus_ingest_sdk::EncodedRecord::Proto(payload) => {
                         let expected = format!("batch-{}", i - 1).into_bytes();
                         assert_eq!(payload, &expected);
@@ -3109,6 +3109,990 @@ mod failure_scenarios_tests {
             // get_unacked_records should return empty iterator
             let unacked = stream.get_unacked_records().await?.collect::<Vec<_>>();
             assert_eq!(unacked.len(), 0, "All records were acked, should be empty");
+
+            Ok(())
+        }
+    }
+}
+
+// Arrow Flight tests module
+mod mock_arrow_flight;
+
+mod arrow_flight_tests {
+    use std::sync::Arc;
+
+    use databricks_zerobus_ingest_sdk::{
+        ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusSdk,
+    };
+    use tracing::info;
+
+    use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
+    use crate::utils::{
+        create_test_arrow_schema, create_test_record_batch, setup_tracing, TestHeadersProvider,
+    };
+
+    const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
+
+    mod stream_creation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_successful_arrow_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_successful_arrow_stream_creation");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to auto-ack (no specific responses needed)
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema,
+            };
+
+            let result = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "Failed to create Arrow Flight stream: {:?}",
+                result.err()
+            );
+
+            let stream = result.unwrap();
+            assert_eq!(stream.table_name(), TABLE_NAME);
+            assert!(!stream.is_closed());
+
+            Ok(())
+        }
+    }
+
+    mod ingestion_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ingest_single_batch() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_single_batch");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack offset 0
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Create and ingest a batch
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("hello"), Some("world"), None],
+            );
+
+            let ack = stream.ingest_batch(batch).await?;
+            let offset = ack.await?;
+
+            assert_eq!(offset, 0, "Expected offset 0 for first batch");
+            assert_eq!(mock_server.get_batch_count().await, 1);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_multiple_batches() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_multiple_batches");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack offsets 0, 1, 2
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Ingest multiple batches
+            let mut ack_futures = Vec::new();
+            for i in 0..3 {
+                let batch = create_test_record_batch(
+                    schema.clone(),
+                    vec![i * 10, i * 10 + 1],
+                    vec![Some(&format!("batch-{}", i)), None],
+                );
+                let ack = stream.ingest_batch(batch).await?;
+                ack_futures.push(ack);
+            }
+
+            // Wait for all acks
+            for (i, ack) in ack_futures.into_iter().enumerate() {
+                let offset = ack.await?;
+                assert_eq!(offset, i as i64, "Expected offset {} for batch {}", i, i);
+            }
+
+            assert_eq!(mock_server.get_batch_count().await, 3);
+            assert_eq!(mock_server.get_max_offset_received().await, 2);
+
+            Ok(())
+        }
+    }
+
+    mod flush_and_close_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_flush_waits_for_acks() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_flush_waits_for_acks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack with delay
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 50,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 50,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        flush_timeout_ms: 5000,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Ingest batches without waiting for acks
+            for i in 0..2 {
+                let batch = create_test_record_batch(schema.clone(), vec![i], vec![Some("test")]);
+                let _ack = stream.ingest_batch(batch).await?;
+                // Don't await - let them be in-flight
+            }
+
+            // Flush should wait for all acks
+            stream.flush().await?;
+
+            assert_eq!(mock_server.get_batch_count().await, 2);
+            assert_eq!(mock_server.get_max_offset_received().await, 1);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_close_flushes_and_closes() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_close_flushes_and_closes");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Auto-ack all
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Ingest a batch
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let _ack = stream.ingest_batch(batch).await?;
+
+            // Close should flush and close
+            assert!(!stream.is_closed());
+            stream.close().await?;
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+    }
+
+    mod error_handling_tests {
+        use tonic::Status;
+
+        use super::*;
+
+        #[tokio::test]
+        async fn test_server_error_propagates() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_server_error_propagates");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to return error
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: Status::invalid_argument("Schema mismatch"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        server_lack_of_ack_timeout_ms: 1000,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Ingest a batch - should fail
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let ack = stream.ingest_batch(batch).await?;
+
+            // The ack should fail
+            let result = ack.await;
+            assert!(result.is_err(), "Expected error from server");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_schema_mismatch_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_schema_mismatch_rejected");
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Create a batch with wrong schema
+            use arrow_array::Int32Array;
+            use arrow_schema::{DataType, Field, Schema};
+
+            let wrong_schema = Arc::new(Schema::new(vec![Field::new(
+                "different_field",
+                DataType::Int32,
+                false,
+            )]));
+            let wrong_batch = arrow_array::RecordBatch::try_new(
+                wrong_schema,
+                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+            )?;
+
+            // Should reject due to schema mismatch
+            let result = stream.ingest_batch(wrong_batch).await;
+            assert!(
+                result.is_err(),
+                "Expected schema mismatch error, but got Ok"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_after_close_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_after_close_rejected");
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Close the stream
+            stream.close().await?;
+
+            // Try to ingest after close - should fail
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let result = stream.ingest_batch(batch).await;
+            assert!(result.is_err(), "Expected error when ingesting after close");
+
+            Ok(())
+        }
+    }
+
+    mod timeout_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ack_timeout() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ack_timeout");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to never ack (close stream immediately)
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::CloseStream { delay_ms: 0 }],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        server_lack_of_ack_timeout_ms: 500,
+                        recovery: false, // Disable recovery to test pure timeout behavior
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Ingest a batch
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let ack = stream.ingest_batch(batch).await?;
+
+            // Should timeout waiting for ack
+            let result = ack.await;
+            assert!(result.is_err(), "Expected timeout error");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_flush_timeout() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_flush_timeout");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack with very long delay
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 5000, // 5 second delay
+                    }],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        flush_timeout_ms: 100, // Short timeout
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Ingest a batch without waiting for ack
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let _ack = stream.ingest_batch(batch).await?;
+
+            // Flush should timeout
+            let result = stream.flush().await;
+            assert!(result.is_err(), "Expected flush timeout error");
+
+            Ok(())
+        }
+    }
+
+    mod lifecycle_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_idempotent_close() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_idempotent_close");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema,
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Close twice - should not error
+            stream.close().await?;
+            stream.close().await?;
+
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_empty_flush() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_empty_flush");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema,
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Flush with no pending batches should succeed immediately
+            let start_time = std::time::Instant::now();
+            stream.flush().await?;
+            let duration = start_time.elapsed();
+
+            assert!(
+                duration.as_millis() <= 1000,
+                "Empty flush should complete quickly, took {:?}",
+                duration
+            );
+
+            Ok(())
+        }
+    }
+
+    mod concurrency_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_concurrent_batch_ingestion() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_concurrent_batch_ingestion");
+
+            const NUM_TASKS: usize = 5;
+            const BATCHES_PER_TASK: usize = 2;
+            const TOTAL_BATCHES: usize = NUM_TASKS * BATCHES_PER_TASK;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack all batches
+            let mut responses = Vec::new();
+            for i in 0..TOTAL_BATCHES {
+                responses.push(MockFlightResponse::BatchAck {
+                    ack_up_to_offset: i as i64,
+                    delay_ms: 10,
+                });
+            }
+            mock_server.inject_responses(TABLE_NAME, responses).await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        max_inflight_batches: TOTAL_BATCHES + 10,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            let stream = Arc::new(stream);
+
+            // Spawn multiple tasks to ingest concurrently
+            let mut tasks = Vec::new();
+            for task_id in 0..NUM_TASKS {
+                let stream_clone = Arc::clone(&stream);
+                let schema_clone = schema.clone();
+                let task = tokio::spawn(async move {
+                    let mut ack_futures = Vec::new();
+                    for batch_id in 0..BATCHES_PER_TASK {
+                        let batch = create_test_record_batch(
+                            schema_clone.clone(),
+                            vec![(task_id * 100 + batch_id) as i64],
+                            vec![Some(&format!("task-{}-batch-{}", task_id, batch_id))],
+                        );
+                        match stream_clone.ingest_batch(batch).await {
+                            Ok(ack) => ack_futures.push(ack),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(ack_futures)
+                });
+                tasks.push(task);
+            }
+
+            // Collect all ack futures
+            let mut all_ack_futures = Vec::new();
+            for task in tasks {
+                let futures = task.await??;
+                all_ack_futures.extend(futures);
+            }
+
+            assert_eq!(all_ack_futures.len(), TOTAL_BATCHES);
+
+            // Wait for all acks
+            let mut offsets = Vec::new();
+            for ack in all_ack_futures {
+                offsets.push(ack.await?);
+            }
+            offsets.sort();
+
+            let expected: Vec<i64> = (0..TOTAL_BATCHES as i64).collect();
+            assert_eq!(offsets, expected);
+
+            Ok(())
+        }
+    }
+
+    mod unacked_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_get_unacked_batches_empty_when_all_acked(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_get_unacked_batches_empty_when_all_acked");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock to ack all
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Ingest and wait for acks
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("test1")]);
+            let ack1 = stream.ingest_batch(batch1).await?;
+            ack1.await?;
+
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("test2")]);
+            let ack2 = stream.ingest_batch(batch2).await?;
+            ack2.await?;
+
+            // Close successfully
+            stream.close().await?;
+
+            // Get unacked batches - should be empty
+            let unacked = stream.get_unacked_batches().await?;
+            assert!(
+                unacked.is_empty(),
+                "All batches were acked, should be empty"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_get_unacked_batches_after_failure() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_get_unacked_batches_after_failure");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock: ack first batch, then fail with non-retriable error
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("Permanent failure"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: false, // No recovery - we want to test unacked batches
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // First batch will be acked
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
+            let ack1 = stream.ingest_batch(batch1).await?;
+            assert!(ack1.await.is_ok());
+
+            // Second batch will fail
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("unacked")]);
+            let ack2 = stream.ingest_batch(batch2).await?;
+            assert!(ack2.await.is_err());
+
+            // Close the stream - internally drains pending batches to failed
+            let _ = stream.close().await;
+
+            // Get unacked batches - should have 1 (batch2)
+            let unacked = stream.get_unacked_batches().await?;
+            assert_eq!(unacked.len(), 1, "Should have 1 unacked batch");
+
+            Ok(())
+        }
+    }
+
+    mod recovery_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_supervisor_recovery_after_retriable_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_supervisor_recovery_after_retriable_error");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock: first batch acked, then retriable error (UNAVAILABLE),
+            // then after recovery, batches acked again
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // First connection: ack batch 0, then UNAVAILABLE error
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Temporary network issue"),
+                            delay_ms: 0,
+                        },
+                        // After recovery (new connection): replay batch 1, then batch 2
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_timeout_ms: 5000,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // First batch - should be acked
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
+            let ack1 = stream.ingest_batch(batch1).await?;
+            assert_eq!(ack1.await?, 0);
+
+            // Second batch - will trigger error, but supervisor will recover
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("second")]);
+            let ack2 = stream.ingest_batch(batch2).await?;
+
+            // This should succeed after supervisor recovery
+            let result = ack2.await;
+            assert!(result.is_ok(), "Expected recovery to succeed: {:?}", result);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_recreate_arrow_stream() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_recreate_arrow_stream");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Configure mock: ack first, fail second with non-retriable, then ack replayed on new stream
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("Schema changed"),
+                            delay_ms: 0,
+                        },
+                        // New stream (recreate) will replay unacked batch
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: false, // Disable auto-recovery to test manual recreate
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // First batch succeeds
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
+            let ack1 = stream.ingest_batch(batch1).await?;
+            ack1.await?;
+
+            // Second batch fails with non-retriable error
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("will-fail")]);
+            let ack2 = stream.ingest_batch(batch2).await?;
+            let _ = ack2.await; // Will fail
+
+            // Close the failed stream
+            let _ = stream.close().await;
+
+            // Recreate stream - should replay unacked batches
+            let new_stream = sdk.recreate_arrow_stream(&stream).await?;
+
+            // Verify new stream is working by flushing (waits for replayed batches to be acked)
+            new_stream.flush().await?;
+
+            assert!(!new_stream.is_closed());
+            assert_eq!(new_stream.table_name(), TABLE_NAME);
 
             Ok(())
         }

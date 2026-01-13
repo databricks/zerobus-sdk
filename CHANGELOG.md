@@ -1,5 +1,15 @@
 # Version changelog
 
+## Release v0.3.0
+
+### New Features and Improvements
+
+- **Arrow Flight Ingestion (Experimental)**: Added experimental Arrow Flight support for high-throughput Apache Arrow record batch ingestion
+  - Opt-in feature: enable with `features = ["arrow-flight"]` in Cargo.toml
+  - Transmits Arrow RecordBatches in native IPC format (no format conversion required)
+  - Same recovery and retry semantics as gRPC streams
+  - **Note**: This feature is currently experimental and unsupported
+
 ## Release v0.2.0
 
 ### New Features and Improvements

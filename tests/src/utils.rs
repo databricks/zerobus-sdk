@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Once};
+
+use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::HeadersProvider;
 use databricks_zerobus_ingest_sdk::ZerobusResult;
 use prost_reflect::prost_types;
-use std::collections::HashMap;
-use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 
 static SETUP: Once = Once::new();
@@ -41,6 +44,27 @@ pub fn create_test_descriptor_proto() -> Option<prost_types::DescriptorProto> {
         ],
         ..Default::default()
     })
+}
+
+/// Create a test Arrow schema matching the protobuf descriptor.
+pub fn create_test_arrow_schema() -> Arc<ArrowSchema> {
+    Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("message", DataType::Utf8, true),
+    ]))
+}
+
+/// Create a test RecordBatch with the given data.
+pub fn create_test_record_batch(
+    schema: Arc<ArrowSchema>,
+    ids: Vec<i64>,
+    messages: Vec<Option<&str>>,
+) -> RecordBatch {
+    let id_array = Int64Array::from(ids);
+    let message_array = StringArray::from(messages);
+
+    RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(message_array)])
+        .expect("Failed to create RecordBatch")
 }
 
 /// Setup tracing for tests.
