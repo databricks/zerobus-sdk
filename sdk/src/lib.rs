@@ -287,8 +287,11 @@ type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 /// # use databricks_zerobus_ingest_sdk::*;
 /// # async fn example(mut stream: ZerobusStream, data: Vec<u8>) -> Result<(), ZerobusError> {
 /// // Ingest a single record
-/// let ack = stream.ingest_record(data).await?;
-/// let offset = ack.await?;
+/// let offset = stream.ingest_record_offset(data).await?;
+/// println!("Record sent with offset: {}", offset);
+///
+/// // Wait for acknowledgment
+/// stream.wait_for_offset(offset).await?;
 /// println!("Record acknowledged at offset: {}", offset);
 ///
 /// // Close the stream gracefully
@@ -357,12 +360,12 @@ pub struct ZerobusStream {
 /// // Create a stream
 /// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
 ///
-/// // Ingest a single record and await its acknowledgment
-/// let ack_future = stream.ingest_record(row.encode_to_vec()).await?;
+/// // Ingest a single record
+/// let offset_id = stream.ingest_record_offset(row.encode_to_vec()).await?;
+/// println!("Record sent with offset Id: {}", offset_id);
 ///
-/// // At this point we know that the record has been sent to the server.
-/// // Let's block on the acknowledgment.
-/// let offset_id = ack_future.await?;
+/// // Wait for acknowledgment
+/// stream.wait_for_offset(offset_id).await?;
 /// println!("Record acknowledged with offset Id: {}", offset_id);
 /// # Ok(())
 /// # }
@@ -1283,6 +1286,16 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Deprecation Note
+    ///
+    /// This method is deprecated. Use [`ingest_record_offset()`](Self::ingest_record_offset) instead,
+    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
+    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use `ingest_record_offset()` instead which returns the offset directly after queuing"
+    )]
     pub async fn ingest_record(
         &self,
         payload: impl Into<EncodedRecord>,
@@ -1297,11 +1310,11 @@ impl ZerobusStream {
         self.ingest_internal(encoded_batch).await
     }
 
-    /// Ingests a single record and returns its logical offset immediately.
+    /// Ingests a single record and returns its logical offset directly.
     ///
     /// This is an alternative to `ingest_record()` that returns the logical offset directly
-    /// as an integer instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly
-    /// wait for server acknowledgment of this offset when needed.
+    /// as an integer (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()`
+    /// to explicitly wait for server acknowledgment of this offset when needed.
     ///
     /// # Arguments
     ///
@@ -1384,6 +1397,16 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Deprecation Note
+    ///
+    /// This method is deprecated. Use [`ingest_records_offset()`](Self::ingest_records_offset) instead,
+    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
+    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use `ingest_records_offset()` instead which returns the offset directly after queuing"
+    )]
     pub async fn ingest_records<I, T>(
         &self,
         payload: I,
@@ -1414,11 +1437,11 @@ impl ZerobusStream {
         })
     }
 
-    /// Ingests a batch of records and returns the logical offset immediately.
+    /// Ingests a batch of records and returns the logical offset directly.
     ///
     /// This is an alternative to `ingest_records()` that returns the logical offset directly
-    /// instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly wait for
-    /// server acknowledgment when needed.
+    /// (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly
+    /// wait for server acknowledgment when needed.
     ///
     /// # Arguments
     ///
@@ -1785,7 +1808,7 @@ impl ZerobusStream {
                     };
                     if let Some(offset) = offset {
                         if offset >= offset_to_wait {
-                            info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} complete.", operation_name);
+                            info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
                             return Ok(());
                         } else {
                             info!(
@@ -1853,8 +1876,7 @@ impl ZerobusStream {
     /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
     /// // Ingest many records
     /// for i in 0..1000 {
-    ///     let ack = stream.ingest_record(vec![i as u8]).await?;
-    ///     tokio::spawn(ack); // Fire and forget
+    ///     let _offset = stream.ingest_record_offset(vec![i as u8]).await?;
     /// }
     ///
     /// // Wait for all to be acknowledged

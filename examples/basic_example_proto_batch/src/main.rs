@@ -26,6 +26,7 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders"); //<your_descriptor_file>, <your_proto_file>, <your_proto_message_name>
@@ -90,13 +91,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .encode_to_vec(),
     ];
 
-    // Example 1: ingest_records returns a future that resolves to the offset.
-    let ack_future = stream.ingest_records(batch).await.unwrap();
-    let offset_id = ack_future.await.unwrap();
-    println!(
-        "Batch of 3 records acknowledged with offset Id: {:?}",
-        offset_id
-    );
+    // Example 1: ingest_records_offset returns the offset immediately.
+    let offset_id = stream.ingest_records_offset(batch).await.unwrap();
+    if let Some(offset_id) = offset_id {
+        println!("Batch sent with offset Id: {}", offset_id);
+        // Wait for acknowledgment.
+        stream.wait_for_offset(offset_id).await.unwrap();
+        println!(
+            "Batch of 3 records acknowledged with offset Id: {}",
+            offset_id
+        );
+    }
 
     let batch_2: Vec<Vec<u8>> = vec![
         TableOrders {
@@ -123,17 +128,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .encode_to_vec(),
     ];
 
-    // Example 2: ingest_records_offset returns the offset immediately.
-    let offset_id = stream.ingest_records_offset(batch_2).await.unwrap();
-    if let Some(offset_id) = offset_id {
-        println!("Batch sent with offset Id: {}", offset_id);
-        // Wait for acknowledgment.
-        stream.wait_for_offset(offset_id).await.unwrap();
-        println!(
-            "Batch of 2 records acknowledged with offset Id: {}",
-            offset_id
-        );
-    }
+    // Example 2: ingest_records returns a future that resolves to the offset (deprecated).
+    let ack_future = stream.ingest_records(batch_2).await.unwrap();
+    let offset_id = ack_future.await.unwrap();
+    println!(
+        "Batch of 2 records acknowledged with offset Id: {:?}",
+        offset_id
+    );
 
     let close_future = stream.close();
     close_future.await?;

@@ -26,6 +26,7 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders"); //<your_descriptor_file>, <your_proto_file>, <your_proto_message_name>
@@ -52,9 +53,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Failed to create a stream.");
 
-    // Example 1: ingest_record returns a future that resolves to the offset.
-    let ack_future = stream
-        .ingest_record(
+    // Example 1: ingest_record_offset returns the offset immediately.
+    let offset_id = stream
+        .ingest_record_offset(
             TableOrders {
                 id: Some(1),
                 customer_name: Some("Alice Smith".to_string()),
@@ -70,12 +71,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
 
-    let offset_id = ack_future.await.unwrap();
+    println!("Record sent with offset Id: {}", offset_id);
+    // Wait for acknowledgment.
+    stream.wait_for_offset(offset_id).await.unwrap();
     println!("Record acknowledged with offset Id: {}", offset_id);
 
-    // Example 2: ingest_record_offset returns the offset immediately.
-    let offset_id = stream
-        .ingest_record_offset(
+    // Example 2: ingest_record returns a future that resolves to the offset.
+    let ack_future = stream
+        .ingest_record(
             TableOrders {
                 id: Some(2),
                 customer_name: Some("Bob Jones".to_string()),
@@ -91,10 +94,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
 
-    println!("Record sent with offset Id: {}", offset_id);
-    // Wait for acknowledgment.
-    stream.wait_for_offset(offset_id).await.unwrap();
-    println!("Record acknowledged with offset Id: {}", offset_id);
+    let offset_id_2 = ack_future.await.unwrap();
+    println!("Record acknowledged with offset Id: {}", offset_id_2);
 
     let close_future = stream.close();
     close_future.await?;
