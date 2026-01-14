@@ -11,8 +11,9 @@ This tool fetches table schema information from Unity Catalog and generates:
 
 ## Supported Data Types
 
-| Unity Catalog Type | Probuf Type | Notes                                                        |
+| Unity Catalog Type | Protobuf Type | Notes                                                        |
 |--------------------|----------------------|--------------------------------------------------------------|
+| `TINYINT`, `BYTE`  | `int32`              |                                                              |
 | `SMALLINT`, `SHORT`, `INT` | `int32`              |                                                              |
 | `BIGINT`, `LONG`   | `int64`              |                                                              |
 | `FLOAT`            | `float`              |                                                              |
@@ -22,7 +23,10 @@ This tool fetches table schema information from Unity Catalog and generates:
 | `BINARY`           | `bytes`              |                                                              |
 | `DATE`             | `int32`              | Mapped to `int32` (days since Unix epoch)                    |
 | `TIMESTAMP`        | `int64`              | Mapped to `int64` (microseconds since Unix epoch)            |
+| `TIMESTAMP_NTZ`    | `int64`              | Timestamp without timezone (microseconds since Unix epoch)   |
+| `VARIANT`          | `string`             | Unshredded JSON string                                       |
 | `ARRAY<T>`         | `repeated T_pb`      | Supports arrays of any other supported type, including structs. |
+| `MAP<K, V>`        | `map<K_pb, V_pb>`    | Key must be integral or string type. See limitations below.  |
 | `STRUCT<...>`      | `message`            | Nested structs are fully supported.                          |
 
 ## How to use

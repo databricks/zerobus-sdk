@@ -4,6 +4,8 @@
 
 ### New Features and Improvements
 
+- Added support for `TINYINT/BYTE`, `TIMESTAMP_NTZ`, and `VARIANT` data types in the proto generation tool
+
 - **Alternative Ingestion API with Direct Offset Return**: Added `ingest_record_offset()` and `ingest_records_offset()` methods
   - Return `OffsetId` (logical offset) directly as an integer (after queuing) instead of wrapping it in a Future
   - Can be used with new `wait_for_offset()` method to block on acknowledgment when needed
