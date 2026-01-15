@@ -26,7 +26,7 @@ This tool fetches table schema information from Unity Catalog and generates:
 | `TIMESTAMP_NTZ`    | `int64`              | Timestamp without timezone (microseconds since Unix epoch)   |
 | `VARIANT`          | `string`             | Unshredded JSON string                                       |
 | `ARRAY<T>`         | `repeated T_pb`      | Supports arrays of any other supported type, including structs. |
-| `MAP<K, V>`        | `map<K_pb, V_pb>`    | Key must be integral or string type. See limitations below.  |
+| `MAP<K, V>`        | `map<K_pb, V_pb>`    | Key must be integer or string type. See limitations below.   |
 | `STRUCT<...>`      | `message`            | Nested structs are fully supported.                          |
 
 ## How to use
