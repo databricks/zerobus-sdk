@@ -287,8 +287,11 @@ type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 /// # use databricks_zerobus_ingest_sdk::*;
 /// # async fn example(mut stream: ZerobusStream, data: Vec<u8>) -> Result<(), ZerobusError> {
 /// // Ingest a single record
-/// let ack = stream.ingest_record(data).await?;
-/// let offset = ack.await?;
+/// let offset = stream.ingest_record_offset(data).await?;
+/// println!("Record sent with offset: {}", offset);
+///
+/// // Wait for acknowledgment
+/// stream.wait_for_offset(offset).await?;
 /// println!("Record acknowledged at offset: {}", offset);
 ///
 /// // Close the stream gracefully
@@ -357,12 +360,12 @@ pub struct ZerobusStream {
 /// // Create a stream
 /// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
 ///
-/// // Ingest a single record and await its acknowledgment
-/// let ack_future = stream.ingest_record(row.encode_to_vec()).await?;
+/// // Ingest a single record
+/// let offset_id = stream.ingest_record_offset(row.encode_to_vec()).await?;
+/// println!("Record sent with offset Id: {}", offset_id);
 ///
-/// // At this point we know that the record has been sent to the server.
-/// // Let's block on the acknowledgment.
-/// let offset_id = ack_future.await?;
+/// // Wait for acknowledgment
+/// stream.wait_for_offset(offset_id).await?;
 /// println!("Record acknowledged with offset Id: {}", offset_id);
 /// # Ok(())
 /// # }
@@ -1283,6 +1286,16 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Deprecation Note
+    ///
+    /// This method is deprecated. Use [`ingest_record_offset()`](Self::ingest_record_offset) instead,
+    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
+    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use `ingest_record_offset()` instead which returns the offset directly after queuing"
+    )]
     pub async fn ingest_record(
         &self,
         payload: impl Into<EncodedRecord>,
@@ -1295,6 +1308,55 @@ impl ZerobusStream {
             })?;
 
         self.ingest_internal(encoded_batch).await
+    }
+
+    /// Ingests a single record and returns its logical offset directly.
+    ///
+    /// This is an alternative to `ingest_record()` that returns the logical offset directly
+    /// as an integer (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()`
+    /// to explicitly wait for server acknowledgment of this offset when needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - A record that can be converted to `EncodedRecord` (either JSON string or protobuf bytes)
+    ///
+    /// # Returns
+    ///
+    /// The logical offset ID assigned to this record.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` - If the record type doesn't match stream configuration
+    /// * `StreamClosedError` - If the stream has been closed
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use prost::Message;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// # let my_record = vec![1, 2, 3]; // Example protobuf-encoded data
+    /// // Ingest and get offset immediately
+    /// let offset = stream.ingest_record_offset(my_record).await?;
+    ///
+    /// // Later, wait for acknowledgment
+    /// stream.wait_for_offset(offset).await?;
+    /// println!("Record at offset {} has been acknowledged", offset);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ingest_record_offset(
+        &self,
+        payload: impl Into<EncodedRecord>,
+    ) -> ZerobusResult<OffsetId> {
+        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
+            .ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Record type does not match stream configuration".to_string(),
+                )
+            })?;
+
+        self.ingest_internal_v2(encoded_batch).await
     }
 
     /// Ingests a batch of records into the stream.
@@ -1335,6 +1397,16 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Deprecation Note
+    ///
+    /// This method is deprecated. Use [`ingest_records_offset()`](Self::ingest_records_offset) instead,
+    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
+    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
+    #[deprecated(
+        since = "0.4.0",
+        note = "Use `ingest_records_offset()` instead which returns the offset directly after queuing"
+    )]
     pub async fn ingest_records<I, T>(
         &self,
         payload: I,
@@ -1365,6 +1437,62 @@ impl ZerobusStream {
         })
     }
 
+    /// Ingests a batch of records and returns the logical offset directly.
+    ///
+    /// This is an alternative to `ingest_records()` that returns the logical offset directly
+    /// (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly
+    /// wait for server acknowledgment when needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - An iterator of records (each item should be convertible to `EncodedRecord`)
+    ///
+    /// # Returns
+    ///
+    /// `Some(offset_id)` for non-empty batches, or `None` if the batch is empty.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` - If record types don't match stream configuration
+    /// * `StreamClosedError` - If the stream has been closed
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use prost::Message;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// let records = vec![vec![1, 2, 3], vec![4, 5, 6]]; // Example protobuf-encoded data
+    ///
+    /// // Ingest batch and get offset immediately
+    /// if let Some(offset) = stream.ingest_records_offset(records).await? {
+    ///     // Later, wait for batch acknowledgment
+    ///     stream.wait_for_offset(offset).await?;
+    ///     println!("Batch at offset {} has been acknowledged", offset);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<EncodedRecord>,
+    {
+        let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
+            .ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Record type does not match stream configuration".to_string(),
+                )
+            })?;
+
+        if encoded_batch.is_empty() {
+            Ok(None)
+        } else {
+            self.ingest_internal_v2(encoded_batch)
+                .await
+                .map(Option::Some)
+        }
+    }
     /// Internal unified method for ingesting records and batches
     async fn ingest_internal(
         &self,
@@ -1413,6 +1541,32 @@ impl ZerobusStream {
                 "Stream ID is None",
             )))
         }
+    }
+
+    /// Internal unified method for ingesting records and batches
+    async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            error!(table_name = %self.table_properties.table_name, "Stream closed");
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Stream closed",
+            )));
+        }
+
+        let _guard = self.sync_mutex.lock().await;
+
+        let offset_id = self.logical_offset_id_generator.next();
+        debug!(
+            offset_id = offset_id,
+            record_count = encoded_batch.get_record_count(),
+            "Ingesting record(s)"
+        );
+        self.landing_zone
+            .add(Box::new(IngestRequest {
+                payload: encoded_batch,
+                offset_id,
+            }))
+            .await;
+        Ok(offset_id)
     }
 
     /// Spawns a task that continuously reads from `response_grpc_stream`
@@ -1626,50 +1780,21 @@ impl ZerobusStream {
         *failed_records.write().await = failed_payloads;
     }
 
-    /// Flushes all currently pending records and waits for their acknowledgments.
-    ///
-    /// This method captures the current highest offset and waits until all records up to
-    /// that offset have been acknowledged by the server. Records ingested during the flush
-    /// operation are not included in this flush.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when all pending records at the time of the call have been acknowledged.
-    ///
-    /// # Errors
-    ///
-    /// * `StreamClosedError` - If the stream is closed or times out
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
-    /// // Ingest many records
-    /// for i in 0..1000 {
-    ///     let ack = stream.ingest_record(vec![i as u8]).await?;
-    ///     tokio::spawn(ack); // Fire and forget
-    /// }
-    ///
-    /// // Wait for all to be acknowledged
-    /// stream.flush().await?;
-    /// println!("All 1000 records have been acknowledged");
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
-    pub async fn flush(&self) -> ZerobusResult<()> {
-        let flush_operation = async {
+    /// Internal method to wait for a specific offset to be acknowledged.
+    /// Used by both `flush()` and `wait_for_offset()`.
+    async fn wait_for_offset_internal(
+        &self,
+        offset_to_wait: OffsetId,
+        operation_name: &str,
+    ) -> ZerobusResult<()> {
+        let wait_operation = async {
             loop {
                 if self.is_closed.load(Ordering::Relaxed) {
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Stream closed during flush",
+                        format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
                 }
-                let offset_to_wait = match self.logical_offset_id_generator.last() {
-                    Some(offset) => offset,
-                    None => return Ok(()),
-                };
+
                 let mut offset_receiver = self.logical_last_received_offset_id_tx.subscribe();
                 loop {
                     let offset = *offset_receiver.borrow_and_update();
@@ -1677,13 +1802,13 @@ impl ZerobusStream {
                     let stream_id = match self.stream_id.as_deref() {
                         Some(stream_id) => stream_id,
                         None => {
-                            error!("Stream ID is None during flush");
+                            error!("Stream ID is None during {}", operation_name.to_lowercase());
                             "None"
                         }
                     };
                     if let Some(offset) = offset {
                         if offset >= offset_to_wait {
-                            info!(stream_id = %stream_id, "Stream is caught up to the given offset. Flushing complete.");
+                            info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
                             return Ok(());
                         } else {
                             info!(
@@ -1711,7 +1836,7 @@ impl ZerobusStream {
 
         match tokio::time::timeout(
             Duration::from_millis(self.options.flush_timeout_ms),
-            flush_operation,
+            wait_operation,
         )
         .await
         {
@@ -1719,15 +1844,104 @@ impl ZerobusStream {
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 if let Some(stream_id) = self.stream_id.as_deref() {
-                    error!(stream_id = %stream_id, table_name = %self.table_properties.table_name, "Flush timed out");
+                    error!(stream_id = %stream_id, table_name = %self.table_properties.table_name, "{} timed out", operation_name);
                 } else {
-                    error!(table_name = %self.table_properties.table_name, "Flush timed out");
+                    error!(table_name = %self.table_properties.table_name, "{} timed out", operation_name);
                 }
                 Err(ZerobusError::StreamClosedError(
-                    tonic::Status::deadline_exceeded("Flush timed out"),
+                    tonic::Status::deadline_exceeded(format!("{} timed out", operation_name)),
                 ))
             }
         }
+    }
+
+    /// Flushes all currently pending records and waits for their acknowledgments.
+    ///
+    /// This method captures the current highest offset and waits until all records up to
+    /// that offset have been acknowledged by the server. Records ingested during the flush
+    /// operation are not included in this flush.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all pending records at the time of the call have been acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// * `StreamClosedError` - If the stream is closed or times out
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// // Ingest many records
+    /// for i in 0..1000 {
+    ///     let _offset = stream.ingest_record_offset(vec![i as u8]).await?;
+    /// }
+    ///
+    /// // Wait for all to be acknowledged
+    /// stream.flush().await?;
+    /// println!("All 1000 records have been acknowledged");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
+    pub async fn flush(&self) -> ZerobusResult<()> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Stream closed during flush.".to_string(),
+            )));
+        }
+        // Get the last generated offset, or return early if no records have been ingested.
+        let offset_to_wait = match self.logical_offset_id_generator.last() {
+            Some(offset) => offset,
+            None => return Ok(()), // Nothing to flush.
+        };
+        self.wait_for_offset_internal(offset_to_wait, "Flush").await
+    }
+
+    /// Waits for server acknowledgment of a specific logical offset.
+    ///
+    /// This method blocks until the server has acknowledged the record or batch at the
+    /// specified offset. Use this with offsets returned from `ingest_record_offset()` or
+    /// `ingest_records_offset()` to explicitly control when to wait for acknowledgments.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The logical offset ID to wait for (returned from `ingest_record_offset()` or `ingest_records_offset()`)
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the record/batch at the specified offset has been acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// * `StreamClosedError` - If the stream is closed or times out while waiting
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// # let my_record = vec![1, 2, 3];
+    /// // Ingest multiple records and collect their offsets
+    /// let mut offsets = Vec::new();
+    /// for i in 0..100 {
+    ///     let offset = stream.ingest_record_offset(vec![i as u8]).await?;
+    ///     offsets.push(offset);
+    /// }
+    ///
+    /// // Wait for specific offsets
+    /// for offset in offsets {
+    ///     stream.wait_for_offset(offset).await?;
+    /// }
+    /// println!("All records acknowledged");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()> {
+        self.wait_for_offset_internal(offset, "Waiting for acknowledgement")
+            .await
     }
 
     /// Closes the stream gracefully after flushing all pending records.

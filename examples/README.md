@@ -34,13 +34,18 @@ More advanced examples that use Protocol Buffers for type-safe data serializatio
 
 All examples demonstrate:
 - Creating a stream with OAuth authentication
+- Two API styles: future-based and immediate offset
 - Waiting for acknowledgment
 - Properly closing the stream
 - Configuring credentials and endpoints
 
+**API Styles:**
+- **`ingest_record_offset` / `ingest_records_offset`** (Recommended): Returns the offset directly after queuing, use `wait_for_offset()` when you need to wait for acknowledgment.
+- **`ingest_record` / `ingest_records`** (Deprecated as of v0.4.0): Returns a future that resolves to the offset when acknowledged.
+
 **When to use single-record vs batch ingestion:**
-- **Single-record (`ingest_record`)**: Use when ingesting records one at a time, or when you need immediate acknowledgment for each record. Each record succeeds or fails independently.
-- **Batch (`ingest_records`)**: Use when you have multiple records to ingest at once for better throughput and efficiency. Uses **all-or-nothing semantics** - the entire batch either succeeds or fails as a unit.
+- **Single-record (`ingest_record` / `ingest_record_offset`)**: Use when ingesting records one at a time, or when you need immediate acknowledgment for each record. Each record succeeds or fails independently.
+- **Batch (`ingest_records` / `ingest_records_offset`)**: Use when you have multiple records to ingest at once for better throughput and efficiency. Uses **all-or-nothing semantics** - the entire batch either succeeds or fails as a unit.
 
 ## Prerequisites
 
@@ -116,13 +121,16 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
+Record sent with offset Id: 1
+Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The JSON example uses string-based JSON records:
+The JSON example uses string-based JSON records and demonstrates both API styles:
 
+**Using ingest_record_offset (Recommended):**
 ```rust
 let json_record = format!(
     r#"{{
@@ -138,7 +146,22 @@ let json_record = format!(
     now, now
 );
 
+// This await queues the record and returns the offset
+let offset_id = stream.ingest_record_offset(json_record).await.unwrap();
+println!("Record sent with offset Id: {}", offset_id);
+
+// Wait for acknowledgment when needed
+stream.wait_for_offset(offset_id).await.unwrap();
+println!("Record {} acknowledged", offset_id);
+```
+
+**Using ingest_record (Deprecated):**
+```rust
+let json_record = format!(/* ... */);
+
 let ack_future = stream.ingest_record(json_record).await.unwrap();
+let offset_id = ack_future.await.unwrap();
+println!("Record acknowledged with offset Id: {}", offset_id);
 ```
 
 Key differences from the Protocol Buffers example:
@@ -167,23 +190,29 @@ cargo run
 **Expected output:**
 
 ```
-Batch of 3 records acknowledged with offset Id: 0
+Batch of 3 records acknowledged with offset Id: Some(0)
+Batch sent with offset Id: 1
+Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The JSON batch example uses `ingest_records()` to send multiple records:
+The JSON batch example demonstrates both API styles with `ingest_records_offset()` and `ingest_records()`:
 
+**Using ingest_records_offset (Recommended):**
 ```rust
-let batch: Vec<String> = vec![
-    format!(r#"{{"id": 1, "customer_name": "Alice Smith", ...}}"#),
-    format!(r#"{{"id": 2, "customer_name": "Bob Johnson", ...}}"#),
-    format!(r#"{{"id": 3, "customer_name": "Carol Williams", ...}}"#),
-];
+let batch: Vec<String> = vec![/* ... */];
 
-let ack_future = stream.ingest_records(batch).await.unwrap();
-let _ack = ack_future.await.unwrap();
+// This await queues the batch and returns the offset
+let offset_id = stream.ingest_records_offset(batch).await.unwrap();
+
+if let Some(offset_id) = offset_id {
+    println!("Batch sent with offset Id: {}", offset_id);
+    // Wait for acknowledgment when needed
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Batch {} acknowledged (2 records)", offset_id);
+}
 ```
 
 **Key benefits:**
@@ -217,6 +246,8 @@ cargo run
 
 ```
 Record acknowledged with offset Id: 0
+Record sent with offset Id: 1
+Record acknowledged with offset Id: 1
 Stream closed successfully
 ```
 
@@ -224,11 +255,13 @@ Schema generation is only needed if you want to customize it for your own table 
 
 ### Code Highlights
 
-The Protocol Buffers example uses strongly-typed structs:
+The Protocol Buffers example uses strongly-typed structs and demonstrates both API styles:
 
+**Using ingest_record_offset (Recommended):**
 ```rust
-let ack_future = stream
-    .ingest_record(
+// This await queues the record and returns the offset
+let offset_id = stream
+    .ingest_record_offset(
         TableOrders {
             id: Some(1),
             customer_name: Some("Alice Smith".to_string()),
@@ -243,6 +276,24 @@ let ack_future = stream
     )
     .await
     .unwrap();
+
+println!("Record sent with offset Id: {}", offset_id);
+
+// Wait for acknowledgment when needed
+stream.wait_for_offset(offset_id).await.unwrap();
+println!("Record {} acknowledged", offset_id);
+```
+
+**Using ingest_record (Deprecated):**
+```rust
+let ack_future = stream
+    .ingest_record(
+        TableOrders { /* ... */ }.encode_to_vec()
+    )
+    .await
+    .unwrap();
+
+let offset_id = ack_future.await.unwrap();
 ```
 
 Key features:
@@ -271,14 +322,17 @@ cargo run
 **Expected output:**
 
 ```
-Batch of 3 records acknowledged with offset Id: 0
+Batch of 3 records acknowledged with offset Id: Some(0)
+Batch sent with offset Id: 1
+Batch of 2 records acknowledged with offset Id: Some(1)
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The Protocol Buffers batch example uses `ingest_records()` with typed records:
+The Protocol Buffers batch example demonstrates both API styles with typed records:
 
+**Using ingest_records_offset (Recommended):**
 ```rust
 let batch: Vec<Vec<u8>> = vec![
     TableOrders {
@@ -301,8 +355,23 @@ let batch: Vec<Vec<u8>> = vec![
     .encode_to_vec(),
 ];
 
-let ack_future = stream.ingest_records(batch).await.unwrap();
-let _ack = ack_future.await.unwrap();
+// This await queues the batch and returns the offset
+let offset_id = stream.ingest_records_offset(batch).await.unwrap();
+
+if let Some(offset_id) = offset_id {
+    println!("Batch sent with offset Id: {}", offset_id);
+    // Wait for acknowledgment when needed
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Batch {} acknowledged (3 records)", offset_id);
+}
+```
+
+**Using ingest_records (Deprecated):**
+```rust
+let batch_2: Vec<Vec<u8>> = vec![/* ... */];
+
+let ack_future = stream.ingest_records(batch_2).await.unwrap();
+let offset_id = ack_future.await.unwrap();
 ```
 
 **Key benefits:**
@@ -530,13 +599,13 @@ Opens a bidirectional gRPC stream with OAuth authentication.
 **Single-Record - JSON Example:**
 ```rust
 let json_record = format!(r#"{{"id": 1, "name": "Alice"}}"#);
-let ack_future = stream.ingest_record(json_record).await.unwrap();
+let offset_id = stream.ingest_record_offset(json_record).await.unwrap();
 ```
 
 **Single-Record - Protocol Buffers Example:**
 ```rust
-let ack_future = stream
-    .ingest_record(
+let offset_id = stream
+    .ingest_record_offset(
         TableOrders {
             id: Some(1),
             customer_name: Some("Alice Smith".to_string()),
@@ -554,7 +623,7 @@ let batch = vec![
     format!(r#"{{"id": 1, "name": "Alice"}}"#),
     format!(r#"{{"id": 2, "name": "Bob"}}"#),
 ];
-let ack_future = stream.ingest_records(batch).await.unwrap();
+let offset_id = stream.ingest_records_offset(batch).await.unwrap();
 ```
 
 **Batch - Protocol Buffers Example:**
@@ -563,18 +632,19 @@ let batch = vec![
     TableOrders { id: Some(1), /* ... */ }.encode_to_vec(),
     TableOrders { id: Some(2), /* ... */ }.encode_to_vec(),
 ];
-let ack_future = stream.ingest_records(batch).await.unwrap();
+let offset_id = stream.ingest_records_offset(batch).await.unwrap();
 ```
 
-Returns a future that resolves when the server acknowledges the record(s).
+Returns the logical offset ID directly (after queuing the record). Use `wait_for_offset()` to explicitly wait for acknowledgment.
 
 ### 6. Wait for Acknowledgment
 
 ```rust
-let _ack = ack_future.await.unwrap();
+// Wait for specific offset
+stream.wait_for_offset(offset_id).await.unwrap();
 ```
 
-Blocks until the server confirms the record was written.
+Blocks until the server confirms the record at the given offset was written.
 
 ### 7. Close Stream
 
@@ -590,7 +660,7 @@ Flushes pending records and closes the stream gracefully.
 
 There are two approaches for ingesting multiple records:
 
-#### Approach 1: Using `ingest_record()` in a Loop
+#### Approach 1: Using `ingest_record_offset()` in a Loop
 Best for streaming scenarios where records arrive one at a time:
 
 **JSON Example:**
@@ -600,7 +670,7 @@ for i in 0..100 {
         r#"{{"id": {}, "customer_name": "Customer {}"}}"#,
         i, i
     );
-    let _ack_future = stream.ingest_record(json_record).await?;
+    let _offset = stream.ingest_record_offset(json_record).await?;
 }
 
 // Flush all pending records
@@ -610,8 +680,8 @@ stream.flush().await?;
 **Protocol Buffers Example:**
 ```rust
 for i in 0..100 {
-    let _ack_future = stream
-        .ingest_record(
+    let _offset = stream
+        .ingest_record_offset(
             TableOrders {
                 id: Some(i),
                 customer_name: Some(format!("Customer {}", i)),
@@ -626,7 +696,7 @@ for i in 0..100 {
 stream.flush().await?;
 ```
 
-#### Approach 2: Using `ingest_records()`
+#### Approach 2: Using `ingest_records_offset()`
 Best for bulk ingestion when you have all records ready at once:
 
 **JSON Batch Example:**
@@ -640,8 +710,10 @@ for i in 0..100 {
     batch.push(json_record);
 }
 
-let ack_future = stream.ingest_records(batch).await?;
-let _ack = ack_future.await?;
+let offset = stream.ingest_records_offset(batch).await?;
+if let Some(offset_id) = offset {
+    stream.wait_for_offset(offset_id).await?;
+}
 ```
 
 **Protocol Buffers Batch Example:**
@@ -658,13 +730,15 @@ for i in 0..100 {
     );
 }
 
-let ack_future = stream.ingest_records(batch).await?;
-let _ack = ack_future.await?;
+let offset = stream.ingest_records_offset(batch).await?;
+if let Some(offset_id) = offset {
+    stream.wait_for_offset(offset_id).await?;
+}
 ```
 
 **When to use each approach:**
-- **`ingest_record()`**: Records arrive one at a time, need individual acknowledgments, streaming scenarios, when partial failures are acceptable
-- **`ingest_records()`**: All records ready at once, bulk imports, better throughput for large datasets, when you need all-or-nothing consistency (entire batch succeeds or fails together)
+- **`ingest_record_offset()`**: Records arrive one at a time, need individual offset tracking, streaming scenarios, when partial failures are acceptable
+- **`ingest_records_offset()`**: All records ready at once, bulk imports, better throughput for large datasets, when you need all-or-nothing consistency (entire batch succeeds or fails together)
 
 ## Choosing the Right Example
 

@@ -20,6 +20,7 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let table_properties = TableProperties {
         table_name: TABLE_NAME.to_string(),
@@ -62,10 +63,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         now, now
     );
 
-    let ack_future = stream.ingest_record(json_record).await.unwrap();
+    // Example 1: ingest_record_offset returns the offset immediately.
+    let offset_id = stream.ingest_record_offset(json_record).await.unwrap();
+    println!("Record sent with offset Id: {}", offset_id);
+    // Wait for acknowledgment.
+    stream.wait_for_offset(offset_id).await.unwrap();
+    println!("Record acknowledged with offset Id: {}", offset_id);
 
-    let _ack = ack_future.await.unwrap();
-    println!("Record acknowledged with offset Id: 0");
+    let json_record_2 = format!(
+        r#"{{
+            "id": 2,
+            "customer_name": "Bob Jones",
+            "product_name": "USB Cable",
+            "quantity": 5,
+            "price": 9.99,
+            "status": "shipped",
+            "created_at": {},
+            "updated_at": {}
+        }}"#,
+        now, now
+    );
+    // Example 2: ingest_record returns a future that resolves to the offset.
+    let ack_future = stream.ingest_record(json_record_2).await.unwrap();
+    let offset_id_2 = ack_future.await.unwrap();
+    println!("Record acknowledged with offset Id: {}", offset_id_2);
+
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");

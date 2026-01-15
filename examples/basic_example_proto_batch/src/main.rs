@@ -26,6 +26,7 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders"); //<your_descriptor_file>, <your_proto_file>, <your_proto_message_name>
@@ -90,11 +91,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .encode_to_vec(),
     ];
 
-    // Ingest the batch
-    let ack_future = stream.ingest_records(batch).await.unwrap();
+    // Example 1: ingest_records_offset returns the offset immediately.
+    let offset_id = stream.ingest_records_offset(batch).await.unwrap();
+    if let Some(offset_id) = offset_id {
+        println!("Batch sent with offset Id: {}", offset_id);
+        // Wait for acknowledgment.
+        stream.wait_for_offset(offset_id).await.unwrap();
+        println!(
+            "Batch of 3 records acknowledged with offset Id: {}",
+            offset_id
+        );
+    }
 
-    let _ack = ack_future.await.unwrap();
-    println!("Batch of 3 records acknowledged with offset Id: 0");
+    let batch_2: Vec<Vec<u8>> = vec![
+        TableOrders {
+            id: Some(4),
+            customer_name: Some("David Green".to_string()),
+            product_name: Some("Monitor".to_string()),
+            quantity: Some(1),
+            price: Some(299.99),
+            status: Some("delivered".to_string()),
+            created_at: Some(now),
+            updated_at: Some(now),
+        }
+        .encode_to_vec(),
+        TableOrders {
+            id: Some(5),
+            customer_name: Some("Emma White".to_string()),
+            product_name: Some("Webcam".to_string()),
+            quantity: Some(2),
+            price: Some(59.99),
+            status: Some("pending".to_string()),
+            created_at: Some(now),
+            updated_at: Some(now),
+        }
+        .encode_to_vec(),
+    ];
+
+    // Example 2: ingest_records returns a future that resolves to the offset (deprecated).
+    let ack_future = stream.ingest_records(batch_2).await.unwrap();
+    let offset_id = ack_future.await.unwrap();
+    println!(
+        "Batch of 2 records acknowledged with offset Id: {:?}",
+        offset_id
+    );
+
     let close_future = stream.close();
     close_future.await?;
     println!("Stream closed successfully");
