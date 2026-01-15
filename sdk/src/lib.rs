@@ -883,8 +883,7 @@ impl ZerobusSdk {
 
         // Replay unacked batches.
         for batch in batches {
-            let ack = new_stream.ingest_batch(batch).await?;
-            tokio::spawn(ack);
+            let _offset = new_stream.ingest_batch(batch).await?;
         }
 
         info!(

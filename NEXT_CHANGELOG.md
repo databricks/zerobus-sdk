@@ -31,6 +31,10 @@
 
 ### API Changes
 
+- [**BREAKING**] Changed `ZerobusArrowStream::ingest_batch()` to return `OffsetId` directly instead of `Future<Output = OffsetId>`
+- Added `ZerobusArrowStream::wait_for_offset()` method to wait for acknowledgment of a specific offset
+- Added `is_closed` check at the beginning of `flush()` for both `ZerobusStream` and `ZerobusArrowStream`
+
 - Added `ingest_record_offset()` method to `ZerobusStream` for direct offset return without Future wrapping
 - Added `ingest_records_offset()` method to `ZerobusStream` for batch ingestion with direct offset return
 - Added `wait_for_offset()` method to `ZerobusStream` to wait for acknowledgment of a specific offset

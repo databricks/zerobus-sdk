@@ -13,6 +13,7 @@ use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
+#[allow(deprecated)]
 mod stream_initialization_and_basic_lifecycle_tests {
     use super::*;
 
@@ -473,6 +474,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 }
 
+#[allow(deprecated)]
 mod schema_tests {
     use super::*;
 
@@ -823,6 +825,7 @@ mod schema_tests {
     }
 }
 
+#[allow(deprecated)]
 mod standard_operation_and_state_management_tests {
     use super::*;
 
@@ -1500,6 +1503,7 @@ mod standard_operation_and_state_management_tests {
     }
 }
 
+#[allow(deprecated)]
 mod concurrency_and_race_condition_tests {
     use super::*;
 
@@ -1988,6 +1992,7 @@ mod concurrency_and_race_condition_tests {
     }
 }
 
+#[allow(deprecated)]
 mod failure_scenarios_tests {
     use super::*;
 
@@ -3116,6 +3121,7 @@ mod failure_scenarios_tests {
     }
 }
 
+#[allow(deprecated)]
 mod graceful_close_tests {
     use super::*;
 
@@ -3699,6 +3705,7 @@ mod graceful_close_tests {
     }
 }
 
+#[allow(deprecated)]
 mod api_offset_tests {
     use super::*;
 
@@ -4451,10 +4458,11 @@ mod arrow_flight_tests {
                 vec![Some("hello"), Some("world"), None],
             );
 
-            let ack = stream.ingest_batch(batch).await?;
-            let offset = ack.await?;
+            let offset = stream.ingest_batch(batch).await?;
 
             assert_eq!(offset, 0, "Expected offset 0 for first batch");
+
+            stream.wait_for_offset(offset).await?;
             assert_eq!(mock_server.get_batch_count().await, 1);
 
             Ok(())
@@ -4506,21 +4514,21 @@ mod arrow_flight_tests {
                 .await?;
 
             // Ingest multiple batches
-            let mut ack_futures = Vec::new();
+            let mut offsets = Vec::new();
             for i in 0..3 {
                 let batch = create_test_record_batch(
                     schema.clone(),
                     vec![i * 10, i * 10 + 1],
                     vec![Some(&format!("batch-{}", i)), None],
                 );
-                let ack = stream.ingest_batch(batch).await?;
-                ack_futures.push(ack);
+                let offset = stream.ingest_batch(batch).await?;
+                assert_eq!(offset, i as i64, "Expected offset {} for batch {}", i, i);
+                offsets.push(offset);
             }
 
             // Wait for all acks
-            for (i, ack) in ack_futures.into_iter().enumerate() {
-                let offset = ack.await?;
-                assert_eq!(offset, i as i64, "Expected offset {} for batch {}", i, i);
+            for offset in offsets {
+                stream.wait_for_offset(offset).await?;
             }
 
             assert_eq!(mock_server.get_batch_count().await, 3);
@@ -4678,10 +4686,10 @@ mod arrow_flight_tests {
 
             // Ingest a batch - should fail
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
-            let ack = stream.ingest_batch(batch).await?;
+            let offset = stream.ingest_batch(batch).await?;
 
-            // The ack should fail
-            let result = ack.await;
+            // The wait_for_offset should fail with timeout or error
+            let result = stream.wait_for_offset(offset).await;
             assert!(result.is_err(), "Expected error from server");
 
             Ok(())
@@ -4804,6 +4812,7 @@ mod arrow_flight_tests {
                     Arc::new(TestHeadersProvider::default()),
                     Some(ArrowStreamConfigurationOptions {
                         server_lack_of_ack_timeout_ms: 500,
+                        flush_timeout_ms: 2000,
                         recovery: false, // Disable recovery to test pure timeout behavior
                         ..Default::default()
                     }),
@@ -4812,10 +4821,10 @@ mod arrow_flight_tests {
 
             // Ingest a batch
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
-            let ack = stream.ingest_batch(batch).await?;
+            let offset = stream.ingest_batch(batch).await?;
 
             // Should timeout waiting for ack
-            let result = ack.await;
+            let result = stream.wait_for_offset(offset).await;
             assert!(result.is_err(), "Expected timeout error");
 
             Ok(())
@@ -5001,7 +5010,7 @@ mod arrow_flight_tests {
                 let stream_clone = Arc::clone(&stream);
                 let schema_clone = schema.clone();
                 let task = tokio::spawn(async move {
-                    let mut ack_futures = Vec::new();
+                    let mut offsets = Vec::new();
                     for batch_id in 0..BATCHES_PER_TASK {
                         let batch = create_test_record_batch(
                             schema_clone.clone(),
@@ -5009,33 +5018,32 @@ mod arrow_flight_tests {
                             vec![Some(&format!("task-{}-batch-{}", task_id, batch_id))],
                         );
                         match stream_clone.ingest_batch(batch).await {
-                            Ok(ack) => ack_futures.push(ack),
+                            Ok(offset) => offsets.push(offset),
                             Err(e) => return Err(e),
                         }
                     }
-                    Ok(ack_futures)
+                    Ok(offsets)
                 });
                 tasks.push(task);
             }
 
-            // Collect all ack futures
-            let mut all_ack_futures = Vec::new();
+            // Collect all offsets
+            let mut all_offsets = Vec::new();
             for task in tasks {
-                let futures = task.await??;
-                all_ack_futures.extend(futures);
+                let offsets = task.await??;
+                all_offsets.extend(offsets);
             }
 
-            assert_eq!(all_ack_futures.len(), TOTAL_BATCHES);
+            assert_eq!(all_offsets.len(), TOTAL_BATCHES);
 
             // Wait for all acks
-            let mut offsets = Vec::new();
-            for ack in all_ack_futures {
-                offsets.push(ack.await?);
+            for offset in &all_offsets {
+                stream.wait_for_offset(*offset).await?;
             }
-            offsets.sort();
+            all_offsets.sort();
 
             let expected: Vec<i64> = (0..TOTAL_BATCHES as i64).collect();
-            assert_eq!(offsets, expected);
+            assert_eq!(all_offsets, expected);
 
             Ok(())
         }
@@ -5088,12 +5096,12 @@ mod arrow_flight_tests {
 
             // Ingest and wait for acks
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("test1")]);
-            let ack1 = stream.ingest_batch(batch1).await?;
-            ack1.await?;
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
 
             let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("test2")]);
-            let ack2 = stream.ingest_batch(batch2).await?;
-            ack2.await?;
+            let offset2 = stream.ingest_batch(batch2).await?;
+            stream.wait_for_offset(offset2).await?;
 
             // Close successfully
             stream.close().await?;
@@ -5155,13 +5163,13 @@ mod arrow_flight_tests {
 
             // First batch will be acked
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
-            let ack1 = stream.ingest_batch(batch1).await?;
-            assert!(ack1.await.is_ok());
+            let offset1 = stream.ingest_batch(batch1).await?;
+            assert!(stream.wait_for_offset(offset1).await.is_ok());
 
             // Second batch will fail
             let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("unacked")]);
-            let ack2 = stream.ingest_batch(batch2).await?;
-            assert!(ack2.await.is_err());
+            let offset2 = stream.ingest_batch(batch2).await?;
+            assert!(stream.wait_for_offset(offset2).await.is_err());
 
             // Close the stream - internally drains pending batches to failed
             let _ = stream.close().await;
@@ -5238,15 +5246,16 @@ mod arrow_flight_tests {
 
             // First batch - should be acked
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
-            let ack1 = stream.ingest_batch(batch1).await?;
-            assert_eq!(ack1.await?, 0);
+            let offset1 = stream.ingest_batch(batch1).await?;
+            assert_eq!(offset1, 0);
+            stream.wait_for_offset(offset1).await?;
 
             // Second batch - will trigger error, but supervisor will recover
             let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("second")]);
-            let ack2 = stream.ingest_batch(batch2).await?;
+            let offset2 = stream.ingest_batch(batch2).await?;
 
             // This should succeed after supervisor recovery
-            let result = ack2.await;
+            let result = stream.wait_for_offset(offset2).await;
             assert!(result.is_ok(), "Expected recovery to succeed: {:?}", result);
 
             Ok(())
@@ -5303,13 +5312,13 @@ mod arrow_flight_tests {
 
             // First batch succeeds
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
-            let ack1 = stream.ingest_batch(batch1).await?;
-            ack1.await?;
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
 
             // Second batch fails with non-retriable error
             let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("will-fail")]);
-            let ack2 = stream.ingest_batch(batch2).await?;
-            let _ = ack2.await; // Will fail
+            let offset2 = stream.ingest_batch(batch2).await?;
+            let _ = stream.wait_for_offset(offset2).await; // Will fail
 
             // Close the failed stream
             let _ = stream.close().await;
