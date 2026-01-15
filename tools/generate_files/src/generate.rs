@@ -40,6 +40,7 @@ fn get_proto_field_info(
 
     // Base scalar types
     let proto_type = match col_type.as_str() {
+        "TINYINT" | "BYTE" => Some("int32"),
         "SMALLINT" | "SHORT" => Some("int32"),
         "INT" => Some("int32"),
         "BIGINT" | "LONG" => Some("int64"),
@@ -50,6 +51,8 @@ fn get_proto_field_info(
         "BINARY" => Some("bytes"),
         "DATE" => Some("int32"),
         "TIMESTAMP" => Some("int64"),
+        "TIMESTAMP_NTZ" => Some("int64"),
+        "VARIANT" => Some("string"),
         _ => None,
     };
 
@@ -702,5 +705,73 @@ mod tests {
                 .to_string()
                 .contains("Invalid Protobuf field name '1field'. Cannot start with a digit.")
         );
+    }
+
+    #[test]
+    fn test_all_scalar_types() {
+        let table_info = TableInfo {
+            columns: vec![
+                Column {
+                    name: "tiny_value".to_string(),
+                    type_text: "TINYINT".to_string(),
+                    nullable: false,
+                },
+                Column {
+                    name: "byte_value".to_string(),
+                    type_text: "BYTE".to_string(),
+                    nullable: true,
+                },
+                Column {
+                    name: "small_value".to_string(),
+                    type_text: "SMALLINT".to_string(),
+                    nullable: false,
+                },
+                Column {
+                    name: "short_value".to_string(),
+                    type_text: "SHORT".to_string(),
+                    nullable: true,
+                },
+                Column {
+                    name: "timestamp_ntz".to_string(),
+                    type_text: "TIMESTAMP_NTZ".to_string(),
+                    nullable: false,
+                },
+                Column {
+                    name: "timestamp_tz".to_string(),
+                    type_text: "TIMESTAMP".to_string(),
+                    nullable: true,
+                },
+                Column {
+                    name: "variant_data".to_string(),
+                    type_text: "VARIANT".to_string(),
+                    nullable: true,
+                },
+                Column {
+                    name: "date_value".to_string(),
+                    type_text: "DATE".to_string(),
+                    nullable: false,
+                },
+            ],
+        };
+
+        let dir = tempdir().unwrap();
+        let proto_path = dir.path().join("types_test.proto");
+        let output_dir = dir.path().to_path_buf();
+
+        generate_proto_file(
+            "TypesMessage",
+            &table_info.columns,
+            &proto_path,
+            &output_dir,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(proto_path.clone()).unwrap();
+        let expected = "syntax = \"proto2\";\n\npackage types_test;\n\nmessage table_TypesMessage {\n\trequired int32 tiny_value = 1;\n\toptional int32 byte_value = 2;\n\trequired int32 small_value = 3;\n\toptional int32 short_value = 4;\n\trequired int64 timestamp_ntz = 5;\n\toptional int64 timestamp_tz = 6;\n\toptional string variant_data = 7;\n\trequired int32 date_value = 8;\n}\n";
+        assert_eq!(content, expected);
+
+        // Verify that the generated proto is valid and can be compiled.
+        generate_rust_and_descriptor(proto_path.to_str().unwrap(), "TypesMessage", &output_dir)
+            .unwrap();
     }
 }
