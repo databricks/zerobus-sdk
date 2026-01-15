@@ -14,6 +14,7 @@ use std::sync::Arc;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, PutResult};
+use arrow_ipc::{writer::IpcWriteOptions, CompressionType};
 use futures::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
@@ -26,7 +27,7 @@ use tracing::{debug, error, info, instrument, warn};
 pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
-use crate::arrow_config::ArrowStreamConfigurationOptions;
+use crate::arrow_config::{ArrowIpcCompression, ArrowStreamConfigurationOptions};
 use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -377,8 +378,27 @@ impl ZerobusArrowStream {
         let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
         let schema = Arc::clone(&table_properties.schema);
 
+        let ipc_write_options = match options.ipc_compression {
+            ArrowIpcCompression::None => IpcWriteOptions::default(),
+            ArrowIpcCompression::Lz4 => IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::LZ4_FRAME))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC LZ4 compression: {e}"
+                    ))
+                })?,
+            ArrowIpcCompression::Zstd => IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::ZSTD))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC Zstd compression: {e}"
+                    ))
+                })?,
+        };
+
         let flight_data_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
+            .with_options(ipc_write_options)
             .build(batch_stream)
             .enumerate()
             .map(move |(idx, result)| {
@@ -653,8 +673,27 @@ impl ZerobusArrowStream {
         let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
         let schema = Arc::clone(&table_properties.schema);
 
+        let ipc_write_options = match options.ipc_compression {
+            ArrowIpcCompression::None => IpcWriteOptions::default(),
+            ArrowIpcCompression::Lz4 => IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::LZ4_FRAME))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC LZ4 compression: {e}"
+                    ))
+                })?,
+            ArrowIpcCompression::Zstd => IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::ZSTD))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC Zstd compression: {e}"
+                    ))
+                })?,
+        };
+
         let flight_data_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
+            .with_options(ipc_write_options)
             .build(batch_stream)
             .enumerate()
             .map(move |(idx, result)| {

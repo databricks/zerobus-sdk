@@ -6,7 +6,7 @@ pub mod databricks {
 /// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
 /// supported for production use. The API may change in future releases.
 #[cfg(feature = "arrow-flight")]
-pub use arrow_config::ArrowStreamConfigurationOptions;
+pub use arrow_config::{ArrowIpcCompression, ArrowStreamConfigurationOptions};
 #[cfg(feature = "arrow-flight")]
 pub use arrow_stream::{
     ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
