@@ -21,6 +21,8 @@
 
 ### Bug Fixes
 
+- Improved error classification in OAuth token retrieval: 5xx server errors and network failures are now retryable, while 4xx client errors (invalid credentials, etc.) are non-retryable
+
 ### Documentation
 
 ### Internal Changes
