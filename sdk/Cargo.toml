@@ -31,6 +31,7 @@ smallvec = "1.15.1"
 arrow-flight = { version = "56.2.0", default-features = false, optional = true }
 arrow-array = { version = "56.2.0", default-features = false, optional = true }
 arrow-schema = { version = "56.2.0", default-features = false, optional = true }
+arrow-ipc = { version = "56.2.0", default-features = false, optional = true, features = ["lz4","zstd"] }
 futures = { version = "0.3", optional = true }
 
 [build-dependencies]
@@ -40,5 +41,5 @@ protoc-bin-vendored = "3.0.0"
 [features]
 default = []
 # Arrow Flight is experimental/unsupported
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:futures"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
 testing = []

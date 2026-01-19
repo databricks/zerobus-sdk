@@ -4,6 +4,7 @@
 //! supported for production use. The API may change in future releases.
 
 use crate::stream_options::defaults;
+use arrow_ipc::CompressionType;
 
 /// Configuration options for Arrow Flight stream creation and operation.
 ///
@@ -83,6 +84,15 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Default: 30,000 (30 seconds)
     pub connection_timeout_ms: u64,
+
+    /// Optional Arrow IPC compression for Flight payloads.
+    ///
+    /// Supported compression types from `arrow_ipc::CompressionType`:
+    /// - `CompressionType::LZ4_FRAME` - LZ4 frame compression
+    /// - `CompressionType::ZSTD` - Zstandard compression
+    ///
+    /// Default: `None`
+    pub ipc_compression: Option<CompressionType>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -96,6 +106,7 @@ impl Default for ArrowStreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
+            ipc_compression: None,
         }
     }
 }

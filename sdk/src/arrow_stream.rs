@@ -6,7 +6,7 @@
 //! This module provides `ZerobusArrowStream`, a client for ingesting Arrow `RecordBatch`
 //! data into Databricks Delta tables using the Arrow Flight protocol.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -14,8 +14,9 @@ use std::sync::Arc;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, PutResult};
+use arrow_ipc::writer::IpcWriteOptions;
 use futures::{Stream, StreamExt};
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -50,9 +51,6 @@ pub struct ArrowTableProperties {
     pub schema: Arc<ArrowSchema>,
 }
 
-/// Map of logical offset to oneshot sender for acknowledgment notification.
-type OneshotMap = HashMap<OffsetId, oneshot::Sender<ZerobusResult<OffsetId>>>;
-
 /// A pending batch waiting for acknowledgment.
 #[derive(Clone)]
 struct PendingBatch {
@@ -86,8 +84,11 @@ struct PendingBatch {
 /// # use arrow_array::RecordBatch;
 /// # async fn example(mut stream: ZerobusArrowStream, batch: RecordBatch) -> Result<(), ZerobusError> {
 /// // Ingest a single RecordBatch
-/// let ack = stream.ingest_batch(batch).await?;
-/// let offset = ack.await?;
+/// let offset = stream.ingest_batch(batch).await?;
+/// println!("Batch queued at offset: {}", offset);
+///
+/// // Wait for acknowledgment
+/// stream.wait_for_offset(offset).await?;
 /// println!("Batch acknowledged at offset: {}", offset);
 ///
 /// // Close the stream gracefully
@@ -102,8 +103,6 @@ pub struct ZerobusArrowStream {
     pub(crate) options: ArrowStreamConfigurationOptions,
     /// Channel to send RecordBatches to the encoder task.
     batch_tx: BatchSender,
-    /// Oneshot map for tracking pending acknowledgments.
-    oneshot_map: Arc<Mutex<OneshotMap>>,
     /// Generator for logical offset IDs.
     offset_generator: OffsetIdGenerator,
     /// Watch channel for tracking the last acknowledged offset.
@@ -158,7 +157,6 @@ impl ZerobusArrowStream {
         options: ArrowStreamConfigurationOptions,
     ) -> ZerobusResult<Self> {
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
-        let oneshot_map = Arc::new(Mutex::new(HashMap::new()));
         let is_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
@@ -173,7 +171,6 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             batch_tx,
-            oneshot_map,
             offset_generator: OffsetIdGenerator::default(),
             last_ack_tx,
             _last_ack_rx,
@@ -251,7 +248,6 @@ impl ZerobusArrowStream {
             stream.options.clone(),
             Arc::clone(&stream.headers_provider),
             Arc::clone(&stream.batch_tx),
-            Arc::clone(&stream.oneshot_map),
             Arc::clone(&stream.is_closed),
             stream.last_ack_tx.clone(),
             Arc::clone(&stream.pending_batches),
@@ -382,8 +378,20 @@ impl ZerobusArrowStream {
         let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
         let schema = Arc::clone(&table_properties.schema);
 
+        let ipc_write_options = match options.ipc_compression {
+            None => IpcWriteOptions::default(),
+            Some(compression_type) => IpcWriteOptions::default()
+                .try_with_compression(Some(compression_type))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC compression: {e}"
+                    ))
+                })?,
+        };
+
         let flight_data_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
+            .with_options(ipc_write_options)
             .build(batch_stream)
             .enumerate()
             .map(move |(idx, result)| {
@@ -483,7 +491,6 @@ impl ZerobusArrowStream {
         options: ArrowStreamConfigurationOptions,
         headers_provider: Arc<dyn HeadersProvider>,
         batch_tx: BatchSender,
-        oneshot_map: Arc<Mutex<OneshotMap>>,
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
@@ -506,7 +513,6 @@ impl ZerobusArrowStream {
                 // Run process_acks until it returns (error or stream closed).
                 let result = Self::process_acks(
                     response_stream,
-                    Arc::clone(&oneshot_map),
                     Arc::clone(&is_closed),
                     last_ack_tx.clone(),
                     Arc::clone(&pending_batches),
@@ -541,7 +547,6 @@ impl ZerobusArrowStream {
                             is_closed.store(true, Ordering::Relaxed);
                             // Move pending batches to failed and fail the ack futures.
                             Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
-                            Self::fail_pending_acks(&oneshot_map, error).await;
                             return result;
                         }
 
@@ -620,7 +625,6 @@ impl ZerobusArrowStream {
                         is_closed.store(true, Ordering::Relaxed);
                         // Move pending batches to failed and fail the ack futures.
                         Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
-                        Self::fail_pending_acks(&oneshot_map, &error).await;
                         return Err(error);
                     }
                 }
@@ -662,8 +666,20 @@ impl ZerobusArrowStream {
         let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
         let schema = Arc::clone(&table_properties.schema);
 
+        let ipc_write_options = match options.ipc_compression {
+            None => IpcWriteOptions::default(),
+            Some(compression_type) => IpcWriteOptions::default()
+                .try_with_compression(Some(compression_type))
+                .map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to enable Arrow IPC compression: {e}"
+                    ))
+                })?,
+        };
+
         let flight_data_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
+            .with_options(ipc_write_options)
             .build(batch_stream)
             .enumerate()
             .map(move |(idx, result)| {
@@ -793,7 +809,6 @@ impl ZerobusArrowStream {
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
         mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        oneshot_map: Arc<Mutex<OneshotMap>>,
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
@@ -848,7 +863,7 @@ impl ZerobusArrowStream {
                                 }
                             }
 
-                            // Remove acknowledged batches from pending_batches and notify oneshot_map.
+                            // Remove acknowledged batches from pending_batches.
                             if !logical_offsets_acked.is_empty() {
                                 let max_logical_offset =
                                     *logical_offsets_acked.iter().max().unwrap();
@@ -861,16 +876,7 @@ impl ZerobusArrowStream {
                                     });
                                 }
 
-                                // Notify oneshot senders
-                                {
-                                    let mut map = oneshot_map.lock().await;
-                                    for logical_offset in &logical_offsets_acked {
-                                        if let Some(sender) = map.remove(logical_offset) {
-                                            let _ = sender.send(Ok(*logical_offset));
-                                        }
-                                    }
-                                }
-
+                                // Send the last acknowledged logical offset to the watch channel.
                                 let _ = last_ack_tx.send(Some(max_logical_offset));
                             }
 
@@ -906,13 +912,12 @@ impl ZerobusArrowStream {
                 }
                 Err(_timeout) => {
                     // Check if there are pending acks that should have been received.
-                    let map = oneshot_map.lock().await;
-                    if !map.is_empty() {
+                    let pending = pending_batches.lock().await;
+                    if !pending.is_empty() {
                         error!(
-                            pending_count = map.len(),
+                            pending_count = pending.len(),
                             "Server ack timeout with pending batches"
                         );
-                        drop(map);
                         let error = ZerobusError::StreamClosedError(
                             tonic::Status::deadline_exceeded("Server ack timeout"),
                         );
@@ -924,19 +929,11 @@ impl ZerobusArrowStream {
         }
     }
 
-    /// Fails all pending acknowledgments with the given error.
-    async fn fail_pending_acks(oneshot_map: &Arc<Mutex<OneshotMap>>, error: &ZerobusError) {
-        let mut map = oneshot_map.lock().await;
-        for (_, sender) in map.drain() {
-            let _ = sender.send(Err(error.clone()));
-        }
-    }
-
     /// Ingests a single Arrow RecordBatch into the stream.
     ///
-    /// This method is non-blocking and returns immediately with a future. The batch is
-    /// queued for transmission and the returned future resolves when the server acknowledges
-    /// the batch has been durably written.
+    /// This method queues the batch for transmission and returns the assigned logical offset
+    /// immediately. Use `wait_for_offset()` to explicitly wait for server acknowledgment
+    /// of this batch when needed.
     ///
     /// # Arguments
     ///
@@ -944,7 +941,7 @@ impl ZerobusArrowStream {
     ///
     /// # Returns
     ///
-    /// A future that resolves to the logical offset ID of the acknowledged batch.
+    /// The logical offset ID assigned to this batch.
     ///
     /// # Errors
     ///
@@ -957,17 +954,17 @@ impl ZerobusArrowStream {
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # use arrow_array::RecordBatch;
     /// # async fn example(stream: ZerobusArrowStream, batch: RecordBatch) -> Result<(), ZerobusError> {
-    /// let ack = stream.ingest_batch(batch).await?;
-    /// let offset = ack.await?;
-    /// println!("Batch written at offset: {}", offset);
+    /// // Ingest and get offset immediately
+    /// let offset = stream.ingest_batch(batch).await?;
+    ///
+    /// // Later, wait for acknowledgment
+    /// stream.wait_for_offset(offset).await?;
+    /// println!("Batch at offset {} has been acknowledged", offset);
     /// # Ok(())
     /// # }
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
-    pub async fn ingest_batch(
-        &self,
-        batch: RecordBatch,
-    ) -> ZerobusResult<impl std::future::Future<Output = ZerobusResult<OffsetId>>> {
+    pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
         if self.is_closed.load(Ordering::Relaxed) {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closed",
@@ -986,14 +983,8 @@ impl ZerobusArrowStream {
         // Serialize ingestion operations.
         let _guard = self.ingest_mutex.lock().await;
 
-        // Generate offset and create acknowledgment channel.
+        // Generate offset.
         let offset_id = self.offset_generator.next();
-        let (tx, rx) = oneshot::channel();
-
-        {
-            let mut map = self.oneshot_map.lock().await;
-            map.insert(offset_id, tx);
-        }
 
         // Store in pending batches for recovery.
         {
@@ -1043,10 +1034,6 @@ impl ZerobusArrowStream {
                     let mut pending = self.pending_batches.lock().await;
                     pending.retain(|pb| pb.offset_id != offset_id);
                 }
-                {
-                    let mut map = self.oneshot_map.lock().await;
-                    map.remove(&offset_id);
-                }
                 // Check if there's a stored server error (e.g., schema validation failure)
                 // that caused the stream to close before this send.
                 let error_result = tokio::time::timeout(
@@ -1081,14 +1068,82 @@ impl ZerobusArrowStream {
 
         debug!(offset_id = offset_id, "Batch queued for ingestion");
 
-        // Return a future that resolves when the ack is received.
-        Ok(async move {
-            rx.await.map_err(|_| {
-                ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Acknowledgment channel closed",
-                ))
+        Ok(offset_id)
+    }
+
+    /// Internal method to wait for a specific offset to be acknowledged.
+    /// Used by both `flush()` and `wait_for_offset()`.
+    async fn wait_for_offset_internal(
+        &self,
+        offset_to_wait: OffsetId,
+        operation_name: &str,
+    ) -> ZerobusResult<()> {
+        let flush_timeout = Duration::from_millis(self.options.flush_timeout_ms);
+        let mut offset_rx = self.last_ack_tx.subscribe();
+        let mut error_rx = self.server_error_rx.clone();
+
+        let wait_future = async {
+            loop {
+                if self.is_closed.load(Ordering::Relaxed) {
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        format!("Stream closed during {}", operation_name.to_lowercase()),
+                    )));
+                }
+
+                let current_ack = *offset_rx.borrow_and_update();
+                if let Some(ack_offset) = current_ack {
+                    if ack_offset >= offset_to_wait {
+                        info!(
+                            ack_offset = ack_offset,
+                            target_offset = offset_to_wait,
+                            "{} completed",
+                            operation_name
+                        );
+                        return Ok(());
+                    }
+                    debug!(
+                        current_ack = ack_offset,
+                        target_offset = offset_to_wait,
+                        "Waiting for more acks"
+                    );
+                }
+
+                // Race between offset updates and server errors
+                tokio::select! {
+                    result = offset_rx.changed() => {
+                        if result.is_err() {
+                            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                                format!(
+                                    "Ack channel closed during {}",
+                                    operation_name.to_lowercase()
+                                ),
+                            )));
+                        }
+                        // Loop continues to check new offset value
+                    }
+                    _ = error_rx.changed() => {
+                        // Server error occurred - return it immediately if stream is closed
+                        if let Some(server_error) = error_rx.borrow().clone() {
+                            if self.is_closed.load(Ordering::Relaxed) {
+                                return Err(server_error);
+                            }
+                            // Stream still active, recovery might succeed - keep waiting
+                        }
+                        // Error channel updated but no error (cleared by recovery) - continue waiting
+                    }
+                }
+            }
+        };
+
+        tokio::time::timeout(flush_timeout, wait_future)
+            .await
+            .map_err(|_| {
+                error!("{} timed out", operation_name);
+                ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded(format!(
+                    "{} timed out",
+                    operation_name
+                )))
             })?
-        })
     }
 
     /// Flushes all currently pending batches and waits for their acknowledgments.
@@ -1111,13 +1166,12 @@ impl ZerobusArrowStream {
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # use arrow_array::RecordBatch;
     /// # async fn example(stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
-    /// // Ingest many batches
+    /// // Ingest many batches without waiting for each one
     /// for batch in batches {
-    ///     let ack = stream.ingest_batch(batch).await?;
-    ///     tokio::spawn(ack); // Fire and forget
+    ///     let _offset = stream.ingest_batch(batch).await?;
     /// }
     ///
-    /// // Wait for all to be acknowledged
+    /// // Wait for all batches to be acknowledged
     /// stream.flush().await?;
     /// println!("All batches have been acknowledged");
     /// # Ok(())
@@ -1125,6 +1179,13 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn flush(&self) -> ZerobusResult<()> {
+        // Check if stream is closed first, before checking for batches.
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Cannot flush: stream is closed",
+            )));
+        }
+
         let target_offset = match self.offset_generator.last() {
             Some(offset) => offset,
             None => {
@@ -1133,51 +1194,51 @@ impl ZerobusArrowStream {
             }
         };
 
-        debug!(target_offset = target_offset, "Flushing to offset");
+        self.wait_for_offset_internal(target_offset, "Flush").await
+    }
 
-        let flush_timeout = Duration::from_millis(self.options.flush_timeout_ms);
-        let mut offset_rx = self.last_ack_tx.subscribe();
-
-        let flush_future = async {
-            loop {
-                if self.is_closed.load(Ordering::Relaxed) {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Stream closed during flush",
-                    )));
-                }
-
-                let current_ack = *offset_rx.borrow_and_update();
-                if let Some(ack_offset) = current_ack {
-                    if ack_offset >= target_offset {
-                        info!(
-                            ack_offset = ack_offset,
-                            target_offset = target_offset,
-                            "Flush completed"
-                        );
-                        return Ok(());
-                    }
-                    debug!(
-                        current_ack = ack_offset,
-                        target_offset = target_offset,
-                        "Waiting for more acks"
-                    );
-                }
-
-                // Wait for the next update.
-                if offset_rx.changed().await.is_err() {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Ack channel closed during flush",
-                    )));
-                }
-            }
-        };
-
-        tokio::time::timeout(flush_timeout, flush_future)
+    /// Waits for server acknowledgment of a specific logical offset.
+    ///
+    /// This method blocks until the server has acknowledged the batch at the
+    /// specified offset. Use this with offsets returned from `ingest_batch()` to
+    /// explicitly control when to wait for acknowledgments.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The logical offset ID to wait for (returned from `ingest_batch()`)
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the batch at the specified offset has been acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// * `StreamClosedError` - If the stream is closed or times out while waiting
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use arrow_array::RecordBatch;
+    /// # async fn example(stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
+    /// // Ingest multiple batches and collect their offsets
+    /// let mut offsets = Vec::new();
+    /// for batch in batches {
+    ///     let offset = stream.ingest_batch(batch).await?;
+    ///     offsets.push(offset);
+    /// }
+    ///
+    /// // Wait for specific offsets
+    /// for offset in offsets {
+    ///     stream.wait_for_offset(offset).await?;
+    /// }
+    /// println!("All batches acknowledged");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()> {
+        self.wait_for_offset_internal(offset, "Waiting for acknowledgement")
             .await
-            .map_err(|_| {
-                error!("Flush timed out");
-                ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded("Flush timed out"))
-            })?
     }
 
     /// Closes the stream gracefully after flushing all pending batches.
@@ -1221,8 +1282,6 @@ impl ZerobusArrowStream {
                 "Flush failed during close: {}. Moving pending batches to failed.",
                 e
             );
-            // Fail outstanding ack futures so callers don't hang forever.
-            Self::fail_pending_acks(&self.oneshot_map, &e).await;
             // Move pending batches to failed (drain to avoid duplicates in get_unacked_batches).
             Self::move_pending_to_failed(&self.pending_batches, &self.failed_batches).await;
         }

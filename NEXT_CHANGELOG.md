@@ -31,6 +31,11 @@
 
 ### API Changes
 
+- Added Arrow IPC compression support via `ipc_compression: Option<CompressionType>` in `ArrowStreamConfigurationOptions` (supports `LZ4_FRAME` and `ZSTD`, default: `None`)
+- **[BREAKING]** Changed `ZerobusArrowStream::ingest_batch()` to return `OffsetId` directly instead of `Future<Output = OffsetId>`. Use `wait_for_offset(offset)` to explicitly wait for acknowledgment
+- Added `ZerobusArrowStream::wait_for_offset()` method to wait for acknowledgment of a specific offset
+- Added `is_closed` check at the beginning of `flush()` for both `ZerobusStream` and `ZerobusArrowStream`
+
 - Added `ingest_record_offset()` method to `ZerobusStream` for direct offset return without Future wrapping
 - Added `ingest_records_offset()` method to `ZerobusStream` for batch ingestion with direct offset return
 - Added `wait_for_offset()` method to `ZerobusStream` to wait for acknowledgment of a specific offset
