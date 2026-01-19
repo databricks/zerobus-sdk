@@ -39,6 +39,9 @@ pub enum ZerobusError {
     /// Returned when a connection or setup operation times out.
     #[error("Connection timeout: {0}")]
     ConnectionTimeout(String),
+    /// Returned when OAuth token fetching fails due to network or server errors.
+    #[error("Token fetch failed: {0}")]
+    TokenFetchError(String),
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -79,6 +82,7 @@ impl ZerobusError {
             ZerobusError::UnexpectedStreamResponseError(_) => true,
             ZerobusError::InvalidStateError(_) => false,
             ZerobusError::ConnectionTimeout(_) => true,
+            ZerobusError::TokenFetchError(_) => true,
         }
     }
 }

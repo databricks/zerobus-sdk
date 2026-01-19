@@ -82,21 +82,16 @@ impl DefaultTokenFactory {
             .form(&params)
             .send()
             .await
-            .map_err(|e| {
-                ZerobusError::InvalidUCTokenError(format!("Request failed with error: {}", e))
-            })?;
+            .map_err(Self::handle_http_error)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
+            let status_code = resp.status().as_u16();
             let error_body = resp
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(ZerobusError::InvalidUCTokenError(format!(
-                "Unexpected status: {}. Response body: {}",
-                status.as_str(),
-                error_body
-            )));
+
+            return Err(Self::classify_status_code(status_code, error_body));
         }
 
         let body: serde_json::Value = resp.json().await.map_err(|e| {
@@ -108,6 +103,49 @@ impl DefaultTokenFactory {
             .ok_or_else(|| ZerobusError::InvalidUCTokenError("access_token missing".to_string()))?
             .to_string();
         Ok(token)
+    }
+
+    /// Classifies HTTP status codes as retryable or non-retryable errors.
+    ///
+    /// # Arguments
+    ///
+    /// * `status_code` - HTTP status code (e.g., 404, 500)
+    /// * `message` - Error message or response body
+    ///
+    /// # Returns
+    ///
+    /// * `TokenFetchError` for 5xx server errors (retryable)
+    /// * `InvalidUCTokenError` for 4xx client errors (non-retryable)
+    fn classify_status_code(status_code: u16, message: String) -> ZerobusError {
+        if status_code >= 500 {
+            ZerobusError::TokenFetchError(format!(
+                "Unity catalog server error ({}): {}",
+                status_code, message
+            ))
+        } else {
+            ZerobusError::InvalidUCTokenError(format!(
+                "Client error ({}): {}",
+                status_code, message
+            ))
+        }
+    }
+
+    /// Helper to classify HTTP errors as retryable (TokenFetchError) or non-retryable.
+    ///
+    /// Retryable:
+    /// - Network errors (timeout, connection failure)
+    /// - Server errors (5xx status codes)
+    ///
+    /// Non-retryable:
+    /// - Client errors (4xx status codes - bad credentials, invalid request, etc.)
+    fn handle_http_error(error: reqwest::Error) -> ZerobusError {
+        if error.is_timeout() || error.is_connect() {
+            return ZerobusError::TokenFetchError(format!("Network error: {}", error));
+        }
+        if let Some(status) = error.status() {
+            return Self::classify_status_code(status.as_u16(), error.to_string());
+        }
+        ZerobusError::InvalidUCTokenError(format!("Request failed: {}", error))
     }
 
     /// Parses a fully qualified table name into its components.
