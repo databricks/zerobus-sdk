@@ -27,6 +27,8 @@
 
 ### Internal Changes
 
+- Added `user-agent` header to all gRPC requests for SDK version tracking
+
 - Refactored `flush()` and `wait_for_offset()` to share common waiting logic via `wait_for_offset_internal()`, reducing code duplication and ensuring consistent behavior
 
 - Improved graceful close mechanism: when server signals stream closure, SDK now continues processing acknowledgments for in-flight records while pausing new record transmission until timeout.
