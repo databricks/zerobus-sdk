@@ -483,6 +483,7 @@ impl ZerobusSdk {
             table_properties.table_name.clone(),
             self.workspace_id.clone(),
             self.unity_catalog_url.clone(),
+            headers_provider::DEFAULT_USER_AGENT.to_string(),
         );
         self.create_stream_with_headers_provider(
             table_properties,
@@ -721,6 +722,7 @@ impl ZerobusSdk {
             table_properties.table_name.clone(),
             self.workspace_id.clone(),
             self.unity_catalog_url.clone(),
+            headers_provider::DEFAULT_USER_AGENT.to_string(),
         );
         self.create_arrow_stream_with_headers_provider(
             table_properties,
