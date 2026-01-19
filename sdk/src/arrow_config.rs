@@ -4,20 +4,7 @@
 //! supported for production use. The API may change in future releases.
 
 use crate::stream_options::defaults;
-
-/// Arrow IPC compression for Flight RecordBatch payloads.
-///
-/// This controls compression applied to Arrow IPC `RecordBatch` messages inside Flight.
-/// It is distinct from gRPC-level compression.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArrowIpcCompression {
-    /// No IPC compression (default).
-    None,
-    /// LZ4 frame compression.
-    Lz4,
-    /// Zstd compression.
-    Zstd,
-}
+use arrow_ipc::CompressionType;
 
 /// Configuration options for Arrow Flight stream creation and operation.
 ///
@@ -97,13 +84,15 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Default: 30,000 (30 seconds)
     pub connection_timeout_ms: u64,
+
     /// Optional Arrow IPC compression for Flight payloads.
     ///
-    /// Note: Compression requires Arrow IPC metadata V5 (the default) and the corresponding
-    /// codec support in the Arrow IPC dependency.
+    /// Supported compression types from `arrow_ipc::CompressionType`:
+    /// - `CompressionType::LZ4_FRAME` - LZ4 frame compression
+    /// - `CompressionType::ZSTD` - Zstandard compression
     ///
     /// Default: `None`
-    pub ipc_compression: ArrowIpcCompression,
+    pub ipc_compression: Option<CompressionType>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -117,7 +106,7 @@ impl Default for ArrowStreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
-            ipc_compression: ArrowIpcCompression::None,
+            ipc_compression: None,
         }
     }
 }
