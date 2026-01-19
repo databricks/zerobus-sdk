@@ -114,11 +114,14 @@ impl DefaultTokenFactory {
     ///
     /// # Returns
     ///
-    /// * `TransientError` for 5xx server errors (retryable)
+    /// * `TokenFetchError` for 5xx server errors (retryable)
     /// * `InvalidUCTokenError` for 4xx client errors (non-retryable)
     fn classify_status_code(status_code: u16, message: String) -> ZerobusError {
         if status_code >= 500 {
-            ZerobusError::TransientError(format!("Server error ({}): {}", status_code, message))
+            ZerobusError::TokenFetchError(format!(
+                "Unity catalog server error ({}): {}",
+                status_code, message
+            ))
         } else {
             ZerobusError::InvalidUCTokenError(format!(
                 "Client error ({}): {}",
@@ -127,7 +130,7 @@ impl DefaultTokenFactory {
         }
     }
 
-    /// Helper to classify HTTP errors as retryable (TransientError) or non-retryable.
+    /// Helper to classify HTTP errors as retryable (TokenFetchError) or non-retryable.
     ///
     /// Retryable:
     /// - Network errors (timeout, connection failure)
@@ -137,7 +140,7 @@ impl DefaultTokenFactory {
     /// - Client errors (4xx status codes - bad credentials, invalid request, etc.)
     fn handle_http_error(error: reqwest::Error) -> ZerobusError {
         if error.is_timeout() || error.is_connect() {
-            return ZerobusError::TransientError(format!("Network error: {}", error));
+            return ZerobusError::TokenFetchError(format!("Network error: {}", error));
         }
         if let Some(status) = error.status() {
             return Self::classify_status_code(status.as_u16(), error.to_string());
