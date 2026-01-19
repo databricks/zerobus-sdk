@@ -2742,8 +2742,6 @@ mod failure_scenarios_tests {
             assert!(close_result.is_err(), "Expected close to fail");
 
             if let Err(e) = close_result {
-                // With immediate error propagation, we should get the actual PermissionDenied error
-                // instead of a generic timeout or closure error
                 assert!(
                     e.to_string().contains("Permission denied"),
                     "Expected error related to permission denied, got: {:?}",
