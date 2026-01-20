@@ -53,7 +53,7 @@ use proto_zerobus::{
 };
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
@@ -1068,8 +1068,11 @@ impl ZerobusStream {
                     let _ = stream_init_result_tx_inner.send(Ok(stream_id.clone()));
                 }
                 initial_stream_creation = false;
+                info!(stream_id = %stream_id, "Successfully created stream");
+            } else {
+                info!(stream_id = %stream_id, "Successfully recovered stream");
+                let _ = server_error_tx.send(None);
             }
-            info!(stream_id = %stream_id, "Successfully created stream");
 
             // 2. Reset landing zone.
             landing_zone_recovery.reset_observe();
@@ -1143,9 +1146,6 @@ impl ZerobusStream {
                     )
                     .await;
                     return Err(error);
-                } else {
-                    // Clear the error after recovery attempt starts
-                    let _ = server_error_tx.send(None);
                 }
             }
         }
@@ -1857,17 +1857,17 @@ impl ZerobusStream {
                         );
                     }
 
-                    // Race between offset updates and server errors
+                    // Race between offset updates and server errors.
                     tokio::select! {
                         result = offset_receiver.changed() => {
                             // If offset_receiver channel is closed, break the loop.
                             if result.is_err() {
                                 break;
                             }
-                            // Loop continues to check new offset value
+                            // Loop continues to check new offset value.
                         }
                         _ = error_rx.changed() => {
-                            // Server error occurred, return it immediately if stream is closed
+                            // Server error occurred, return it immediately if stream is closed.
                             if let Some(server_error) = error_rx.borrow().clone() {
                                 if self.is_closed.load(Ordering::Relaxed) {
                                     return Err(server_error);
@@ -1877,20 +1877,14 @@ impl ZerobusStream {
                     }
                 }
 
-                // Sleep with interruptibility for is_closed changes
-                tokio::select! {
-                    _ = sleep(Duration::from_millis(self.options.recovery_timeout_ms)) => {
-                        // Sleep completed normally
-                    }
-                    _ = error_rx.changed() => {
-                        // Error occurred during sleep - check if stream is closed
-                        if let Some(server_error) = error_rx.borrow().clone() {
-                            if self.is_closed.load(Ordering::Relaxed) {
-                                return Err(server_error);
-                            }
+                if error_rx.changed().await.is_ok() {
+                    // Check if there's an error and stream is closed.
+                    if let Some(server_error) = error_rx.borrow().clone() {
+                        if self.is_closed.load(Ordering::Relaxed) {
+                            return Err(server_error);
                         }
-                        // Stream still active, recovery might succeed - continue waiting
                     }
+                    // If either there is no error or stream is still active, keep waiting.
                 }
             }
         };
