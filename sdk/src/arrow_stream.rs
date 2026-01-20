@@ -27,7 +27,7 @@ use tracing::{debug, error, info, instrument, warn};
 pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
-use crate::arrow_config::ArrowStreamConfigurationOptions;
+use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;

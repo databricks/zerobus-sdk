@@ -6,7 +6,7 @@ pub mod databricks {
 /// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
 /// supported for production use. The API may change in future releases.
 #[cfg(feature = "arrow-flight")]
-pub use arrow_config::ArrowStreamConfigurationOptions;
+pub use arrow_configuration::ArrowStreamConfigurationOptions;
 #[cfg(feature = "arrow-flight")]
 pub use arrow_stream::{
     ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
@@ -21,7 +21,7 @@ pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use stream_configuration::StreamConfigurationOptions;
 
 #[cfg(feature = "arrow-flight")]
-mod arrow_config;
+mod arrow_configuration;
 #[cfg(feature = "arrow-flight")]
 mod arrow_metadata;
 #[cfg(feature = "arrow-flight")]
