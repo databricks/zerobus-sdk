@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use async_trait::async_trait;
-use databricks_zerobus_ingest_sdk::HeadersProvider;
-use databricks_zerobus_ingest_sdk::ZerobusResult;
+use databricks_zerobus_ingest_sdk::{AckCallback, HeadersProvider, ZerobusResult};
 use prost_reflect::prost_types;
 use tracing_subscriber::EnvFilter;
 
@@ -78,4 +77,41 @@ pub fn setup_tracing() {
             .try_init()
             .ok();
     });
+}
+
+/// Test callback implementation for tracking acknowledgments and errors.
+#[derive(Debug)]
+pub struct TestCallback {
+    acks: Arc<Mutex<Vec<i64>>>,
+    errors: Arc<Mutex<Vec<(i64, String)>>>,
+}
+
+impl TestCallback {
+    pub fn new() -> Self {
+        Self {
+            acks: Arc::new(Mutex::new(Vec::new())),
+            errors: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn get_acks(&self) -> Vec<i64> {
+        self.acks.lock().unwrap().clone()
+    }
+
+    pub fn get_errors(&self) -> Vec<(i64, String)> {
+        self.errors.lock().unwrap().clone()
+    }
+}
+
+impl AckCallback for TestCallback {
+    fn on_ack(&self, offset_id: i64) {
+        self.acks.lock().unwrap().push(offset_id);
+    }
+
+    fn on_error(&self, offset_id: i64, error_message: &str) {
+        self.errors
+            .lock()
+            .unwrap()
+            .push((offset_id, error_message.to_string()));
+    }
 }

@@ -11,6 +11,7 @@ pub use arrow_configuration::ArrowStreamConfigurationOptions;
 pub use arrow_stream::{
     ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
 };
+pub use callbacks::AckCallback;
 use databricks::zerobus as proto_zerobus;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
@@ -26,6 +27,7 @@ mod arrow_configuration;
 mod arrow_metadata;
 #[cfg(feature = "arrow-flight")]
 mod arrow_stream;
+mod callbacks;
 mod default_token_factory;
 mod errors;
 mod headers_provider;
@@ -1076,6 +1078,7 @@ impl ZerobusStream {
                             oneshot_map.clone(),
                             failed_records.clone(),
                             &e,
+                            &options.ack_callback,
                         )
                         .await;
                     }
@@ -1164,6 +1167,7 @@ impl ZerobusStream {
                         oneshot_map.clone(),
                         failed_records.clone(),
                         &error,
+                        &options.ack_callback,
                     )
                     .await;
                     return Err(error);
@@ -1693,6 +1697,10 @@ impl ZerobusStream {
                                     if let Some(sender) = map.remove(&logical_offset) {
                                         let _ = sender.send(Ok(logical_offset));
                                     }
+
+                                    if let Some(ref callback) = options.ack_callback {
+                                        callback.on_ack(logical_offset);
+                                    }
                                 }
                             }
                             drop(map);
@@ -1829,14 +1837,19 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         error: &ZerobusError,
+        ack_callback: &Option<Arc<dyn AckCallback>>,
     ) {
         let mut failed_payloads = Vec::with_capacity(landing_zone.len());
         let records = landing_zone.remove_all();
         let mut map = oneshot_map.lock().await;
+        let error_message = error.to_string();
         for record in records {
             failed_payloads.push(record.payload);
             if let Some(sender) = map.remove(&record.offset_id) {
                 let _ = sender.send(Err(error.clone()));
+            }
+            if let Some(ref callback) = ack_callback {
+                callback.on_error(record.offset_id, &error_message);
             }
         }
         *failed_records.write().await = failed_payloads;

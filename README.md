@@ -51,6 +51,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
+- **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
 
 ## Installation
 
@@ -593,6 +594,84 @@ for offset in offsets {
 stream.flush().await?;
 ```
 
+#### Using Acknowledgment Callbacks
+
+For scenarios where you need to track acknowledgments without explicitly waiting (e.g., for metrics or logging), you can use callbacks:
+
+```rust
+use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
+use std::sync::Arc;
+
+// Define a callback that implements the AckCallback trait
+struct MyCallback;
+
+impl AckCallback for MyCallback {
+    fn on_ack(&self, offset_id: OffsetId) {
+        // Called when a record is acknowledged
+        println!("✓ Acknowledged offset: {}", offset_id);
+    }
+
+    fn on_error(&self, offset_id: OffsetId, error_message: &str) {
+        // Called when a record encounters an error
+        eprintln!("✗ Error for offset {}: {}", offset_id, error_message);
+    }
+}
+
+// Configure stream with callback
+let options = StreamConfigurationOptions {
+    max_inflight_requests: 10000,
+    ack_callback: Some(Arc::new(MyCallback)),
+    ..Default::default()
+};
+
+let mut stream = sdk.create_stream(
+    table_properties,
+    client_id,
+    client_secret,
+    Some(options),
+).await?;
+
+for i in 0..1000 {
+    let record = YourMessage { id: Some(i), /* ... */ };
+    stream.ingest_record_offset(record.encode_to_vec()).await?;
+    // Callback fires when this record is acknowledged
+}
+
+stream.flush().await?;
+```
+
+**Important:** Callbacks run synchronously in the receiver task. Keep them extremely lightweight (simple logging, metrics increment) to avoid blocking acknowledgment processing. For heavy work like database writes or network calls, send data to a channel for processing in a separate task:
+
+```rust
+use tokio::sync::mpsc;
+
+struct ChannelCallback {
+    tx: mpsc::UnboundedSender<OffsetId>,
+}
+
+impl AckCallback for ChannelCallback {
+    fn on_ack(&self, offset_id: OffsetId) {
+        // Lightweight: just send to channel
+        let _ = self.tx.send(offset_id);
+    }
+
+    fn on_error(&self, offset_id: OffsetId, error_message: &str) {
+        eprintln!("Error: {}", error_message);
+    }
+}
+
+let (tx, mut rx) = mpsc::unbounded_channel();
+let callback = Arc::new(ChannelCallback { tx });
+
+// Heavy processing in separate task
+tokio::spawn(async move {
+    while let Some(offset) = rx.recv().await {
+        // Heavy work here (database writes, API calls, etc.)
+        write_to_database(offset).await;
+    }
+});
+```
+
 ### 7. Close the Stream
 
 Always close streams to ensure data is flushed:
@@ -638,6 +717,7 @@ match stream.close().await {
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait during graceful close (`None` = full server duration, `Some(0)` = immediate, `Some(x)` = min(x, server_duration)) |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | Optional callback for acknowledgment notifications |
 
 **Example:**
 
@@ -894,10 +974,47 @@ pub struct StreamConfigurationOptions {
     pub flush_timeout_ms: u64,
     pub record_type: RecordType,
     pub stream_paused_max_wait_time_ms: Option<u64>,
+    pub ack_callback: Option<Arc<dyn AckCallback>>,
 }
 ```
 
 See [Configuration Options](#configuration-options) for details.
+
+### `AckCallback`
+
+Trait for receiving acknowledgment notifications.
+
+**Methods:**
+```rust
+pub trait AckCallback: Send + Sync {
+    fn on_ack(&self, offset_id: OffsetId);
+    fn on_error(&self, offset_id: OffsetId, error_message: &str);
+}
+```
+
+- `on_ack()` - Called when a record/batch is successfully acknowledged
+- `on_error()` - Called when a record/batch encounters an error
+
+**Important:** Callbacks run synchronously in the receiver task. Keep implementations lightweight to avoid blocking acknowledgment processing.
+
+### `HeadersProvider`
+
+Trait for custom authentication header providers.
+
+**Methods:**
+```rust
+#[async_trait]
+pub trait HeadersProvider: Send + Sync {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>>;
+}
+```
+
+Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management. Use this for:
+- Custom token caching strategies
+- Alternative authentication mechanisms
+- Integration with centralized credential services
+
+See [Custom Authentication](#custom-authentication) section for usage examples.
 
 ### `ZerobusError`
 
