@@ -273,6 +273,17 @@ type OneshotMap = HashMap<OffsetId, tokio::sync::oneshot::Sender<ZerobusResult<O
 /// Landing zone for ingest records.
 type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 
+/// Messages sent to the callback handler task.
+#[derive(Debug, Clone)]
+enum CallbackMessage {
+    /// Acknowledgment callback with logical offset ID.
+    Ack(OffsetId),
+    /// Error callback with logical offset ID and error message.
+    Error(OffsetId, String),
+    /// Shutdown signal to terminate the callback handler task.
+    Shutdown,
+}
+
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
 /// A `ZerobusStream` manages a bidirectional gRPC stream for ingesting records into
@@ -340,6 +351,10 @@ pub struct ZerobusStream {
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
+    /// Callback handler task that executes callbacks in a separate thread.
+    callback_handler_task: tokio::task::JoinHandle<()>,
+    /// Sender for callback messages to the callback handler task.
+    callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -957,6 +972,15 @@ impl ZerobusStream {
 
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
+        // Create callback channel and spawn callback handler task
+        let (callback_tx, callback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let callback_handler_task =
+            Self::spawn_callback_handler_task(callback_rx, options.ack_callback.clone());
+
+        // Create callback channel and spawn callback handler task
+        let (callback_tx, callback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let callback_handler_task =
+            Self::spawn_callback_handler_task(callback_rx, options.ack_callback.clone());
 
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
@@ -971,6 +995,7 @@ impl ZerobusStream {
             stream_init_result_tx,
             server_error_tx,
             cancellation_token.clone(),
+            callback_tx.clone(),
         ));
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
@@ -995,6 +1020,8 @@ impl ZerobusStream {
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
             server_error_rx,
             cancellation_token,
+            callback_handler_task,
+            callback_tx,
         };
 
         Ok(stream)
@@ -1017,6 +1044,7 @@ impl ZerobusStream {
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
+        callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -1078,7 +1106,7 @@ impl ZerobusStream {
                             oneshot_map.clone(),
                             failed_records.clone(),
                             &e,
-                            &options.ack_callback,
+                            &callback_tx,
                         )
                         .await;
                     }
@@ -1110,6 +1138,7 @@ impl ZerobusStream {
                 options.clone(),
                 server_error_tx.clone(),
                 cancellation_token.clone(),
+                callback_tx.clone(),
             );
             let mut send_task = Self::spawn_sender_task(
                 tx,
@@ -1167,7 +1196,7 @@ impl ZerobusStream {
                         oneshot_map.clone(),
                         failed_records.clone(),
                         &error,
-                        &options.ack_callback,
+                        &callback_tx,
                     )
                     .await;
                     return Err(error);
@@ -1612,6 +1641,41 @@ impl ZerobusStream {
         Ok(offset_id)
     }
 
+    /// Spawns a task that handles callback execution in a separate thread.
+    /// This task receives callback messages via a channel and executes them
+    /// without blocking the receiver task.
+    #[instrument(level = "debug", skip_all)]
+    fn spawn_callback_handler_task(
+        mut callback_rx: tokio::sync::mpsc::UnboundedReceiver<CallbackMessage>,
+        ack_callback: Option<Arc<dyn AckCallback>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let span = span!(Level::DEBUG, "callback_handler");
+            let _guard = span.enter();
+
+            while let Some(message) = callback_rx.recv().await {
+                match message {
+                    CallbackMessage::Ack(logical_offset) => {
+                        if let Some(ref callback) = ack_callback {
+                            callback.on_ack(logical_offset);
+                        }
+                    }
+                    CallbackMessage::Error(logical_offset, error_message) => {
+                        if let Some(ref callback) = ack_callback {
+                            callback.on_error(logical_offset, &error_message);
+                        }
+                    }
+                    CallbackMessage::Shutdown => {
+                        debug!("Callback handler task shutting down");
+                        break;
+                    }
+                }
+            }
+
+            debug!("Callback handler task finished");
+        })
+    }
+
     /// Spawns a task that continuously reads from `response_grpc_stream`
     /// and propagates the received durability acknowledgements to the
     /// corresponding pending acks promises.
@@ -1626,6 +1690,7 @@ impl ZerobusStream {
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
+        callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -1698,9 +1763,7 @@ impl ZerobusStream {
                                         let _ = sender.send(Ok(logical_offset));
                                     }
 
-                                    if let Some(ref callback) = options.ack_callback {
-                                        callback.on_ack(logical_offset);
-                                    }
+                                    let _ = callback_tx.send(CallbackMessage::Ack(logical_offset));
                                 }
                             }
                             drop(map);
@@ -1837,7 +1900,7 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         error: &ZerobusError,
-        ack_callback: &Option<Arc<dyn AckCallback>>,
+        callback_tx: &tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
     ) {
         let mut failed_payloads = Vec::with_capacity(landing_zone.len());
         let records = landing_zone.remove_all();
@@ -1848,9 +1911,10 @@ impl ZerobusStream {
             if let Some(sender) = map.remove(&record.offset_id) {
                 let _ = sender.send(Err(error.clone()));
             }
-            if let Some(ref callback) = ack_callback {
-                callback.on_error(record.offset_id, &error_message);
-            }
+            let _ = callback_tx.send(CallbackMessage::Error(
+                record.offset_id,
+                error_message.clone(),
+            ));
         }
         *failed_records.write().await = failed_payloads;
     }
