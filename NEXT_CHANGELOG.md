@@ -29,8 +29,8 @@
 
 ### Internal Changes
 
+- Refactored `wait_for_offset_internal` to remove unnecessary double loop
 - Optimized gRPC channel reuse: `ZerobusSdk` now reuses a single gRPC channel across multiple stream creations instead of creating a new channel for each stream, improving connection efficiency and reducing resource overhead
-
 - Enhanced background tasks with `is_closed` checks and proper error broadcasting to the shared error channel, ensuring timely shutdown and accurate error reporting
 
 - Added `user-agent` header to all gRPC requests for SDK version tracking

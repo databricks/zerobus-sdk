@@ -1598,6 +1598,7 @@ impl ZerobusStream {
     /// and propagates the received durability acknowledgements to the
     /// corresponding pending acks promises.
     #[instrument(level = "debug", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     fn spawn_receiver_task(
         mut response_grpc_stream: tonic::Streaming<EphemeralStreamResponse>,
         last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
@@ -1836,73 +1837,72 @@ impl ZerobusStream {
         operation_name: &str,
     ) -> ZerobusResult<()> {
         let wait_operation = async {
-            loop {
-                if self.is_closed.load(Ordering::Relaxed) {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!("Stream closed during {}", operation_name.to_lowercase()),
-                    )));
-                }
-
-                let mut offset_receiver = self.logical_last_received_offset_id_tx.subscribe();
-                let mut error_rx = self.server_error_rx.clone();
-
-                loop {
-                    let offset = *offset_receiver.borrow_and_update();
-
-                    let stream_id = match self.stream_id.as_deref() {
-                        Some(stream_id) => stream_id,
-                        None => {
-                            error!("Stream ID is None during {}", operation_name.to_lowercase());
-                            "None"
-                        }
-                    };
-                    if let Some(offset) = offset {
-                        if offset >= offset_to_wait {
-                            info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
-                            return Ok(());
-                        } else {
-                            info!(
-                                stream_id = %stream_id,
-                                "Stream is caught up to offset {}. Waiting for offset {}.",
-                                offset, offset_to_wait
-                            );
-                        }
-                    } else {
-                        info!(
-                            stream_id = %stream_id,
-                            "Stream is not caught up to any offset yet. Waiting for the first offset."
-                        );
-                    }
-
-                    // Race between offset updates and server errors.
-                    tokio::select! {
-                        result = offset_receiver.changed() => {
-                            // If offset_receiver channel is closed, break the loop.
-                            if result.is_err() {
-                                break;
-                            }
-                            // Loop continues to check new offset value.
-                        }
-                        _ = error_rx.changed() => {
-                            // Server error occurred, return it immediately if stream is closed.
-                            if let Some(server_error) = error_rx.borrow().clone() {
-                                if self.is_closed.load(Ordering::Relaxed) {
-                                    return Err(server_error);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(server_error) = error_rx.borrow().clone() {
-                    if self.is_closed.load(Ordering::Relaxed) {
-                        return Err(server_error);
-                    }
-                }
+            if self.is_closed.load(Ordering::Relaxed) {
                 return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                     format!("Stream closed during {}", operation_name.to_lowercase()),
                 )));
             }
+
+            let mut offset_receiver = self.logical_last_received_offset_id_tx.subscribe();
+            let mut error_rx = self.server_error_rx.clone();
+
+            loop {
+                let offset = *offset_receiver.borrow_and_update();
+
+                let stream_id = match self.stream_id.as_deref() {
+                    Some(stream_id) => stream_id,
+                    None => {
+                        error!("Stream ID is None during {}", operation_name.to_lowercase());
+                        "None"
+                    }
+                };
+                if let Some(offset) = offset {
+                    if offset >= offset_to_wait {
+                        info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
+                        return Ok(());
+                    } else {
+                        info!(
+                            stream_id = %stream_id,
+                            "Stream is caught up to offset {}. Waiting for offset {}.",
+                            offset, offset_to_wait
+                        );
+                    }
+                } else {
+                    info!(
+                        stream_id = %stream_id,
+                        "Stream is not caught up to any offset yet. Waiting for the first offset."
+                    );
+                }
+
+                // Race between offset updates and server errors.
+                tokio::select! {
+                    result = offset_receiver.changed() => {
+                        // If offset_receiver channel is closed, break the loop.
+                        if result.is_err() {
+                            break;
+                        }
+                        // Loop continues to check new offset value.
+                    }
+                    _ = error_rx.changed() => {
+                        // Server error occurred, return it immediately if stream is closed.
+                        if let Some(server_error) = error_rx.borrow().clone() {
+                            if self.is_closed.load(Ordering::Relaxed) {
+                                return Err(server_error);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(server_error) = error_rx.borrow().clone() {
+                if self.is_closed.load(Ordering::Relaxed) {
+                    return Err(server_error);
+                }
+            }
+
+            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                format!("Stream closed during {}", operation_name.to_lowercase()),
+            )))
         };
 
         match tokio::time::timeout(
