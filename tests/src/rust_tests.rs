@@ -2743,9 +2743,8 @@ mod failure_scenarios_tests {
 
             if let Err(e) = close_result {
                 assert!(
-                    e.to_string().contains("Flush timed out")
-                        || e.to_string().contains("Stream closed"),
-                    "Expected error related to flush timeout or stream closure, got: {:?}",
+                    e.to_string().contains("Permission denied"),
+                    "Expected error related to permission denied, got: {:?}",
                     e
                 );
             }
@@ -3899,6 +3898,88 @@ mod api_offset_tests {
 
         assert_eq!(mock_server.get_write_count().await, 3);
         assert_eq!(mock_server.get_max_offset_sent().await, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_error_during_wait_for_offset() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_error_during_wait_for_offset");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_error_wait".to_string(),
+                        delay_ms: 0,
+                    },
+                    // Send an error instead of an ack to simulate server error during wait
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Server error during processing"),
+                        delay_ms: 100,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let offset = stream.ingest_record_offset(b"test record".to_vec()).await?;
+
+        assert_eq!(offset, 0);
+
+        let start = std::time::Instant::now();
+
+        let wait_result = stream.wait_for_offset(offset).await;
+
+        let elapsed = start.elapsed();
+
+        assert!(
+            wait_result.is_err(),
+            "Expected wait_for_offset to fail with server error"
+        );
+
+        if let Err(e) = wait_result {
+            let error_msg = e.to_string();
+            assert!(
+                error_msg.contains("Server error during processing")
+                    || error_msg.contains("Stream closed"),
+                "Expected server error or stream closed, got: {}",
+                error_msg
+            );
+        }
+
+        // Verify error was propagated quickly (should be ~100ms for the error delay,
+        // not waiting for the full flush_timeout_ms which is much longer)
+        assert!(
+            elapsed.as_millis() < 1000,
+            "Error should be propagated immediately, but took {}ms",
+            elapsed.as_millis()
+        );
 
         Ok(())
     }

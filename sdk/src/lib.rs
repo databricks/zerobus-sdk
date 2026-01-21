@@ -53,7 +53,7 @@ use proto_zerobus::{
 };
 use smallvec::{smallvec, SmallVec};
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
@@ -331,6 +331,8 @@ pub struct ZerobusStream {
     is_closed: Arc<AtomicBool>,
     /// Sync mutex to ensure that offset generation and record ingestion happen atomically.
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Watch channel for last error received from the server.
+    server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -937,6 +939,9 @@ impl ZerobusStream {
         let is_closed = Arc::new(AtomicBool::new(false));
         let failed_records = Arc::new(RwLock::new(Vec::new()));
         let logical_offset_id_generator = OffsetIdGenerator::default();
+
+        let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
+
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
@@ -948,6 +953,7 @@ impl ZerobusStream {
             Arc::clone(&is_closed),
             Arc::clone(&failed_records),
             stream_init_result_tx,
+            server_error_tx,
         ));
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
@@ -970,6 +976,7 @@ impl ZerobusStream {
             failed_records,
             is_closed,
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            server_error_rx,
         };
 
         Ok(stream)
@@ -990,6 +997,7 @@ impl ZerobusStream {
         is_closed: Arc<AtomicBool>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
+        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -1060,8 +1068,11 @@ impl ZerobusStream {
                     let _ = stream_init_result_tx_inner.send(Ok(stream_id.clone()));
                 }
                 initial_stream_creation = false;
+                info!(stream_id = %stream_id, "Successfully created stream");
+            } else {
+                info!(stream_id = %stream_id, "Successfully recovered stream");
+                let _ = server_error_tx.send(None);
             }
-            info!(stream_id = %stream_id, "Successfully created stream");
 
             // 2. Reset landing zone.
             landing_zone_recovery.reset_observe();
@@ -1075,9 +1086,14 @@ impl ZerobusStream {
                 oneshot_map.clone(),
                 Arc::clone(&is_paused),
                 options.clone(),
+                server_error_tx.clone(),
             );
-            let mut send_task =
-                Self::spawn_sender_task(tx, landing_zone_sender, Arc::clone(&is_paused));
+            let mut send_task = Self::spawn_sender_task(
+                tx,
+                landing_zone_sender,
+                Arc::clone(&is_paused),
+                server_error_tx.clone(),
+            );
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {
@@ -1119,6 +1135,7 @@ impl ZerobusStream {
                     }
                     _ => error,
                 };
+                let _ = server_error_tx.send(Some(error.clone()));
                 if !error.is_retryable() || !options.recovery {
                     is_closed.store(true, Ordering::Relaxed);
                     Self::fail_all_pending_records(
@@ -1581,6 +1598,7 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
+        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -1630,11 +1648,12 @@ impl ZerobusStream {
                                 Some(offset) => offset,
                                 None => {
                                     error!("Missing ack offset in server response");
-                                    return Err(ZerobusError::StreamClosedError(
-                                        tonic::Status::internal(
+                                    let error =
+                                        ZerobusError::StreamClosedError(tonic::Status::internal(
                                             "Missing ack offset in server response",
-                                        ),
-                                    ));
+                                        ));
+                                    let _ = server_error_tx.send(Some(error.clone()));
+                                    return Err(error);
                                 }
                             };
                             let mut last_logical_acked_offset = -2;
@@ -1696,20 +1715,26 @@ impl ZerobusStream {
                         }
                         unexpected_message => {
                             error!("Unexpected response from server {unexpected_message:?}");
-                            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            let error = ZerobusError::StreamClosedError(tonic::Status::internal(
                                 "Unexpected response from server",
-                            )));
+                            ));
+                            let _ = server_error_tx.send(Some(error.clone()));
+                            return Err(error);
                         }
                     },
                     Ok(Ok(None)) => {
                         info!("Server closed the stream without errors.");
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::ok(
+                        let error = ZerobusError::StreamClosedError(tonic::Status::ok(
                             "Stream closed by server without errors.",
-                        )));
+                        ));
+                        let _ = server_error_tx.send(Some(error.clone()));
+                        return Err(error);
                     }
                     Ok(Err(status)) => {
                         error!("Unexpected response from server {status:?}");
-                        return Err(ZerobusError::StreamClosedError(status));
+                        let error = ZerobusError::StreamClosedError(status);
+                        let _ = server_error_tx.send(Some(error.clone()));
+                        return Err(error);
                     }
                     Err(_timeout) => {
                         // No message received for server_lack_of_ack_timeout_ms.
@@ -1718,9 +1743,11 @@ impl ZerobusStream {
                                 "Server ack timeout: no response for {}ms",
                                 options.server_lack_of_ack_timeout_ms
                             );
-                            return Err(ZerobusError::StreamClosedError(
+                            let error = ZerobusError::StreamClosedError(
                                 tonic::Status::deadline_exceeded("Server ack timeout"),
-                            ));
+                            );
+                            let _ = server_error_tx.send(Some(error.clone()));
+                            return Err(error);
                         }
                     }
                 }
@@ -1734,6 +1761,7 @@ impl ZerobusStream {
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         landing_zone: RecordLandingZone,
         is_paused: Arc<AtomicBool>,
+        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
@@ -1754,9 +1782,11 @@ impl ZerobusStream {
 
                 if let Err(err) = send_result {
                     error!("Failed to send record: {}", err);
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    let error = ZerobusError::StreamClosedError(tonic::Status::internal(
                         "Failed to send record",
-                    )));
+                    ));
+                    let _ = server_error_tx.send(Some(error.clone()));
+                    return Err(error);
                 }
             }
         })
@@ -1797,6 +1827,8 @@ impl ZerobusStream {
                 }
 
                 let mut offset_receiver = self.logical_last_received_offset_id_tx.subscribe();
+                let mut error_rx = self.server_error_rx.clone();
+
                 loop {
                     let offset = *offset_receiver.borrow_and_update();
 
@@ -1824,14 +1856,36 @@ impl ZerobusStream {
                             "Stream is not caught up to any offset yet. Waiting for the first offset."
                         );
                     }
-                    // If offset_receiver channel is closed, break the loop.
-                    if offset_receiver.changed().await.is_err() {
-                        break;
+
+                    // Race between offset updates and server errors.
+                    tokio::select! {
+                        result = offset_receiver.changed() => {
+                            // If offset_receiver channel is closed, break the loop.
+                            if result.is_err() {
+                                break;
+                            }
+                            // Loop continues to check new offset value.
+                        }
+                        _ = error_rx.changed() => {
+                            // Server error occurred, return it immediately if stream is closed.
+                            if let Some(server_error) = error_rx.borrow().clone() {
+                                if self.is_closed.load(Ordering::Relaxed) {
+                                    return Err(server_error);
+                                }
+                            }
+                        }
                     }
                 }
 
-                sleep(Duration::from_millis(self.options.recovery_timeout_ms)).await;
-                // TODO Add a watch channel to alert on is_closed change, this causes unnecessary wakeups.
+                if error_rx.changed().await.is_ok() {
+                    // Check if there's an error and stream is closed.
+                    if let Some(server_error) = error_rx.borrow().clone() {
+                        if self.is_closed.load(Ordering::Relaxed) {
+                            return Err(server_error);
+                        }
+                    }
+                    // If either there is no error or stream is still active, keep waiting.
+                }
             }
         };
 
