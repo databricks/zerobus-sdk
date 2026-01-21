@@ -58,7 +58,7 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, instrument, span, warn, Level};
 
 /// The type of the stream connection created with the server.
@@ -376,6 +376,7 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub use_tls: bool,
     pub unity_catalog_url: String,
+    shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     workspace_id: String,
 }
 
@@ -426,6 +427,7 @@ impl ZerobusSdk {
             use_tls: true,
             unity_catalog_url,
             workspace_id,
+            shared_channel: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -574,17 +576,7 @@ impl ZerobusSdk {
             }
         }
 
-        // TODO: For now we are opening a new channel for each stream.
-        // In the future we should consider reusing the channel.
-        let channel = if self.use_tls {
-            self.create_secure_channel_zerobus_client().await?
-        } else {
-            let endpoint = Channel::from_shared(self.zerobus_endpoint.clone())
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
-            ZerobusClient::new(endpoint.connect_lazy())
-                .max_decoding_message_size(usize::MAX)
-                .max_encoding_message_size(usize::MAX)
-        };
+        let channel = self.get_or_create_channel_zerobus_client().await?;
         let stream = ZerobusStream::new_stream(
             channel,
             table_properties,
@@ -898,22 +890,35 @@ impl ZerobusSdk {
         Ok(new_stream)
     }
 
-    async fn create_secure_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        // Use native OS certificate store (works on Windows, macOS, and Linux)
-        let tls_config = ClientTlsConfig::new().with_native_roots();
+    /// Gets or creates the shared Channel for all streams.
+    /// The first call creates the Channel, subsequent calls clone it.
+    /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
+    async fn get_or_create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+        let mut guard = self.shared_channel.lock().await;
 
-        let channel = Channel::from_shared(self.zerobus_endpoint.clone())
-            .map_err(|_| ZerobusError::InvalidZerobusEndpointError(self.zerobus_endpoint.clone()))?
-            .tls_config(tls_config)
-            .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
-            .connect_lazy();
+        if guard.is_none() {
+            // Create the channel for the first time.
+            let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-        // Set unlimited message sizes (equivalent to -1 in Python gRPC)
-        let client = ZerobusClient::new(channel)
-            .max_decoding_message_size(usize::MAX) // Max receive message length
-            .max_encoding_message_size(usize::MAX); // Max send message length
+            let channel = if self.use_tls {
+                let tls_config = ClientTlsConfig::new().with_native_roots();
+                endpoint
+                    .tls_config(tls_config)
+                    .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
+                    .connect_lazy()
+            } else {
+                endpoint.connect_lazy()
+            };
 
-        Ok(client)
+            let client = ZerobusClient::new(channel)
+                .max_decoding_message_size(usize::MAX)
+                .max_encoding_message_size(usize::MAX);
+
+            *guard = Some(client);
+        }
+
+        Ok(guard.as_ref().unwrap().clone())
     }
 }
 
@@ -1085,6 +1090,7 @@ impl ZerobusStream {
                 landing_zone_receiver,
                 oneshot_map.clone(),
                 Arc::clone(&is_paused),
+                Arc::clone(&is_closed),
                 options.clone(),
                 server_error_tx.clone(),
             );
@@ -1092,6 +1098,7 @@ impl ZerobusStream {
                 tx,
                 landing_zone_sender,
                 Arc::clone(&is_paused),
+                Arc::clone(&is_closed),
                 server_error_tx.clone(),
             );
 
@@ -1597,6 +1604,7 @@ impl ZerobusStream {
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         is_paused: Arc<AtomicBool>,
+        is_closed: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
@@ -1607,6 +1615,10 @@ impl ZerobusStream {
             let mut pause_deadline: Option<tokio::time::Instant> = None;
 
             loop {
+                // Exit gracefully if stream is being dropped.
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
                 if let Some(deadline) = pause_deadline {
                     let now = tokio::time::Instant::now();
                     let all_acked = landing_zone.is_observed_empty();
@@ -1761,11 +1773,16 @@ impl ZerobusStream {
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         landing_zone: RecordLandingZone,
         is_paused: Arc<AtomicBool>,
+        is_closed: Arc<AtomicBool>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
+                // Exit gracefully if stream is being dropped.
+                if is_closed.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
                 let item = if is_paused.load(Ordering::Relaxed) {
                     std::future::pending().await // Wait until supervisor task aborts this task.
                 } else {
@@ -1877,15 +1894,14 @@ impl ZerobusStream {
                     }
                 }
 
-                if error_rx.changed().await.is_ok() {
-                    // Check if there's an error and stream is closed.
-                    if let Some(server_error) = error_rx.borrow().clone() {
-                        if self.is_closed.load(Ordering::Relaxed) {
-                            return Err(server_error);
-                        }
+                if let Some(server_error) = error_rx.borrow().clone() {
+                    if self.is_closed.load(Ordering::Relaxed) {
+                        return Err(server_error);
                     }
-                    // If either there is no error or stream is still active, keep waiting.
                 }
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    format!("Stream closed during {}", operation_name.to_lowercase()),
+                )));
             }
         };
 
@@ -2120,6 +2136,14 @@ impl ZerobusStream {
             "Cannot get unacked records from an active stream. Stream must be closed first."
                 .to_string(),
         ))
+    }
+}
+
+impl Drop for ZerobusStream {
+    fn drop(&mut self) {
+        // Mark the stream as closed to signal the supervisor task to exit.
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.supervisor_task.abort();
     }
 }
 
