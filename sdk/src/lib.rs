@@ -48,6 +48,7 @@ pub use stream_configuration::StreamConfigurationOptions;
 
 // Builder API
 pub mod builder;
+#[allow(deprecated)]
 pub use builder::record_type_markers::{AcceptsRecord, Dynamic, Json, Proto};
 pub use builder::ZerobusSdkBuilder;
 
@@ -178,6 +179,7 @@ type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 /// # Ok(())
 /// # }
 /// ```
+#[allow(deprecated)] // Dynamic is deprecated but kept as default for backward compatibility
 pub struct ZerobusStream<R = Dynamic> {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
@@ -404,6 +406,11 @@ impl ZerobusSdk {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `stream_builder()` instead for type-safe stream creation with builder pattern"
+    )]
+    #[allow(deprecated)] // Internally uses create_stream_with_headers_provider
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream(
         &self,
@@ -478,6 +485,10 @@ impl ZerobusSdk {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `stream_builder()` instead for type-safe stream creation with builder pattern"
+    )]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream_with_headers_provider(
         &self,
@@ -565,6 +576,11 @@ impl ZerobusSdk {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use stream_builder() to create a new stream instead"
+    )]
+    #[allow(deprecated)]
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;

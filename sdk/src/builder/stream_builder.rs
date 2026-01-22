@@ -391,6 +391,7 @@ impl<'sdk> StreamBuilder<'sdk, ReadyJson> {
 // ============================================================================
 
 impl<'sdk, Stage> StreamBuilder<'sdk, Stage> {
+    #[allow(deprecated)] // Uses create_stream_with_headers_provider internally
     async fn build_grpc_stream(self, record_type: RecordType) -> ZerobusResult<ZerobusStream> {
         let descriptor_proto = match &self.schema {
             Some(SchemaConfig::Proto(desc)) => Some((**desc).clone()),
