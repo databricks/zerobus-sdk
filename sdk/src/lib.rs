@@ -48,7 +48,7 @@ pub use stream_configuration::StreamConfigurationOptions;
 
 // Builder API
 pub mod builder;
-pub use builder::record_type_markers::{Dynamic, Json, Proto};
+pub use builder::record_type_markers::{AcceptsRecord, Dynamic, Json, Proto};
 pub use builder::ZerobusSdkBuilder;
 
 #[cfg(feature = "arrow-flight")]
@@ -900,7 +900,7 @@ impl ZerobusSdk {
 
 }
 
-impl ZerobusStream {
+impl<R: 'static> ZerobusStream<R> {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
     async fn new_stream(
@@ -1339,10 +1339,14 @@ impl ZerobusStream {
         since = "0.4.0",
         note = "Use `ingest_record_offset()` instead which returns the offset directly after queuing"
     )]
-    pub async fn ingest_record(
+    pub async fn ingest_record<T>(
         &self,
-        payload: impl Into<EncodedRecord>,
-    ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
+        payload: T,
+    ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>>
+    where
+        R: AcceptsRecord<T>,
+        T: Into<EncodedRecord>,
+    {
         let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
@@ -1388,10 +1392,14 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn ingest_record_offset(
+    pub async fn ingest_record_offset<T>(
         &self,
-        payload: impl Into<EncodedRecord>,
-    ) -> ZerobusResult<OffsetId> {
+        payload: T,
+    ) -> ZerobusResult<OffsetId>
+    where
+        R: AcceptsRecord<T>,
+        T: Into<EncodedRecord>,
+    {
         let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
@@ -1455,6 +1463,7 @@ impl ZerobusStream {
         payload: I,
     ) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
     where
+        R: AcceptsRecord<T>,
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
     {
@@ -1518,6 +1527,7 @@ impl ZerobusStream {
     /// ```
     pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
     where
+        R: AcceptsRecord<T>,
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
     {
