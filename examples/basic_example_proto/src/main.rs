@@ -4,7 +4,7 @@ use std::fs;
 use prost::Message;
 use prost_reflect::prost_types;
 
-use databricks_zerobus_ingest_sdk::{StreamConfigurationOptions, TableProperties, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
 pub mod orders {
     include!("../output/orders.rs");
 }
@@ -26,32 +26,22 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
-#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders"); //<your_descriptor_file>, <your_proto_file>, <your_proto_message_name>
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        descriptor_proto: Some(descriptor_proto),
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        ..Default::default()
-    };
-    let sdk_handle = ZerobusSdk::new(
-        SERVER_ENDPOINT.to_string(),
-        DATABRICKS_WORKSPACE_URL.to_string(),
-    )?;
 
-    let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
-        .await
-        .expect("Failed to create a stream.");
+    let sdk = ZerobusSdk::builder()
+        .endpoint(SERVER_ENDPOINT)
+        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .build()?;
+
+    let mut stream = sdk
+        .stream_builder(TABLE_NAME)
+        .client_credentials(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .max_inflight_requests(100)
+        .proto(descriptor_proto)
+        .build()
+        .await?;
 
     // Example 1: ingest_record_offset returns the offset immediately.
     let offset_id = stream

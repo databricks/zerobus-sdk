@@ -1,8 +1,6 @@
 use std::error::Error;
 
-use databricks_zerobus_ingest_sdk::{
-    databricks::zerobus::RecordType, StreamConfigurationOptions, TableProperties, ZerobusSdk,
-};
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
 
 // Change constants to match your data.
 const TABLE_NAME: &str = "<your_table_name>";
@@ -20,32 +18,19 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 // const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
-#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        // descriptor_proto is not needed for JSON ingestion
-        descriptor_proto: None,
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        record_type: RecordType::Json,
-        ..Default::default()
-    };
-    let sdk_handle = ZerobusSdk::new(
-        SERVER_ENDPOINT.to_string(),
-        DATABRICKS_WORKSPACE_URL.to_string(),
-    )?;
+    let sdk = ZerobusSdk::builder()
+        .endpoint(SERVER_ENDPOINT)
+        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .build()?;
 
-    let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
-        .await
-        .expect("Failed to create a stream.");
+    let mut stream = sdk
+        .stream_builder(TABLE_NAME)
+        .client_credentials(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .max_inflight_requests(100)
+        .json()
+        .build()
+        .await?;
 
     // Create a batch of JSON records
     let now = chrono::Utc::now().timestamp();

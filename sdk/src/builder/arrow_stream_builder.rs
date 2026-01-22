@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arrow_ipc::CompressionType;
 use arrow_schema::Schema as ArrowSchema;
 
-use crate::arrow_config::ArrowStreamConfigurationOptions;
+use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::arrow_stream::ArrowTableProperties;
 use crate::headers_provider::{OAuthHeadersProvider, DEFAULT_USER_AGENT};
 use crate::{HeadersProvider, ZerobusArrowStream, ZerobusResult, ZerobusSdk};

@@ -87,8 +87,6 @@ pub use stream_builder::StreamBuilder;
 /// These are used as generic parameters on [`ZerobusStream`](crate::ZerobusStream)
 /// to enable compile-time checking of record types passed to ingestion methods.
 pub mod record_type_markers {
-    use crate::{JsonString, JsonValue, ProtoBytes, ProtoMessage};
-
     /// Marker for Proto-encoded streams.
     #[derive(Debug, Clone, Copy)]
     pub struct Proto;
@@ -131,29 +129,17 @@ pub mod record_type_markers {
     /// ```
     pub trait AcceptsRecord<Payload> {}
 
-    // Proto streams accept Proto record types
+    // Proto streams accept Proto record types (Vec<u8>)
     impl AcceptsRecord<Vec<u8>> for Proto {}
-    impl AcceptsRecord<ProtoBytes> for Proto {}
-    impl<T: prost::Message> AcceptsRecord<ProtoMessage<T>> for Proto {}
 
-    // Json streams accept Json record types
+    // Json streams accept Json record types (String)
     impl AcceptsRecord<String> for Json {}
-    impl AcceptsRecord<JsonString> for Json {}
-    impl<T: serde::Serialize> AcceptsRecord<JsonValue<T>> for Json {}
 
     // Dynamic streams accept all record types (for backward compatibility)
     #[allow(deprecated)]
     impl AcceptsRecord<Vec<u8>> for Dynamic {}
     #[allow(deprecated)]
-    impl AcceptsRecord<ProtoBytes> for Dynamic {}
-    #[allow(deprecated)]
-    impl<T: prost::Message> AcceptsRecord<ProtoMessage<T>> for Dynamic {}
-    #[allow(deprecated)]
     impl AcceptsRecord<String> for Dynamic {}
-    #[allow(deprecated)]
-    impl AcceptsRecord<JsonString> for Dynamic {}
-    #[allow(deprecated)]
-    impl<T: serde::Serialize> AcceptsRecord<JsonValue<T>> for Dynamic {}
 }
 
 /// Typestate markers for builder stages.
