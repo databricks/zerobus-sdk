@@ -46,6 +46,11 @@ pub use record_types::{
 };
 pub use stream_configuration::StreamConfigurationOptions;
 
+// Builder API
+pub mod builder;
+pub use builder::record_type_markers::{Dynamic, Json, Proto};
+pub use builder::ZerobusSdkBuilder;
+
 #[cfg(feature = "arrow-flight")]
 mod arrow_config;
 #[cfg(feature = "arrow-flight")]
@@ -60,11 +65,12 @@ mod landing_zone;
 mod offset_generator;
 mod record_types;
 mod stream_configuration;
-mod stream_options;
+pub(crate) mod stream_options;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -133,9 +139,20 @@ type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 /// a Unity Catalog table. It handles authentication, automatic recovery, acknowledgment
 /// tracking, and graceful shutdown.
 ///
+/// # Type Parameter
+///
+/// The type parameter `R` indicates the record type for this stream:
+/// - [`Proto`]: Protobuf-encoded records (compile-time type safety in future release)
+/// - [`Json`]: JSON-encoded records (compile-time type safety in future release)
+/// - [`Dynamic`]: Runtime-checked record types (legacy, for backward compatibility)
+///
+/// Streams created via [`ZerobusSdk::stream_builder`] return typed streams
+/// (`ZerobusStream<Proto>` or `ZerobusStream<Json>`), while [`ZerobusSdk::create_stream`]
+/// returns `ZerobusStream<Dynamic>` for backward compatibility.
+///
 /// # Lifecycle
 ///
-/// 1. Create a stream via `ZerobusSdk::create_stream()`
+/// 1. Create a stream via [`ZerobusSdk::stream_builder`] (recommended) or [`ZerobusSdk::create_stream`]
 /// 2. Ingest records with `ingest_record()` and await acknowledgments
 /// 3. Optionally call `flush()` to ensure all records are persisted
 /// 4. Close the stream with `close()` to release resources
@@ -158,7 +175,7 @@ type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 /// # Ok(())
 /// # }
 /// ```
-pub struct ZerobusStream {
+pub struct ZerobusStream<R = Dynamic> {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
     /// after validating the table properties and establishing the gRPC connection.
@@ -194,6 +211,8 @@ pub struct ZerobusStream {
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
+    /// Marker for the record type.
+    _record_type: PhantomData<R>,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -242,6 +261,26 @@ pub struct ZerobusSdk {
 }
 
 impl ZerobusSdk {
+    /// Creates a new SDK builder for fluent configuration.
+    ///
+    /// This is an alternative to [`ZerobusSdk::new`] that provides a more
+    /// ergonomic way to configure the SDK.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    ///
+    /// let sdk = ZerobusSdk::builder()
+    ///     .endpoint("https://workspace.zerobus.databricks.com")
+    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+    ///     .build()?;
+    /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
+    /// ```
+    pub fn builder() -> ZerobusSdkBuilder {
+        ZerobusSdkBuilder::new()
+    }
+
     /// Creates a new Zerobus SDK instance.
     ///
     /// This initializes the SDK with the required endpoints. The workspace ID is automatically
@@ -290,6 +329,30 @@ impl ZerobusSdk {
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// Creates a new SDK instance with explicit configuration.
+    ///
+    /// This is used internally by the builder pattern.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn new_with_config(
+        zerobus_endpoint: String,
+        unity_catalog_url: String,
+        use_tls: bool,
+        workspace_id: String,
+    ) -> Self {
+        ZerobusSdk {
+            zerobus_endpoint,
+            use_tls,
+            unity_catalog_url,
+            workspace_id,
+            shared_channel: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Returns the workspace ID extracted from the endpoint.
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
     }
 
     /// Creates a new ingestion stream to a Unity Catalog table.
@@ -751,6 +814,51 @@ impl ZerobusSdk {
         Ok(new_stream)
     }
 
+    /// Creates a new stream builder for the specified table.
+    ///
+    /// This is the recommended way to create streams with fine-grained control
+    /// over configuration. Use method chaining to configure authentication,
+    /// options, and schema type.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The fully-qualified table name (e.g., "catalog.schema.table")
+    ///
+    /// # Examples
+    ///
+    /// ## Proto Stream
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, ZerobusError};
+    /// # async fn example(sdk: ZerobusSdk, descriptor: prost_types::DescriptorProto) -> Result<(), ZerobusError> {
+    /// let stream = sdk.stream_builder("catalog.schema.table")
+    ///     .client_credentials("client-id", "client-secret")
+    ///     .max_inflight_requests(100_000)
+    ///     .recovery(true)
+    ///     .proto(descriptor)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ## JSON Stream
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, ZerobusError};
+    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let stream = sdk.stream_builder("catalog.schema.table")
+    ///     .client_credentials("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream_builder(&self, table_name: impl Into<String>) -> builder::StreamBuilder<'_, builder::stages::NeedsAuth> {
+        builder::StreamBuilder::new(self, table_name.into())
+    }
+
     /// Gets or creates the shared Channel for all streams.
     /// The first call creates the Channel, subsequent calls clone it.
     /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
@@ -849,9 +957,43 @@ impl ZerobusStream {
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
             server_error_rx,
             cancellation_token,
+            _record_type: PhantomData,
         };
 
         Ok(stream)
+    }
+
+    /// Converts this stream to a typed variant.
+    ///
+    /// This is an internal method used by the builder to return typed streams.
+    /// It simply changes the type parameter while keeping all internal state.
+    pub(crate) fn into_typed<T>(self) -> ZerobusStream<T> {
+        // Use ManuallyDrop to prevent Drop from running when we move fields out
+        let this = std::mem::ManuallyDrop::new(self);
+
+        // SAFETY: We're moving all fields out of `this` and forgetting the original.
+        // The new ZerobusStream<T> takes ownership of all resources and will handle cleanup.
+        unsafe {
+            ZerobusStream {
+                stream_id: std::ptr::read(&this.stream_id),
+                stream_type: std::ptr::read(&this.stream_type),
+                headers_provider: std::ptr::read(&this.headers_provider),
+                options: std::ptr::read(&this.options),
+                table_properties: std::ptr::read(&this.table_properties),
+                landing_zone: std::ptr::read(&this.landing_zone),
+                oneshot_map: std::ptr::read(&this.oneshot_map),
+                supervisor_task: std::ptr::read(&this.supervisor_task),
+                logical_offset_id_generator: std::ptr::read(&this.logical_offset_id_generator),
+                logical_last_received_offset_id_tx: std::ptr::read(&this.logical_last_received_offset_id_tx),
+                _logical_last_received_offset_id_rx: std::ptr::read(&this._logical_last_received_offset_id_rx),
+                failed_records: std::ptr::read(&this.failed_records),
+                is_closed: std::ptr::read(&this.is_closed),
+                sync_mutex: std::ptr::read(&this.sync_mutex),
+                server_error_rx: std::ptr::read(&this.server_error_rx),
+                cancellation_token: std::ptr::read(&this.cancellation_token),
+                _record_type: PhantomData,
+            }
+        }
     }
 
     /// Supervisor task is responsible for managing the stream lifecycle.
@@ -2031,7 +2173,7 @@ impl ZerobusStream {
     }
 }
 
-impl Drop for ZerobusStream {
+impl<R> Drop for ZerobusStream<R> {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
         self.cancellation_token.cancel();
