@@ -109,9 +109,6 @@ pub struct StreamConfigurationOptions {
     /// - On successful acknowledgment: `on_ack(offset_id)` is called
     /// - On error: `on_error(offset_id, error_message)` is called
     ///
-    /// **Warning**: Callbacks run synchronously in the receiver task. Keep them
-    /// extremely lightweight (simple logging, metrics) to avoid blocking acknowledgment
-    /// processing. For heavy work, send data to a channel for processing in another task.
     ///
     /// Default: `None` (no callbacks)
     ///

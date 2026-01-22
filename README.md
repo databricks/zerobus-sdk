@@ -640,7 +640,7 @@ for i in 0..1000 {
 stream.flush().await?;
 ```
 
-**Important:** Callbacks run synchronously in the receiver task. Keep them extremely lightweight (simple logging, metrics increment) to avoid blocking acknowledgment processing. For heavy work like database writes or network calls, send data to a channel for processing in a separate task:
+**Important:** Callbacks run synchronously in a dedicated callback handler task. Keep them lightweight (simple logging, metrics increment) to avoid callback backlog. For heavy work like database writes or network calls, send data to a channel for processing in a separate task:
 
 ```rust
 use tokio::sync::mpsc;
@@ -994,8 +994,6 @@ pub trait AckCallback: Send + Sync {
 
 - `on_ack()` - Called when a record/batch is successfully acknowledged
 - `on_error()` - Called when a record/batch encounters an error
-
-**Important:** Callbacks run synchronously in the receiver task. Keep implementations lightweight to avoid blocking acknowledgment processing.
 
 ### `HeadersProvider`
 

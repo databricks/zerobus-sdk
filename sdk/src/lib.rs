@@ -1963,7 +1963,11 @@ impl ZerobusStream {
                         "Stream is not caught up to any offset yet. Waiting for the first offset."
                     );
                 }
-
+                if self.is_closed.load(Ordering::Relaxed) {
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        format!("Stream closed during {}", operation_name.to_lowercase()),
+                    )));
+                }
                 // Race between offset updates and server errors.
                 tokio::select! {
                     result = offset_receiver.changed() => {

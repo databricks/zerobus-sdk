@@ -31,13 +31,12 @@ use crate::offset_generator::OffsetId;
 /// # Thread Safety and Performance
 ///
 /// Implementations must be `Send + Sync` as callbacks are invoked from
-/// background receiver tasks.
+/// a dedicated background callback handler task.
 ///
-/// **Important**: Callbacks are executed synchronously in the receiver task of the stream.
-/// Keep implementations extremely lightweight (simple logging, metrics increment, etc.)
-/// to avoid blocking acknowledgment processing. For heavy work like database writes,
-/// network calls, or complex processing, use channels to send data to dedicated
-/// worker tasks.
+/// **Important**: Callbacks are executed synchronously in a separate callback handler task.
+/// Keep implementations lightweight (simple logging, metrics increment, etc.) to avoid
+/// accumulating callback backlog. For heavy work like database writes, network calls,
+/// or complex processing, consider using channels to send data to dedicated worker tasks.
 ///
 /// # Examples
 ///
@@ -62,8 +61,8 @@ use crate::offset_generator::OffsetId;
 pub trait AckCallback: Send + Sync {
     /// Called when a record/batch is successfully acknowledged by the server.
     ///
-    /// **Warning**: This runs synchronously in the receiver task. Keep it lightweight
-    /// (e.g., logging, metrics) to avoid delaying acknowledgment processing.
+    /// **Note**: This runs synchronously in a dedicated callback handler task.
+    /// Keep it lightweight (e.g., logging, metrics) to avoid callback backlog.
     ///
     /// # Parameters
     ///
@@ -72,8 +71,8 @@ pub trait AckCallback: Send + Sync {
 
     /// Called when an error occurs for a specific record/batch.
     ///
-    /// **Warning**: This runs synchronously in the receiver task. Keep it lightweight
-    /// (e.g., logging, metrics) to avoid delaying error handling.
+    /// **Note**: This runs synchronously in a dedicated callback handler task.
+    /// Keep it reasonably lightweight (e.g., logging, metrics) to avoid callback backlog.
     ///
     /// # Parameters
     ///
