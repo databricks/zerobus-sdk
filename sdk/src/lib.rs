@@ -352,7 +352,7 @@ pub struct ZerobusStream {
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
-    callback_handler_task: tokio::task::JoinHandle<()>,
+    _callback_handler_task: tokio::task::JoinHandle<()>,
     /// Sender for callback messages to the callback handler task.
     callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
 }
@@ -1020,7 +1020,7 @@ impl ZerobusStream {
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
             server_error_rx,
             cancellation_token,
-            callback_handler_task,
+            _callback_handler_task: callback_handler_task,
             callback_tx,
         };
 
@@ -2142,6 +2142,7 @@ impl ZerobusStream {
         self.flush().await?;
         self.is_closed.store(true, Ordering::Relaxed);
         self.shutdown_supervisor_gracefully().await;
+        let _ = self.callback_tx.send(CallbackMessage::Shutdown);
         Ok(())
     }
 
