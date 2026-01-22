@@ -57,6 +57,7 @@ use tokio::time::Duration;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, instrument, span, warn, Level};
@@ -333,6 +334,8 @@ pub struct ZerobusStream {
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Watch channel for last error received from the server.
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
+    /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
+    cancellation_token: CancellationToken,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -918,7 +921,10 @@ impl ZerobusSdk {
             *guard = Some(client);
         }
 
-        Ok(guard.as_ref().unwrap().clone())
+        Ok(guard
+            .as_ref()
+            .expect("Channel was just initialized")
+            .clone())
     }
 }
 
@@ -946,6 +952,7 @@ impl ZerobusStream {
         let logical_offset_id_generator = OffsetIdGenerator::default();
 
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
+        let cancellation_token = CancellationToken::new();
 
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
@@ -959,6 +966,7 @@ impl ZerobusStream {
             Arc::clone(&failed_records),
             stream_init_result_tx,
             server_error_tx,
+            cancellation_token.clone(),
         ));
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
@@ -982,6 +990,7 @@ impl ZerobusStream {
             is_closed,
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
             server_error_rx,
+            cancellation_token,
         };
 
         Ok(stream)
@@ -1003,15 +1012,13 @@ impl ZerobusStream {
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        cancellation_token: CancellationToken,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
 
         loop {
             debug!("Supervisor task loop");
-            if is_closed.load(Ordering::Relaxed) {
-                return Ok(());
-            }
 
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
@@ -1090,16 +1097,16 @@ impl ZerobusStream {
                 landing_zone_receiver,
                 oneshot_map.clone(),
                 Arc::clone(&is_paused),
-                Arc::clone(&is_closed),
                 options.clone(),
                 server_error_tx.clone(),
+                cancellation_token.clone(),
             );
             let mut send_task = Self::spawn_sender_task(
                 tx,
                 landing_zone_sender,
                 Arc::clone(&is_paused),
-                Arc::clone(&is_closed),
                 server_error_tx.clone(),
+                cancellation_token.clone(),
             );
 
             // 4. Wait for any of the two tasks to end.
@@ -1605,9 +1612,9 @@ impl ZerobusStream {
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         is_paused: Arc<AtomicBool>,
-        is_closed: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        cancellation_token: CancellationToken,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -1616,10 +1623,6 @@ impl ZerobusStream {
             let mut pause_deadline: Option<tokio::time::Instant> = None;
 
             loop {
-                // Exit gracefully if stream is being dropped.
-                if is_closed.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
                 if let Some(deadline) = pause_deadline {
                     let now = tokio::time::Instant::now();
                     let all_acked = landing_zone.is_observed_empty();
@@ -1633,25 +1636,18 @@ impl ZerobusStream {
                     }
                 }
 
-                // During graceful close, race between message timeout and pause deadline.
-                let message_result = if let Some(deadline) = pause_deadline {
-                    tokio::select! {
-                        result = tokio::time::timeout(
-                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                            response_grpc_stream.message(),
-                        ) => result,
-                        _ = tokio::time::sleep_until(deadline) => {
-                            // Deadline reached, loop back to check and return.
-                            continue;
-                        }
+                let message_result = tokio::select! {
+                    _ = cancellation_token.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(pause_deadline.unwrap_or(tokio::time::Instant::now() + Duration::from_secs(365 * 24 * 60 * 60))), if pause_deadline.is_some() => {
+                        // Pause deadline reached, loop will handle it at the start.
+                        continue;
                     }
-                } else {
-                    tokio::time::timeout(
+                    res = tokio::time::timeout(
                         Duration::from_millis(options.server_lack_of_ack_timeout_ms),
                         response_grpc_stream.message(),
-                    )
-                    .await
+                    ) => res,
                 };
+
                 match message_result {
                     Ok(Ok(Some(ingest_record_response))) => match ingest_record_response.payload {
                         Some(ResponsePayload::IngestRecordResponse(IngestRecordResponse {
@@ -1774,20 +1770,21 @@ impl ZerobusStream {
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         landing_zone: RecordLandingZone,
         is_paused: Arc<AtomicBool>,
-        is_closed: Arc<AtomicBool>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        cancellation_token: CancellationToken,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
-                // Exit gracefully if stream is being dropped.
-                if is_closed.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                let item = if is_paused.load(Ordering::Relaxed) {
-                    std::future::pending().await // Wait until supervisor task aborts this task.
-                } else {
-                    landing_zone.observe().await.clone()
+                let item = tokio::select! {
+                    _ = cancellation_token.cancelled() => return Ok(()),
+                    item = async {
+                        if is_paused.load(Ordering::Relaxed) {
+                            std::future::pending().await // Wait until supervisor task aborts this task.
+                        } else {
+                            landing_zone.observe().await
+                        }
+                    } => item.clone(),
                 };
                 let offset_id = physical_offset_id_generator.next();
                 let request_payload = item.payload.into_request_payload(offset_id);
@@ -2051,6 +2048,7 @@ impl ZerobusStream {
         }
         self.flush().await?;
         self.is_closed.store(true, Ordering::Relaxed);
+        self.cancellation_token.cancel();
         self.supervisor_task.abort();
         Ok(())
     }
@@ -2143,6 +2141,7 @@ impl Drop for ZerobusStream {
     fn drop(&mut self) {
         // Mark the stream as closed to signal the supervisor task to exit.
         self.is_closed.store(true, Ordering::Relaxed);
+        self.cancellation_token.cancel();
         self.supervisor_task.abort();
     }
 }
