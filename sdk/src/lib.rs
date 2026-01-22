@@ -37,7 +37,6 @@ pub use arrow_stream::{
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 pub use headers_provider::HeadersProvider;
-use headers_provider::OAuthHeadersProvider;
 use landing_zone::LandingZone;
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use record_types::{
@@ -225,27 +224,23 @@ pub struct ZerobusStream<R = Dynamic> {
 /// ```no_run
 /// # use std::error::Error;
 /// # use std::sync::Arc;
-/// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
+/// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, ZerobusError};
 /// #
-/// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
+/// # async fn write_single_row(row: impl prost::Message, descriptor: prost_types::DescriptorProto) -> Result<(), ZerobusError> {
 ///
 /// // Open SDK with the Zerobus API endpoint.
-/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string())?;
+/// let sdk = ZerobusSdk::new(
+///     "https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),
+///     "https://your-workspace.cloud.databricks.com".to_string(),
+/// )?;
 ///
-/// // Define the arguments for the ephemeral stream.
-/// let table_properties = TableProperties {
-///     table_name: "test_table".to_string(),
-///     descriptor_proto: Default::default(),
-/// };
-/// let options = StreamConfigurationOptions {
-///     max_inflight_requests: 100,
-///     ..Default::default()
-/// };
-/// let client_id = "your-client-id".to_string();
-/// let client_secret = "your-client-secret".to_string();
-///
-/// // Create a stream
-/// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
+/// // Create a stream using the builder API
+/// let stream = sdk.stream_builder("catalog.schema.table")
+///     .client_credentials("your-client-id", "your-client-secret")
+///     .max_inflight_requests(100)
+///     .proto(descriptor)
+///     .build()
+///     .await?;
 ///
 /// // Ingest a single record
 /// let offset_id = stream.ingest_record_offset(row.encode_to_vec()).await?;
@@ -364,131 +359,17 @@ impl ZerobusSdk {
         &self.workspace_id
     }
 
-    /// Creates a new ingestion stream to a Unity Catalog table.
-    ///
-    /// This establishes a bidirectional gRPC stream for ingesting records. Authentication
-    /// is handled automatically using the provided OAuth credentials.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_properties` - Table name and protobuf descriptor
-    /// * `client_id` - OAuth client ID for authentication
-    /// * `client_secret` - OAuth client secret for authentication
-    /// * `options` - Optional stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusStream` ready for ingesting records.
-    ///
-    /// # Errors
-    ///
-    /// * `CreateStreamError` - If stream creation fails
-    /// * `InvalidTableName` - If the table name is invalid or table doesn't exist
-    /// * `InvalidUCTokenError` - If OAuth authentication fails
-    /// * `PermissionDenied` - If credentials lack required permissions
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let table_props = TableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     descriptor_proto: Default::default(), // Load from generated files
-    /// };
-    ///
-    /// let stream = sdk.create_stream(
-    ///     table_props,
-    ///     "client-id".to_string(),
-    ///     "client-secret".to_string(),
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.5.0",
-        note = "Use `stream_builder()` instead for type-safe stream creation with builder pattern"
-    )]
-    #[allow(deprecated)] // Internally uses create_stream_with_headers_provider
-    #[instrument(level = "debug", skip_all)]
-    pub async fn create_stream(
-        &self,
-        table_properties: TableProperties,
-        client_id: String,
-        client_secret: String,
-        options: Option<StreamConfigurationOptions>,
-    ) -> ZerobusResult<ZerobusStream> {
-        let headers_provider = OAuthHeadersProvider::new(
-            client_id,
-            client_secret,
-            table_properties.table_name.clone(),
-            self.workspace_id.clone(),
-            self.unity_catalog_url.clone(),
-            headers_provider::DEFAULT_USER_AGENT.to_string(),
-        );
-        self.create_stream_with_headers_provider(
-            table_properties,
-            Arc::new(headers_provider),
-            options,
-        )
-        .await
-    }
-
     /// Creates a new ingestion stream with a custom headers provider.
     ///
-    /// This is an advanced method that allows you to implement your own authentication
-    /// logic by providing a custom implementation of the `HeadersProvider` trait.
+    /// This is an advanced method for when you need direct control over stream creation
+    /// with a custom headers provider. For most use cases, prefer using
+    /// [`stream_builder()`](Self::stream_builder) instead.
     ///
     /// # Arguments
     ///
     /// * `table_properties` - Table name and protobuf descriptor
     /// * `headers_provider` - An `Arc` holding your custom `HeadersProvider` implementation
     /// * `options` - Optional stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusStream` ready for ingesting records.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use std::collections::HashMap;
-    /// # use std::sync::Arc;
-    /// # use async_trait::async_trait;
-    /// #
-    /// # struct MyHeadersProvider;
-    /// #
-    /// # #[async_trait]
-    /// # impl HeadersProvider for MyHeadersProvider {
-    /// #     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-    /// #         let mut headers = HashMap::new();
-    /// #         headers.insert("some_key", "some_value".to_string());
-    /// #         Ok(headers)
-    /// #     }
-    /// # }
-    /// #
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let table_props = TableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     descriptor_proto: Default::default(),
-    /// };
-    ///
-    /// let headers_provider = Arc::new(MyHeadersProvider);
-    ///
-    /// let stream = sdk.create_stream_with_headers_provider(
-    ///     table_props,
-    ///     headers_provider,
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.5.0",
-        note = "Use `stream_builder()` instead for type-safe stream creation with builder pattern"
-    )]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream_with_headers_provider(
         &self,
@@ -540,62 +421,6 @@ impl ZerobusSdk {
                 return Err(e);
             }
         }
-    }
-
-    /// Recreates a failed stream and re-ingests unacknowledged records.
-    ///
-    /// This is useful when a stream encounters an error and you want to preserve
-    /// unacknowledged records. The method creates a new stream with the same
-    /// configuration and automatically re-ingests all records that weren't acknowledged.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` - The failed stream to recreate
-    ///
-    /// # Returns
-    ///
-    /// A new `ZerobusStream` with unacknowledged records already submitted.
-    ///
-    /// # Errors
-    ///
-    /// Returns any errors from stream creation or re-ingestion.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusStream) -> Result<(), ZerobusError> {
-    /// match stream.close().await {
-    ///     Err(_) => {
-    ///         // Stream failed, recreate it
-    ///         let new_stream = sdk.recreate_stream(&stream).await?;
-    ///         // Continue using new_stream
-    ///     }
-    ///     Ok(_) => println!("Stream closed successfully"),
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.5.0",
-        note = "Use stream_builder() to create a new stream instead"
-    )]
-    #[allow(deprecated)]
-    #[instrument(level = "debug", skip_all)]
-    pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
-        let batches = stream.get_unacked_batches().await?;
-        let new_stream = self
-            .create_stream_with_headers_provider(
-                stream.table_properties.clone(),
-                Arc::clone(&stream.headers_provider),
-                Some(stream.options.clone()),
-            )
-            .await?;
-        for batch in batches {
-            let ack = new_stream.ingest_internal(batch).await?;
-            tokio::spawn(ack);
-        }
-        return Ok(new_stream);
     }
 
     /// Creates a new Arrow Flight ingestion stream to a Unity Catalog table.
@@ -2129,9 +1954,6 @@ impl<R: 'static> ZerobusStream<R> {
     /// **Note:** This method flattens all unacknowledged records into a single iterator,
     /// losing the original batch grouping.
     /// If you want to preserve the batch grouping, use `ZerobusStream::get_unacked_batches()` instead.
-    /// If you want to re-ingest unacknowledged records while preserving their batch
-    /// structure, use `ZerobusSdk::recreate_stream()` instead.
-    ///
     ///
     /// # Returns
     ///
@@ -2154,9 +1976,6 @@ impl<R: 'static> ZerobusStream<R> {
     ///         let unacked = stream.get_unacked_records().await?;
     ///         let total_records = unacked.into_iter().count();
     ///         println!("Failed to acknowledge {} records", total_records);
-    ///         
-    ///         // For re-ingestion with preserved batch structure, use recreate_stream
-    ///         let new_stream = sdk.recreate_stream(&stream).await?;
     ///     }
     ///     Ok(_) => println!("All records acknowledged"),
     /// }
@@ -2181,7 +2000,7 @@ impl<R: 'static> ZerobusStream<R> {
     /// - Each `ingest_record()` call creates a single batch containing one record
     /// - Each `ingest_records()` call creates a single batch containing multiple records
     ///
-    /// For alternatives, see `ZerobusStream::get_unacked_records()` and `ZerobusSdk::recreate_stream()`.
+    /// For a flattened view, see `ZerobusStream::get_unacked_records()` instead.
     ///
     /// # Returns
     ///

@@ -4,10 +4,7 @@ use std::fs;
 use prost::Message;
 use prost_reflect::prost_types;
 
-use databricks_zerobus_ingest_sdk::{
-    ProtoBytes, ProtoMessage, StreamConfigurationOptions, TableProperties, ZerobusSdk,
-    ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{Proto, ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
 pub mod orders {
     include!("../output/orders.rs");
@@ -33,27 +30,18 @@ const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders");
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        descriptor_proto: Some(descriptor_proto),
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        // RecordType::Proto is the default.
-        ..Default::default()
-    };
+
     let sdk_handle = ZerobusSdk::new(
         SERVER_ENDPOINT.to_string(),
         DATABRICKS_WORKSPACE_URL.to_string(),
     )?;
 
     let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
+        .stream_builder(TABLE_NAME)
+        .client_credentials(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .max_inflight_requests(100)
+        .proto(descriptor_proto)
+        .build()
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;
@@ -66,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Recommended API: returns offset directly after queuing.
-async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
+async fn ingest_with_offset_api(stream: &mut ZerobusStream<Proto>) -> Result<(), Box<dyn Error>> {
     println!("=== Offset-based API (Recommended) ===");
 
     let now = chrono::Utc::now().timestamp();
@@ -226,7 +214,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
 /// Deprecated API: returns future that resolves to offset.
 #[allow(deprecated)]
-async fn ingest_with_future_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
+async fn ingest_with_future_api(stream: &mut ZerobusStream<Proto>) -> Result<(), Box<dyn Error>> {
     println!("=== Future-based API (Deprecated) ===");
 
     let now = chrono::Utc::now().timestamp();
