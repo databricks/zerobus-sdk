@@ -100,6 +100,10 @@ pub mod record_type_markers {
     /// Marker for dynamically-typed streams (runtime checking).
     ///
     /// This is used by the legacy `create_stream()` API for backward compatibility.
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `ZerobusStream<Proto>` or `ZerobusStream<Json>` via stream_builder() instead"
+    )]
     #[derive(Debug, Clone, Copy)]
     pub struct Dynamic;
 
@@ -138,11 +142,17 @@ pub mod record_type_markers {
     impl<T: serde::Serialize> AcceptsRecord<JsonValue<T>> for Json {}
 
     // Dynamic streams accept all record types (for backward compatibility)
+    #[allow(deprecated)]
     impl AcceptsRecord<Vec<u8>> for Dynamic {}
+    #[allow(deprecated)]
     impl AcceptsRecord<ProtoBytes> for Dynamic {}
+    #[allow(deprecated)]
     impl<T: prost::Message> AcceptsRecord<ProtoMessage<T>> for Dynamic {}
+    #[allow(deprecated)]
     impl AcceptsRecord<String> for Dynamic {}
+    #[allow(deprecated)]
     impl AcceptsRecord<JsonString> for Dynamic {}
+    #[allow(deprecated)]
     impl<T: serde::Serialize> AcceptsRecord<JsonValue<T>> for Dynamic {}
 }
 
