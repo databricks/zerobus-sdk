@@ -4,10 +4,18 @@
 
 ### New Features and Improvements
 
+- **Type Widening for Record Ingestion**: Added wrapper types for record ingestion
+  - **`ProtoMessage<T>`**: SDK handles encoding - pass any `prost::Message` directly
+  - **`JsonValue<T>`**: SDK handles serialization - pass any `serde::Serialize` type directly
+  - **`ProtoBytes`**: Client handles encoding - explicit wrapper for pre-encoded protobuf bytes
+  - **`JsonString`**: Client handles serialization - explicit wrapper for pre-serialized JSON strings
+  - **Backward compatible**: existing code using `Vec<u8>` and `String` continues to work
+  - Works with both single record and batch ingestion methods
+
 - Added support for `TINYINT/BYTE`, `TIMESTAMP_NTZ`, and `VARIANT` data types in the proto generation tool
 
 - **Alternative Ingestion API with Direct Offset Return**: Added `ingest_record_offset()` and `ingest_records_offset()` methods
-  - Return `OffsetId` (logical offset) directly as an integer (after queuing) instead of wrapping it in a Future
+  - Return `OffsetId` (logical offset) directly as an integer (after queueing) instead of wrapping it in a Future
   - Can be used with new `wait_for_offset()` method to block on acknowledgment when needed
   - Allows decoupling record ingestion from acknowledgment tracking
   - Useful for scenarios where you want to collect offsets and wait on them selectively
@@ -27,6 +35,10 @@
 
 ### Documentation
 
+- Reorganized examples directory structure: `json/single`, `json/batch`, `proto/single`, `proto/batch`
+- Added separate README files for JSON and Protocol Buffers examples with comprehensive documentation
+- Updated all examples to demonstrate three data-passing approaches: auto-encoding/serializing wrappers, pre-encoded/serialized wrappers, and backward-compatible raw types
+
 ### Internal Changes
 
 - Refactored `wait_for_offset_internal` to remove unnecessary double loop
@@ -40,6 +52,14 @@
 - Improved graceful close mechanism: when server signals stream closure, SDK now continues processing acknowledgments for in-flight records while pausing new record transmission until timeout.
 
 ### API Changes
+
+- **Added type widening wrapper types** (backward compatible):
+  - Added `ProtoMessage<T: prost::Message>` - SDK handles encoding for protobuf messages
+  - Added `JsonValue<T: serde::Serialize>` - SDK handles serialization for JSON objects
+  - Added `ProtoBytes` - for pre-encoded protobuf bytes (client handles encoding)
+  - Added `JsonString` - for pre-serialized JSON strings (client handles serialization)
+  - All new types implement `Into<EncodedRecord>` for seamless integration
+  - Existing `Vec<u8>` and `String` types continue to work (backward compatible)
 
 - Added Arrow IPC compression support via `ipc_compression: Option<CompressionType>` in `ArrowStreamConfigurationOptions` (supports `LZ4_FRAME` and `ZSTD`, default: `None`)
 - **[BREAKING]** Changed `ZerobusArrowStream::ingest_batch()` to return `OffsetId` directly instead of `Future<Output = OffsetId>`. Use `wait_for_offset(offset)` to explicitly wait for acknowledgment
