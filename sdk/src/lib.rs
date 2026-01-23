@@ -62,6 +62,8 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, instrument, span, warn, Level};
 
+const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1020,6 +1022,11 @@ impl ZerobusStream {
         loop {
             debug!("Supervisor task loop");
 
+            if cancellation_token.is_cancelled() {
+                debug!("Supervisor task cancelled, exiting");
+                return Ok(());
+            }
+
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
@@ -1131,7 +1138,7 @@ impl ZerobusStream {
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
                             format!("Sender task panicked: {}", e)
                         )),
-                        Ok(Ok(())) => unreachable!("Sender task should never complete successfully"),
+                        Ok(Ok(())) => Ok(()) // This only happens when the sender task receives a cancellation signal.
                     }
                 }
             };
@@ -1636,16 +1643,25 @@ impl ZerobusStream {
                     }
                 }
 
-                let message_result = tokio::select! {
-                    _ = cancellation_token.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep_until(pause_deadline.unwrap_or(tokio::time::Instant::now() + Duration::from_secs(365 * 24 * 60 * 60))), if pause_deadline.is_some() => {
-                        // Pause deadline reached, loop will handle it at the start.
-                        continue;
+                let message_result = if let Some(deadline) = pause_deadline {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep_until(deadline) => {
+                            continue;
+                        }
+                        res = tokio::time::timeout(
+                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                            response_grpc_stream.message(),
+                        ) => res,
                     }
-                    res = tokio::time::timeout(
-                        Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                        response_grpc_stream.message(),
-                    ) => res,
+                } else {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return Ok(()),
+                        res = tokio::time::timeout(
+                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                            response_grpc_stream.message(),
+                        ) => res,
+                    }
                 };
 
                 match message_result {
@@ -2048,9 +2064,31 @@ impl ZerobusStream {
         }
         self.flush().await?;
         self.is_closed.store(true, Ordering::Relaxed);
-        self.cancellation_token.cancel();
-        self.supervisor_task.abort();
+        self.shutdown_supervisor_gracefully().await;
         Ok(())
+    }
+
+    /// Gracefully shuts down the supervisor task.
+    ///
+    /// Signals cancellation and waits for the task to exit. If the timeout
+    /// is provided and expires, forcefully aborts the task.
+    async fn shutdown_supervisor_gracefully(&mut self) {
+        self.cancellation_token.cancel();
+
+        match tokio::time::timeout(
+            Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
+            &mut self.supervisor_task,
+        )
+        .await
+        {
+            Ok(_) => {
+                debug!("Supervisor task exited gracefully");
+            }
+            Err(_) => {
+                warn!("Supervisor task did not exit within timeout, aborting");
+                self.supervisor_task.abort();
+            }
+        }
     }
 
     /// Returns all records that were ingested but not acknowledged by the server.
@@ -2139,7 +2177,6 @@ impl ZerobusStream {
 
 impl Drop for ZerobusStream {
     fn drop(&mut self) {
-        // Mark the stream as closed to signal the supervisor task to exit.
         self.is_closed.store(true, Ordering::Relaxed);
         self.cancellation_token.cancel();
         self.supervisor_task.abort();
