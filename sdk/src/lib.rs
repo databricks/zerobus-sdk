@@ -40,6 +40,9 @@ mod landing_zone;
 mod offset_generator;
 mod stream_configuration;
 pub(crate) mod stream_options;
+mod tls_config;
+
+pub use tls_config::{SecureTlsConfig, TlsConfig};
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -67,7 +70,7 @@ use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, error, info, instrument, span, warn, Level};
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
@@ -415,6 +418,7 @@ pub struct ZerobusSdk {
     pub unity_catalog_url: String,
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     workspace_id: String,
+    tls_config: Arc<dyn TlsConfig>,
 }
 
 impl ZerobusSdk {
@@ -485,6 +489,7 @@ impl ZerobusSdk {
             unity_catalog_url,
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
+            tls_config: Arc::new(SecureTlsConfig::new()),
         })
     }
 
@@ -497,6 +502,7 @@ impl ZerobusSdk {
         unity_catalog_url: String,
         use_tls: bool,
         workspace_id: String,
+        tls_config: Option<Arc<dyn TlsConfig>>,
     ) -> Self {
         ZerobusSdk {
             zerobus_endpoint,
@@ -504,6 +510,7 @@ impl ZerobusSdk {
             unity_catalog_url,
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
+            tls_config: tls_config.unwrap_or_else(|| Arc::new(SecureTlsConfig::new())),
         }
     }
 
@@ -1028,10 +1035,8 @@ impl ZerobusSdk {
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
             let channel = if self.use_tls {
-                let tls_config = ClientTlsConfig::new().with_native_roots();
-                endpoint
-                    .tls_config(tls_config)
-                    .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
+                self.tls_config
+                    .configure_endpoint(endpoint)?
                     .connect_lazy()
             } else {
                 endpoint.connect_lazy()
@@ -1049,6 +1054,7 @@ impl ZerobusSdk {
             .expect("Channel was just initialized")
             .clone())
     }
+
 }
 
 impl ZerobusStream {

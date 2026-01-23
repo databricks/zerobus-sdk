@@ -1,6 +1,8 @@
 //! Builder for creating [`ZerobusSdk`] instances.
 
-use crate::{ZerobusError, ZerobusResult, ZerobusSdk};
+use std::sync::Arc;
+
+use crate::{TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// Builder for creating a [`ZerobusSdk`] instance with fluent configuration.
 ///
@@ -15,11 +17,11 @@ use crate::{ZerobusError, ZerobusResult, ZerobusSdk};
 ///     .build()?;
 /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
 /// ```
-#[derive(Debug, Default, Clone)]
 pub struct ZerobusSdkBuilder {
     zerobus_endpoint: Option<String>,
     unity_catalog_url: Option<String>,
     use_tls: bool,
+    tls_config: Option<Arc<dyn TlsConfig>>,
 }
 
 impl ZerobusSdkBuilder {
@@ -31,6 +33,7 @@ impl ZerobusSdkBuilder {
             zerobus_endpoint: None,
             unity_catalog_url: None,
             use_tls: true,
+            tls_config: None,
         }
     }
 
@@ -64,6 +67,19 @@ impl ZerobusSdkBuilder {
     /// environments should always use TLS.
     pub fn disable_tls(mut self) -> Self {
         self.use_tls = false;
+        self
+    }
+
+    /// Sets a custom TLS configuration.
+    ///
+    /// Use this to provide custom certificate handling or other TLS settings.
+    /// If not set, the default `SecureTlsConfig` (system CA certificates) is used.
+    ///
+    /// # Arguments
+    ///
+    /// * `tls_config` - A TLS configuration implementing the `TlsConfig` trait
+    pub fn tls_config(mut self, tls_config: Arc<dyn TlsConfig>) -> Self {
+        self.tls_config = Some(tls_config);
         self
     }
 
@@ -101,7 +117,14 @@ impl ZerobusSdkBuilder {
             unity_catalog_url,
             self.use_tls,
             workspace_id,
+            self.tls_config,
         ))
+    }
+}
+
+impl Default for ZerobusSdkBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
