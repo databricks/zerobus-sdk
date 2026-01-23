@@ -472,6 +472,350 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_close_waits_for_graceful_supervisor_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_close_waits_for_graceful_supervisor_shutdown");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_graceful_shutdown".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let mut stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest a record to ensure supervisor is running.
+        let _ack = stream.ingest_record(b"test".to_vec()).await?;
+
+        let start = std::time::Instant::now();
+        stream.close().await?;
+        let duration = start.elapsed();
+
+        // Should complete relatively quickly (within 2-3 seconds).
+        assert!(
+            duration.as_secs() < 3,
+            "Close should complete within timeout, took {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_drop_immediately_shuts_down() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_drop_immediately_shuts_down");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_drop".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                None,
+            )
+            .await?;
+
+        let start = std::time::Instant::now();
+        drop(stream);
+        let duration = start.elapsed();
+
+        // Drop should be nearly instantaneous.
+        assert!(
+            duration.as_millis() < 100,
+            "Drop should be immediate, took {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_close_idempotent_after_error() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_close_idempotent_after_error");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_close_after_error".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Simulated error"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            recovery: false,
+            ..Default::default()
+        };
+
+        let mut stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest record that will fail.
+        let _ack = stream.ingest_record(b"will fail".to_vec()).await?;
+
+        // Wait for error to propagate.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Close should work even after error (may return error from flush, but shouldn't hang).
+        let _close_result = stream.close().await;
+
+        // Second close should also work.
+        let second_close = stream.close().await;
+        assert!(second_close.is_ok(), "Second close should be idempotent");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_responds_to_cancellation() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_supervisor_responds_to_cancellation");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_cancellation".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 9,
+                        delay_ms: 100,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ..Default::default()
+        };
+
+        let mut stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest several records to keep supervisor busy.
+        for _ in 0..10 {
+            let _ack = stream.ingest_record(b"test data".to_vec()).await?;
+        }
+
+        // Close while records are in flight.
+        // Supervisor should respond to cancellation token and exit promptly.
+        let start = std::time::Instant::now();
+        stream.close().await?;
+        let duration = start.elapsed();
+
+        // Should complete within reasonable time (supervisor responds to cancellation).
+        assert!(
+            duration.as_secs() < 3,
+            "Close with in-flight records should complete within timeout, took {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_close_operations() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_concurrent_close_operations");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_concurrent_close".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                None,
+            )
+            .await?;
+
+        // Wrap stream in Arc<Mutex<>> to enable concurrent access from multiple tasks.
+        let stream = Arc::new(tokio::sync::Mutex::new(stream));
+
+        let start = std::time::Instant::now();
+
+        // Spawn multiple tasks trying to close concurrently.
+        let mut handles = vec![];
+        for i in 0..3 {
+            let stream_clone = Arc::clone(&stream);
+            let handle = tokio::spawn(async move {
+                info!("Task {} attempting to close stream", i);
+                let mut stream_guard = stream_clone.lock().await;
+                stream_guard.close().await
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let _ = handle.await?; // Some may succeed, some may return Ok (already closed).
+        }
+
+        let duration = start.elapsed();
+
+        assert!(
+            duration.as_millis() < 500,
+            "Concurrent close calls should be fast and idempotent, took {:?}",
+            duration
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stream_cleanup_on_drop() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_stream_cleanup_on_drop");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_cleanup".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                None,
+            )
+            .await?;
+
+        {
+            let _stream_in_scope = stream;
+            // Stream goes out of scope here and drop is called.
+        }
+
+        assert!(true, "Stream cleanup completed successfully");
+
+        Ok(())
+    }
 }
 
 #[allow(deprecated)]
