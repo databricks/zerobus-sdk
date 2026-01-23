@@ -18,6 +18,7 @@ pub mod defaults {
     /// Default: 5 minutes flush timeout
     pub const FLUSH_TIMEOUT_MS: u64 = 300_000;
     /// Default: 30 seconds connection timeout
+    #[cfg(feature = "arrow-flight")]
     pub const CONNECTION_TIMEOUT_MS: u64 = 30_000;
     /// Default: 5 seconds callback timeout
     pub const CALLBACK_MAX_WAIT_TIME_MS: u64 = 5_000;

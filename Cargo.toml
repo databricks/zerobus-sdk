@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "sdk",
-    "examples/*",
+    "examples/json/*",
+    "examples/proto/*",
     "tools/*",
     "tests",
 ]
