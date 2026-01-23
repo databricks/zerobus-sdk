@@ -329,10 +329,20 @@ mod stream_initialization_and_basic_lifecycle_tests {
         mock_server
             .inject_responses(
                 TABLE_NAME,
-                vec![MockResponse::CreateStream {
-                    stream_id: "test_stream_1".to_string(),
-                    delay_ms: 0,
-                }],
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Simulated error"),
+                        delay_ms: 0,
+                    },
+                ],
             )
             .await;
 
@@ -358,7 +368,11 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await?;
 
-        stream.close().await?;
+        let test_record = b"test record data".to_vec();
+        let _ = stream.ingest_record(test_record).await?;
+        let test_record = b"test record data 2".to_vec();
+        let _ = stream.ingest_record(test_record).await?;
+        let _ = stream.close().await;
         let flush_result = stream.flush().await;
 
         assert!(flush_result.is_err());

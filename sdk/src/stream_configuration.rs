@@ -136,6 +136,20 @@ pub struct StreamConfigurationOptions {
     /// };
     /// ```
     pub ack_callback: Option<Arc<dyn AckCallback>>,
+
+    /// Maximum time in milliseconds to wait for callbacks to finish after calling close() on the stream.
+    ///
+    /// When the stream is closed, all tasks are shut down and the callback handler task is
+    /// given a timeout to finish processing callbacks. After the timeout expires, or once all
+    /// callbacks have been processed, the callback handler task is aborted and the stream is
+    /// fully closed.
+    ///
+    /// Configuration values:
+    /// - `None`: Wait forever
+    /// - `Some(x)`: Wait up to x milliseconds
+    ///
+    /// Default: `Some(5000)` (wait 5 seconds)
+    pub callback_max_wait_time_ms: Option<u64>,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -151,6 +165,7 @@ impl Default for StreamConfigurationOptions {
             record_type: RecordType::Proto,
             stream_paused_max_wait_time_ms: None,
             ack_callback: None,
+            callback_max_wait_time_ms: Some(defaults::CALLBACK_MAX_WAIT_TIME_MS),
         }
     }
 }

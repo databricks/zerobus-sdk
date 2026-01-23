@@ -718,6 +718,8 @@ match stream.close().await {
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait during graceful close (`None` = full server duration, `Some(0)` = immediate, `Some(x)` = min(x, server_duration)) |
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | Optional callback for acknowledgment notifications |
+| `callback_max_wait_time_ms` | `Option<u64>` | `None` | Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+
 
 **Example:**
 
@@ -975,6 +977,7 @@ pub struct StreamConfigurationOptions {
     pub record_type: RecordType,
     pub stream_paused_max_wait_time_ms: Option<u64>,
     pub ack_callback: Option<Arc<dyn AckCallback>>,
+    pub callback_max_wait_time_ms: Option<u64>
 }
 ```
 

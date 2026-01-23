@@ -280,8 +280,6 @@ enum CallbackMessage {
     Ack(OffsetId),
     /// Error callback with logical offset ID and error message.
     Error(OffsetId, String),
-    /// Shutdown signal to terminate the callback handler task.
-    Shutdown,
 }
 
 /// Represents an active ingestion stream to a Databricks Delta table.
@@ -352,9 +350,7 @@ pub struct ZerobusStream {
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
-    _callback_handler_task: tokio::task::JoinHandle<()>,
-    /// Sender for callback messages to the callback handler task.
-    callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
+    callback_handler_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -972,15 +968,18 @@ impl ZerobusStream {
 
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
-        // Create callback channel and spawn callback handler task
-        let (callback_tx, callback_rx) = tokio::sync::mpsc::unbounded_channel();
-        let callback_handler_task =
-            Self::spawn_callback_handler_task(callback_rx, options.ack_callback.clone());
-
-        // Create callback channel and spawn callback handler task
-        let (callback_tx, callback_rx) = tokio::sync::mpsc::unbounded_channel();
-        let callback_handler_task =
-            Self::spawn_callback_handler_task(callback_rx, options.ack_callback.clone());
+        // Create callback channel and spawn callback handler task only if callback is defined
+        let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = Self::spawn_callback_handler_task(
+                rx,
+                options.ack_callback.clone(),
+                cancellation_token.clone(),
+            );
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
 
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
@@ -1020,8 +1019,7 @@ impl ZerobusStream {
             sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
             server_error_rx,
             cancellation_token,
-            _callback_handler_task: callback_handler_task,
-            callback_tx,
+            callback_handler_task,
         };
 
         Ok(stream)
@@ -1044,7 +1042,7 @@ impl ZerobusStream {
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
-        callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
+        callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -1648,31 +1646,43 @@ impl ZerobusStream {
     fn spawn_callback_handler_task(
         mut callback_rx: tokio::sync::mpsc::UnboundedReceiver<CallbackMessage>,
         ack_callback: Option<Arc<dyn AckCallback>>,
+        cancellation_token: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "callback_handler");
             let _guard = span.enter();
+            loop {
+                tokio::select! {
+                    biased;
+                    message = callback_rx.recv() => {
+                        match message {
+                            Some(message) => {
+                                match message {
+                                    CallbackMessage::Ack(logical_offset) => {
+                                        if let Some(ref callback) = ack_callback {
+                                            callback.on_ack(logical_offset);
+                                        }
+                                    }
+                                    CallbackMessage::Error(logical_offset, error_message) => {
+                                        if let Some(ref callback) = ack_callback {
+                                            callback.on_error(logical_offset, &error_message);
+                                        }
+                                    }
+                                }
+                            }
+                            None => { // This happens when all senders are dropped.
+                                debug!("Callback handler task shutting down");
+                                return;
+                            }
+                        }
+                    }
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Callback handler task cancelled");
+                        return;
+                    }
 
-            while let Some(message) = callback_rx.recv().await {
-                match message {
-                    CallbackMessage::Ack(logical_offset) => {
-                        if let Some(ref callback) = ack_callback {
-                            callback.on_ack(logical_offset);
-                        }
-                    }
-                    CallbackMessage::Error(logical_offset, error_message) => {
-                        if let Some(ref callback) = ack_callback {
-                            callback.on_error(logical_offset, &error_message);
-                        }
-                    }
-                    CallbackMessage::Shutdown => {
-                        debug!("Callback handler task shutting down");
-                        break;
-                    }
                 }
             }
-
-            debug!("Callback handler task finished");
         })
     }
 
@@ -1690,7 +1700,7 @@ impl ZerobusStream {
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
-        callback_tx: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
+        callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -1714,6 +1724,7 @@ impl ZerobusStream {
 
                 let message_result = if let Some(deadline) = pause_deadline {
                     tokio::select! {
+                        biased;
                         _ = cancellation_token.cancelled() => return Ok(()),
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
@@ -1725,6 +1736,7 @@ impl ZerobusStream {
                     }
                 } else {
                     tokio::select! {
+                        biased;
                         _ = cancellation_token.cancelled() => return Ok(()),
                         res = tokio::time::timeout(
                             Duration::from_millis(options.server_lack_of_ack_timeout_ms),
@@ -1763,7 +1775,9 @@ impl ZerobusStream {
                                         let _ = sender.send(Ok(logical_offset));
                                     }
 
-                                    let _ = callback_tx.send(CallbackMessage::Ack(logical_offset));
+                                    if let Some(ref tx) = callback_tx {
+                                        let _ = tx.send(CallbackMessage::Ack(logical_offset));
+                                    }
                                 }
                             }
                             drop(map);
@@ -1864,6 +1878,7 @@ impl ZerobusStream {
             let physical_offset_id_generator = OffsetIdGenerator::default();
             loop {
                 let item = tokio::select! {
+                    biased;
                     _ = cancellation_token.cancelled() => return Ok(()),
                     item = async {
                         if is_paused.load(Ordering::Relaxed) {
@@ -1900,7 +1915,7 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         error: &ZerobusError,
-        callback_tx: &tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
+        callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) {
         let mut failed_payloads = Vec::with_capacity(landing_zone.len());
         let records = landing_zone.remove_all();
@@ -1911,10 +1926,12 @@ impl ZerobusStream {
             if let Some(sender) = map.remove(&record.offset_id) {
                 let _ = sender.send(Err(error.clone()));
             }
-            let _ = callback_tx.send(CallbackMessage::Error(
-                record.offset_id,
-                error_message.clone(),
-            ));
+            if let Some(tx) = callback_tx {
+                let _ = tx.send(CallbackMessage::Error(
+                    record.offset_id,
+                    error_message.clone(),
+                ));
+            }
         }
         *failed_records.write().await = failed_payloads;
     }
@@ -1927,12 +1944,6 @@ impl ZerobusStream {
         operation_name: &str,
     ) -> ZerobusResult<()> {
         let wait_operation = async {
-            if self.is_closed.load(Ordering::Relaxed) {
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    format!("Stream closed during {}", operation_name.to_lowercase()),
-                )));
-            }
-
             let mut offset_receiver = self.logical_last_received_offset_id_tx.subscribe();
             let mut error_rx = self.server_error_rx.clone();
 
@@ -1964,6 +1975,13 @@ impl ZerobusStream {
                     );
                 }
                 if self.is_closed.load(Ordering::Relaxed) {
+                    // Re-check offset before failing, it might have been updated.
+                    let offset = *offset_receiver.borrow_and_update();
+                    if let Some(offset) = offset {
+                        if offset >= offset_to_wait {
+                            return Ok(());
+                        }
+                    }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                         format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
@@ -1981,6 +1999,13 @@ impl ZerobusStream {
                         // Server error occurred, return it immediately if stream is closed.
                         if let Some(server_error) = error_rx.borrow().clone() {
                             if self.is_closed.load(Ordering::Relaxed) {
+                                // Re-check offset before failing, it might have been updated.
+                                let offset = *offset_receiver.borrow_and_update();
+                                if let Some(offset) = offset {
+                                    if offset >= offset_to_wait {
+                                        return Ok(());
+                                    }
+                                }
                                 return Err(server_error);
                             }
                         }
@@ -2052,12 +2077,6 @@ impl ZerobusStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn flush(&self) -> ZerobusResult<()> {
-        if self.is_closed.load(Ordering::Relaxed) {
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream closed during flush.".to_string(),
-            )));
-        }
-        // Get the last generated offset, or return early if no records have been ingested.
         let offset_to_wait = match self.logical_offset_id_generator.last() {
             Some(offset) => offset,
             None => return Ok(()), // Nothing to flush.
@@ -2143,20 +2162,20 @@ impl ZerobusStream {
         } else {
             error!("Stream ID is None during closing");
         }
-        self.flush().await?;
+        let flush_result = self.flush().await;
         self.is_closed.store(true, Ordering::Relaxed);
-        self.shutdown_supervisor_gracefully().await;
-        let _ = self.callback_tx.send(CallbackMessage::Shutdown);
-        Ok(())
+        self.shutdown_all_tasks_gracefully().await;
+        flush_result
     }
 
     /// Gracefully shuts down the supervisor task.
     ///
     /// Signals cancellation and waits for the task to exit. If the timeout
     /// is provided and expires, forcefully aborts the task.
-    async fn shutdown_supervisor_gracefully(&mut self) {
+    async fn shutdown_all_tasks_gracefully(&mut self) {
         self.cancellation_token.cancel();
 
+        // Shutdown supervisor task.
         match tokio::time::timeout(
             Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
             &mut self.supervisor_task,
@@ -2169,6 +2188,28 @@ impl ZerobusStream {
             Err(_) => {
                 warn!("Supervisor task did not exit within timeout, aborting");
                 self.supervisor_task.abort();
+            }
+        }
+        // Shutdown callback handler task, if there are any callbacks.
+        if let Some(mut task) = self.callback_handler_task.take() {
+            if let Some(callback_max_wait_time_ms) = self.options.callback_max_wait_time_ms {
+                match tokio::time::timeout(
+                    Duration::from_millis(callback_max_wait_time_ms),
+                    &mut task,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!("Callback handler task exited gracefully");
+                    }
+                    Err(_) => {
+                        debug!("Callback handler task did not exit within timeout, aborting");
+                        task.abort();
+                    }
+                }
+            } else {
+                debug!("Callback max wait time is not set, waiting indefinitely");
+                let _ = (&mut task).await;
             }
         }
     }
@@ -2262,6 +2303,9 @@ impl Drop for ZerobusStream {
         self.is_closed.store(true, Ordering::Relaxed);
         self.cancellation_token.cancel();
         self.supervisor_task.abort();
+        if let Some(callback_handler_task) = self.callback_handler_task.take() {
+            callback_handler_task.abort();
+        }
     }
 }
 

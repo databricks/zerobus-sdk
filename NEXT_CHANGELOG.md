@@ -45,6 +45,7 @@
 
 ### API Changes
 
+- [**BREAKING**] Added `callback_max_wait_time_ms` to `StreamConfigurationOptions` to limit how long callbacks may run after stream closure (`None` = infinite, `Some(x)` = `x` ms).
 - Added `ack_callback: Option<Arc<dyn AckCallback>>` field to `StreamConfigurationOptions` and `ArrowStreamConfigurationOptions` for acknowledgment callbacks
 - Added `AckCallback` trait with `on_ack(offset_id)` and `on_error(offset_id, error_message)` methods
 
