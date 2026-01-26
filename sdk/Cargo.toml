@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
