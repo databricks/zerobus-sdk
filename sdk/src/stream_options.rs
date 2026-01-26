@@ -19,4 +19,6 @@ pub mod defaults {
     pub const FLUSH_TIMEOUT_MS: u64 = 300_000;
     /// Default: 30 seconds connection timeout
     pub const CONNECTION_TIMEOUT_MS: u64 = 30_000;
+    /// Default: 5 seconds callback timeout
+    pub const CALLBACK_MAX_WAIT_TIME_MS: u64 = 5_000;
 }

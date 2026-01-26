@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 use crate::stream_options::defaults;
 
@@ -99,6 +102,54 @@ pub struct StreamConfigurationOptions {
     ///
     /// Default: `None` (wait for full server duration)
     pub stream_paused_max_wait_time_ms: Option<u64>,
+
+    /// Optional callback invoked when records are acknowledged or encounter errors.
+    ///
+    /// When set, this callback will be invoked:
+    /// - On successful acknowledgment: `on_ack(offset_id)` is called
+    /// - On error: `on_error(offset_id, error_message)` is called
+    ///
+    ///
+    /// Default: `None` (no callbacks)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use databricks_zerobus_ingest_sdk::{AckCallback, StreamConfigurationOptions, OffsetId};
+    ///
+    /// struct MyCallback;
+    ///
+    /// impl AckCallback for MyCallback {
+    ///     fn on_ack(&self, offset_id: OffsetId) {
+    ///         println!("Acknowledged: {}", offset_id);
+    ///     }
+    ///
+    ///     fn on_error(&self, offset_id: OffsetId, error_message: &str) {
+    ///         eprintln!("Error {}: {}", offset_id, error_message);
+    ///     }
+    /// }
+    ///
+    /// let options = StreamConfigurationOptions {
+    ///     ack_callback: Some(Arc::new(MyCallback)),
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub ack_callback: Option<Arc<dyn AckCallback>>,
+
+    /// Maximum time in milliseconds to wait for callbacks to finish after calling close() on the stream.
+    ///
+    /// When the stream is closed, all tasks are shut down and the callback handler task is
+    /// given a timeout to finish processing callbacks. After the timeout expires, or once all
+    /// callbacks have been processed, the callback handler task is aborted and the stream is
+    /// fully closed.
+    ///
+    /// Configuration values:
+    /// - `None`: Wait forever
+    /// - `Some(x)`: Wait up to x milliseconds
+    ///
+    /// Default: `Some(5000)` (wait 5 seconds)
+    pub callback_max_wait_time_ms: Option<u64>,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -113,6 +164,8 @@ impl Default for StreamConfigurationOptions {
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             record_type: RecordType::Proto,
             stream_paused_max_wait_time_ms: None,
+            ack_callback: None,
+            callback_max_wait_time_ms: Some(defaults::CALLBACK_MAX_WAIT_TIME_MS),
         }
     }
 }

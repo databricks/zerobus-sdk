@@ -9,7 +9,7 @@ use databricks_zerobus_ingest_sdk::{
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
-use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
+use utils::{create_test_descriptor_proto, setup_tracing, TestCallback, TestHeadersProvider};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -329,10 +329,20 @@ mod stream_initialization_and_basic_lifecycle_tests {
         mock_server
             .inject_responses(
                 TABLE_NAME,
-                vec![MockResponse::CreateStream {
-                    stream_id: "test_stream_1".to_string(),
-                    delay_ms: 0,
-                }],
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Simulated error"),
+                        delay_ms: 0,
+                    },
+                ],
             )
             .await;
 
@@ -358,7 +368,11 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await?;
 
-        stream.close().await?;
+        let test_record = b"test record data".to_vec();
+        let _ = stream.ingest_record(test_record).await?;
+        let test_record = b"test record data 2".to_vec();
+        let _ = stream.ingest_record(test_record).await?;
+        let _ = stream.close().await;
         let flush_result = stream.flush().await;
 
         assert!(flush_result.is_err());
@@ -4771,6 +4785,288 @@ mod api_offset_tests {
             mock_server.get_max_offset_sent().await,
             (TOTAL_REQUESTS - 1) as i64
         );
+
+        Ok(())
+    }
+}
+
+mod callback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_callbacks_on_successful_acks() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_callbacks_on_successful_acks");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 2,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let callback = Arc::new(TestCallback::new());
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ack_callback: Some(callback.clone()),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let offset1 = stream.ingest_record_offset(vec![1, 2, 3]).await?;
+        let offset2 = stream.ingest_record_offset(vec![4, 5, 6]).await?;
+        let offset3 = stream.ingest_record_offset(vec![7, 8, 9]).await?;
+
+        stream.wait_for_offset(offset3).await?;
+
+        let acks = callback.get_acks();
+        assert_eq!(acks.len(), 3, "Expected 3 ack callbacks");
+        assert!(acks.contains(&offset1));
+        assert!(acks.contains(&offset2));
+        assert!(acks.contains(&offset3));
+
+        let errors = callback.get_errors();
+        assert_eq!(errors.len(), 0, "Expected no error callbacks");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_callbacks_on_stream_errors() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_callbacks_on_stream_errors");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::internal("Simulated error"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let callback = Arc::new(TestCallback::new());
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ack_callback: Some(callback.clone()),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let offset1 = stream.ingest_record_offset(vec![1, 2, 3]).await?;
+        let _offset2 = stream.ingest_record_offset(vec![4, 5, 6]).await?;
+        let _offset3 = stream.ingest_record_offset(vec![7, 8, 9]).await?;
+
+        stream.wait_for_offset(offset1).await?;
+
+        // First should be acked
+        let acks = callback.get_acks();
+        assert_eq!(acks.len(), 1, "Expected 1 ack callback");
+        assert!(acks.contains(&offset1));
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Other two should have error callbacks
+        let errors = callback.get_errors();
+        assert!(
+            errors.len() >= 2,
+            "Expected at least 2 error callbacks, got {}",
+            errors.len()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_callbacks_with_batches() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_callbacks_with_batches");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let callback = Arc::new(TestCallback::new());
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            record_type: RecordType::Proto,
+            ack_callback: Some(callback.clone()),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest batch of records
+        let records = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let offset = stream.ingest_records_offset(records).await?;
+
+        stream.wait_for_offset(offset.unwrap()).await?;
+
+        // Should have received 1 ack callbacks (one per batch)
+        let acks = callback.get_acks();
+        assert_eq!(acks.len(), 1, "Expected 1 ack callback for batch");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_callback_called_per_offset() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_callback_called_per_offset");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 4,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: create_test_descriptor_proto(),
+        };
+
+        let callback = Arc::new(TestCallback::new());
+
+        let options = StreamConfigurationOptions {
+            max_inflight_requests: 100,
+            recovery: false,
+            ack_callback: Some(callback.clone()),
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        // Ingest 5 records
+        for _ in 0..5 {
+            stream.ingest_record_offset(vec![1, 2, 3]).await?;
+        }
+
+        stream.flush().await?;
+
+        // Should have received 5 ack callbacks (one per offset)
+        let acks = callback.get_acks();
+        assert_eq!(acks.len(), 5, "Expected 5 ack callbacks for cumulative ack");
 
         Ok(())
     }
