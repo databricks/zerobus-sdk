@@ -131,26 +131,24 @@ zerobus_rust_sdk/
 │
 ├── examples/
 │   ├── README.md                       # Examples documentation
-│   ├── basic_example_json/             # JSON single-record example
-│   │   ├── src/main.rs                 # Example usage code
-│   │   └── Cargo.toml
-│   ├── basic_example_json_batch/       # JSON batch ingestion example
-│   │   ├── src/main.rs                 # Example usage code
-│   │   └── Cargo.toml
-│   ├── basic_example_proto/            # Protocol Buffers single-record example
-│   │   ├── src/main.rs                 # Example usage code
-│   │   ├── output/                     # Generated schema files
-│   │   │   ├── orders.proto
-│   │   │   ├── orders.rs
-│   │   │   └── orders.descriptor
-│   │   └── Cargo.toml
-│   └── basic_example_proto_batch/      # Protocol Buffers batch ingestion example
-│       ├── src/main.rs                 # Example usage code
-│       ├── output/                     # Generated schema files
-│       │   ├── orders.proto
-│       │   ├── orders.rs
-│       │   └── orders.descriptor
-│       └── Cargo.toml
+│   ├── json/
+│   │   ├── README.md                   # JSON examples documentation
+│   │   ├── single/                     # JSON single-record example
+│   │   │   ├── src/main.rs
+│   │   │   └── Cargo.toml
+│   │   └── batch/                      # JSON batch ingestion example
+│   │       ├── src/main.rs
+│   │       └── Cargo.toml
+│   └── proto/
+│       ├── README.md                   # Protocol Buffers examples documentation
+│       ├── single/                     # Protocol Buffers single-record example
+│       │   ├── src/main.rs
+│       │   ├── output/                 # Generated schema files
+│       │   └── Cargo.toml
+│       └── batch/                      # Protocol Buffers batch ingestion example
+│           ├── src/main.rs
+│           ├── output/                 # Generated schema files
+│           └── Cargo.toml
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
@@ -407,151 +405,68 @@ let mut stream = sdk.create_stream(
 
 ### 5. Ingest Data
 
-The SDK provides multiple ingestion methods:
+The SDK provides flexible ways to ingest data with different levels of abstraction:
+
+| Wrapper | Format | Description |
+|---------|--------|-------------|
+| `ProtoMessage<T>` | Proto | Auto-encoding: pass structs, SDK handles encoding |
+| `ProtoBytes` | Proto | Pre-encoded: pass bytes with explicit wrapper |
+| `Vec<u8>` | Proto | Backward-compatible: raw bytes without wrapper |
+| `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
+| `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
+| `String` | JSON | Backward-compatible: raw strings without wrapper |
 
 #### Single Record Ingestion
 
-Ingest records one at a time by encoding them with Protocol Buffers. Use `ingest_record_offset()` to get the offset directly:
-
 ```rust
-use prost::Message;
+use databricks_zerobus_ingest_sdk::ProtoMessage;
 
-let record = YourMessage {
-    field1: Some("value".to_string()),
-    field2: Some(42),
-};
+let record = YourMessage { id: Some(1), name: Some("Alice".to_string()) };
 
-// This await queues the record for sending and returns the offset directly.
-let offset_id = stream.ingest_record_offset(record.encode_to_vec()).await?;
+// Ingest and get offset (after queuing)
+let offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
 
-// Later, you can explicitly wait for acknowledgment using the offset.
-stream.wait_for_offset(offset_id).await?;
+// Wait for server acknowledgment
+stream.wait_for_offset(offset).await?;
 ```
-
-#### Alternative API: Future-Based Acknowledgment (Deprecated)
-
-The older `ingest_record()` method returns a Future for acknowledgment. This method is deprecated as of v0.4.0:
-
-```rust
-use prost::Message;
-
-let record = YourMessage {
-    field1: Some("value".to_string()),
-    field2: Some(42),
-};
-
-// DEPRECATED: Returns a Future that resolves to the offset
-let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
-let offset_id = ack_future.await?;
-```
-
-**Recommended:** Use `ingest_record_offset()` for new code. It provides a cleaner API by returning the offset directly (after queuing), allowing you to use `wait_for_offset()` when you explicitly need to wait for acknowledgment
 
 #### Batch Ingestion
 
-For higher throughput and all-or-nothing semantics, use `ingest_records_offset()` to ingest multiple records at once:
+Ingest multiple records at once for higher throughput with all-or-nothing semantics.
 
 ```rust
-let records: Vec<Vec<u8>> = vec![
-    YourMessage { id: Some(1), /* ... */ }.encode_to_vec(),
-    YourMessage { id: Some(2), /* ... */ }.encode_to_vec(),
-    YourMessage { id: Some(3), /* ... */ }.encode_to_vec(),
+use databricks_zerobus_ingest_sdk::ProtoMessage;
+
+let records: Vec<ProtoMessage<YourMessage>> = vec![
+    ProtoMessage(YourMessage { id: Some(1), /* ... */ }),
+    ProtoMessage(YourMessage { id: Some(2), /* ... */ }),
+    ProtoMessage(YourMessage { id: Some(3), /* ... */ }),
 ];
 
-// This await queues the batch for sending and returns the offset directly.
-// Returns Some(offset) for non-empty batches, None for empty batches.
-if let Some(offset_id) = stream.ingest_records_offset(records).await? {
-    // Later, wait for this specific batch acknowledgment.
-    stream.wait_for_offset(offset_id).await?;
+// Returns Some(offset) for non-empty batches, None for empty batches
+if let Some(offset) = stream.ingest_records_offset(records).await? {
+    stream.wait_for_offset(offset).await?;
 }
 ```
 
-**Batch API Semantics:**
-- **All-or-nothing**: The entire batch succeeds or fails as a unit. If any record in the batch fails, the entire batch is rejected.
-- **Atomic acknowledgment**: You receive a single acknowledgment for the entire batch, not individual records.
-- **Better throughput**: Reduces network overhead by sending multiple records in a single request.
-- **Empty batches**: Ingesting an empty batch is a no-op. The future resolves to `None`.
-- **Preserved on failure**: Batches are preserved as units when retrieving via `get_unacked_batches()` or when reingested via `recreate_stream()`. Note that `get_unacked_records()` flattens batches into individual records.
+#### High Throughput Pattern
 
-**High throughput patterns:**
-
-With `ingest_record_offset()` and `ingest_records_offset()`, you can ingest many records without immediately waiting for acknowledgments. Use `flush()` to periodically wait for all pending acknowledgments:
+Ingest many records without waiting for each acknowledgment, then flush periodically:
 
 ```rust
-let mut ingested_cnt = 0;
-
-// Example with single-record ingestion
 for i in 0..100_000 {
-    let record = YourMessage {
-        id: Some(i),
-        timestamp: Some(chrono::Utc::now().timestamp()),
-        data: Some(format!("record-{}", i)),
-    };
+    let record = YourMessage { id: Some(i), /* ... */ };
+    let _offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
 
-    // This await only waits for the record to be queued.
-    let _offset = stream.ingest_record_offset(record.encode_to_vec()).await?;
-    ingested_cnt += 1;
-
-    // Periodically flush and wait for acks to avoid unbounded memory growth
-    if ingested_cnt >= 10_000 {
+    // Periodically flush to avoid unbounded memory growth
+    if (i + 1) % 10_000 == 0 {
         stream.flush().await?;
-        ingested_cnt = 0;
     }
 }
-
-// Flush and wait for remaining acknowledgments
 stream.flush().await?;
-
-// Same pattern works for batch ingestion
-let batches = vec![/* batch1 */, /* batch2 */, /* batch3 */];
-for batch in batches {
-    let _offset = stream.ingest_records_offset(batch).await?;
-    ingested_cnt += 1;
-    // ...
-}
 ```
 
-**Parallelizing with multiple streams:**
-
-Since each stream uses a single gRPC connection, opening multiple threads on the same stream doesn't improve throughput. For true parallelization, open multiple streams (e.g., partition your data):
-
-```rust
-use tokio::task::JoinSet;
-
-let mut tasks = JoinSet::new();
-
-// Partition data across multiple streams for parallel ingestion
-for partition in 0..4 {
-    let sdk_clone = sdk.clone();
-    let table_properties = table_properties.clone();
-    let client_id = client_id.clone();
-    let client_secret = client_secret.clone();
-
-    tasks.spawn(async move {
-        let mut stream = sdk_clone.create_stream(
-            table_properties,
-            client_id,
-            client_secret,
-            None,
-        ).await?;
-
-        // Ingest partition data (using single-record or batch ingestion)
-        for i in (partition * 25_000)..((partition + 1) * 25_000) {
-            let record = YourMessage { id: Some(i), /* ... */ };
-            let _offset = stream.ingest_record_offset(record.encode_to_vec()).await?;
-        }
-
-        // Close implicitly waits for all acknowledgments from the server.
-        stream.close().await?; 
-        Ok::<_, ZerobusError>(())
-    });
-}
-
-// Wait for all streams to complete
-while let Some(result) = tasks.join_next().await {
-    result??;
-}
-```
+See [`examples/`](examples/) for complete working examples with all wrapper types, serialization formats, and ingestion patterns.
 
 ### 6. Handle Acknowledgments
 
@@ -560,16 +475,16 @@ The recommended `ingest_record_offset()` and `ingest_records_offset()` methods r
 - `ingest_records_offset()` returns `Option<OffsetId>` (None if the batch is empty)
 
 ```rust
-// Ingest and get offset (after queuing the record)
+// Ingest and get offset, after queuing the record.
 let offset_id = stream.ingest_record_offset(data).await?;
 println!("Record sent with offset Id: {}", offset_id);
 
-// Wait for acknowledgment when needed
+// Wait for acknowledgment when needed.
 stream.wait_for_offset(offset_id).await?;
 println!("Record committed at offset: {}", offset_id);
 
-// For batches, the method returns Option<OffsetId>
-// (None if the batch is empty)
+// For batches, the method returns Option<OffsetId>.
+// None if the batch is empty.
 let batch = vec![data1, data2, data3];
 if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
     println!("Batch sent with last offset: {}", offset_id);
@@ -579,18 +494,18 @@ if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
     println!("Empty batch, no records ingested");
 }
 
-// High-throughput: collect offsets and wait selectively
+// High-throughput: collect offsets and wait selectively.
 let mut offsets = Vec::new();
 for i in 0..1000 {
     let offset = stream.ingest_record_offset(record).await?;
     offsets.push(offset);
 }
-// Wait for specific offsets as needed
+// Wait for specific offsets as needed.
 for offset in offsets {
     stream.wait_for_offset(offset).await?;
 }
 
-// Or use flush() to wait for all pending acknowledgments at once
+// Or use flush() to wait for all pending acknowledgments at once.
 stream.flush().await?;
 ```
 
@@ -777,12 +692,12 @@ match stream.ingest_record(payload).await {
 
 The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
 
-| Example | Serialization | Ingestion | Description |
-|---------|--------------|-----------|-------------|
-| `basic_example_json/` | JSON | Single-record | Simple JSON strings, no schema required |
-| `basic_example_json_batch/` | JSON | Batch | Multiple JSON records with all-or-nothing semantics, no schema required |
-| `basic_example_proto/` | Protocol Buffers | Single-record | Type-safe with compile-time validation |
-| `basic_example_proto_batch/` | Protocol Buffers | Batch | High-throughput batch ingestion with Proto |
+| Example | Serialization | Ingestion | Package |
+|---------|--------------|-----------|---------|
+| `json/single/` | JSON | Single-record | `example_json_single` |
+| `json/batch/` | JSON | Batch | `example_json_batch` |
+| `proto/single/` | Protocol Buffers | Single-record | `example_proto_single` |
+| `proto/batch/` | Protocol Buffers | Batch | `example_proto_batch` |
 
 
 Check [`examples/README.md`](examples/README.md) for setup instructions and detailed comparisons.
@@ -1046,11 +961,17 @@ cargo build -p databricks-zerobus-ingest-sdk
 # Build only schema tool
 cargo build -p generate_files
 
-# Build and run JSON example
-cargo run -p basic_example_json
+# Build and run JSON single-record example
+cargo run -p example_json_single
 
-# Build and run Protocol Buffers example
-cargo run -p basic_example_proto
+# Build and run JSON batch example
+cargo run -p example_json_batch
+
+# Build and run Protocol Buffers single-record example
+cargo run -p example_proto_single
+
+# Build and run Protocol Buffers batch example
+cargo run -p example_proto_batch
 ```
 
 ## Community and Contributing

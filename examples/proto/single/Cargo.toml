@@ -1,11 +1,11 @@
 [package]
-name = "basic_example_proto_batch"
+name = "example_proto_single"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { path = "../../sdk" }
+databricks-zerobus-ingest-sdk = { path = "../../../sdk" }
 tonic-build = "0.13.1"
 prost = "0.13.3"
 prost-build = "0.12"
