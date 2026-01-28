@@ -7,6 +7,7 @@ rust-version = "1.70"
 license-file = "../LICENSE"
 description = "JNI bindings for the Zerobus Rust SDK"
 repository = "https://github.com/databricks/zerobus-sdk-rs"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
