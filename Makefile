@@ -1,11 +1,12 @@
 # Makefile for zerobus-sdk-rs
 
-.PHONY: help build build-release clean fmt lint check test
+.PHONY: help build build-release clean fmt lint check test build-jni
 
 help:
 	@echo "Available targets:"
 	@echo "  make build          - Build the project for debugging"
 	@echo "  make build-release  - Build the project for release"
+	@echo "  make build-jni      - Build JNI library for Java SDK"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make fmt            - Format code with rustfmt"
 	@echo "  make lint           - Run linting with clippy"
@@ -17,6 +18,9 @@ build:
 
 build-release:
 	cargo build --release --workspace
+
+build-jni:
+	cargo build --release -p zerobus-jni
 
 clean:
 	cargo clean
