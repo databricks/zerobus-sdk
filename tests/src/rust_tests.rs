@@ -369,10 +369,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .await?;
 
         let test_record = b"test record data".to_vec();
-        let _ = stream.ingest_record(test_record).await?;
+        let _offset = stream.ingest_record(test_record).await?;
         let test_record = b"test record data 2".to_vec();
-        let _ = stream.ingest_record(test_record).await?;
-        let _ = stream.close().await;
+        let _offset = stream.ingest_record(test_record).await?;
+        let _result = stream.close().await;
         let flush_result = stream.flush().await;
 
         assert!(flush_result.is_err());
@@ -826,8 +826,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
             // Stream goes out of scope here and drop is called.
         }
 
-        assert!(true, "Stream cleanup completed successfully");
-
+        // Stream cleanup completed successfully
         Ok(())
     }
 }
@@ -3632,7 +3631,7 @@ mod graceful_close_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let start_time = std::time::Instant::now();
-        let payload = format!("record-4").into_bytes();
+        let payload = "record-4".to_string().into_bytes();
         let _ack = stream.ingest_record(payload).await?;
 
         stream.flush().await?;
@@ -5152,6 +5151,7 @@ mod arrow_flight_tests {
                     vec![MockFlightResponse::BatchAck {
                         ack_up_to_offset: 0,
                         delay_ms: 0,
+                        ack_up_to_records: 3,
                     }],
                 )
                 .await;
@@ -5205,14 +5205,17 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 2,
                         },
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 1,
                             delay_ms: 0,
+                            ack_up_to_records: 4,
                         },
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 2,
                             delay_ms: 0,
+                            ack_up_to_records: 6,
                         },
                     ],
                 )
@@ -5243,7 +5246,7 @@ mod arrow_flight_tests {
                     vec![Some(&format!("batch-{}", i)), None],
                 );
                 let offset = stream.ingest_batch(batch).await?;
-                assert_eq!(offset, i as i64, "Expected offset {} for batch {}", i, i);
+                assert_eq!(offset, i, "Expected offset {} for batch {}", i, i);
                 offsets.push(offset);
             }
 
@@ -5278,10 +5281,12 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 50,
+                            ack_up_to_records: 1,
                         },
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 1,
                             delay_ms: 50,
+                            ack_up_to_records: 2,
                         },
                     ],
                 )
@@ -5330,8 +5335,17 @@ mod arrow_flight_tests {
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
-            // Auto-ack all
-            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+            // Ack the single batch
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
 
             let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
             sdk.use_tls = false;
@@ -5566,6 +5580,7 @@ mod arrow_flight_tests {
                     vec![MockFlightResponse::BatchAck {
                         ack_up_to_offset: 0,
                         delay_ms: 5000, // 5 second delay
+                        ack_up_to_records: 1,
                     }],
                 )
                 .await;
@@ -5701,6 +5716,7 @@ mod arrow_flight_tests {
                 responses.push(MockFlightResponse::BatchAck {
                     ack_up_to_offset: i as i64,
                     delay_ms: 10,
+                    ack_up_to_records: (i + 1) as u64,
                 });
             }
             mock_server.inject_responses(TABLE_NAME, responses).await;
@@ -5790,10 +5806,12 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 1,
                             delay_ms: 0,
+                            ack_up_to_records: 2,
                         },
                     ],
                 )
@@ -5854,6 +5872,7 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                         MockFlightResponse::Error {
                             status: tonic::Status::invalid_argument("Permanent failure"),
@@ -5925,19 +5944,17 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                         MockFlightResponse::Error {
                             status: tonic::Status::unavailable("Temporary network issue"),
                             delay_ms: 0,
                         },
-                        // After recovery (new connection): replay batch 1, then batch 2
+                        // After recovery (new connection): replay unacked batch (becomes offset 0)
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
-                        },
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 1,
-                            delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                     ],
                 )
@@ -5998,6 +6015,7 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                         MockFlightResponse::Error {
                             status: tonic::Status::invalid_argument("Schema changed"),
@@ -6007,6 +6025,7 @@ mod arrow_flight_tests {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
+                            ack_up_to_records: 1,
                         },
                     ],
                 )
@@ -6052,6 +6071,201 @@ mod arrow_flight_tests {
 
             assert!(!new_stream.is_closed());
             assert_eq!(new_stream.table_name(), TABLE_NAME);
+
+            Ok(())
+        }
+
+        /// Test that record-based acknowledgment correctly tracks cumulative records.
+        /// Verifies that batches are acknowledged based on record counts, not just offsets.
+        #[tokio::test]
+        async fn test_record_based_acknowledgment() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_record_based_acknowledgment");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Batch 1: 3 records (cumulative: 3)
+            // Batch 2: 2 records (cumulative: 5)
+            // Batch 3: 4 records (cumulative: 9)
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Ack batch 1: 3 records
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                        // Ack batch 2: 5 cumulative records
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 5,
+                        },
+                        // Ack batch 3: 9 cumulative records
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                            ack_up_to_records: 9,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Batch 1: 3 records
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Batch 2: 2 records
+            let batch2 =
+                create_test_record_batch(schema.clone(), vec![4, 5], vec![Some("d"), Some("e")]);
+            let offset2 = stream.ingest_batch(batch2).await?;
+            stream.wait_for_offset(offset2).await?;
+
+            // Batch 3: 4 records
+            let batch3 = create_test_record_batch(
+                schema.clone(),
+                vec![6, 7, 8, 9],
+                vec![Some("f"), Some("g"), Some("h"), Some("i")],
+            );
+            let offset3 = stream.ingest_batch(batch3).await?;
+            stream.wait_for_offset(offset3).await?;
+
+            // All batches should be acknowledged
+            stream.close().await?;
+
+            Ok(())
+        }
+
+        /// Test partial batch recovery: when disconnect happens after partial acknowledgment,
+        /// only the unacknowledged portion of the batch should be replayed.
+        #[tokio::test]
+        async fn test_partial_batch_recovery() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_partial_batch_recovery");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Scenario:
+            // - Batch 1: 5 records, fully acked (cumulative: 5)
+            // - Batch 2: 10 records, partially acked (7 of 10, cumulative: 12)
+            // - Disconnect happens
+            // - On reconnect: only 3 remaining records from batch 2 should be replayed
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Ack batch 1: 5 records
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 5,
+                        },
+                        // Partial ack batch 2: 12 cumulative (7 of 10 records from batch 2)
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 12,
+                        },
+                        // Disconnect
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        // After recovery: ack the remaining 3 records (sliced batch)
+                        // New connection starts at 0, so cumulative is 3 for the sliced batch
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+            sdk.use_tls = false;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_timeout_ms: 5000,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Batch 1: 5 records - will be fully acked
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3, 4, 5],
+                vec![Some("a"), Some("b"), Some("c"), Some("d"), Some("e")],
+            );
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Batch 2: 10 records - will be partially acked (7 of 10)
+            let batch2 = create_test_record_batch(
+                schema.clone(),
+                vec![6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                vec![
+                    Some("f"),
+                    Some("g"),
+                    Some("h"),
+                    Some("i"),
+                    Some("j"),
+                    Some("k"),
+                    Some("l"),
+                    Some("m"),
+                    Some("n"),
+                    Some("o"),
+                ],
+            );
+            let offset2 = stream.ingest_batch(batch2).await?;
+
+            // This should eventually succeed after recovery replays the sliced batch
+            let result = stream.wait_for_offset(offset2).await;
+            assert!(
+                result.is_ok(),
+                "Expected partial batch recovery to succeed: {:?}",
+                result
+            );
+
+            stream.close().await?;
 
             Ok(())
         }

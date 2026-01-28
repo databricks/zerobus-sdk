@@ -29,6 +29,7 @@ pub struct FlightBatchMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlightAckMetadata {
     pub ack_up_to_offset: i64,
+    pub ack_up_to_records: u64,
 }
 
 /// Sentinel offset value indicating stream setup is complete but no batches have been acked yet.
@@ -47,11 +48,13 @@ pub enum MockFlightResponse {
     /// will trigger when batch 2 (or higher) arrives and acknowledge all batches up to offset 2.
     ///
     /// **Common patterns**:
-    /// - Ack each batch individually: `(0..n).map(|i| BatchAck { ack_up_to_offset: i, delay_ms: 0 })`
+    /// - Ack each batch individually: `(0..n).map(|i| BatchAck { ack_up_to_offset: i, delay_ms: 0, ack_up_to_records: 100 })`
     /// - Ack in batches: `[BatchAck { ack_up_to_offset: 4, .. }]` acks batches 0-4 when batch 4 arrives
     BatchAck {
         ack_up_to_offset: i64,
         delay_ms: u64,
+        /// Cumulative records acknowledged.
+        ack_up_to_records: u64,
     },
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
@@ -235,6 +238,7 @@ impl FlightService for MockFlightServer {
                         // successful auth, schema validation, and stream setup.
                         let ready_metadata = FlightAckMetadata {
                             ack_up_to_offset: STREAM_READY_OFFSET,
+                            ack_up_to_records: 0,
                         };
                         let ready_bytes = serde_json::to_vec(&ready_metadata).unwrap();
                         let ready_result = PutResult {
@@ -308,6 +312,7 @@ impl FlightService for MockFlightServer {
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset,
                             delay_ms,
+                            ack_up_to_records,
                         } => {
                             if metadata
                                 .as_ref()
@@ -320,10 +325,14 @@ impl FlightService for MockFlightServer {
 
                                 let ack_metadata = FlightAckMetadata {
                                     ack_up_to_offset: *ack_up_to_offset,
+                                    ack_up_to_records: *ack_up_to_records,
                                 };
                                 let ack_bytes = serde_json::to_vec(&ack_metadata).unwrap();
 
-                                info!("Sending BatchAck for offset: {}", ack_up_to_offset);
+                                info!(
+                                    "Sending BatchAck for offset: {}, records: {}",
+                                    ack_up_to_offset, ack_up_to_records
+                                );
                                 let put_result = PutResult {
                                     app_metadata: ack_bytes.into(),
                                 };
@@ -374,12 +383,20 @@ impl FlightService for MockFlightServer {
                 } else {
                     // Auto-ack if no more configured responses
                     if let Some(metadata) = metadata {
+                        let records = {
+                            let count = row_count.lock().await;
+                            *count
+                        };
                         let ack_metadata = FlightAckMetadata {
                             ack_up_to_offset: metadata.offset_id,
+                            ack_up_to_records: records,
                         };
                         let ack_bytes = serde_json::to_vec(&ack_metadata).unwrap();
 
-                        debug!("Auto-acking offset: {}", metadata.offset_id);
+                        debug!(
+                            "Auto-acking offset: {}, records: {}",
+                            metadata.offset_id, records
+                        );
                         let put_result = PutResult {
                             app_metadata: ack_bytes.into(),
                         };

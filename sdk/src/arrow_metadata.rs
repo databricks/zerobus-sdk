@@ -66,13 +66,18 @@ pub struct FlightAckMetadata {
     /// (schema validation, table access) but no batches acked yet.
     /// The SDK waits for this signal during stream creation.
     pub ack_up_to_offset: OffsetId,
+    /// Cumulative count of records durably stored up to this acknowledgment.
+    pub ack_up_to_records: u64,
 }
 
 impl FlightAckMetadata {
     /// Create new acknowledgement metadata.
     #[allow(dead_code)]
-    pub fn new(ack_up_to_offset: OffsetId) -> Self {
-        Self { ack_up_to_offset }
+    pub fn new(ack_up_to_offset: OffsetId, ack_up_to_records: u64) -> Self {
+        Self {
+            ack_up_to_offset,
+            ack_up_to_records,
+        }
     }
 
     /// Create a "stream ready" signal indicating successful stream setup.
@@ -81,6 +86,7 @@ impl FlightAckMetadata {
     pub fn stream_ready() -> Self {
         Self {
             ack_up_to_offset: STREAM_READY_OFFSET,
+            ack_up_to_records: 0,
         }
     }
 
@@ -129,10 +135,11 @@ mod tests {
     }
 
     #[test]
-    fn test_flight_ack_metadata_parse() {
-        let json = r#"{"ack_up_to_offset": 99}"#;
+    fn test_flight_ack_metadata_parse_with_records() {
+        let json = r#"{"ack_up_to_offset": 99, "ack_up_to_records": 5000}"#;
         let parsed = FlightAckMetadata::from_bytes(json.as_bytes()).unwrap();
         assert_eq!(parsed.ack_up_to_offset, 99);
+        assert_eq!(parsed.ack_up_to_records, 5000);
     }
 
     #[test]
