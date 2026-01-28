@@ -97,7 +97,7 @@ where
                     Ok(long_class) => {
                         match env.new_object(long_class, "(J)V", &[JValue::Long(handle_value)]) {
                             Ok(java_value) => {
-                                if let Err(e) = complete_future(&mut env, &future, java_value) {
+                                if let Err(e) = complete_future(&mut env, future, java_value) {
                                     tracing::error!("Failed to complete future: {}", e);
                                 }
                             }
@@ -106,11 +106,8 @@ where
                                 if let Some(exc) =
                                     create_zerobus_exception(&mut env, &e.to_string())
                                 {
-                                    let _ = complete_future_exceptionally(
-                                        &mut env,
-                                        &future,
-                                        exc.into(),
-                                    );
+                                    let _ =
+                                        complete_future_exceptionally(&mut env, future, exc.into());
                                 }
                             }
                         }
@@ -118,14 +115,14 @@ where
                     Err(e) => {
                         tracing::error!("Failed to find Long class: {}", e);
                         if let Some(exc) = create_zerobus_exception(&mut env, &e.to_string()) {
-                            let _ = complete_future_exceptionally(&mut env, &future, exc.into());
+                            let _ = complete_future_exceptionally(&mut env, future, exc.into());
                         }
                     }
                 }
             }
             Err(error) => {
                 if let Some(exc) = create_exception_from_error(&mut env, &error) {
-                    if let Err(e) = complete_future_exceptionally(&mut env, &future, exc.into()) {
+                    if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into()) {
                         tracing::error!("Failed to complete future exceptionally: {}", e);
                     }
                 }
@@ -158,13 +155,13 @@ where
 
         match result {
             Ok(()) => {
-                if let Err(e) = complete_future_void(&mut env, &future) {
+                if let Err(e) = complete_future_void(&mut env, future) {
                     tracing::error!("Failed to complete future: {}", e);
                 }
             }
             Err(error) => {
                 if let Some(exc) = create_exception_from_error(&mut env, &error) {
-                    if let Err(e) = complete_future_exceptionally(&mut env, &future, exc.into()) {
+                    if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into()) {
                         tracing::error!("Failed to complete future exceptionally: {}", e);
                     }
                 }
