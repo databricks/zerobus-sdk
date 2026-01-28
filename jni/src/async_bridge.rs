@@ -68,11 +68,8 @@ pub fn complete_future_exceptionally<'local>(
 /// * `F` - The future type that produces the result
 /// * `T` - The result type that can be converted to a jlong
 /// * `C` - A closure that converts the result to a jlong
-pub fn spawn_and_complete<F, T, C>(
-    future_ref: GlobalRef,
-    async_fn: F,
-    convert_result: C,
-) where
+pub fn spawn_and_complete<F, T, C>(future_ref: GlobalRef, async_fn: F, convert_result: C)
+where
     F: Future<Output = Result<T, ZerobusError>> + Send + 'static,
     T: Send + 'static,
     C: FnOnce(T) -> jni::sys::jlong + Send + 'static,
@@ -106,8 +103,14 @@ pub fn spawn_and_complete<F, T, C>(
                             }
                             Err(e) => {
                                 tracing::error!("Failed to create Long object: {}", e);
-                                if let Some(exc) = create_zerobus_exception(&mut env, &e.to_string()) {
-                                    let _ = complete_future_exceptionally(&mut env, &future, exc.into());
+                                if let Some(exc) =
+                                    create_zerobus_exception(&mut env, &e.to_string())
+                                {
+                                    let _ = complete_future_exceptionally(
+                                        &mut env,
+                                        &future,
+                                        exc.into(),
+                                    );
                                 }
                             }
                         }

@@ -40,12 +40,7 @@ impl AckCallback for JavaAckCallback {
 
         let callback = self.callback_ref.as_obj();
 
-        if let Err(e) = env.call_method(
-            callback,
-            "onAck",
-            "(J)V",
-            &[JValue::Long(offset_id)],
-        ) {
+        if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
             tracing::error!("Failed to call onAck callback: {}", e);
         }
     }

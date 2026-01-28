@@ -76,16 +76,11 @@ pub fn extract_stream_options(
 fn extract_ack_callback(
     env: &mut JNIEnv,
     options: &JObject,
-) -> Result<Option<Arc<dyn AckCallback>>, jni::errors::Error>
-{
+) -> Result<Option<Arc<dyn AckCallback>>, jni::errors::Error> {
     // Call getAckCallback() which returns Optional<AckCallback>
     // We need to check if the result contains a new-style AckCallback
-    let optional_result = env.call_method(
-        options,
-        "getNewAckCallback",
-        "()Ljava/util/Optional;",
-        &[],
-    );
+    let optional_result =
+        env.call_method(options, "getNewAckCallback", "()Ljava/util/Optional;", &[]);
 
     // If the method doesn't exist (old API), return None
     let optional = match optional_result {

@@ -246,7 +246,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 )
                 .await?;
 
-            Ok(NativeStreamHandle::new(stream, credentials.0, credentials.1))
+            Ok(NativeStreamHandle::new(
+                stream,
+                credentials.0,
+                credentials.1,
+            ))
         },
         |handle| handle.into_raw(),
     );
@@ -312,7 +316,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
         future_ref,
         async move {
             let new_stream = sdk_arc.recreate_stream(&old_stream).await?;
-            Ok(NativeStreamHandle::new(new_stream, client_id, client_secret))
+            Ok(NativeStreamHandle::new(
+                new_stream,
+                client_id,
+                client_secret,
+            ))
         },
         |handle| handle.into_raw(),
     );
@@ -444,7 +452,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
                 )
                 .await?;
 
-            Ok(NativeArrowStreamHandle::new(stream, credentials.0, credentials.1))
+            Ok(NativeArrowStreamHandle::new(
+                stream,
+                credentials.0,
+                credentials.1,
+            ))
         },
         |handle| handle.into_raw(),
     );
@@ -510,7 +522,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateArro
         future_ref,
         async move {
             let new_stream = sdk_arc.recreate_arrow_stream(&old_stream).await?;
-            Ok(NativeArrowStreamHandle::new(new_stream, client_id, client_secret))
+            Ok(NativeArrowStreamHandle::new(
+                new_stream,
+                client_id,
+                client_secret,
+            ))
         },
         |handle| handle.into_raw(),
     );

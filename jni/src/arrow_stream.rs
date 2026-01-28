@@ -124,9 +124,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeInge
         }
 
         if batches.is_empty() {
-            return Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                "No batches found in Arrow IPC data".to_string(),
-            ));
+            return Err(
+                databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                    "No batches found in Arrow IPC data".to_string(),
+                ),
+            );
         }
 
         // Ingest the first batch
@@ -149,7 +151,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeInge
 /// private native void nativeWaitForOffset(long handle, long offset);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeWaitForOffset<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeWaitForOffset<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,

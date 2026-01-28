@@ -6,8 +6,8 @@
 use crate::async_bridge::{create_completable_future, spawn_and_complete_void};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
-use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord};
 use databricks_zerobus_ingest_sdk::ZerobusStream;
+use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord};
 use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
@@ -152,7 +152,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRec
 /// private native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordOffset<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordOffset<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -213,7 +215,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRec
 /// private native long nativeIngestRecordsOffset(long handle, List<byte[]> payloads, boolean isJson);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordsOffset<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordsOffset<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -554,7 +558,10 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnacke
     let encoded_batch_class = match env.find_class("com/databricks/zerobus/EncodedBatch") {
         Ok(c) => c,
         Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to find EncodedBatch class: {}", e));
+            throw_zerobus_exception(
+                &mut env,
+                &format!("Failed to find EncodedBatch class: {}", e),
+            );
             return JObject::null();
         }
     };
@@ -569,11 +576,8 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnacke
 
     // Add each batch to the list
     for batch in batches {
-
         let (is_json, records): (bool, Vec<Vec<u8>>) = match batch {
-            EncodedBatch::Proto(records) => {
-                (false, records.into_iter().collect())
-            }
+            EncodedBatch::Proto(records) => (false, records.into_iter().collect()),
             EncodedBatch::Json(records) => {
                 (true, records.into_iter().map(|r| r.into_bytes()).collect())
             }
@@ -583,7 +587,10 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnacke
         let records_list = match env.new_object(&array_list_class, "()V", &[]) {
             Ok(l) => l,
             Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Failed to create inner ArrayList: {}", e));
+                throw_zerobus_exception(
+                    &mut env,
+                    &format!("Failed to create inner ArrayList: {}", e),
+                );
                 return JObject::null();
             }
         };
@@ -592,7 +599,10 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnacke
             let byte_array = match env.byte_array_from_slice(&record_bytes) {
                 Ok(b) => b,
                 Err(e) => {
-                    throw_zerobus_exception(&mut env, &format!("Failed to create byte array: {}", e));
+                    throw_zerobus_exception(
+                        &mut env,
+                        &format!("Failed to create byte array: {}", e),
+                    );
                     return JObject::null();
                 }
             };
