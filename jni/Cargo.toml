@@ -1,0 +1,30 @@
+[package]
+name = "zerobus-jni"
+version = "0.1.0"
+authors = ["Databricks"]
+edition = "2021"
+rust-version = "1.70"
+license-file = "../LICENSE"
+description = "JNI bindings for the Zerobus Rust SDK"
+repository = "https://github.com/databricks/zerobus-sdk-rs"
+
+[lib]
+crate-type = ["cdylib"]
+name = "zerobus_jni"
+
+[dependencies]
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight"] }
+jni = "0.21"
+tokio = { version = "1.42", features = ["rt-multi-thread", "sync"] }
+prost = "0.13"
+prost-types = "0.13"
+thiserror = "1.0"
+tracing = "0.1"
+
+# Arrow dependencies (re-exported from SDK)
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
+arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"] }
+
+[features]
+default = []
