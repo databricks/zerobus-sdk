@@ -1,0 +1,27 @@
+[package]
+name = "zerobus-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bindings for the Zerobus Rust SDK"
+license-file = "../LICENSE"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# Core SDK logic - use local path dependency
+databricks-zerobus-ingest-sdk = { path = "../sdk" }
+
+# FFI helpers
+tokio = { version = "1.42", features = ["rt", "rt-multi-thread"] }
+once_cell = "1.19"
+prost = "0.13.3"
+prost-types = "0.13.3"
+async-trait = "0.1"
+libc = "0.2"
+
+# Logging
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[build-dependencies]
+cbindgen = "0.27"
