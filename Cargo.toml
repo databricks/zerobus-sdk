@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "sdk",
+    "ffi",
+    "jni",
     "examples/json/*",
     "examples/proto/*",
     "tools/*",

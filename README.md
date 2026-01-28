@@ -29,6 +29,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Examples](#examples)
 - [Best Practices](#best-practices)
 - [API Reference](#api-reference)
+- [Language Bindings](#language-bindings)
 - [Building from Source](#building-from-source)
 - [Community and Contributing](#community-and-contributing)
 - [License](#license)
@@ -121,6 +122,20 @@ zerobus_rust_sdk/
 │   ├── build.rs                        # Build script for protobuf compilation
 │   └── Cargo.toml
 │
+├── ffi/                                # C FFI bindings for other languages
+│   ├── src/
+│   │   ├── lib.rs                      # FFI implementation
+│   │   └── tests.rs                    # FFI unit tests
+│   ├── zerobus.h                       # Generated C header
+│   ├── cbindgen.toml                   # Header generation config
+│   ├── build.rs                        # Build script for header generation
+│   └── Cargo.toml
+│
+├── jni/                                # JNI bindings for Java SDK
+│   ├── src/
+│   │   └── lib.rs                      # JNI implementation
+│   └── Cargo.toml
+│
 ├── tools/
 │   └── generate_files/                 # Schema generation CLI tool
 │       ├── src/
@@ -164,6 +179,8 @@ zerobus_rust_sdk/
 ### Key Components
 
 - **`sdk/`** - The main library crate containing all SDK functionality
+- **`ffi/`** - C FFI bindings for building language wrappers (Go, C#, C++, etc.)
+- **`jni/`** - JNI bindings for the Java SDK
 - **`tools/`** - CLI tool for generating Protocol Buffer schemas from Unity Catalog tables
 - **`examples/`** - Complete working examples demonstrating SDK usage
 - **Workspace** - Root `Cargo.toml` defines a Cargo workspace for unified builds
@@ -941,6 +958,44 @@ Error type for all SDK operations.
 pub fn is_retryable(&self) -> bool
 ```
 Returns `true` if the error can be automatically recovered by the SDK.
+
+## Language Bindings
+
+This repository includes bindings for building SDKs in other languages.
+
+### C FFI (`ffi/`)
+
+C Foreign Function Interface for languages that can call C functions (Go, C#, C++, etc.).
+
+```bash
+# Build static and dynamic libraries
+cargo build -p zerobus-ffi --release
+
+# Output:
+# target/release/libzerobus_ffi.a      (static library for Go, C++)
+# target/release/libzerobus_ffi.so     (Linux dynamic library for C#)
+# target/release/libzerobus_ffi.dylib  (macOS dynamic library for C#)
+# target/release/zerobus_ffi.dll       (Windows dynamic library for C#)
+# ffi/zerobus.h                        (C header file)
+```
+
+Pre-built binaries for all platforms are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk-rs/releases) with tags `ffi-vX.X.X`.
+
+### JNI (`jni/`)
+
+Java Native Interface bindings for the [Zerobus Java SDK](https://github.com/databricks/zerobus-sdk-java).
+
+```bash
+# Build JNI library
+cargo build -p zerobus-jni --release
+
+# Output:
+# target/release/libzerobus_jni.so     (Linux)
+# target/release/libzerobus_jni.dylib  (macOS)
+# target/release/zerobus_jni.dll       (Windows)
+```
+
+Pre-built binaries are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk-rs/releases) with tags `jni-vX.X.X`.
 
 ## Building from Source
 
