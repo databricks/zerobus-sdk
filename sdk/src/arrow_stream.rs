@@ -6,9 +6,8 @@
 //! This module provides `ZerobusArrowStream`, a client for ingesting Arrow `RecordBatch`
 //! data into Databricks Delta tables using the Arrow Flight protocol.
 
-use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
@@ -55,7 +54,56 @@ pub struct ArrowTableProperties {
 #[derive(Clone)]
 struct PendingBatch {
     batch: RecordBatch,
+    /// Logical offset ID assigned by the client for this batch.
     offset_id: OffsetId,
+    /// Cumulative record count before this batch.
+    start_record: u64,
+    /// Cumulative record count after this batch.
+    /// Batch is fully acked when `acked_records >= end_record`.
+    end_record: u64,
+}
+
+/// Returns the portion of a batch that needs to be replayed after recovery.
+///
+/// - If batch is fully acked: returns `None`
+/// - If batch is partially acked: returns sliced batch with only un-acked records
+/// - If batch is fully un-acked: returns the full batch
+fn slice_batch_for_recovery(
+    pb: &PendingBatch,
+    acked_before_disconnect: u64,
+) -> Option<RecordBatch> {
+    if pb.start_record >= acked_before_disconnect {
+        // Fully un-acked
+        return Some(pb.batch.clone());
+    }
+
+    let records_already_acked =
+        (acked_before_disconnect - pb.start_record).min(pb.batch.num_rows() as u64);
+    let remaining_rows = pb
+        .batch
+        .num_rows()
+        .saturating_sub(records_already_acked as usize);
+
+    if remaining_rows == 0 {
+        // Fully acked
+        None
+    } else if records_already_acked == 0 {
+        // No records acked (shouldn't happen given first check, but be safe)
+        Some(pb.batch.clone())
+    } else {
+        // Partially acked - slice to get un-acked portion
+        debug!(
+            offset_id = pb.offset_id,
+            total_rows = pb.batch.num_rows(),
+            records_already_acked = records_already_acked,
+            remaining_rows = remaining_rows,
+            "Slicing partially-acked batch for recovery"
+        );
+        Some(
+            pb.batch
+                .slice(records_already_acked as usize, remaining_rows),
+        )
+    }
 }
 
 /// An Arrow Flight stream for ingesting Arrow RecordBatches into a Delta table.
@@ -130,15 +178,10 @@ pub struct ZerobusArrowStream {
     /// When ingest_batch has a send failure, it can immediately check the current value.
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     server_error_rx: watch::Receiver<Option<ZerobusError>>,
-    /// Queue mapping physical offsets (wire protocol) to logical offsets (client tracking).
-    ///
-    /// The server expects physical offsets to be strictly sequential starting from 0 on each
-    /// connection. On recovery, physical offsets reset to 0, but logical offsets (used for
-    /// client ack tracking) must be preserved. This queue maintains the mapping:
-    /// - When sending batch with logical offset L, push L to this queue
-    /// - When receiving ack for physical offset P, pop from queue to get logical offset
-    /// - On recovery, clear queue and repopulate when replaying pending batches
-    pending_logical_offsets: Arc<Mutex<VecDeque<OffsetId>>>,
+    /// Cumulative count of records sent (for record-based ack tracking).
+    cumulative_records_sent: Arc<AtomicU64>,
+    /// Last acknowledged cumulative record count (for recovery slicing).
+    last_acked_records: Arc<AtomicU64>,
 }
 
 impl ZerobusArrowStream {
@@ -163,7 +206,8 @@ impl ZerobusArrowStream {
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
         let receiver_task = Arc::new(Mutex::new(None));
-        let pending_logical_offsets = Arc::new(Mutex::new(VecDeque::new()));
+        let cumulative_records_sent = Arc::new(AtomicU64::new(0));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
 
@@ -185,7 +229,8 @@ impl ZerobusArrowStream {
             ingest_mutex: Arc::new(Mutex::new(())),
             server_error_tx,
             server_error_rx,
-            pending_logical_offsets,
+            cumulative_records_sent,
+            last_acked_records,
         };
 
         // Initialize the connection with retry logic.
@@ -254,7 +299,8 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.failed_batches),
             Arc::clone(&stream.recovery_attempts),
             stream.server_error_tx.clone(),
-            Arc::clone(&stream.pending_logical_offsets),
+            Arc::clone(&stream.cumulative_records_sent),
+            Arc::clone(&stream.last_acked_records),
             response_stream,
         );
 
@@ -497,7 +543,8 @@ impl ZerobusArrowStream {
         failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
         recovery_attempts: Arc<AtomicU32>,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
-        pending_logical_offsets: Arc<Mutex<VecDeque<OffsetId>>>,
+        cumulative_records_sent: Arc<AtomicU64>,
+        last_acked_records: Arc<AtomicU64>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
@@ -516,9 +563,9 @@ impl ZerobusArrowStream {
                     Arc::clone(&is_closed),
                     last_ack_tx.clone(),
                     Arc::clone(&pending_batches),
-                    Arc::clone(&pending_logical_offsets),
                     ack_timeout,
                     server_error_tx.clone(),
+                    Arc::clone(&last_acked_records),
                 )
                 .await;
 
@@ -569,12 +616,6 @@ impl ZerobusArrowStream {
                             *tx_guard = None;
                         }
 
-                        // Clear the logical offset queue (physical offsets reset on reconnect).
-                        {
-                            let mut queue = pending_logical_offsets.lock().await;
-                            queue.clear();
-                        }
-
                         // Create new connection.
                         let reconnect_result = tokio::time::timeout(
                             Duration::from_millis(options.recovery_timeout_ms),
@@ -586,7 +627,8 @@ impl ZerobusArrowStream {
                                 &headers_provider,
                                 &batch_tx,
                                 &pending_batches,
-                                &pending_logical_offsets,
+                                &cumulative_records_sent,
+                                &last_acked_records,
                             ),
                         )
                         .await;
@@ -642,7 +684,8 @@ impl ZerobusArrowStream {
         headers_provider: &Arc<dyn HeadersProvider>,
         batch_tx: &BatchSender,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        pending_logical_offsets: &Arc<Mutex<VecDeque<OffsetId>>>,
+        cumulative_records_sent: &Arc<AtomicU64>,
+        last_acked_records: &Arc<AtomicU64>,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -761,24 +804,57 @@ impl ZerobusArrowStream {
             *tx_guard = Some(tx.clone());
         }
 
-        // Replay pending batches.
-        let batches_to_replay: Vec<PendingBatch> = { pending_batches.lock().await.clone() };
+        // Get the last acked record count before the disconnect.
+        // This tells us how many records were durably stored.
+        let acked_before_disconnect = last_acked_records.load(Ordering::Relaxed);
+        // Reset for the new connection to avoid reusing stale values.
+        last_acked_records.store(0, Ordering::Relaxed);
 
-        if !batches_to_replay.is_empty() {
-            info!(
-                batch_count = batches_to_replay.len(),
-                "Replaying pending batches after recovery"
-            );
+        // Reset cumulative_records_sent for the new connection.
+        // It will be recalculated as we replay batches.
+        cumulative_records_sent.store(0, Ordering::Relaxed);
 
-            for pending in batches_to_replay {
-                if tx.send(Ok(pending.batch)).await.is_err() {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Failed to replay batch during recovery",
-                    )));
+        // Replay pending batches, slicing partially-acked ones if present.
+        // We rebuild the pending list to drop fully-acked batches.
+        {
+            let mut pending = pending_batches.lock().await;
+            if !pending.is_empty() {
+                info!(
+                    batch_count = pending.len(),
+                    acked_records = acked_before_disconnect,
+                    "Replaying pending batches after recovery"
+                );
+
+                let mut new_pending = Vec::with_capacity(pending.len());
+                let mut new_cumulative: u64 = 0;
+
+                for pb in pending.drain(..) {
+                    let Some(batch) = slice_batch_for_recovery(&pb, acked_before_disconnect) else {
+                        debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
+                        continue;
+                    };
+
+                    if tx.send(Ok(batch.clone())).await.is_err() {
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            "Failed to replay batch during recovery",
+                        )));
+                    }
+
+                    let num_records = batch.num_rows() as u64;
+                    let start_record = new_cumulative;
+                    let end_record = new_cumulative + num_records;
+                    new_cumulative = end_record;
+
+                    new_pending.push(PendingBatch {
+                        batch,
+                        offset_id: pb.offset_id,
+                        start_record,
+                        end_record,
+                    });
                 }
-                // Push logical offset to queue for ack matching after replay.
-                let mut queue = pending_logical_offsets.lock().await;
-                queue.push_back(pending.offset_id);
+
+                *pending = new_pending;
+                cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
             }
         }
 
@@ -802,23 +878,20 @@ impl ZerobusArrowStream {
 
     /// Processes acknowledgments from the server response stream.
     ///
-    /// Uses position-based matching: the server sends physical offsets (0, 1, 2...),
-    /// and we pop from `pending_logical_offsets` to get the corresponding logical
-    /// offset for each acked batch. This allows physical offsets to reset on recovery
-    /// while preserving logical offset continuity for client ack tracking.
+    /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
+    /// the cumulative number of records durably stored. We match this against
+    /// pending batches' record ranges to determine which batches are fully acked.
+    /// This correctly handles Arrow Flight's automatic batch chunking.
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
         mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
-        pending_logical_offsets: Arc<Mutex<VecDeque<OffsetId>>>,
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
+        last_acked_records: Arc<AtomicU64>,
     ) -> ZerobusResult<()> {
-        // Track physical offset (resets to 0 on each connection)
-        let mut last_acked_physical_offset: OffsetId = -1;
-
         loop {
             if is_closed.load(Ordering::Relaxed) {
                 debug!("Stream closed, stopping ack processor");
@@ -831,56 +904,39 @@ impl ZerobusArrowStream {
                 Ok(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
+                            let acked_records = ack.ack_up_to_records;
                             debug!(
-                                physical_offset = ack.ack_up_to_offset,
+                                ack_up_to_offset = ack.ack_up_to_offset,
+                                ack_up_to_records = acked_records,
                                 "Received acknowledgment"
                             );
 
-                            let delta = ack.ack_up_to_offset - last_acked_physical_offset;
-                            if delta <= 0 {
-                                // This indicates duplicate/out-of-order ack or a queue desync.
-                                // Fail fast to avoid breaking logical<->physical mapping.
-                                let err = ZerobusError::StreamClosedError(tonic::Status::internal(format!(
-                                    "Out-of-order/duplicate ack: ack_up_to_offset={} last_acked_physical_offset={}",
-                                    ack.ack_up_to_offset, last_acked_physical_offset
-                                )));
-                                return Err(err);
-                            }
-                            // Pop logical offsets from queue for each physical offset acked.
-                            // Server acks are cumulative: ack_up_to_offset=N means 0..=N are acked.
-                            let num_to_ack = delta as usize;
+                            // Update last_acked_records for recovery slicing.
+                            last_acked_records.store(acked_records, Ordering::Relaxed);
 
-                            let mut logical_offsets_acked = HashSet::with_capacity(num_to_ack);
+                            // Find and remove batches that are fully acknowledged.
+                            // A batch is fully acked when ack_up_to_records >= batch.end_record.
+                            let mut max_acked_offset: Option<OffsetId> = None;
                             {
-                                let mut queue = pending_logical_offsets.lock().await;
-                                for _ in 0..num_to_ack {
-                                    if let Some(logical_offset) = queue.pop_front() {
-                                        logical_offsets_acked.insert(logical_offset);
+                                let mut pending = pending_batches.lock().await;
+                                pending.retain(|pb| {
+                                    if acked_records >= pb.end_record {
+                                        // Batch is fully acknowledged
+                                        max_acked_offset = Some(
+                                            max_acked_offset
+                                                .map_or(pb.offset_id, |o| o.max(pb.offset_id)),
+                                        );
+                                        false // Remove from pending
                                     } else {
-                                        warn!("Ack queue underflow - received more acks than batches sent");
-                                        break;
+                                        true // Keep in pending
                                     }
-                                }
+                                });
                             }
 
-                            // Remove acknowledged batches from pending_batches.
-                            if !logical_offsets_acked.is_empty() {
-                                let max_logical_offset =
-                                    *logical_offsets_acked.iter().max().unwrap();
-
-                                // Remove from pending_batches
-                                {
-                                    let mut pending = pending_batches.lock().await;
-                                    pending.retain(|pb| {
-                                        !logical_offsets_acked.contains(&pb.offset_id)
-                                    });
-                                }
-
-                                // Send the last acknowledged logical offset to the watch channel.
-                                let _ = last_ack_tx.send(Some(max_logical_offset));
+                            // Notify waiters of the highest acknowledged logical offset.
+                            if let Some(offset) = max_acked_offset {
+                                let _ = last_ack_tx.send(Some(offset));
                             }
-
-                            last_acked_physical_offset = ack.ack_up_to_offset;
                         }
                         Err(e) => {
                             warn!("Failed to parse ack metadata: {}", e);
@@ -983,15 +1039,23 @@ impl ZerobusArrowStream {
         // Serialize ingestion operations.
         let _guard = self.ingest_mutex.lock().await;
 
-        // Generate offset.
+        // Generate offset and calculate cumulative record range.
         let offset_id = self.offset_generator.next();
 
-        // Store in pending batches for recovery.
+        let record_count = batch.num_rows() as u64;
+        let start_record = self
+            .cumulative_records_sent
+            .fetch_add(record_count, Ordering::Relaxed);
+        let end_record = start_record + record_count;
+
+        // Store in pending batches for recovery with record range for ack matching.
         {
             let mut pending = self.pending_batches.lock().await;
             pending.push(PendingBatch {
                 batch: batch.clone(),
                 offset_id,
+                start_record,
+                end_record,
             });
         }
 
@@ -1059,11 +1123,6 @@ impl ZerobusArrowStream {
                     "Failed to send batch",
                 )));
             }
-        } else {
-            // Send succeeded - push logical offset to queue for ack matching.
-            // This must happen AFTER successful send to maintain queue order.
-            let mut queue = self.pending_logical_offsets.lock().await;
-            queue.push_back(offset_id);
         }
 
         debug!(offset_id = offset_id, "Batch queued for ingestion");

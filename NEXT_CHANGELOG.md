@@ -17,6 +17,7 @@
 
 ### Bug Fixes
 
+- **[Experimental] Record-based acknowledgment tracking for Arrow Flight streams**: Added cumulative record counting to support proper ack tracking and correct recovery when batches are auto-chunked.
 
 ### Documentation
 
