@@ -102,7 +102,8 @@ where
                     // Box as Java Long
                     match env.find_class("java/lang/Long") {
                         Ok(long_class) => {
-                            match env.new_object(long_class, "(J)V", &[JValue::Long(handle_value)]) {
+                            match env.new_object(long_class, "(J)V", &[JValue::Long(handle_value)])
+                            {
                                 Ok(java_value) => {
                                     if let Err(e) = complete_future(&mut env, future, java_value) {
                                         tracing::error!("Failed to complete future: {}", e);
@@ -113,8 +114,11 @@ where
                                     if let Some(exc) =
                                         create_zerobus_exception(&mut env, &e.to_string())
                                     {
-                                        let _ =
-                                            complete_future_exceptionally(&mut env, future, exc.into());
+                                        let _ = complete_future_exceptionally(
+                                            &mut env,
+                                            future,
+                                            exc.into(),
+                                        );
                                     }
                                 }
                             }
@@ -129,7 +133,8 @@ where
                 }
                 Err(error) => {
                     if let Some(exc) = create_exception_from_error(&mut env, &error) {
-                        if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into()) {
+                        if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into())
+                        {
                             tracing::error!("Failed to complete future exceptionally: {}", e);
                         }
                     }
@@ -175,7 +180,8 @@ where
                 }
                 Err(error) => {
                     if let Some(exc) = create_exception_from_error(&mut env, &error) {
-                        if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into()) {
+                        if let Err(e) = complete_future_exceptionally(&mut env, future, exc.into())
+                        {
                             tracing::error!("Failed to complete future exceptionally: {}", e);
                         }
                     }
