@@ -83,7 +83,7 @@ where
 
         // Complete the future on the blocking thread pool to avoid issues when
         // Java callbacks call back into JNI methods that use block_on.
-        let _ = tokio::task::spawn_blocking(move || {
+        drop(tokio::task::spawn_blocking(move || {
             // Attach to the JVM to complete the future
             let jvm = get_jvm();
             let mut env = match jvm.attach_current_thread_as_daemon() {
@@ -140,7 +140,7 @@ where
                     }
                 }
             }
-        });
+        }));
     });
 }
 
@@ -159,7 +159,7 @@ where
 
         // Complete the future on the blocking thread pool to avoid issues when
         // Java callbacks call back into JNI methods that use block_on.
-        let _ = tokio::task::spawn_blocking(move || {
+        drop(tokio::task::spawn_blocking(move || {
             // Attach to the JVM to complete the future
             let jvm = get_jvm();
             let mut env = match jvm.attach_current_thread_as_daemon() {
@@ -187,7 +187,7 @@ where
                     }
                 }
             }
-        });
+        }));
     });
 }
 
