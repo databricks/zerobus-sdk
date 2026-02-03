@@ -437,7 +437,9 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClo
 /// private native List<byte[]> nativeGetUnackedRecords(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedRecords<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedRecords<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -518,7 +520,9 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
 /// private native List<EncodedBatch> nativeGetUnackedBatches(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedBatches<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedBatches<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
