@@ -56,7 +56,7 @@ impl NativeStreamHandle {
 /// private static native void nativeDestroy(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeDestroy<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeDestroy<'local>(
     _env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
@@ -76,7 +76,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeDestroy<'
 /// private native CompletableFuture<Void> nativeIngestRecord(long handle, byte[] payload, boolean isJson);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecord<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecord<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -152,7 +152,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRec
 /// private native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordOffset<
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordOffset<
     'local,
 >(
     mut env: JNIEnv<'local>,
@@ -215,7 +215,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRec
 /// private native long nativeIngestRecordsOffset(long handle, List<byte[]> payloads, boolean isJson);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRecordsOffset<
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordsOffset<
     'local,
 >(
     mut env: JNIEnv<'local>,
@@ -315,7 +315,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIngestRec
 /// private native void nativeWaitForOffset(long handle, long offset);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeWaitForOffset<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeWaitForOffset<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -348,7 +348,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeWaitForOf
 /// private native void nativeFlush(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeFlush<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeFlush<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -380,7 +380,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeFlush<'lo
 /// private native void nativeClose(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeClose<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -409,7 +409,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeClose<'lo
 /// private native boolean nativeIsClosed(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIsClosed<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClosed<'local>(
     _env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -437,7 +437,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeIsClosed<
 /// private native List<byte[]> nativeGetUnackedRecords(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnackedRecords<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedRecords<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -518,7 +518,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnacke
 /// private native List<EncodedBatch> nativeGetUnackedBatches(long handle);
 /// ```
 #[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusStream_nativeGetUnackedBatches<'local>(
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedBatches<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
