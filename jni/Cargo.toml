@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-jni"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
