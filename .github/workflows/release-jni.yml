@@ -17,14 +17,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: libzerobus_jni.so
             artifact_dir: linux-x86-64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            artifact_dir: darwin-x86-64
-          - os: macos-14
-            target: aarch64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            artifact_dir: darwin-aarch64
           - os: windows-server-latest
             target: x86_64-pc-windows-msvc
             artifact: zerobus_jni.dll
@@ -112,7 +104,5 @@ jobs:
 
             Platforms included:
             - linux-x86-64
-            - darwin-x86-64
-            - darwin-aarch64
             - windows-x86-64
           files: zerobus-jni-${{ inputs.version }}.tar.gz
