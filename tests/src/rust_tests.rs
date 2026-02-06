@@ -13,7 +13,6 @@ use utils::{create_test_descriptor_proto, setup_tracing, TestCallback, TestHeade
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
-#[allow(deprecated)]
 mod stream_initialization_and_basic_lifecycle_tests {
     use super::*;
 
@@ -34,8 +33,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -84,8 +85,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -133,8 +136,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -183,8 +188,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -236,8 +243,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -291,8 +300,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -346,8 +357,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -402,8 +415,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -452,8 +467,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -511,8 +528,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -567,8 +586,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -620,8 +641,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -680,8 +703,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -740,8 +765,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -805,8 +832,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -831,7 +860,6 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 }
 
-#[allow(deprecated)]
 mod schema_tests {
     use super::*;
 
@@ -858,8 +886,10 @@ mod schema_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -914,8 +944,10 @@ mod schema_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -958,8 +990,10 @@ mod schema_tests {
         info!("Starting test_ingest_json_into_proto_stream_fails");
 
         let (_mock_server, server_url) = start_mock_server().await?;
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -994,8 +1028,10 @@ mod schema_tests {
         info!("Starting test_ingest_json_batch_into_proto_stream_fails");
 
         let (_mock_server, server_url) = start_mock_server().await?;
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1032,8 +1068,10 @@ mod schema_tests {
         info!("Starting test_ingest_proto_into_json_stream_fails");
 
         let (_mock_server, server_url) = start_mock_server().await?;
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1068,8 +1106,10 @@ mod schema_tests {
         info!("Starting test_ingest_proto_batch_into_json_stream_fails");
 
         let (_mock_server, server_url) = start_mock_server().await?;
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1104,8 +1144,10 @@ mod schema_tests {
         info!("Starting test_proto_stream_creation_without_descriptor_fails");
 
         let (_mock_server, server_url) = start_mock_server().await?;
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1151,8 +1193,10 @@ mod schema_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1182,7 +1226,6 @@ mod schema_tests {
     }
 }
 
-#[allow(deprecated)]
 mod standard_operation_and_state_management_tests {
     use super::*;
 
@@ -1209,8 +1252,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1264,8 +1309,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1326,8 +1373,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1381,8 +1430,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1441,8 +1492,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1509,8 +1562,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1576,8 +1631,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1643,8 +1700,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1710,8 +1769,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1767,8 +1828,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1828,8 +1891,10 @@ mod standard_operation_and_state_management_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1860,7 +1925,6 @@ mod standard_operation_and_state_management_tests {
     }
 }
 
-#[allow(deprecated)]
 mod concurrency_and_race_condition_tests {
     use super::*;
 
@@ -1888,8 +1952,10 @@ mod concurrency_and_race_condition_tests {
         ];
         mock_server.inject_responses(TABLE_NAME, responses).await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -1991,8 +2057,10 @@ mod concurrency_and_race_condition_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -2089,8 +2157,10 @@ mod concurrency_and_race_condition_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -2191,8 +2261,10 @@ mod concurrency_and_race_condition_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
         let stream = sdk
             .create_stream_with_headers_provider(
                 TableProperties {
@@ -2288,8 +2360,10 @@ mod concurrency_and_race_condition_tests {
         ];
         mock_server.inject_responses(TABLE_NAME, responses).await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -2349,7 +2423,6 @@ mod concurrency_and_race_condition_tests {
     }
 }
 
-#[allow(deprecated)]
 mod failure_scenarios_tests {
     use super::*;
 
@@ -2383,8 +2456,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -2436,8 +2511,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -2496,8 +2573,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -2578,8 +2657,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -2679,8 +2760,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -2747,8 +2830,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -2837,8 +2922,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -2915,8 +3002,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -2999,8 +3088,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -3067,8 +3158,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -3153,8 +3246,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -3245,8 +3340,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = TableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -3342,8 +3439,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -3436,8 +3535,10 @@ mod failure_scenarios_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
             let mut stream = sdk
                 .create_stream_with_headers_provider(
                     TableProperties {
@@ -3477,7 +3578,6 @@ mod failure_scenarios_tests {
     }
 }
 
-#[allow(deprecated)]
 mod graceful_close_tests {
     use super::*;
 
@@ -3519,8 +3619,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -3602,8 +3704,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -3686,8 +3790,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -3779,8 +3885,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -3859,8 +3967,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -3935,8 +4045,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -4020,8 +4132,10 @@ mod graceful_close_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let options = StreamConfigurationOptions {
             max_inflight_requests: 100,
@@ -4061,7 +4175,6 @@ mod graceful_close_tests {
     }
 }
 
-#[allow(deprecated)]
 mod api_offset_tests {
     use super::*;
 
@@ -4088,8 +4201,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4150,8 +4265,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4216,8 +4333,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4283,8 +4402,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4358,8 +4479,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4413,8 +4536,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4482,8 +4607,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4539,8 +4666,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4597,8 +4726,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4650,8 +4781,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4717,8 +4850,10 @@ mod api_offset_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4823,8 +4958,10 @@ mod callback_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4893,8 +5030,10 @@ mod callback_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -4969,8 +5108,10 @@ mod callback_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -5031,8 +5172,10 @@ mod callback_tests {
             )
             .await;
 
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
 
         let table_properties = TableProperties {
             table_name: TABLE_NAME.to_string(),
@@ -5103,8 +5246,10 @@ mod arrow_flight_tests {
             // Configure mock to auto-ack (no specific responses needed)
             mock_server.inject_responses(TABLE_NAME, vec![]).await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5156,8 +5301,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5221,8 +5368,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5292,8 +5441,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5347,8 +5498,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5400,8 +5553,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5438,8 +5593,10 @@ mod arrow_flight_tests {
             let (_mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5486,8 +5643,10 @@ mod arrow_flight_tests {
             let (_mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5533,8 +5692,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5585,8 +5746,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5629,8 +5792,10 @@ mod arrow_flight_tests {
 
             mock_server.inject_responses(TABLE_NAME, vec![]).await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5664,8 +5829,10 @@ mod arrow_flight_tests {
 
             mock_server.inject_responses(TABLE_NAME, vec![]).await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5721,8 +5888,10 @@ mod arrow_flight_tests {
             }
             mock_server.inject_responses(TABLE_NAME, responses).await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5817,8 +5986,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5882,8 +6053,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -5960,8 +6133,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -6031,8 +6206,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -6114,8 +6291,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),
@@ -6207,8 +6386,10 @@ mod arrow_flight_tests {
                 )
                 .await;
 
-            let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-            sdk.use_tls = false;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
 
             let table_properties = ArrowTableProperties {
                 table_name: TABLE_NAME.to_string(),

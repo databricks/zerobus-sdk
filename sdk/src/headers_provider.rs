@@ -3,8 +3,8 @@ use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Default User-Agent header value for Rust SDK requests.
-pub const DEFAULT_USER_AGENT: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
+/// Default x-zerobus-sdk header value for Rust SDK requests.
+pub const DEFAULT_X_ZEROBUS_SDK: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -54,7 +54,6 @@ pub struct OAuthHeadersProvider {
     table_name: String,
     workspace_id: String,
     unity_catalog_url: String,
-    user_agent: String,
 }
 
 impl OAuthHeadersProvider {
@@ -65,7 +64,6 @@ impl OAuthHeadersProvider {
         table_name: String,
         workspace_id: String,
         unity_catalog_url: String,
-        user_agent: String,
     ) -> Self {
         Self {
             client_id,
@@ -73,7 +71,6 @@ impl OAuthHeadersProvider {
             table_name,
             workspace_id,
             unity_catalog_url,
-            user_agent,
         }
     }
 }
@@ -92,7 +89,7 @@ impl HeadersProvider for OAuthHeadersProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
-        headers.insert("user-agent", self.user_agent.clone());
+        headers.insert("x-zerobus-sdk", DEFAULT_X_ZEROBUS_SDK.to_string());
         Ok(headers)
     }
 }
