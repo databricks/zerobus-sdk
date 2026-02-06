@@ -17,15 +17,15 @@ name = "zerobus_jni"
 databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight"] }
 jni = "0.21"
 tokio = { version = "1.42", features = ["rt-multi-thread", "sync"] }
-prost = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-types = "0.14"
 thiserror = "1.0"
 tracing = "0.1"
 
 # Arrow dependencies (re-exported from SDK)
-arrow-array = "56.2.0"
-arrow-schema = "56.2.0"
-arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"] }
+arrow-array = "57"
+arrow-schema = "57"
+arrow-ipc = { version = "57", features = ["lz4", "zstd"] }
 
 [features]
 default = []
