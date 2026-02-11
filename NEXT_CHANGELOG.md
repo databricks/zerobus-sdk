@@ -4,6 +4,15 @@
 
 ### New Features and Improvements
 
+- **Builder Pattern for SDK Initialization**: Added `ZerobusSdk::builder()` for fluent SDK configuration
+  - `.endpoint()` - Set the Zerobus endpoint (scheme is optional, defaults work with or without `https://`)
+  - `.unity_catalog_url()` - Set the Unity Catalog URL (optional when using custom headers providers)
+  - `.tls_config()` - Provide a custom `TlsConfig` implementation (defaults to `SecureTlsConfig`)
+- **Configurable TLS via `TlsConfig` trait**: TLS is now configured through a strategy pattern
+  - `SecureTlsConfig` (default) - Production TLS with system CA certificates
+  - `NoTlsConfig` - No-op TLS for testing with plaintext `http://` endpoints (requires `testing` feature)
+  - Implement `TlsConfig` trait for custom certificate handling
+- **SDK Identifier Header**: Renamed `user-agent` header to `x-zerobus-sdk` for clearer SDK identification in gRPC metadata
 - **Type Widening for Record Ingestion**: Added wrapper types for record ingestion
   - **`ProtoMessage<T>`**: SDK handles encoding - pass any `prost::Message` directly
   - **`JsonValue<T>`**: SDK handles serialization - pass any `serde::Serialize` type directly
@@ -13,6 +22,9 @@
   - Works with both single record and batch ingestion methods
 
 ### Deprecations
+
+- **`ZerobusSdk::new()`**: Use `ZerobusSdk::builder()` instead
+- **`ZerobusSdk.use_tls` field**: TLS is now controlled via the `TlsConfig` trait passed to the builder
 
 
 ### Bug Fixes
@@ -30,6 +42,9 @@
 
 ### API Changes
 
+- **Added `ZerobusSdkBuilder`** for fluent SDK configuration (replaces `ZerobusSdk::new()`)
+- **Added `TlsConfig` trait** with `SecureTlsConfig` (default) and `NoTlsConfig` (behind `testing` feature)
+- **Renamed header** from `user-agent` to `x-zerobus-sdk` in gRPC metadata
 - **Added type widening wrapper types** (backward compatible):
   - Added `ProtoMessage<T: prost::Message>` - SDK handles encoding for protobuf messages
   - Added `JsonValue<T: serde::Serialize>` - SDK handles serialization for JSON objects
