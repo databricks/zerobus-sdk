@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 // Re-export arrow types for public API
@@ -31,6 +31,7 @@ use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
+use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
@@ -169,7 +170,8 @@ pub struct ZerobusArrowStream {
     recovery_attempts: Arc<AtomicU32>,
     /// Connection details for recovery.
     endpoint: String,
-    use_tls: bool,
+    /// TLS configuration for the connection.
+    tls_config: Arc<dyn TlsConfig>,
     headers_provider: Arc<dyn HeadersProvider>,
     /// Synchronization mutex for serializing ingest operations.
     ingest_mutex: Arc<Mutex<()>>,
@@ -194,7 +196,7 @@ impl ZerobusArrowStream {
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     pub(crate) async fn new(
         endpoint: &str,
-        use_tls: bool,
+        tls_config: Arc<dyn TlsConfig>,
         table_properties: ArrowTableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
@@ -224,7 +226,7 @@ impl ZerobusArrowStream {
             failed_batches,
             recovery_attempts,
             endpoint: endpoint.to_string(),
-            use_tls,
+            tls_config,
             headers_provider,
             ingest_mutex: Arc::new(Mutex::new(())),
             server_error_tx,
@@ -235,7 +237,7 @@ impl ZerobusArrowStream {
 
         // Initialize the connection with retry logic.
         let endpoint = stream.endpoint.clone();
-        let use_tls = stream.use_tls;
+        let tls_config = Arc::clone(&stream.tls_config);
         let table_properties = stream.table_properties.clone();
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
@@ -245,6 +247,7 @@ impl ZerobusArrowStream {
 
         let create_attempt = || {
             let endpoint = endpoint.clone();
+            let tls_config = Arc::clone(&tls_config);
             let table_properties = table_properties.clone();
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
@@ -254,7 +257,7 @@ impl ZerobusArrowStream {
                     Duration::from_millis(options.recovery_timeout_ms),
                     Self::try_connect(
                         &endpoint,
-                        use_tls,
+                        &tls_config,
                         &table_properties,
                         &options,
                         &headers_provider,
@@ -288,7 +291,7 @@ impl ZerobusArrowStream {
         // Spawn the supervisor task.
         let task = Self::spawn_supervisor_task(
             stream.endpoint.clone(),
-            stream.use_tls,
+            Arc::clone(&stream.tls_config),
             stream.table_properties.clone(),
             stream.options.clone(),
             Arc::clone(&stream.headers_provider),
@@ -321,7 +324,7 @@ impl ZerobusArrowStream {
     /// Returns the response stream and batch sender on success.
     async fn try_connect(
         endpoint: &str,
-        use_tls: bool,
+        tls_config: &Arc<dyn TlsConfig>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
@@ -331,7 +334,7 @@ impl ZerobusArrowStream {
     )> {
         let client = Self::create_flight_client(
             endpoint,
-            use_tls,
+            tls_config,
             table_properties,
             options,
             headers_provider,
@@ -344,29 +347,19 @@ impl ZerobusArrowStream {
     /// Creates a Flight client connected to the endpoint.
     async fn create_flight_client(
         endpoint: &str,
-        use_tls: bool,
+        tls_config: &Arc<dyn TlsConfig>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
     ) -> ZerobusResult<FlightClient> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
-        let channel = if use_tls {
-            let tls_config = ClientTlsConfig::new().with_native_roots();
-            Channel::from_shared(endpoint.to_string())
-                .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
-                .tls_config(tls_config)
-                .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
-                .connect_timeout(connection_timeout)
-                .timeout(connection_timeout)
-                .connect_lazy()
-        } else {
-            Channel::from_shared(endpoint.to_string())
-                .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
-                .connect_timeout(connection_timeout)
-                .timeout(connection_timeout)
-                .connect_lazy()
-        };
+        let base_endpoint = Channel::from_shared(endpoint.to_string())
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .connect_timeout(connection_timeout)
+            .timeout(connection_timeout);
+
+        let channel = tls_config.configure_endpoint(base_endpoint)?.connect_lazy();
 
         let mut client = FlightClient::new(channel);
 
@@ -532,7 +525,7 @@ impl ZerobusArrowStream {
     #[allow(clippy::too_many_arguments)]
     fn spawn_supervisor_task(
         endpoint: String,
-        use_tls: bool,
+        tls_config: Arc<dyn TlsConfig>,
         table_properties: ArrowTableProperties,
         options: ArrowStreamConfigurationOptions,
         headers_provider: Arc<dyn HeadersProvider>,
@@ -621,7 +614,7 @@ impl ZerobusArrowStream {
                             Duration::from_millis(options.recovery_timeout_ms),
                             Self::reconnect(
                                 &endpoint,
-                                use_tls,
+                                &tls_config,
                                 &table_properties,
                                 &options,
                                 &headers_provider,
@@ -678,7 +671,7 @@ impl ZerobusArrowStream {
     #[allow(clippy::too_many_arguments)]
     async fn reconnect(
         endpoint: &str,
-        use_tls: bool,
+        tls_config: &Arc<dyn TlsConfig>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
@@ -690,7 +683,7 @@ impl ZerobusArrowStream {
         // Create new client.
         let client = Self::create_flight_client(
             endpoint,
-            use_tls,
+            tls_config,
             table_properties,
             options,
             headers_provider,

@@ -111,10 +111,12 @@ struct CZerobusSdk *zerobus_sdk_new(const char *zerobus_endpoint,
 void zerobus_sdk_free(struct CZerobusSdk *sdk);
 
 /**
- * Set whether to use TLS for connections
- * This should be set to false when using HTTP endpoints (e.g., for testing)
+ * Set whether to use TLS for connections.
+ *
+ * Deprecated: This function is a no-op. TLS is now controlled via the `TlsConfig`
+ * trait passed to the SDK builder. This function is retained for ABI compatibility.
  */
-void zerobus_sdk_set_use_tls(struct CZerobusSdk *sdk, bool use_tls);
+void zerobus_sdk_set_use_tls(struct CZerobusSdk *sdk, bool _use_tls);
 
 /**
  * Create a stream with OAuth authentication

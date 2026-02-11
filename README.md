@@ -115,6 +115,8 @@ zerobus_rust_sdk/
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── errors.rs                   # Error types and retryable logic
 │   │   ├── headers_provider.rs         # Trait for custom authentication headers
+│   │   ├── builder/                    # Builder pattern for SDK initialization
+│   │   ├── tls_config.rs              # TLS configuration strategies
 │   │   ├── stream_configuration.rs     # Stream options
 │   │   ├── landing_zone.rs             # Inflight record buffer
 │   │   └── offset_generator.rs         # Logical offset tracking
@@ -336,23 +338,53 @@ See [`examples/README.md`](examples/README.md) for more information on how to ge
 
 ### 2. Initialize the SDK
 
-Create an SDK instance with your Databricks workspace endpoints:
+Create an SDK instance using the builder pattern:
 
 ```rust
 // For AWS
-let sdk = ZerobusSdk::new(
-    "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com".to_string(),  // Zerobus endpoint
-    "https://<your-workspace>.cloud.databricks.com".to_string(),     // Unity Catalog endpoint
-)?;
+let sdk = ZerobusSdk::builder()
+    .endpoint("https://<your-shard-id>.zerobus.<region>.cloud.databricks.com")
+    .unity_catalog_url("https://<your-workspace>.cloud.databricks.com")
+    .build()?;
 
 // For Azure
-let sdk = ZerobusSdk::new(
-    "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net".to_string(),  // Zerobus endpoint
-    "https://<your-workspace>.azuredatabricks.net".to_string(),     // Unity Catalog endpoint
-)?;
+let sdk = ZerobusSdk::builder()
+    .endpoint("https://<your-shard-id>.zerobus.<region>.azuredatabricks.net")
+    .unity_catalog_url("https://<your-workspace>.azuredatabricks.net")
+    .build()?;
 ```
 
-**Note:** The workspace ID is automatically extracted from the Zerobus endpoint when `ZerobusSdk::new()` is called.
+**Note:** The workspace ID is automatically extracted from the Zerobus endpoint. The `https://` scheme is optional — the SDK accepts endpoints with or without it.
+
+#### TLS Configuration
+
+By default, the SDK uses `SecureTlsConfig` which enables TLS with the operating system's trusted CA certificates. For testing against a local `http://` server, use `NoTlsConfig` (requires the `testing` feature):
+
+```rust
+use databricks_zerobus_ingest_sdk::{ZerobusSdk, NoTlsConfig};
+use std::sync::Arc;
+
+let sdk = ZerobusSdk::builder()
+    .endpoint("http://localhost:50051")
+    .tls_config(Arc::new(NoTlsConfig))
+    .build()?;
+```
+
+For custom certificate handling, implement the `TlsConfig` trait:
+
+```rust
+use databricks_zerobus_ingest_sdk::{TlsConfig, ZerobusResult};
+use tonic::transport::Endpoint;
+
+struct MyTlsConfig { /* ... */ }
+
+impl TlsConfig for MyTlsConfig {
+    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
+        // Custom TLS configuration logic
+        Ok(endpoint)
+    }
+}
+```
 
 ### 3. Configure Authentication
 
@@ -722,7 +754,10 @@ Check [`examples/README.md`](examples/README.md) for setup instructions and deta
 ### Stream Recovery
 
 ```rust
-let sdk = ZerobusSdk::new(endpoint, uc_endpoint);
+let sdk = ZerobusSdk::builder()
+    .endpoint(endpoint)
+    .unity_catalog_url(uc_endpoint)
+    .build()?;
 
 let mut stream = sdk.create_stream(
     table_properties.clone(),
@@ -777,9 +812,13 @@ cargo test -p tests -- --nocapture
 
 Main entry point for the SDK.
 
-**Constructor:**
+**Builder:**
 ```rust
-pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self>
+let sdk = ZerobusSdk::builder()
+    .endpoint("https://workspace.zerobus.databricks.com")  // Required
+    .unity_catalog_url("https://workspace.cloud.databricks.com")  // Optional with custom headers
+    .tls_config(Arc::new(SecureTlsConfig::new()))  // Optional, defaults to SecureTlsConfig
+    .build()?;
 ```
 
 **Methods:**
@@ -949,6 +988,20 @@ Implement this trait to provide custom authentication headers. The default imple
 
 See [Custom Authentication](#custom-authentication) section for usage examples.
 
+### `TlsConfig`
+
+Trait for TLS configuration strategies.
+
+**Implementations:**
+- `SecureTlsConfig` (default) - Production TLS with system CA certificates
+- `NoTlsConfig` - No-op TLS for testing with `http://` endpoints (requires `testing` feature)
+
+```rust
+pub trait TlsConfig: Send + Sync {
+    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint>;
+}
+```
+
 ### `ZerobusError`
 
 Error type for all SDK operations.
@@ -1049,7 +1102,7 @@ This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) fi
 - **Databricks** workspace with Zerobus access enabled
 - **OAuth 2.0** client credentials (client ID and secret)
 - **Unity Catalog** endpoint access
-- **TLS** - Uses native OS certificate store
+- **TLS** - Uses native OS certificate store by default (configurable via `TlsConfig` trait)
 
 
 ---

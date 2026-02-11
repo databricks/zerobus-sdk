@@ -7,12 +7,15 @@
 //! ```rust,ignore
 //! use databricks_zerobus_ingest_sdk::{ZerobusSdk, TableProperties, ProtoMessage};
 //!
-//! let sdk = ZerobusSdk::new(zerobus_endpoint, uc_endpoint)?;
+//! let sdk = ZerobusSdk::builder()
+//!     .endpoint(zerobus_endpoint)
+//!     .unity_catalog_url(uc_endpoint)
+//!     .build()?;
 //! let stream = sdk.create_stream(table_properties, client_id, client_secret, None).await?;
 //!
-//! // Ingest a record (automatically serialized)
-//! let ack = stream.ingest_record(ProtoMessage(my_message)).await?;
-//! ack.await?;
+//! // Ingest a record and wait for acknowledgment
+//! let offset = stream.ingest_record_offset(ProtoMessage(my_message)).await?;
+//! stream.wait_for_offset(offset).await?;
 //!
 //! stream.close().await?;
 //! ```
@@ -25,33 +28,13 @@ pub mod databricks {
     }
 }
 
-/// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
-/// supported for production use. The API may change in future releases.
-#[cfg(feature = "arrow-flight")]
-pub use arrow_configuration::ArrowStreamConfigurationOptions;
-#[cfg(feature = "arrow-flight")]
-pub use arrow_stream::{
-    ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
-};
-pub use callbacks::AckCallback;
-pub use default_token_factory::DefaultTokenFactory;
-pub use errors::ZerobusError;
-pub use headers_provider::HeadersProvider;
-use headers_provider::OAuthHeadersProvider;
-use landing_zone::LandingZone;
-pub use offset_generator::{OffsetId, OffsetIdGenerator};
-pub use record_types::{
-    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
-};
-pub use stream_configuration::StreamConfigurationOptions;
-
 #[cfg(feature = "arrow-flight")]
 mod arrow_configuration;
 #[cfg(feature = "arrow-flight")]
 mod arrow_metadata;
 #[cfg(feature = "arrow-flight")]
 mod arrow_stream;
+mod builder;
 mod callbacks;
 mod default_token_factory;
 mod errors;
@@ -61,6 +44,7 @@ mod offset_generator;
 mod record_types;
 mod stream_configuration;
 mod stream_options;
+mod tls_config;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -68,13 +52,6 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
-use databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
-use databricks::zerobus::zerobus_client::ZerobusClient;
-use databricks::zerobus::{
-    CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordResponse, RecordType,
-};
 use prost::Message;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
@@ -83,8 +60,41 @@ use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, error, info, instrument, span, warn, Level};
+
+use databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
+use databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
+use databricks::zerobus::zerobus_client::ZerobusClient;
+use databricks::zerobus::{
+    CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
+    IngestRecordResponse, RecordType,
+};
+use headers_provider::OAuthHeadersProvider;
+use landing_zone::LandingZone;
+
+/// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
+/// supported for production use. The API may change in future releases.
+#[cfg(feature = "arrow-flight")]
+pub use arrow_configuration::ArrowStreamConfigurationOptions;
+#[cfg(feature = "arrow-flight")]
+pub use arrow_stream::{
+    ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
+};
+pub use builder::ZerobusSdkBuilder;
+pub use callbacks::AckCallback;
+pub use default_token_factory::DefaultTokenFactory;
+pub use errors::ZerobusError;
+pub use headers_provider::{HeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+pub use offset_generator::{OffsetId, OffsetIdGenerator};
+pub use record_types::{
+    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
+    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+};
+pub use stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "testing")]
+pub use tls_config::NoTlsConfig;
+pub use tls_config::{SecureTlsConfig, TlsConfig};
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
@@ -216,8 +226,11 @@ pub struct ZerobusStream {
 /// #
 /// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
 ///
-/// // Open SDK with the Zerobus API endpoint.
-/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string())?;
+/// // Create SDK using the builder
+/// let sdk = ZerobusSdk::builder()
+///     .endpoint("https://your-workspace.zerobus.region.cloud.databricks.com")
+///     .unity_catalog_url("https://your-workspace.cloud.databricks.com")
+///     .build()?;
 ///
 /// // Define the arguments for the ephemeral stream.
 /// let table_properties = TableProperties {
@@ -246,17 +259,53 @@ pub struct ZerobusStream {
 /// ```
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
+    /// Deprecated: This field is no longer used. TLS is now controlled via `tls_config`.
+    #[deprecated(
+        since = "0.5.0",
+        note = "This field is no longer used. TLS is controlled via tls_config."
+    )]
     pub use_tls: bool,
     pub unity_catalog_url: String,
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     workspace_id: String,
+    tls_config: Arc<dyn TlsConfig>,
 }
 
 impl ZerobusSdk {
+    /// Creates a new SDK builder for fluent configuration.
+    ///
+    /// This is the recommended way to create a `ZerobusSdk` instance.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    ///
+    /// let sdk = ZerobusSdk::builder()
+    ///     .endpoint("https://workspace.zerobus.databricks.com")
+    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+    ///     .build()?;
+    /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
+    /// ```
+    pub fn builder() -> ZerobusSdkBuilder {
+        ZerobusSdkBuilder::new()
+    }
+
     /// Creates a new Zerobus SDK instance.
     ///
-    /// This initializes the SDK with the required endpoints. The workspace ID is automatically
-    /// extracted from the Zerobus endpoint URL.
+    /// # Deprecated
+    ///
+    /// Use [`ZerobusSdk::builder()`] instead for more flexible configuration:
+    ///
+    /// ```no_run
+    /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    ///
+    /// let sdk = ZerobusSdk::builder()
+    ///     .endpoint("https://workspace.zerobus.databricks.com")
+    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+    ///     .build()?;
+    /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
+    /// ```
     ///
     /// # Arguments
     ///
@@ -270,17 +319,7 @@ impl ZerobusSdk {
     /// # Errors
     ///
     /// * `ChannelCreationError` - If the workspace ID cannot be extracted from the Zerobus endpoint
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// let sdk = ZerobusSdk::new(
-    ///     "https://<your-zerobus-endpoint>".to_string(),
-    ///     "https://<your-uc-endpoint>".to_string(),
-    /// )?;
-    /// # Ok::<(), ZerobusError>(())
-    /// ```
+    #[deprecated(since = "0.5.0", note = "Use ZerobusSdk::builder() instead")]
     #[allow(clippy::result_large_err)]
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
         let workspace_id = zerobus_endpoint
@@ -289,18 +328,40 @@ impl ZerobusSdk {
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
-                ZerobusError::ChannelCreationError(
-                    "Failed to extract workspace_id from zerobus_endpoint".to_string(),
+                ZerobusError::InvalidArgument(
+                    "Failed to extract workspace ID from zerobus_endpoint".to_string(),
                 )
             })?;
 
+        #[allow(deprecated)]
         Ok(ZerobusSdk {
             zerobus_endpoint,
             use_tls: true,
             unity_catalog_url,
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
+            tls_config: Arc::new(SecureTlsConfig::new()),
         })
+    }
+
+    /// Creates a new SDK instance with explicit configuration.
+    ///
+    /// This is used internally by the builder pattern.
+    pub(crate) fn new_with_config(
+        zerobus_endpoint: String,
+        unity_catalog_url: String,
+        workspace_id: String,
+        tls_config: Arc<dyn TlsConfig>,
+    ) -> Self {
+        #[allow(deprecated)]
+        ZerobusSdk {
+            zerobus_endpoint,
+            use_tls: true,
+            unity_catalog_url,
+            workspace_id,
+            shared_channel: tokio::sync::Mutex::new(None),
+            tls_config,
+        }
     }
 
     /// Creates a new ingestion stream to a Unity Catalog table.
@@ -359,7 +420,6 @@ impl ZerobusSdk {
             table_properties.table_name.clone(),
             self.workspace_id.clone(),
             self.unity_catalog_url.clone(),
-            headers_provider::DEFAULT_USER_AGENT.to_string(),
         );
         self.create_stream_with_headers_provider(
             table_properties,
@@ -588,7 +648,6 @@ impl ZerobusSdk {
             table_properties.table_name.clone(),
             self.workspace_id.clone(),
             self.unity_catalog_url.clone(),
-            headers_provider::DEFAULT_USER_AGENT.to_string(),
         );
         self.create_arrow_stream_with_headers_provider(
             table_properties,
@@ -665,7 +724,7 @@ impl ZerobusSdk {
 
         let stream = ZerobusArrowStream::new(
             &self.zerobus_endpoint,
-            self.use_tls,
+            Arc::clone(&self.tls_config),
             table_properties,
             headers_provider,
             options,
@@ -773,15 +832,7 @@ impl ZerobusSdk {
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-            let channel = if self.use_tls {
-                let tls_config = ClientTlsConfig::new().with_native_roots();
-                endpoint
-                    .tls_config(tls_config)
-                    .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
-                    .connect_lazy()
-            } else {
-                endpoint.connect_lazy()
-            };
+            let channel = self.tls_config.configure_endpoint(endpoint)?.connect_lazy();
 
             let client = ZerobusClient::new(channel)
                 .max_decoding_message_size(usize::MAX)
