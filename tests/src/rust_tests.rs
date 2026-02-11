@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
+    NoTlsConfig, StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
@@ -36,6 +36,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -88,6 +89,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -139,6 +141,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -191,6 +194,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -246,6 +250,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -303,6 +308,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -360,6 +366,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -418,6 +425,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -470,6 +478,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -531,6 +540,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -589,6 +599,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -644,6 +655,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -706,6 +718,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -768,6 +781,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -835,6 +849,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -889,6 +904,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -947,6 +963,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -993,6 +1010,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1031,6 +1049,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1071,6 +1090,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1109,6 +1129,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1147,6 +1168,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1196,6 +1218,7 @@ mod schema_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1255,6 +1278,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1312,6 +1336,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1376,6 +1401,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1433,6 +1459,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1495,6 +1522,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1565,6 +1593,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1634,6 +1663,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1703,6 +1733,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1772,6 +1803,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1831,6 +1863,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1894,6 +1927,7 @@ mod standard_operation_and_state_management_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -1955,6 +1989,7 @@ mod concurrency_and_race_condition_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -2060,6 +2095,7 @@ mod concurrency_and_race_condition_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -2160,6 +2196,7 @@ mod concurrency_and_race_condition_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -2264,6 +2301,7 @@ mod concurrency_and_race_condition_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
         let stream = sdk
             .create_stream_with_headers_provider(
@@ -2363,6 +2401,7 @@ mod concurrency_and_race_condition_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -2459,6 +2498,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -2514,6 +2554,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -2576,6 +2617,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -2660,6 +2702,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -2763,6 +2806,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
                 .create_stream_with_headers_provider(
@@ -2833,6 +2877,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -2925,6 +2970,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3005,6 +3051,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3091,6 +3138,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3161,6 +3209,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3249,6 +3298,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3343,6 +3393,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = TableProperties {
@@ -3442,6 +3493,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let stream = sdk
@@ -3538,6 +3590,7 @@ mod failure_scenarios_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let mut stream = sdk
                 .create_stream_with_headers_provider(
@@ -3622,6 +3675,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -3707,6 +3761,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -3793,6 +3848,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -3888,6 +3944,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -3970,6 +4027,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -4048,6 +4106,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -4135,6 +4194,7 @@ mod graceful_close_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let options = StreamConfigurationOptions {
@@ -4204,6 +4264,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4268,6 +4329,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4336,6 +4398,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4405,6 +4468,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4482,6 +4546,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4539,6 +4604,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4610,6 +4676,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4669,6 +4736,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4729,6 +4797,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4784,6 +4853,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4853,6 +4923,7 @@ mod api_offset_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -4961,6 +5032,7 @@ mod callback_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -5033,6 +5105,7 @@ mod callback_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -5111,6 +5184,7 @@ mod callback_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -5175,6 +5249,7 @@ mod callback_tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
         let table_properties = TableProperties {
@@ -5221,7 +5296,7 @@ mod arrow_flight_tests {
     use std::sync::Arc;
 
     use databricks_zerobus_ingest_sdk::{
-        ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusSdk,
+        ArrowStreamConfigurationOptions, ArrowTableProperties, NoTlsConfig, ZerobusSdk,
     };
     use tracing::info;
 
@@ -5249,6 +5324,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5304,6 +5380,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5371,6 +5448,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5444,6 +5522,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5501,6 +5580,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5556,6 +5636,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5596,6 +5677,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5646,6 +5728,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5695,6 +5778,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5749,6 +5833,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5795,6 +5880,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5832,6 +5918,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5891,6 +5978,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -5989,6 +6077,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -6056,6 +6145,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -6136,6 +6226,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -6209,6 +6300,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -6294,6 +6386,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {
@@ -6389,6 +6482,7 @@ mod arrow_flight_tests {
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
                 .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
             let table_properties = ArrowTableProperties {

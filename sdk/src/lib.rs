@@ -7,12 +7,15 @@
 //! ```rust,ignore
 //! use databricks_zerobus_ingest_sdk::{ZerobusSdk, TableProperties, ProtoMessage};
 //!
-//! let sdk = ZerobusSdk::new(zerobus_endpoint, uc_endpoint)?;
+//! let sdk = ZerobusSdk::builder()
+//!     .endpoint(zerobus_endpoint)
+//!     .unity_catalog_url(uc_endpoint)
+//!     .build()?;
 //! let stream = sdk.create_stream(table_properties, client_id, client_secret, None).await?;
 //!
-//! // Ingest a record (automatically serialized)
-//! let ack = stream.ingest_record(ProtoMessage(my_message)).await?;
-//! ack.await?;
+//! // Ingest a record and wait for acknowledgment
+//! let offset = stream.ingest_record_offset(ProtoMessage(my_message)).await?;
+//! stream.wait_for_offset(offset).await?;
 //!
 //! stream.close().await?;
 //! ```
@@ -89,6 +92,8 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "testing")]
+pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 2;

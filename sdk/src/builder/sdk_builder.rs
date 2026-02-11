@@ -92,6 +92,7 @@ impl ZerobusSdkBuilder {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
             .or_else(|| zerobus_endpoint.strip_prefix("http://"))
+            .or(Some(zerobus_endpoint.as_str()))
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -154,16 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_invalid_endpoint_format() {
-        // Endpoint without protocol prefix - can't extract workspace_id
-        let result = ZerobusSdkBuilder::new()
-            .endpoint("invalid-endpoint")
-            .build();
+    fn test_builder_schemeless_endpoint() {
+        // Endpoint without protocol prefix - workspace ID is extracted from first dot-segment
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("my-workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build successfully with schemeless endpoint");
 
-        assert!(matches!(
-            result,
-            Err(ZerobusError::InvalidArgument(msg)) if msg.contains("workspace ID")
-        ));
+        assert_eq!(sdk.workspace_id, "my-workspace");
     }
 
     #[test]

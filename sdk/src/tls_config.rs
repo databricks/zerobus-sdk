@@ -12,7 +12,8 @@ use tonic::transport::{ClientTlsConfig, Endpoint};
 /// Implementations define how to configure the gRPC channel's TLS settings.
 /// This allows the SDK to support different TLS configurations:
 /// - `SecureTlsConfig`: Production TLS with system CA certificates (default)
-/// - Custom implementations for testing or special certificate requirements
+/// - `NoTlsConfig`: No TLS, for testing with local `http://` endpoints (requires `testing` feature)
+/// - Custom implementations for special certificate requirements
 ///
 /// # Examples
 ///
@@ -71,5 +72,29 @@ impl TlsConfig for SecureTlsConfig {
         endpoint
             .tls_config(tls_config)
             .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)
+    }
+}
+
+/// No-op TLS configuration for testing with plaintext `http://` endpoints.
+///
+/// This passes the endpoint through without any TLS configuration.
+/// Only available when the `testing` feature is enabled.
+///
+/// # Examples
+///
+/// ```rust
+/// use databricks_zerobus_ingest_sdk::{NoTlsConfig, TlsConfig};
+/// use std::sync::Arc;
+///
+/// let tls: Arc<dyn TlsConfig> = Arc::new(NoTlsConfig);
+/// ```
+#[cfg(feature = "testing")]
+#[derive(Clone, Debug, Default)]
+pub struct NoTlsConfig;
+
+#[cfg(feature = "testing")]
+impl TlsConfig for NoTlsConfig {
+    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
+        Ok(endpoint)
     }
 }
