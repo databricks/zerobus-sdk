@@ -71,7 +71,7 @@ cargo run -- \
 - `--proto-msg` - Message name in proto (optional, defaults to table name)
 - `--output-dir` - Output directory for generated files (optional, defaults to "output"). Can be relative or absolute path
 
-See [`../../examples/basic_example/README.md`](../../examples/basic_example/README.md) for more information on how to get OAuth credentials.
+See [`../../examples/README.md`](../../examples/README.md) for more information on how to get OAuth credentials.
 
 ## Output Files
 
