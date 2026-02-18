@@ -26,6 +26,10 @@ jobs:
       group: databricks-protected-runner-group
       labels: ${{ matrix.os }}
 
+    defaults:
+      run:
+        working-directory: rust
+
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jni-${{ matrix.artifact_dir }}
-          path: artifacts/${{ matrix.artifact_dir }}
+          path: rust/artifacts/${{ matrix.artifact_dir }}
 
   package:
     needs: build-jni

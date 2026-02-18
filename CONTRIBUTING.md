@@ -1,8 +1,10 @@
-# Contributing to Zerobus SDK for Rust
+# Contributing to Zerobus SDKs
 
-We happily welcome contributions to the Zerobus SDK for Rust. We use [GitHub Issues](https://github.com/databricks/zerobus-sdk-rs/issues) to track community reported issues and [GitHub Pull Requests](https://github.com/databricks/zerobus-sdk-rs/pulls) for accepting changes.
+We happily welcome contributions to the Zerobus SDKs. We use [GitHub Issues](https://github.com/databricks/zerobus-sdk/issues) to track community reported issues and [GitHub Pull Requests](https://github.com/databricks/zerobus-sdk/pulls) for accepting changes.
 
 Contributions are licensed on a license-in/license-out basis.
+
+For language-specific development setup, coding style, and CI details, see the contributing guide in each SDK directory (e.g., [`rust/CONTRIBUTING.md`](rust/CONTRIBUTING.md)).
 
 ## Communication
 
@@ -16,64 +18,6 @@ If it is appropriate to write a design document, the document must be hosted eit
 
 Small patches and bug fixes don't need prior communication.
 
-## Development Setup
-
-### Prerequisites
-
-- Git
-- cargo
-
-### Setting Up Your Development Environment
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/databricks/zerobus-sdk-rs.git
-    cd zerobus-sdk-rs
-    ```
-
-2. **Build the project:**
-   ```bash
-   make build
-   ```
-
-   This will:
-   - Download all dependencies
-   - Build the project in debug mode
-
-## Coding Style
-
-Code style is enforced by a formatter check in your pull request. We use `rustfmt` to format our code. Run `make fmt` to ensure your code is properly formatted prior to raising a pull request.
-
-### Running the Formatter
-
-Format your code before committing:
-
-```bash
-make fmt
-```
-
-This runs `cargo fmt --all` to format all crates in the workspace.
-
-### Running Linters
-
-Check your code for issues:
-
-```bash
-make lint
-```
-
-This runs `cargo clippy` to catch common mistakes and improve your code.
-
-### Running Tests
-
-Run the test suite to ensure your changes don't break existing functionality:
-
-```bash
-make test
-```
-
-This runs `cargo test` for all crates in the workspace.
-
 ## Pull Request Process
 
 1. **Create a feature branch:**
@@ -86,16 +30,12 @@ This runs `cargo test` for all crates in the workspace.
    - Follow existing code style
    - Update documentation as needed
 
-3. **Format and test your code:**
-   ```bash
-   make fmt
-   make test
-   ```
+3. **Run formatting and tests** for the SDK you are modifying (see the SDK's own contributing guide for details).
 
 4. **Commit your changes:**
    ```bash
    git add .
-   git commit -m "Add feature: description of your changes"
+   git commit -s -m "Add feature: description of your changes"
    ```
 
 5. **Push to your fork:**
@@ -146,71 +86,13 @@ Follow these conventions for commit messages:
 
 Example:
 ```
-Add async stream creation example
+Add batch ingestion support
 
-- Add async_example.py demonstrating non-blocking ingestion
-- Update README with async API documentation
+- Add batch method with all-or-nothing semantics
+- Update README with batch API documentation
 
 Fixes #42
 ```
-
-## Documentation
-
-### Updating Documentation
-
-- Update docstrings for all public APIs
-- Use Google-style docstrings
-- Include examples in docstrings where helpful
-- Update README.md for user-facing changes
-- Update examples/ for new features
-
-Example docstring:
-```python
-def ingest_record(self, record) -> RecordAcknowledgment:
-    """
-    Submits a single record for ingestion into the stream.
-
-    This method may block if the maximum number of in-flight records
-    has been reached.
-
-    Args:
-        record: The Protobuf message object to be ingested.
-
-    Returns:
-        RecordAcknowledgment: An object to wait on for the server's acknowledgment.
-
-    Raises:
-        ZerobusException: If the stream is not in a valid state for ingestion.
-
-    Example:
-        >>> record = AirQuality(device_name="sensor-1", temp=25)
-        >>> ack = stream.ingest_record(record)
-        >>> ack.wait_for_ack()
-    """
-```
-
-## Continuous Integration
-
-All pull requests must pass CI checks:
-
-- **fmt**: Runs formatting checks (`cargo fmt`)
-- **lint**: Runs linting checks (`cargo clippy`)
-- **tests**: Runs tests on Ubuntu and Windows for the stable Rust toolchain.
-
-You can view CI results in the GitHub Actions tab of the pull request.
-
-## Makefile Targets
-
-Available make targets:
-
-- `make build` - Build the project for debugging
-- `make build-release` - Build the project for release
-- `make fmt` - Format code with `rustfmt`
-- `make lint` - Run linting with `clippy`
-- `make check` - Run all checks (fmt and lint)
-- `make test` - Run unit tests with `cargo test`
-- `make clean` - Remove build artifacts
-- `make help` - Show available targets
 
 ## Versioning
 
@@ -224,15 +106,9 @@ We follow [Semantic Versioning](https://semver.org/):
 
 - **Issues**: Open an issue on GitHub for bugs or feature requests
 - **Discussions**: Use GitHub Discussions for questions
-- **Documentation**: Check the README and examples/
-
-## Package Name
-
-The package is published on [crates.io](https://crates.io/) as `zerobus`.
 
 ## Code of Conduct
 
 - Be respectful and inclusive
 - Welcome newcomers
 - Focus on constructive feedback
-- Follow the [Python Community Code of Conduct](https://www.python.org/psf/conduct/)

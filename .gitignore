@@ -1,2 +1,3 @@
-Cargo.lock
-target/
+# Rust
+rust/Cargo.lock
+rust/target/

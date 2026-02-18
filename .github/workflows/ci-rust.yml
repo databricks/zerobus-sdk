@@ -1,0 +1,58 @@
+name: Rust CI
+
+on:
+  workflow_call:
+
+jobs:
+  fmt:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format all files
+        run: make fmt
+      - name: Fail on differences
+        run: git diff --exit-code
+
+  lint:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: arduino/setup-protoc@v3
+      - name: Lint code
+        run: make lint
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux-ubuntu-latest, windows-server-latest]
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unshallow
+        run: git fetch --prune --unshallow
+      - uses: arduino/setup-protoc@v3
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: make test
