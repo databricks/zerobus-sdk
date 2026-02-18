@@ -11,11 +11,12 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust]
+    needs: [changes, rust, java]
     if: always()
     steps:
       - run: |
-          if [[ "${{ needs.rust.result }}" == "failure" ]]; then
+          if [[ "${{ needs.rust.result }}" == "failure" ]] || \
+             [[ "${{ needs.java.result }}" == "failure" ]]; then
             exit 1
           fi
 
@@ -25,6 +26,7 @@ jobs:
       labels: linux-ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      java: ${{ steps.filter.outputs.java }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -34,8 +36,16 @@ jobs:
             rust:
               - 'rust/**'
               - '.github/workflows/ci-rust.yml'
+            java:
+              - 'java/**'
+              - '.github/workflows/ci-java.yml'
 
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/ci-rust.yml
+
+  java:
+    needs: changes
+    if: needs.changes.outputs.java == 'true'
+    uses: ./.github/workflows/ci-java.yml

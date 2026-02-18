@@ -1030,7 +1030,7 @@ Pre-built binaries for all platforms are available in [GitHub Releases](https://
 
 ### JNI (`jni/`)
 
-Java Native Interface bindings for the [Zerobus Java SDK](https://github.com/databricks/zerobus-sdk-java).
+Java Native Interface bindings for the [Zerobus Java SDK](https://github.com/databricks/zerobus-sdk/tree/main/java).
 
 ```bash
 # Build JNI library

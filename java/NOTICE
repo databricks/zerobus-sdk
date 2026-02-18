@@ -1,0 +1,34 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following open source components:
+
+## Apache License 2.0
+
+### Protocol Buffers (protobuf-java)
+Copyright 2008 Google Inc.
+https://github.com/protocolbuffers/protobuf
+License: https://github.com/protocolbuffers/protobuf/blob/main/LICENSE
+
+### gRPC Java
+Copyright 2014 gRPC authors
+https://github.com/grpc/grpc-java
+License: https://github.com/grpc/grpc-java/blob/master/LICENSE
+
+### Netty
+Copyright 2014 The Netty Project
+https://github.com/netty/netty
+License: https://github.com/netty/netty/blob/4.1/LICENSE.txt
+
+### SLF4J
+Copyright (c) 2004-2017 QOS.ch
+https://github.com/qos-ch/slf4j
+License: https://github.com/qos-ch/slf4j/blob/master/LICENSE.txt
+
+## CDDL + GPLv2 with classpath exception
+
+### javax.annotation-api
+https://github.com/javaee/javax.annotation

@@ -20,7 +20,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | Python | `python/` | *coming soon* |
 | Go | `go/` | *coming soon* |
 | TypeScript | `typescript/` | *coming soon* |
-| Java | `java/` | *coming soon* |
+| Java | [`java/`](java/) | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
 
 ## Prerequisites
 
