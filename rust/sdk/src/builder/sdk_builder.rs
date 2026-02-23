@@ -87,13 +87,13 @@ impl ZerobusSdkBuilder {
             .zerobus_endpoint
             .ok_or_else(|| ZerobusError::InvalidArgument("endpoint is required".to_string()))?;
 
-        let zerobus_endpoint =
-            if !zerobus_endpoint.starts_with("https://") && !zerobus_endpoint.starts_with("http://")
-            {
-                format!("https://{}", zerobus_endpoint)
-            } else {
-                zerobus_endpoint
-            };
+        let zerobus_endpoint = if !zerobus_endpoint.starts_with("https://")
+            && !zerobus_endpoint.starts_with("http://")
+        {
+            format!("https://{}", zerobus_endpoint)
+        } else {
+            zerobus_endpoint
+        };
 
         let unity_catalog_url = self.unity_catalog_url.unwrap_or_default();
 

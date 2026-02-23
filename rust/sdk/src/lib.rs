@@ -322,13 +322,13 @@ impl ZerobusSdk {
     #[deprecated(since = "0.5.0", note = "Use ZerobusSdk::builder() instead")]
     #[allow(clippy::result_large_err)]
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
-        let zerobus_endpoint =
-            if !zerobus_endpoint.starts_with("https://") && !zerobus_endpoint.starts_with("http://")
-            {
-                format!("https://{}", zerobus_endpoint)
-            } else {
-                zerobus_endpoint
-            };
+        let zerobus_endpoint = if !zerobus_endpoint.starts_with("https://")
+            && !zerobus_endpoint.starts_with("http://")
+        {
+            format!("https://{}", zerobus_endpoint)
+        } else {
+            zerobus_endpoint
+        };
 
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
