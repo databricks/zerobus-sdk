@@ -87,12 +87,19 @@ impl ZerobusSdkBuilder {
             .zerobus_endpoint
             .ok_or_else(|| ZerobusError::InvalidArgument("endpoint is required".to_string()))?;
 
+        let zerobus_endpoint =
+            if !zerobus_endpoint.starts_with("https://") && !zerobus_endpoint.starts_with("http://")
+            {
+                format!("https://{}", zerobus_endpoint)
+            } else {
+                zerobus_endpoint
+            };
+
         let unity_catalog_url = self.unity_catalog_url.unwrap_or_default();
 
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
             .or_else(|| zerobus_endpoint.strip_prefix("http://"))
-            .or(Some(zerobus_endpoint.as_str()))
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -156,13 +163,17 @@ mod tests {
 
     #[test]
     fn test_builder_schemeless_endpoint() {
-        // Endpoint without protocol prefix - workspace ID is extracted from first dot-segment
+        // Endpoint without protocol prefix - https:// is prepended automatically
         let sdk = ZerobusSdkBuilder::new()
             .endpoint("my-workspace.zerobus.databricks.com")
             .build()
             .expect("should build successfully with schemeless endpoint");
 
         assert_eq!(sdk.workspace_id, "my-workspace");
+        assert_eq!(
+            sdk.zerobus_endpoint,
+            "https://my-workspace.zerobus.databricks.com"
+        );
     }
 
     #[test]

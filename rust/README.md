@@ -348,7 +348,7 @@ let sdk = ZerobusSdk::builder()
     .build()?;
 ```
 
-**Note:** The workspace ID is automatically extracted from the Zerobus endpoint. The `https://` scheme is optional — the SDK accepts endpoints with or without it.
+**Note:** The workspace ID is automatically extracted from the Zerobus endpoint. The `https://` scheme is optional — if omitted, the SDK automatically prepends `https://`.
 
 #### TLS Configuration
 
