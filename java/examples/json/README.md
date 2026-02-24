@@ -21,7 +21,7 @@ javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -
   json/BatchIngestionExample.java
 
 # Set environment variables
-export ZEROBUS_SERVER_ENDPOINT="<workspace-id>.zerobus.<region>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
 export DATABRICKS_WORKSPACE_URL="https://<workspace>.cloud.databricks.com"
 export ZEROBUS_TABLE_NAME="catalog.schema.table"
 export DATABRICKS_CLIENT_ID="your-client-id"

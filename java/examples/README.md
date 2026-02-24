@@ -107,7 +107,7 @@ Create a service principal with `SELECT` and `MODIFY` permissions on the table.
 ### 3. Set Environment Variables
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="<workspace-id>.zerobus.<region>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
 export DATABRICKS_WORKSPACE_URL="https://<workspace>.cloud.databricks.com"
 export ZEROBUS_TABLE_NAME="<catalog>.<schema>.<table>"
 export DATABRICKS_CLIENT_ID="your-client-id"

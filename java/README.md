@@ -405,7 +405,7 @@ import com.example.proto.Record.AirQuality;
 public class ZerobusClient {
     public static void main(String[] args) throws Exception {
         // Configuration
-        String serverEndpoint = "1234567890123456.zerobus.us-west-2.cloud.databricks.com";
+        String serverEndpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com";
         String workspaceUrl = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com";
         String tableName = "main.default.air_quality";
         String clientId = "your-service-principal-application-id";
@@ -845,7 +845,7 @@ Main entry point for the SDK.
 ```java
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint)
 ```
-- `serverEndpoint` - The Zerobus gRPC endpoint (e.g., `<workspace-id>.zerobus.region.cloud.databricks.com`)
+- `serverEndpoint` - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.region.cloud.databricks.com`)
 - `unityCatalogEndpoint` - The Unity Catalog endpoint (your workspace URL)
 
 **Methods:**

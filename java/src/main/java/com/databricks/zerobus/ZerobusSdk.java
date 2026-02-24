@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
  *
  * <pre>{@code
  * try (ZerobusSdk sdk = new ZerobusSdk(
- *         "server-endpoint.databricks.com",
+ *         "https://server-endpoint.databricks.com",
  *         "https://workspace.databricks.com")) {
  *
  *     // For JSON ingestion (recommended):
