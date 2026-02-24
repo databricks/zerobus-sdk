@@ -1,11 +1,21 @@
 # Version changelog
 
+## Release v0.6.0
+
+### New Features and Improvements
+
+- **Automatic `https://` scheme prepending**: Endpoints without a scheme now automatically get `https://` prepended. Previously, schemeless endpoints would fail with `InvalidUri` (builder) or fail to extract the workspace ID (deprecated `new()` constructor).
+
+### Documentation
+
+- Updated all examples to consistently include `https://` in endpoint URLs
+
 ## Release v0.5.0
 
 ### New Features and Improvements
 
 - **Builder Pattern for SDK Initialization**: Added `ZerobusSdk::builder()` for fluent SDK configuration
-  - `.endpoint()` - Set the Zerobus endpoint (scheme is optional, defaults work with or without `https://`)
+  - `.endpoint()` - Set the Zerobus endpoint (~~scheme is optional, defaults work with or without `https://`~~ `https://` is required; schemeless endpoints are auto-prepended since v0.6.0)
   - `.unity_catalog_url()` - Set the Unity Catalog URL (optional when using custom headers providers)
   - `.tls_config()` - Provide a custom `TlsConfig` implementation (defaults to `SecureTlsConfig`)
 - **Configurable TLS via `TlsConfig` trait**: TLS is now configured through a strategy pattern
