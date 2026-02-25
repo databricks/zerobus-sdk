@@ -24,6 +24,8 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>Linux x86_64 (linux-x86_64)
  *   <li>Linux aarch64 (linux-aarch64)
+ *   <li>macOS x86_64 (osx-x86_64)
+ *   <li>macOS aarch64 / Apple Silicon (osx-aarch64)
  *   <li>Windows x86_64 (windows-x86_64)
  * </ul>
  */

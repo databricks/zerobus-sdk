@@ -7,6 +7,7 @@
 - Updated native Rust backend to v0.6.0
 - Schemeless server endpoints (e.g. `workspace.zerobus.databricks.com`) now automatically get `https://` prepended
 - All documentation and examples updated to explicitly use `https://` prefixed endpoints
+- Added Linux aarch64 (ARM64) native library support
 
 ## Release v0.2.0
 

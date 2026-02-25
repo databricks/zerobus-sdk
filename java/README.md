@@ -73,6 +73,7 @@ This SDK includes native libraries for the following platforms:
 | Platform | Architecture | Status |
 |----------|--------------|--------|
 | Linux    | x86_64       | Supported |
+| Linux    | aarch64      | Supported |
 | Windows  | x86_64       | Supported |
 | macOS    | x86_64       | Supported |
 | macOS    | aarch64 (Apple Silicon) | Supported |
