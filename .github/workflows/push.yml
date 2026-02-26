@@ -7,6 +7,18 @@ on:
     types: [checks_requested]
 
 jobs:
+  gate:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    needs: [changes, rust]
+    if: always()
+    steps:
+      - run: |
+          if [[ "${{ needs.rust.result }}" == "failure" ]]; then
+            exit 1
+          fi
+
   changes:
     runs-on:
       group: databricks-protected-runner-group
@@ -21,6 +33,7 @@ jobs:
           filters: |
             rust:
               - 'rust/**'
+              - '.github/workflows/ci-rust.yml'
 
   rust:
     needs: changes
