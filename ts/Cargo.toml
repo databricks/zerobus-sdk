@@ -16,7 +16,7 @@ napi = { version = "2", features = ["async", "tokio_rt", "serde-json"] }
 napi-derive = "2"
 
 # The Rust SDK we're wrapping
-databricks-zerobus-ingest-sdk = { git = "https://github.com/databricks/zerobus-sdk-rs", tag = "v0.4.0" }
+databricks-zerobus-ingest-sdk = "0.6.0"
 
 # Async runtime (same as the Rust SDK)
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread"] }
