@@ -67,7 +67,7 @@ CREATE TABLE catalog.schema.air_quality (
 Set the following environment variables:
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="workspace-id.zerobus.region.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
 export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
 export ZEROBUS_TABLE_NAME="catalog.schema.air_quality"
 export DATABRICKS_CLIENT_ID="your-client-id"

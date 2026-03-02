@@ -193,7 +193,7 @@ import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 
 // Configuration
 // For AWS:
-const zerobusEndpoint = '<workspace-id>.zerobus.<region>.cloud.databricks.com';
+const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
 // For Azure:
 // const zerobusEndpoint = '<workspace-id>.zerobus.<region>.azuredatabricks.net';
@@ -356,7 +356,7 @@ import * as airQuality from './examples/generated/air_quality';
 import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor';
 
 // Configuration
-const zerobusEndpoint = '<workspace-id>.zerobus.<region>.cloud.databricks.com';
+const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
 const tableName = 'main.default.air_quality';
 const clientId = process.env.DATABRICKS_CLIENT_ID!;
@@ -551,7 +551,7 @@ See the `examples/` directory for complete, runnable examples. See [examples/REA
 
 ```bash
 # Set environment variables
-export ZEROBUS_SERVER_ENDPOINT="<workspace-id>.zerobus.<region>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
 export DATABRICKS_WORKSPACE_URL="https://<workspace-name>.cloud.databricks.com"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
@@ -810,7 +810,7 @@ new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string)
 ```
 
 **Parameters:**
-- `zerobusEndpoint` (string) - The Zerobus gRPC endpoint (e.g., `<workspace-id>.zerobus.<region>.cloud.databricks.com` for AWS, or `<workspace-id>.zerobus.<region>.azuredatabricks.net` for Azure)
+- `zerobusEndpoint` (string) - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` for AWS, or `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` for Azure)
 - `unityCatalogUrl` (string) - The Unity Catalog endpoint (your workspace URL)
 
 **Methods:**

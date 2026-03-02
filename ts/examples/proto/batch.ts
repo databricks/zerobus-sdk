@@ -17,7 +17,7 @@ import { loadDescriptorProto } from '../../utils/descriptor';
 import * as airQuality from '../generated/air_quality';
 
 // Configuration - set via environment variables or modify these defaults
-const SERVER_ENDPOINT = process.env.ZEROBUS_SERVER_ENDPOINT || 'your-workspace-id.zerobus.region.cloud.databricks.com';
+const SERVER_ENDPOINT = process.env.ZEROBUS_SERVER_ENDPOINT || 'https://your-workspace-id.zerobus.region.cloud.databricks.com';
 const DATABRICKS_WORKSPACE_URL = process.env.DATABRICKS_WORKSPACE_URL || 'https://your-workspace.cloud.databricks.com';
 const TABLE_NAME = process.env.ZEROBUS_TABLE_NAME || 'catalog.schema.table';
 const CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || 'your-oauth-client-id';
@@ -33,7 +33,7 @@ async function main() {
         process.exit(1);
     }
 
-    if (SERVER_ENDPOINT === 'your-workspace-id.zerobus.region.cloud.databricks.com') {
+    if (SERVER_ENDPOINT === 'https://your-workspace-id.zerobus.region.cloud.databricks.com') {
         console.error('Error: Please set ZEROBUS_SERVER_ENDPOINT environment variable');
         process.exit(1);
     }

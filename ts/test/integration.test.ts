@@ -41,7 +41,7 @@ if (SKIP_INTEGRATION) {
         console.log(`  ✗ ${varName}`);
     });
     console.log('\nTo run integration tests, set these environment variables:');
-    console.log('  export ZEROBUS_SERVER_ENDPOINT="<workspace-id>.zerobus.<region>.cloud.databricks.com"');
+    console.log('  export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"');
     console.log('  export DATABRICKS_WORKSPACE_URL="https://<workspace>.cloud.databricks.com"');
     console.log('  export DATABRICKS_CLIENT_ID="<service-principal-id>"');
     console.log('  export DATABRICKS_CLIENT_SECRET="<service-principal-secret>"');
