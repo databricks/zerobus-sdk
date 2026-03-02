@@ -1169,9 +1169,9 @@ This SDK wraps the high-performance [Rust Zerobus SDK](https://github.com/databr
 
 This is an open source project. We welcome contributions, feedback, and bug reports.
 
-- **[Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/ts/CONTRIBUTING.md)**: TypeScript-specific development setup and workflow.
+- **[Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/typescript/CONTRIBUTING.md)**: TypeScript-specific development setup and workflow.
 - **[General Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
-- **[Changelog](https://github.com/databricks/zerobus-sdk/blob/main/ts/CHANGELOG.md)**: See the history of changes in the SDK.
+- **[Changelog](https://github.com/databricks/zerobus-sdk/blob/main/typescript/CHANGELOG.md)**: See the history of changes in the SDK.
 - **[Security Policy](https://github.com/databricks/zerobus-sdk/blob/main/SECURITY.md)**: Read about our security process and how to report vulnerabilities.
 - **[Developer Certificate of Origin (DCO)](https://github.com/databricks/zerobus-sdk/blob/main/DCO)**: Understand the agreement for contributions.
 

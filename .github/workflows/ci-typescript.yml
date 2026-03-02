@@ -22,7 +22,7 @@ jobs:
       labels: ${{ matrix.settings.host }}
     defaults:
       run:
-        working-directory: ts
+        working-directory: typescript
 
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-          cache-dependency-path: ts/package-lock.json
+          cache-dependency-path: typescript/package-lock.json
 
       - name: Install Rust (Unix)
         if: runner.os != 'Windows'
@@ -58,8 +58,8 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            ts/target/
-          key: ${{ matrix.settings.target }}-cargo-${{ hashFiles('ts/Cargo.lock') }}
+            typescript/target/
+          key: ${{ matrix.settings.target }}-cargo-${{ hashFiles('typescript/Cargo.lock') }}
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
@@ -79,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: 'ts/*.node'
+          path: 'typescript/*.node'
           if-no-files-found: error
 
   test:
@@ -94,7 +94,7 @@ jobs:
         node: ['16', '18', '20']
     defaults:
       run:
-        working-directory: ts
+        working-directory: typescript
 
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +104,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: 'npm'
-          cache-dependency-path: ts/package-lock.json
+          cache-dependency-path: typescript/package-lock.json
 
       - name: Install Rust (Unix)
         if: runner.os != 'Windows'
