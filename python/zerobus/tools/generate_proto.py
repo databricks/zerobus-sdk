@@ -58,7 +58,8 @@ Type mappings:
         "--uc-endpoint",
         type=str,
         required=True,
-        help="Unity Catalog endpoint URL (e.g., https://your-workspace.cloud.databricks.com for AWS, or https://your-workspace.azuredatabricks.net for Azure)",
+        help="Unity Catalog endpoint URL (e.g., https://your-workspace.cloud.databricks.com for AWS"
+        " or https://your-workspace.azuredatabricks.net for Azure)",
     )
 
     parser.add_argument(
