@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+include NOTICE
+include CHANGELOG.md
+include DCO
+include Makefile
+include SECURITY.md
+include CONTRIBUTING.md
+include pyproject.toml
+
+recursive-exclude examples *
+recursive-exclude tests *

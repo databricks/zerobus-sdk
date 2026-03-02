@@ -1,0 +1,43 @@
+syntax = "proto2";
+
+package tests;
+
+message TestTableRow {
+    optional string city_name = 1;
+    optional int32 population = 2;
+}
+
+message AirQuality {
+    optional string device_name = 1;
+    optional int32 temp = 2;
+    optional int64 humidity = 3;
+}
+
+// Nested message for testing nested structures
+message NestedData {
+    optional string nested_string = 1;
+    optional int32 nested_int = 2;
+}
+
+// Comprehensive message with all supported proto types
+message AllTypesRecord {
+    // Basic scalar types
+    optional string string_field = 1;
+    optional int32 int32_field = 2;
+    optional int64 int64_field = 3;
+    optional float float_field = 4;
+    optional double double_field = 5;
+    optional bool bool_field = 6;
+    optional bytes bytes_field = 7;
+
+    // Repeated fields (arrays)
+    repeated string repeated_string = 8;
+    repeated int32 repeated_int32 = 9;
+    repeated double repeated_double = 10;
+
+    // Nested message
+    optional NestedData nested_message = 11;
+
+    // Repeated nested message
+    repeated NestedData repeated_nested = 12;
+}

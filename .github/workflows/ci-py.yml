@@ -1,0 +1,67 @@
+name: Python CI
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux-ubuntu-latest, windows-server-latest]
+        pyVersion: ['3.9', '3.10', '3.11', '3.12']
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unshallow
+        run: git fetch --prune --unshallow
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.pyVersion }}
+
+      - name: Run tests
+        run: make dev test
+
+  fmt:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Format all files
+        run: make dev fmt
+
+      - name: Fail on differences
+        run: git diff --exit-code
+
+  lint:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Lint code
+        run: make dev lint
