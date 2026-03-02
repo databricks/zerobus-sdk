@@ -901,7 +901,10 @@ impl ZerobusSdk {
                 Error::from_reason("Failed to extract workspace_id from zerobus_endpoint".to_string())
             })?;
 
-        let inner = RustZerobusSdk::new(zerobus_endpoint, unity_catalog_url.clone())
+        let inner = RustZerobusSdk::builder()
+            .endpoint(&zerobus_endpoint)
+            .unity_catalog_url(&unity_catalog_url)
+            .build()
             .map_err(|e| Error::from_reason(format!("Failed to create SDK: {}", e)))?;
 
         Ok(ZerobusSdk {
