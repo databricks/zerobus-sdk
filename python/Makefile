@@ -34,6 +34,7 @@ help:
 dev:
 	$(PYTHON) -m venv .venv
 	$(VENV) -m pip install --upgrade pip
+	@test -f LICENSE || cp ../LICENSE LICENSE
 	$(VENV) -m pip install -e '.[dev]'
 
 install:
@@ -68,7 +69,7 @@ fmt:
 	$(VENV) -m isort zerobus examples tests
 
 lint:
-	$(VENV) -m pycodestyle --exclude='*_pb2*.py' zerobus
+	$(VENV) -m pycodestyle --exclude='*_pb2*.py' --max-line-length=120 --ignore=E203,W503 zerobus
 	$(VENV) -m autoflake --check-diff --quiet --recursive --exclude '*_pb2*.py' zerobus
 
 test:
