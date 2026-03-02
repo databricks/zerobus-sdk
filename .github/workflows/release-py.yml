@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -71,6 +74,10 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+        shell: bash
+
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -100,6 +107,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
 
       - name: Install Rust
         run: |

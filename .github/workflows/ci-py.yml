@@ -26,6 +26,9 @@ jobs:
         with:
           python-version: ${{ matrix.pyVersion }}
 
+      - name: Copy root LICENSE for maturin
+        run: cp ../LICENSE LICENSE
+
       - name: Run tests
         run: make dev test
 
@@ -42,6 +45,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Copy root LICENSE for maturin
+        run: cp ../LICENSE LICENSE
 
       - name: Format all files
         run: make dev fmt
@@ -62,6 +68,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Copy root LICENSE for maturin
+        run: cp ../LICENSE LICENSE
 
       - name: Lint code
         run: make dev lint
