@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package databricks.test.table;
+
+option java_package = "com.databricks.test.table";
+option java_outer_classname = "TestTableRow";
+
+message CityPopulationTableRow {
+  optional string city_name = 1;
+  optional int32 population = 2;
+}

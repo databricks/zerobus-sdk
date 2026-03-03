@@ -1,3 +1,34 @@
 # Rust
 rust/Cargo.lock
 rust/target/
+
+# Java
+java/target/
+java/pom.xml.tag
+java/pom.xml.releaseBackup
+java/pom.xml.versionsBackup
+java/pom.xml.next
+java/release.properties
+java/dependency-reduced-pom.xml
+java/buildNumber.properties
+java/.mvn/timing.properties
+java/.mvn/wrapper/maven-wrapper.jar
+*.class
+java/examples/proto/**/AirQualityProto.java
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.project
+.classpath
+.metals/
+.bsp/
+.bazelbsp/
+
+# OS
+.DS_Store
+Thumbs.db

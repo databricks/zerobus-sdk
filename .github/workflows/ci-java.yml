@@ -1,0 +1,64 @@
+name: Java CI
+
+on:
+  workflow_call:
+
+jobs:
+  fmt:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: 11
+          distribution: 'temurin'
+          cache: 'maven'
+      - name: Check formatting
+        run: mvn spotless:check
+      - name: Fail on formatting differences
+        if: failure()
+        run: |
+          echo "Code formatting issues detected. Run 'mvn spotless:apply' to fix."
+          exit 1
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux-ubuntu-latest, windows-server-latest]
+        javaVersion: ['11', '17', '21']
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unshallow
+        run: git fetch --prune --unshallow
+      - name: Set up JDK ${{ matrix.javaVersion }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.javaVersion }}
+          distribution: 'temurin'
+          cache: 'maven'
+      - name: Build with Maven
+        run: mvn clean compile
+      - name: Run tests
+        run: mvn test
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}
+          path: |
+            java/target/surefire-reports/
+            java/target/test-classes/
+          retention-days: 7
