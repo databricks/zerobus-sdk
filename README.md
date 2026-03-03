@@ -19,7 +19,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | Rust | [`rust/`](rust/) | [`databricks-zerobus-ingest-sdk`](https://crates.io/crates/databricks-zerobus-ingest-sdk) |
 | Python | `python/` | *coming soon* |
 | Go | `go/` | *coming soon* |
-| TypeScript | `typescript/` | *coming soon* |
+| TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk) |
 | Java | [`java/`](java/) | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
 
 ## Prerequisites

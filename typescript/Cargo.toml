@@ -1,0 +1,61 @@
+[package]
+name = "zerobus-sdk-ts"
+version = "0.2.0"
+authors = ["Databricks"]
+edition = "2021"
+license-file = "LICENSE"
+description = "TypeScript/Node.js bindings for the Databricks Zerobus SDK"
+repository = "https://github.com/databricks/zerobus-sdk"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# NAPI-RS for Node.js bindings
+napi = { version = "2", features = ["async", "tokio_rt", "serde-json"] }
+napi-derive = "2"
+
+# The Rust SDK we're wrapping
+databricks-zerobus-ingest-sdk = "0.6.0"
+
+# Async runtime (same as the Rust SDK)
+tokio = { version = "1.42", features = ["macros", "rt-multi-thread"] }
+
+# Protobuf support
+prost = "0.13.3"
+prost-types = "0.13.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+# Base64 encoding/decoding
+base64 = "0.21"
+
+# Async trait support
+async-trait = "0.1"
+
+# Arrow dependencies (only used when arrow-flight feature is enabled)
+arrow-array = { version = "56.2.0", optional = true }
+arrow-schema = { version = "56.2.0", optional = true }
+arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"], optional = true }
+
+[build-dependencies]
+napi-build = "2"
+
+[features]
+default = []
+# Arrow Flight is experimental/unsupported - enable with: npm run build:arrow
+arrow-flight = [
+    "databricks-zerobus-ingest-sdk/arrow-flight",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:arrow-ipc"
+]
+
+[profile.release]
+lto = true
+strip = true

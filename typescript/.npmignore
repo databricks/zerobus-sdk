@@ -1,0 +1,48 @@
+# Development files
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.travis.yml
+.circleci/
+
+# Build artifacts not needed in published package
+target/
+
+# Development config
+tsconfig.json
+
+# Documentation (except README, LICENSE, CHANGELOG, NEXT_CHANGELOG, and SECURITY)
+docs/
+*.md
+!README.md
+!CHANGELOG.md
+!NEXT_CHANGELOG.md
+!SECURITY.md
+!LICENSE
+
+# Test files
+test/
+tests/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+
+# Environment
+.env*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

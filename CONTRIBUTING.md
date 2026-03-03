@@ -4,7 +4,7 @@ We happily welcome contributions to the Zerobus SDKs. We use [GitHub Issues](htt
 
 Contributions are licensed on a license-in/license-out basis.
 
-For language-specific development setup, coding style, and CI details, see the contributing guide in each SDK directory (e.g., [`rust/CONTRIBUTING.md`](rust/CONTRIBUTING.md), [`java/CONTRIBUTING.md`](java/CONTRIBUTING.md)).
+For language-specific development setup, coding style, and CI details, see the contributing guide in each SDK directory (e.g., [`rust/CONTRIBUTING.md`](rust/CONTRIBUTING.md), [`java/CONTRIBUTING.md`](java/CONTRIBUTING.md), [`typescript/CONTRIBUTING.md`](typescript/CONTRIBUTING.md)).
 
 ## Communication
 

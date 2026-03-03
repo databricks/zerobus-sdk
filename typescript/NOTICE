@@ -1,0 +1,46 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following open source components:
+
+## MIT License
+
+### NAPI-RS (napi, napi-derive)
+Copyright (c) 2020-2024 LongYinan
+https://github.com/napi-rs/napi-rs
+License: https://github.com/napi-rs/napi-rs/blob/main/LICENSE
+
+### tokio
+Copyright (c) 2021 Tokio Contributors
+https://github.com/tokio-rs/tokio
+License: https://github.com/tokio-rs/tokio/blob/master/LICENSE
+
+### serde, serde_json
+Copyright (c) 2014-2021 David Tolnay
+https://github.com/serde-rs/serde
+License: https://github.com/serde-rs/serde/blob/master/LICENSE-MIT
+
+### thiserror
+Copyright (c) 2019-2021 David Tolnay
+https://github.com/dtolnay/thiserror
+License: https://github.com/dtolnay/thiserror/blob/master/LICENSE-MIT
+
+### async-trait
+Copyright (c) 2019-2021 David Tolnay
+https://github.com/dtolnay/async-trait
+License: https://github.com/dtolnay/async-trait/blob/master/LICENSE-MIT
+
+## Apache License 2.0
+
+### prost, prost-types
+Copyright 2017 Dan Burkert
+https://github.com/tokio-rs/prost
+License: https://github.com/tokio-rs/prost/blob/master/LICENSE
+
+### base64
+Copyright (c) 2015-2023 Alice Maz and Marshall Pierce
+https://github.com/marshallpierce/rust-base64
+License: https://github.com/marshallpierce/rust-base64/blob/master/LICENSE-APACHE

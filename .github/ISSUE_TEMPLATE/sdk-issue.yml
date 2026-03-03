@@ -10,6 +10,7 @@ body:
       description: Which SDK is this issue for?
       options:
         - Rust
+        - TypeScript
         - All / General
     validations:
       required: true
