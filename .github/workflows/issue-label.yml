@@ -22,7 +22,6 @@ jobs:
             if (!match) return;
 
             const sdk = match[1].trim();
-            if (sdk === 'General') return;
 
             const prefix = `[${sdk}]`;
             if (title.startsWith(prefix)) return;
