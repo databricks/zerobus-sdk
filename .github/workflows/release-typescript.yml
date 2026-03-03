@@ -130,8 +130,13 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/typescript/v}" >> "$GITHUB_OUTPUT"
 
+      - name: Extract release notes from changelog
+        run: |
+          version="v${{ steps.version.outputs.version }}"
+          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" typescript/CHANGELOG.md > /tmp/release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: TypeScript SDK v${{ steps.version.outputs.version }}
-          generate_release_notes: true
+          body_path: /tmp/release-notes.md

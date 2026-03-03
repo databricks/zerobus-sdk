@@ -1,6 +1,6 @@
 # NEXT CHANGELOG
 
-## Unreleased
+## Release v0.4.0
 
 ### New Features and Improvements
 
@@ -9,7 +9,5 @@
 ### Documentation
 
 ### Internal Changes
-
-### Breaking Changes
 
 ### API Changes
