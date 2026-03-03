@@ -1895,6 +1895,12 @@ impl ZerobusStream {
                             return Ok(());
                         }
                     }
+                    // The supervisor always sends the real error to server_error_tx
+                    // before setting is_closed=true, so check error_rx first to
+                    // return the actual error instead of a generic one.
+                    if let Some(server_error) = error_rx.borrow().clone() {
+                        return Err(server_error);
+                    }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                         format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
