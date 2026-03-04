@@ -161,15 +161,6 @@ class ZerobusSdk:
     def __init__(self, host: str, unity_catalog_url: str):
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url)
 
-    async def set_use_tls(self, use_tls: bool):
-        """
-        Set whether to use TLS for connections.
-
-        Args:
-            use_tls: Whether to use TLS (default: True). Set to False for testing with local mock servers.
-        """
-        await self._inner.set_use_tls(use_tls)
-
     async def create_stream(
         self, client_id: str, client_secret: str, table_properties, options=None, headers_provider=None
     ):

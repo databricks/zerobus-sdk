@@ -79,11 +79,18 @@ GRANT SELECT, MODIFY ON TABLE <catalog_name>.default.<table_name> TO `<service-p
 
 The service principal's **Application ID** is your OAuth **Client ID**, and the generated secret is your **Client Secret**.
 
-## Protocol Buffers
+## Serialization Formats
 
-All SDKs support Protocol Buffers as a serialization format. Use `proto2` syntax with `optional` fields to correctly represent nullable Delta table columns.
+All SDKs support two serialization formats:
 
-### Delta → Protobuf Type Mappings
+- **JSON** - Simple, schema-free ingestion. Pass a JSON string or native object (dict, map, etc.) and the SDK serializes it. No compilation step required. Good for getting started or dynamic schemas.
+- **Protocol Buffers** - Strongly-typed, schema-validated ingestion. More efficient over the wire. Recommended for production workloads.
+
+### Protocol Buffers
+
+Use `proto2` syntax with `optional` fields to correctly represent nullable Delta table columns.
+
+#### Delta → Protobuf Type Mappings
 
 | Delta Type | Proto2 Type |
 |-----------|-------------|
