@@ -1,0 +1,19 @@
+[package]
+name = "zerobus-python"
+version = "0.3.0"
+edition = "2021"
+
+[lib]
+name = "_zerobus_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py39"] }
+pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["full"] }
+databricks-zerobus-ingest-sdk = "0.6.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+prost = "0.13"
+prost-types = "0.13"
+tonic = "0.13"

@@ -1,0 +1,26 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following open source components:
+
+## Apache License 2.0
+
+### requests
+Copyright 2019 Kenneth Reitz
+https://github.com/psf/requests
+License: https://github.com/psf/requests/blob/main/LICENSE
+
+### grpcio
+Copyright 2014 gRPC authors
+https://github.com/grpc/grpc
+License: https://github.com/grpc/grpc/blob/master/LICENSE
+
+## BSD 3-Clause License
+
+### protobuf
+Copyright 2008 Google Inc.
+https://github.com/protocolbuffers/protobuf
+License: https://github.com/protocolbuffers/protobuf/blob/main/LICENSE

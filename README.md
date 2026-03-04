@@ -17,7 +17,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | Language | Directory | Package |
 |----------|-----------|---------|
 | Rust | [`rust/`](rust/) | [`databricks-zerobus-ingest-sdk`](https://crates.io/crates/databricks-zerobus-ingest-sdk) |
-| Python | `python/` | *coming soon* |
+| Python | [`python/`](python/) | [`databricks-zerobus-ingest-sdk`](https://pypi.org/project/databricks-zerobus-ingest-sdk/) |
 | Go | `go/` | *coming soon* |
 | TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk) |
 | Java | [`java/`](java/) | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
@@ -78,6 +78,39 @@ GRANT SELECT, MODIFY ON TABLE <catalog_name>.default.<table_name> TO `<service-p
 ```
 
 The service principal's **Application ID** is your OAuth **Client ID**, and the generated secret is your **Client Secret**.
+
+## Serialization Formats
+
+All SDKs support two serialization formats:
+
+- **JSON** - Simple, schema-free ingestion. Pass a JSON string or native object (dict, map, etc.) and the SDK serializes it. No compilation step required. Good for getting started or dynamic schemas.
+- **Protocol Buffers** - Strongly-typed, schema-validated ingestion. More efficient over the wire. Recommended for production workloads.
+
+### Protocol Buffers
+
+Use `proto2` syntax with `optional` fields to correctly represent nullable Delta table columns.
+
+#### Delta → Protobuf Type Mappings
+
+| Delta Type | Proto2 Type |
+|-----------|-------------|
+| TINYINT, BYTE, INT, SMALLINT, SHORT | int32 |
+| BIGINT, LONG | int64 |
+| FLOAT | float |
+| DOUBLE | double |
+| STRING, VARCHAR | string |
+| BOOLEAN | bool |
+| BINARY | bytes |
+| DATE | int32 |
+| TIMESTAMP, TIMESTAMP_NTZ | int64 |
+| ARRAY\<type\> | repeated type |
+| MAP\<key, value\> | map\<key, value\> |
+| STRUCT\<fields\> | nested message |
+| VARIANT | string (JSON string) |
+
+### Schema Generation
+
+Instead of writing `.proto` files by hand, each SDK ships a tool to generate protobuf schemas directly from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
 
 ## Contributing
 

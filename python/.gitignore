@@ -1,0 +1,37 @@
+# Virtual environment
+.venv
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Rust extension build artifacts
+target/
+Cargo.lock
+*.so
+*.pyd
+*.dylib
+
+# Maturin
+*.whl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Type checking
+.mypy_cache/
+
+# Misc
+*.backups
+LICENSE

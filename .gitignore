@@ -14,3 +14,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Databricks
+.databricks

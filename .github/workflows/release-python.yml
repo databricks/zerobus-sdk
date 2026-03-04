@@ -1,0 +1,155 @@
+name: Build & Release to PyPI
+
+on:
+  push:
+    tags:
+      - 'python/v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheels (x86_64)
+        if: matrix.target == 'x86_64'
+        run: maturin build --release --manifest-path python/rust/Cargo.toml --out dist
+
+      - name: Install Zig (for aarch64)
+        if: matrix.target == 'aarch64'
+        run: |
+          wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+          tar -xf zig-linux-x86_64-0.13.0.tar.xz
+          echo "$(pwd)/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
+
+      - name: Build wheels (aarch64)
+        if: matrix.target == 'aarch64'
+        run: |
+          source "$HOME/.cargo/env"
+          rustup target add aarch64-unknown-linux-gnu
+          cargo install cargo-zigbuild
+          maturin build --release --target aarch64-unknown-linux-gnu --zig --manifest-path python/rust/Cargo.toml --out dist
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+          if-no-files-found: error
+
+  windows:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: windows-server-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+        shell: bash
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheels
+        run: maturin build --release --manifest-path python/rust/Cargo.toml --out dist
+        shell: bash
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows
+          path: dist
+          if-no-files-found: error
+
+  sdist:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build source distribution
+        run: maturin sdist --manifest-path python/rust/Cargo.toml --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+          if-no-files-found: error
+
+  release:
+    name: Release to PyPI
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/python/')
+    needs: [linux, windows, sdist]
+    permissions:
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: List artifacts for verification
+        run: ls -lh dist/
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
