@@ -48,7 +48,7 @@ jobs:
               - '.github/workflows/ci-typescript.yml'
             python:
               - 'python/**'
-              - '.github/workflows/ci-py.yml'
+              - '.github/workflows/ci-python.yml'
 
   rust:
     needs: changes
@@ -68,4 +68,4 @@ jobs:
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
-    uses: ./.github/workflows/ci-py.yml
+    uses: ./.github/workflows/ci-python.yml
