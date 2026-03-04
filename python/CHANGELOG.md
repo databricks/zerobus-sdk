@@ -1,6 +1,12 @@
 # Version changelog
 
-## Release v0.3.0
+## Release v1.0.0
+
+### Breaking Changes
+
+- **v0.3.0 was yanked** due to a breaking change introduced in that release: the `server_endpoint` parameter was changed to require the `https://` prefix, whereas v0.2.0 accepted URLs without it. v1.0.0 resolves this by accepting `server_endpoint` both with and without the `https://` prefix.
+
+## Release v0.3.0 (YANKED)
 
 ### Major Changes
 
