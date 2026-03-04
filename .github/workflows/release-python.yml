@@ -1,4 +1,5 @@
 name: Build & Release to PyPI
+run-name: "Release Python SDK ${{ github.ref_name }}"
 
 on:
   push:
