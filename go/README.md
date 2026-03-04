@@ -6,7 +6,7 @@ A high-performance Go client for streaming data ingestion into Databricks Delta 
 
 [Public Preview](https://docs.databricks.com/release-notes/release-types.html): This SDK is supported for production use cases and is available to all customers. Databricks is actively working on stabilizing the Zerobus Ingest SDK for Go. Minor version updates may include backwards-incompatible changes.
 
-We are keen to hear feedback from you on this SDK. Please [file issues](https://github.com/databricks/zerobus-sdk-go/issues), and we will address them.
+We are keen to hear feedback from you on this SDK. Please [file issues](https://github.com/databricks/zerobus-sdk/issues), and we will address them.
 
 ## Table of Contents
 
@@ -49,7 +49,7 @@ The Zerobus Go SDK provides a robust, CGO-based wrapper around the high-performa
 
 **What is Zerobus?** Zerobus is a high-throughput streaming service for direct data ingestion into Databricks Delta tables, optimized for real-time data pipelines and high-volume workloads.
 
-This SDK wraps the Rust [zerobus-sdk-rs](https://github.com/databricks/zerobus-sdk-rs) using CGO and FFI (Foreign Function Interface), providing an idiomatic Go API while leveraging the performance and reliability of the underlying Rust implementation.
+This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/main/rust) using CGO and FFI (Foreign Function Interface), providing an idiomatic Go API while leveraging the performance and reliability of the underlying Rust implementation.
 
 ## Features
 
@@ -78,6 +78,8 @@ Choose your installation path:
 The Zerobus Go SDK is a CGO-based wrapper around a high-performance Rust core. For the best experience, use a tagged release which includes pre-built binaries.
 
 **Prerequisites:**
+
+Before using the SDK, you need a Databricks workspace URL, a Delta table, and a service principal. See the [monorepo prerequisites](https://github.com/databricks/zerobus-sdk/blob/main/README.md#prerequisites) for detailed setup instructions.
 
 - **Go 1.21+**
 - **CGO enabled** (enabled by default)
@@ -122,8 +124,8 @@ func main() {
 
 ```bash
 # Clone the repository
-git clone https://github.com/databricks/zerobus-sdk-go.git
-cd zerobus-sdk-go
+git clone https://github.com/databricks/zerobus-sdk.git
+cd zerobus-sdk/go
 go generate  # Builds Rust FFI
 make build   # Builds everything
 ```
@@ -260,7 +262,7 @@ log.Println("Record confirmed by server")
 ## Repository Structure
 
 ```
-zerobus-sdk-go/
+go/
 ├── zerobus.go                      # Main SDK and stream implementation
 ├── ffi.go                          # CGO bindings to Rust FFI
 ├── ffi_test.go                     # CGO bindings tests
@@ -303,10 +305,7 @@ zerobus-sdk-go/
 ├── README.md                       # This file
 ├── CHANGELOG.md                    # Version history
 ├── CONTRIBUTING.md                 # Contribution guidelines
-├── SECURITY.md                     # Security policy
-├── DCO                             # Developer Certificate of Origin
-├── NOTICE                          # Third-party attribution
-└── LICENSE                         # License file
+└── NOTICE                          # Third-party attribution
 ```
 
 ### Key Components
@@ -333,7 +332,7 @@ zerobus-sdk-go/
          │
 ┌────────▼────────┐
 │  Rust SDK       │  ← Core async implementation (Tokio)
-│(zerobus-sdk-rs) │     - gRPC bidirectional streaming
+│  (rust/)        │     - gRPC bidirectional streaming
 └────────┬────────┘     - OAuth 2.0 authentication
          │              - Automatic recovery
          ▼
@@ -1264,8 +1263,8 @@ This section is for contributors and those who need to build the SDK from source
 ### Basic Build
 
 ```bash
-git clone https://github.com/databricks/zerobus-sdk-go.git
-cd zerobus-sdk-go
+git clone https://github.com/databricks/zerobus-sdk.git
+cd zerobus-sdk/go
 make build
 ```
 
@@ -1391,15 +1390,16 @@ export RUST_LOG=databricks_zerobus_ingest_sdk=debug,tokio=warn
 
 This is an open source project. We welcome contributions, feedback, and bug reports.
 
-- **[Contributing Guide](CONTRIBUTING.md)**: Learn how to contribute, including our development process and coding style
-- **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK
-- **[Security Policy](SECURITY.md)**: Read about our security process and how to report vulnerabilities
-- **[Developer Certificate of Origin (DCO)](DCO)**: Understand the agreement for contributions
-- **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use
+- **[Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/go/CONTRIBUTING.md)**: Go-specific development setup and workflow.
+- **[General Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
+- **[Changelog](https://github.com/databricks/zerobus-sdk/blob/main/go/CHANGELOG.md)**: See the history of changes in the SDK.
+- **[Security Policy](https://github.com/databricks/zerobus-sdk/blob/main/SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](https://github.com/databricks/zerobus-sdk/blob/main/DCO)**: Understand the agreement for contributions.
+- **[Open Source Attributions](https://github.com/databricks/zerobus-sdk/blob/main/go/NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 
-This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) file for the full license text. The license is also available online at [https://www.databricks.com/legal/db-license](https://www.databricks.com/legal/db-license).
+This SDK is licensed under the Databricks License. See the [LICENSE](https://github.com/databricks/zerobus-sdk/blob/main/LICENSE) file for the full license text. The license is also available online at [https://www.databricks.com/legal/db-license](https://www.databricks.com/legal/db-license).
 
 ## Requirements
 
@@ -1413,4 +1413,4 @@ This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) fi
 
 ---
 
-For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/databricks/zerobus-sdk-go).
+For issues, questions, or contributions, please visit the [GitHub repository](https://github.com/databricks/zerobus-sdk).
