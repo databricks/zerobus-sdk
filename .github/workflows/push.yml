@@ -11,13 +11,13 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust, java, ts, python]
+    needs: [changes, rust, java, typescript, python]
     if: always()
     steps:
       - run: |
           if [[ "${{ needs.rust.result }}" == "failure" ]] || \
              [[ "${{ needs.java.result }}" == "failure" ]] || \
-             [[ "${{ needs.ts.result }}" == "failure" ]] || \
+             [[ "${{ needs.typescript.result }}" == "failure" ]] || \
              [[ "${{ needs.python.result }}" == "failure" ]]; then
             exit 1
           fi
@@ -29,7 +29,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       java: ${{ steps.filter.outputs.java }}
-      ts: ${{ steps.filter.outputs.ts }}
+      typescript: ${{ steps.filter.outputs.typescript }}
       python: ${{ steps.filter.outputs.python }}
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
             java:
               - 'java/**'
               - '.github/workflows/ci-java.yml'
-            ts:
+            typescript:
               - 'typescript/**'
               - '.github/workflows/ci-typescript.yml'
             python:
@@ -60,9 +60,9 @@ jobs:
     if: needs.changes.outputs.java == 'true'
     uses: ./.github/workflows/ci-java.yml
 
-  ts:
+  typescript:
     needs: changes
-    if: needs.changes.outputs.ts == 'true'
+    if: needs.changes.outputs.typescript == 'true'
     uses: ./.github/workflows/ci-typescript.yml
 
   python:
