@@ -18,7 +18,8 @@ jobs:
           if [[ "${{ needs.rust.result }}" == "failure" ]] || \
              [[ "${{ needs.java.result }}" == "failure" ]] || \
              [[ "${{ needs.typescript.result }}" == "failure" ]] || \
-             [[ "${{ needs.python.result }}" == "failure" ]]; then
+             [[ "${{ needs.python.result }}" == "failure" ]] || \
+             [[ "${{ needs.go.result }}" == "failure" ]]; then
             exit 1
           fi
 
@@ -31,6 +32,7 @@ jobs:
       java: ${{ steps.filter.outputs.java }}
       typescript: ${{ steps.filter.outputs.typescript }}
       python: ${{ steps.filter.outputs.python }}
+      go: ${{ steps.filter.outputs.go }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -49,6 +51,9 @@ jobs:
             python:
               - 'python/**'
               - '.github/workflows/ci-python.yml'
+            go:
+              - 'go/**'
+              - '.github/workflows/ci-go.yml'
 
   rust:
     needs: changes
@@ -64,8 +69,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
     uses: ./.github/workflows/ci-typescript.yml
-
+    
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     uses: ./.github/workflows/ci-python.yml
+    
+  go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    uses: ./.github/workflows/ci-go.yml

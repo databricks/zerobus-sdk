@@ -1,0 +1,603 @@
+// Package zerobus provides a high-performance Go client for streaming data ingestion
+// into Databricks Delta tables using the Zerobus service.
+//
+// Zerobus is a high-throughput streaming service for direct data ingestion into
+// Databricks Delta tables, optimized for real-time data pipelines and high-volume workloads.
+//
+// # Installation
+//
+// This package requires a one-time build step to compile the Rust FFI layer:
+//
+//	go get github.com/databricks/zerobus-sdk-go
+//	go generate github.com/databricks/zerobus-sdk-go
+//
+// Prerequisites: Go 1.19+, Rust 1.70+, CGO enabled
+//
+// # Quick Start
+//
+// Create an SDK instance and stream:
+//
+//	sdk, err := zerobus.NewZerobusSdk(
+//	    "https://your-shard.zerobus.databricks.com",
+//	    "https://your-workspace.databricks.com",
+//	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer sdk.Free()
+//
+//	options := zerobus.DefaultStreamConfigurationOptions()
+//	options.RecordType = zerobus.RecordTypeJson
+//
+//	stream, err := sdk.CreateStream(
+//	    zerobus.TableProperties{TableName: "catalog.schema.table"},
+//	    clientID,
+//	    clientSecret,
+//	    options,
+//	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer stream.Close()
+//
+// # Ingesting Data
+//
+// Recommended API (direct offset return):
+//
+//	offset, err := stream.IngestRecordOffset(`{"id": 1, "message": "Hello"}`)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Legacy API (still supported but deprecated):
+//
+//	ack, err := stream.IngestRecord(`{"id": 1, "message": "Hello"}`)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	offset, err := ack.Await()
+//
+// Protocol Buffer records:
+//
+//	protoBytes, _ := proto.Marshal(myMessage)
+//	offset, err := stream.IngestRecordOffset(protoBytes)
+//
+// # Authentication
+//
+// The SDK supports OAuth 2.0 authentication with Unity Catalog:
+//
+//	stream, err := sdk.CreateStream(
+//	    tableProps,
+//	    os.Getenv("DATABRICKS_CLIENT_ID"),
+//	    os.Getenv("DATABRICKS_CLIENT_SECRET"),
+//	    options,
+//	)
+//
+// For custom authentication, implement the HeadersProvider interface:
+//
+//	type CustomAuth struct{}
+//
+//	func (a *CustomAuth) GetHeaders() (map[string]string, error) {
+//	    return map[string]string{
+//	        "authorization": "Bearer " + getToken(),
+//	        "x-databricks-zerobus-table-name": "catalog.schema.table",
+//	    }, nil
+//	}
+//
+//	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, &CustomAuth{}, options)
+//
+// # Error Handling
+//
+// Errors are categorized as retryable or non-retryable:
+//
+//	ack, err := stream.IngestRecord(data)
+//	if err != nil {
+//	    if zbErr, ok := err.(*zerobus.ZerobusError); ok {
+//	        if zbErr.Retryable() {
+//	            // Transient error, SDK will auto-recover
+//	        } else {
+//	            // Fatal error, manual intervention needed
+//	        }
+//	    }
+//	}
+//
+// # Performance
+//
+// For high throughput, use goroutines for concurrent ingestion:
+//
+//	var wg sync.WaitGroup
+//	for i := 0; i < 10000; i++ {
+//	    wg.Add(1)
+//	    go func(data []byte) {
+//	        defer wg.Done()
+//	        offset, err := stream.IngestRecordOffset(data)
+//	        if err != nil {
+//	            log.Printf("Failed to ingest: %v", err)
+//	        }
+//	    }(dataToIngest)
+//	}
+//	wg.Wait()
+//
+// # Static Linking
+//
+// This SDK uses static linking of the Rust FFI layer, resulting in self-contained
+// Go binaries with no runtime dependencies or library path configuration needed.
+//
+// For more information, visit: https://github.com/databricks/zerobus-sdk-go
+package zerobus
+
+import (
+	"runtime"
+	"unsafe"
+)
+
+// ZerobusSdk is the main entry point for interacting with the Zerobus ingestion service.
+// It manages the connection to the Zerobus endpoint and Unity Catalog.
+type ZerobusSdk struct {
+	ptr unsafe.Pointer
+}
+
+// ZerobusStream represents an active bidirectional gRPC stream for ingesting records.
+// Records can be ingested concurrently and will be acknowledged asynchronously.
+type ZerobusStream struct {
+	ptr unsafe.Pointer
+}
+
+// NewZerobusSdk creates a new SDK instance.
+//
+// Parameters:
+//   - zerobusEndpoint: The gRPC endpoint for the Zerobus service (e.g., "https://zerobus.databricks.com")
+//   - unityCatalogURL: The Unity Catalog URL for OAuth token acquisition (e.g., "https://workspace.databricks.com")
+//
+// Returns an error if:
+//   - Invalid endpoint URLs
+//   - Unable to extract workspace ID from Unity Catalog URL
+func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error) {
+	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL)
+	if err != nil {
+		return nil, err
+	}
+
+	sdk := &ZerobusSdk{ptr: ptr}
+
+	// Set up finalizer for automatic cleanup
+	runtime.SetFinalizer(sdk, func(s *ZerobusSdk) {
+		s.Free()
+	})
+
+	return sdk, nil
+}
+
+// Free explicitly releases resources associated with the SDK.
+// The SDK cannot be used after calling Free().
+// Note: This is automatically called by the garbage collector, but can be called explicitly for deterministic cleanup.
+func (s *ZerobusSdk) Free() {
+	if s.ptr != nil {
+		sdkFree(s.ptr)
+		s.ptr = nil
+	}
+}
+
+// CreateStream creates a new bidirectional gRPC stream for ingesting records into a Databricks table.
+// This method uses OAuth 2.0 client credentials flow for authentication.
+//
+// Parameters:
+//   - tableProps: Table properties including name and optional protobuf descriptor
+//   - clientID: OAuth 2.0 client ID
+//   - clientSecret: OAuth 2.0 client secret
+//   - options: Stream configuration options (nil for defaults)
+//
+// Returns an error if:
+//   - Invalid table name format
+//   - Authentication fails
+//   - Insufficient permissions
+//   - Network connectivity issues
+//
+// Example:
+//
+//	stream, err := sdk.CreateStream(
+//	    TableProperties{
+//	        TableName: "catalog.schema.table",
+//	        DescriptorProto: descriptorBytes,
+//	    },
+//	    clientID,
+//	    clientSecret,
+//	    nil, // use default options
+//	)
+func (s *ZerobusSdk) CreateStream(
+	tableProps TableProperties,
+	clientID string,
+	clientSecret string,
+	options *StreamConfigurationOptions,
+) (*ZerobusStream, error) {
+	if s.ptr == nil {
+		return nil, &ZerobusError{Message: "SDK has been freed", IsRetryable: false}
+	}
+
+	ptr, err := sdkCreateStream(
+		s.ptr,
+		tableProps.TableName,
+		tableProps.DescriptorProto,
+		clientID,
+		clientSecret,
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	stream := &ZerobusStream{ptr: ptr}
+
+	// Set up finalizer for automatic cleanup
+	runtime.SetFinalizer(stream, func(st *ZerobusStream) {
+		st.Close()
+	})
+
+	return stream, nil
+}
+
+// HeadersProvider is an interface for providing custom authentication headers.
+// Implement this interface to provide custom authentication logic.
+//
+// Example:
+//
+//	type CustomHeadersProvider struct{}
+//
+//	func (c *CustomHeadersProvider) GetHeaders() (map[string]string, error) {
+//	    return map[string]string{
+//	        "authorization": "Bearer custom-token",
+//	        "x-databricks-zerobus-table-name": "catalog.schema.table",
+//	    }, nil
+//	}
+type HeadersProvider interface {
+	// GetHeaders returns the headers to be used for authentication.
+	// This method will be called by the SDK when authentication is needed.
+	GetHeaders() (map[string]string, error)
+}
+
+// CreateStreamWithHeadersProvider creates a new bidirectional gRPC stream using a custom headers provider.
+// This is useful for testing or when you need custom authentication logic.
+//
+// Parameters:
+//   - tableProps: Table properties including name and optional protobuf descriptor
+//   - headersProvider: Custom implementation of HeadersProvider interface
+//   - options: Stream configuration options (nil for defaults)
+//
+// Returns an error if:
+//   - Invalid table name format
+//   - Headers provider returns an error
+//   - Network connectivity issues
+//
+// Example:
+//
+//	provider := &CustomHeadersProvider{}
+//	stream, err := sdk.CreateStreamWithHeadersProvider(
+//	    TableProperties{TableName: "catalog.schema.table"},
+//	    provider,
+//	    nil, // use default options
+//	)
+func (s *ZerobusSdk) CreateStreamWithHeadersProvider(
+	tableProps TableProperties,
+	headersProvider HeadersProvider,
+	options *StreamConfigurationOptions,
+) (*ZerobusStream, error) {
+	if s.ptr == nil {
+		return nil, &ZerobusError{Message: "SDK has been freed", IsRetryable: false}
+	}
+
+	ptr, err := sdkCreateStreamWithHeadersProvider(
+		s.ptr,
+		tableProps.TableName,
+		tableProps.DescriptorProto,
+		headersProvider,
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	stream := &ZerobusStream{ptr: ptr}
+
+	// Set up finalizer for automatic cleanup
+	runtime.SetFinalizer(stream, func(st *ZerobusStream) {
+		st.Close()
+	})
+
+	return stream, nil
+}
+
+// IngestRecord ingests a record into the stream and returns an acknowledgment.
+// This method blocks until the record is queued and the offset is available.
+//
+// Deprecated: This API is maintained for backwards compatibility.
+// Use IngestRecordOffset() for a simpler API that returns the offset directly.
+//
+// The payload parameter accepts either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// Returns:
+//   - *RecordAck: An acknowledgment containing the offset (available immediately)
+//   - error: Any error that occurred during ingestion
+//
+// The record type is automatically detected based on the payload type.
+//
+// Examples:
+//
+//	// Old API (still works but deprecated)
+//	ack, err := stream.IngestRecord(`{"field": "value1"}`)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	offset, err := ack.Await()
+//
+//	// Preferred: Use IngestRecordOffset instead
+//	offset, err := stream.IngestRecordOffset(`{"field": "value1"}`)
+func (st *ZerobusStream) IngestRecord(payload interface{}) (*RecordAck, error) {
+	if st.ptr == nil {
+		return nil, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	var offset int64
+	var err error
+
+	switch v := payload.(type) {
+	case []byte:
+		offset, err = streamIngestProtoRecord(st.ptr, v)
+	case string:
+		offset, err = streamIngestJSONRecord(st.ptr, v)
+	default:
+		return nil, &ZerobusError{
+			Message:     "Invalid payload type: must be []byte or string",
+			IsRetryable: false,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &RecordAck{
+		streamPtr: st.ptr,
+		offset:    offset,
+		err:       nil,
+	}, nil
+}
+
+// IngestRecordOffset ingests a record into the stream and returns the offset directly.
+// This is the preferred API for ingesting records.
+// This method blocks until the record is queued and returns the offset.
+//
+// The payload parameter accepts either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// Returns:
+//   - int64: The offset of the ingested record
+//   - error: Any error that occurred during ingestion
+//
+// The record type is automatically detected based on the payload type.
+//
+// Examples:
+//
+//	// Ingest records and get offsets directly
+//	offset1, err := stream.IngestRecordOffset(`{"field": "value1"}`)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// For concurrent ingestion, use goroutines
+//	go func() {
+//	    offset, err := stream.IngestRecordOffset(data)
+//	    // handle result
+//	}()
+func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) {
+	if st.ptr == nil {
+		return -1, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	var offset int64
+	var err error
+
+	switch v := payload.(type) {
+	case []byte:
+		offset, err = streamIngestProtoRecord(st.ptr, v)
+	case string:
+		offset, err = streamIngestJSONRecord(st.ptr, v)
+	default:
+		return -1, &ZerobusError{
+			Message:     "Invalid payload type: must be []byte or string",
+			IsRetryable: false,
+		}
+	}
+
+	if err != nil {
+		return -1, err
+	}
+
+	return offset, nil
+}
+
+// IngestRecordsOffset ingests a batch of records into the stream and returns one offset for the entire batch.
+// This is an optimized API for ingesting multiple records at once.
+// This method blocks until all records are queued and returns the batch offset.
+//
+// The records parameter accepts a slice where each element is either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// All records in the batch must be of the same type (all protobuf or all JSON).
+//
+// Returns:
+//   - int64: One offset that represents the entire batch
+//   - error: Any error that occurred during ingestion
+//
+// If the batch is empty, returns -1 with no error.
+//
+// Example:
+//
+//	// Ingest a batch of JSON records
+//	records := []interface{}{
+//	    `{"field": "value1"}`,
+//	    `{"field": "value2"}`,
+//	    `{"field": "value3"}`,
+//	}
+//	batchOffset, err := stream.IngestRecordsOffset(records)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	log.Printf("Batch ingested with offset: %d", batchOffset)
+func (st *ZerobusStream) IngestRecordsOffset(records []interface{}) (int64, error) {
+	if st.ptr == nil {
+		return -1, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	if len(records) == 0 {
+		return -1, nil
+	}
+
+	// Determine the type from the first record
+	switch records[0].(type) {
+	case []byte:
+		// Convert to [][]byte
+		byteRecords := make([][]byte, len(records))
+		for i, r := range records {
+			b, ok := r.([]byte)
+			if !ok {
+				return -1, &ZerobusError{
+					Message:     "All records in batch must be of the same type ([]byte)",
+					IsRetryable: false,
+				}
+			}
+			byteRecords[i] = b
+		}
+		return streamIngestProtoRecords(st.ptr, byteRecords)
+
+	case string:
+		// Convert to []string
+		stringRecords := make([]string, len(records))
+		for i, r := range records {
+			s, ok := r.(string)
+			if !ok {
+				return -1, &ZerobusError{
+					Message:     "All records in batch must be of the same type (string)",
+					IsRetryable: false,
+				}
+			}
+			stringRecords[i] = s
+		}
+		return streamIngestJSONRecords(st.ptr, stringRecords)
+
+	default:
+		return -1, &ZerobusError{
+			Message:     "Invalid payload type: must be []byte or string",
+			IsRetryable: false,
+		}
+	}
+}
+
+// WaitForOffset blocks until the server acknowledges the record at the specified offset.
+// This allows explicit control over when to wait for acknowledgments.
+//
+// Use this with offsets returned from IngestRecordOffset() to wait for specific records
+// to be durably written without waiting for all pending records (unlike Flush).
+//
+// Example:
+//
+//	offset, _ := stream.IngestRecordOffset(data)
+//	// Do other work...
+//	if err := stream.WaitForOffset(offset); err != nil {
+//	    log.Printf("Record at offset %d failed: %v", offset, err)
+//	}
+func (st *ZerobusStream) WaitForOffset(offset int64) error {
+	if st.ptr == nil {
+		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	return streamWaitForOffset(st.ptr, offset)
+}
+
+// GetUnackedRecords retrieves all records that have not yet been acknowledged by the server.
+//
+// IMPORTANT: This method should only be called AFTER the stream has closed or failed.
+// Calling it on an active stream will return an error.
+//
+// Use this method to:
+//   - Retrieve unacknowledged records after stream failure for retry logic
+//   - Check which records weren't durably written after Close() fails
+//   - Implement custom retry strategies after stream errors
+//
+// Returns a slice where each element is either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// Returns an empty slice if there are no unacknowledged records.
+//
+// Example:
+//
+//	if err := stream.Close(); err != nil {
+//	    // Stream failed, check for unacked records
+//	    unacked, err := stream.GetUnackedRecords()
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
+//	    log.Printf("Failed to acknowledge %d records", len(unacked))
+//	    // Retry with a new stream
+//	}
+func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
+	if st.ptr == nil {
+		return nil, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	return streamGetUnackedRecords(st.ptr)
+}
+
+// Flush blocks until all pending records have been acknowledged by the server.
+// This ensures durability guarantees before proceeding.
+//
+// Returns an error if:
+//   - Flush timeout is exceeded
+//   - Any record fails with a non-retryable error
+//
+// Example:
+//
+//	if err := stream.Flush(); err != nil {
+//	    log.Printf("Flush failed: %v", err)
+//	}
+func (st *ZerobusStream) Flush() error {
+	if st.ptr == nil {
+		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	return streamFlush(st.ptr)
+}
+
+// Close gracefully closes the stream after flushing all pending records.
+// This method ensures all records are durably stored before closing the connection.
+//
+// The stream cannot be used after calling Close().
+// Note: This is automatically called by the garbage collector, but should be called explicitly
+// when done with the stream to ensure timely resource cleanup and proper error handling.
+//
+// Returns an error if:
+//   - Flush fails
+//   - Unable to close the gRPC connection
+//
+// Example:
+//
+//	defer stream.Close()
+func (st *ZerobusStream) Close() error {
+	if st.ptr == nil {
+		return nil // Already closed
+	}
+
+	// Always free resources, even if close fails
+	// The FFI layer now properly cleans up pending acks and aborts background tasks
+	ptr := st.ptr
+	st.ptr = nil // Mark as closed immediately to prevent double-close
+
+	err := streamClose(ptr)
+	streamFree(ptr) // Always free to prevent resource leaks
+
+	return err
+}
