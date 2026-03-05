@@ -41,6 +41,7 @@ mod errors;
 mod headers_provider;
 mod landing_zone;
 mod offset_generator;
+mod proxy;
 mod record_types;
 mod stream_configuration;
 mod stream_options;
@@ -840,7 +841,21 @@ impl ZerobusSdk {
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-            let channel = self.tls_config.configure_endpoint(endpoint)?.connect_lazy();
+            let endpoint = self.tls_config.configure_endpoint(endpoint)?;
+
+            // Check for HTTP proxy env vars (https_proxy, HTTPS_PROXY, etc.)
+            // and use a proxy connector if one is configured.
+            let host = endpoint.uri().host().unwrap_or_default().to_string();
+
+            let channel = if !proxy::is_no_proxy(&host) {
+                if let Some(proxy_connector) = proxy::create_proxy_connector() {
+                    endpoint.connect_with_connector_lazy(proxy_connector)
+                } else {
+                    endpoint.connect_lazy()
+                }
+            } else {
+                endpoint.connect_lazy()
+            };
 
             let client = ZerobusClient::new(channel)
                 .max_decoding_message_size(usize::MAX)
@@ -1894,6 +1909,12 @@ impl ZerobusStream {
                         if offset >= offset_to_wait {
                             return Ok(());
                         }
+                    }
+                    // The supervisor always sends the real error to server_error_tx
+                    // before setting is_closed=true, so check error_rx first to
+                    // return the actual error instead of a generic one.
+                    if let Some(server_error) = error_rx.borrow().clone() {
+                        return Err(server_error);
                     }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                         format!("Stream closed during {}", operation_name.to_lowercase()),
