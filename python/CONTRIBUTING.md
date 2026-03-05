@@ -104,76 +104,6 @@ open htmlcov/index.html  # macOS
 xdg-open htmlcov/index.html  # Linux
 ```
 
-## Pull Request Process
-
-1. **Create a feature branch:**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Make your changes:**
-   - Write clear, concise commit messages
-   - Follow existing code style
-   - Update documentation as needed
-
-3. **Format and test your code:**
-   ```bash
-   make fmt
-   make test
-   ```
-
-4. **Commit your changes:**
-   ```bash
-   git add .
-   git commit -m "Add feature: description of your changes"
-   ```
-
-5. **Push to your fork:**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-6. **Create a Pull Request:**
-   - Provide a clear description of changes
-   - Reference any related issues
-   - Ensure all CI checks pass
-
-## Signed Commits
-
-This repo requires all contributors to sign their commits. To configure this, you can follow [Github's documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) to create a GPG key, upload it to your Github account, and configure your git client to sign commits.
-
-## Developer Certificate of Origin
-
-All commits must be signed off to certify compliance with the [Developer Certificate of Origin](../DCO). Use `git commit -s` to sign automatically.
-
-## Code Review Guidelines
-
-When reviewing code:
-
-- Check for adherence to code style
-- Look for potential edge cases
-- Consider performance implications
-- Ensure documentation is updated
-
-## Commit Message Guidelines
-
-Follow these conventions for commit messages:
-
-- Use present tense: "Add feature" not "Added feature"
-- Use imperative mood: "Fix bug" not "Fixes bug"
-- First line should be 50 characters or less
-- Reference issues: "Fix #123: Description of fix"
-
-Example:
-```
-Add async stream creation example
-
-- Add async_example.py demonstrating non-blocking ingestion
-- Update README with async API documentation
-
-Fixes #42
-```
-
 ## Documentation
 
 ### Updating Documentation
@@ -264,27 +194,6 @@ make build    # Build optimized wheel
 # Wheel will be in dist/
 ```
 
-## Versioning
-
-We follow [Semantic Versioning](https://semver.org/):
-
-- **MAJOR**: Incompatible API changes
-- **MINOR**: Backwards-compatible functionality additions
-- **PATCH**: Backwards-compatible bug fixes
-
-## Getting Help
-
-- **Issues**: Open an issue on GitHub for bugs or feature requests
-- **Discussions**: Use GitHub Discussions for questions
-- **Documentation**: Check the README and examples/
-
 ## Package Name
 
 The package is published on PyPI as `databricks-zerobus-ingest-sdk`.
-
-## Code of Conduct
-
-- Be respectful and inclusive
-- Welcome newcomers
-- Focus on constructive feedback
-- Follow the [Python Community Code of Conduct](https://www.python.org/psf/conduct/)
