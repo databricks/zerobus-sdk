@@ -8,6 +8,10 @@ publish = false
 name = "rust_tests"
 path = "src/rust_tests.rs"
 
+[[test]]
+name = "proxy_tests"
+path = "src/proxy_tests.rs"
+
 [dependencies]
 async-trait = "0.1"
 prost = "0.13.3"

@@ -51,7 +51,10 @@ pub(crate) fn create_proxy_connector() -> Option<ProxiedConnector> {
 
     info!("Using HTTP proxy: {}", proxy_url);
 
-    let proxy = Proxy::new(Intercept::All, proxy_uri);
+    let mut proxy = Proxy::new(Intercept::All, proxy_uri);
+    // gRPC uses HTTP/2 which cannot traverse a regular HTTP/1 forward proxy.
+    // Force CONNECT tunneling for all targets, matching gRPC core behavior.
+    proxy.force_connect();
     let mut http_connector = HttpConnector::new();
     http_connector.enforce_http(false);
 
