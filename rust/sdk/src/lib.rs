@@ -44,6 +44,7 @@ mod offset_generator;
 mod record_types;
 mod stream_configuration;
 mod stream_options;
+mod proxy;
 mod tls_config;
 
 use std::collections::HashMap;
@@ -840,7 +841,25 @@ impl ZerobusSdk {
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-            let channel = self.tls_config.configure_endpoint(endpoint)?.connect_lazy();
+            let endpoint = self.tls_config.configure_endpoint(endpoint)?;
+
+            // Check for HTTP proxy env vars (https_proxy, HTTPS_PROXY, etc.)
+            // and use a proxy connector if one is configured.
+            let host = endpoint
+                .uri()
+                .host()
+                .unwrap_or_default()
+                .to_string();
+
+            let channel = if !proxy::is_no_proxy(&host) {
+                if let Some(proxy_connector) = proxy::create_proxy_connector() {
+                    endpoint.connect_with_connector_lazy(proxy_connector)
+                } else {
+                    endpoint.connect_lazy()
+                }
+            } else {
+                endpoint.connect_lazy()
+            };
 
             let client = ZerobusClient::new(channel)
                 .max_decoding_message_size(usize::MAX)
