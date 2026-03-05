@@ -1,4 +1,5 @@
 name: Go Release
+run-name: "Release Go SDK ${{ github.ref_name }}"
 
 on:
   push:
@@ -80,7 +81,7 @@ jobs:
 
       - name: Build Rust Library (Standard)
         if: matrix.use-zig == false
-        working-directory: go/zerobus-ffi
+        working-directory: rust/ffi
         run: |
           cargo build --release --target ${{ matrix.target }}
         env:
@@ -88,7 +89,7 @@ jobs:
 
       - name: Build Rust Library (Zig Cross-Compile)
         if: matrix.use-zig == true
-        working-directory: go/zerobus-ffi
+        working-directory: rust/ffi
         run: |
           cargo zigbuild --release --target ${{ matrix.target }}
 
@@ -105,10 +106,10 @@ jobs:
           mkdir -p dist/${OS_NAME}_${{ matrix.arch }}
 
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp go/zerobus-ffi/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/windows_${{ matrix.arch }}/libzerobus_ffi.a || \
-            cp go/zerobus-ffi/target/${{ matrix.target }}/release/zerobus_ffi.lib dist/windows_${{ matrix.arch }}/libzerobus_ffi.a
+            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/windows_${{ matrix.arch }}/libzerobus_ffi.a || \
+            cp rust/target/${{ matrix.target }}/release/zerobus_ffi.lib dist/windows_${{ matrix.arch }}/libzerobus_ffi.a
           else
-            cp go/zerobus-ffi/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/${OS_NAME}_${{ matrix.arch }}/libzerobus_ffi.a
+            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/${OS_NAME}_${{ matrix.arch }}/libzerobus_ffi.a
           fi
 
       - name: Upload Artifact

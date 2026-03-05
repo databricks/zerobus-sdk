@@ -6,7 +6,7 @@ package zerobus
 #cgo darwin,amd64 LDFLAGS: ${SRCDIR}/lib/darwin_amd64/libzerobus_ffi.a -framework CoreFoundation -framework Security -liconv
 #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libzerobus_ffi.a -framework CoreFoundation -framework Security -liconv
 #cgo windows,amd64 LDFLAGS: ${SRCDIR}/lib/windows_amd64/libzerobus_ffi.a -lws2_32 -luserenv -lbcrypt -lntdll
-#cgo CFLAGS: -I${SRCDIR}/zerobus-ffi -Wno-implicit-function-declaration
+#cgo CFLAGS: -I${SRCDIR}/../rust/ffi -Wno-implicit-function-declaration
 
 #include <stdlib.h>
 #include <stdint.h>

@@ -4,7 +4,7 @@ import "google/protobuf/duration.proto";
 
 package databricks.zerobus;
 
-option go_package = "github.com/databricks/zerobus-sdk-go/testutil/pb";
+option go_package = "github.com/databricks/zerobus-sdk/go/testutil/pb";
 
 service Zerobus {
   rpc EphemeralStream(stream EphemeralStreamRequest) returns (stream EphemeralStreamResponse);

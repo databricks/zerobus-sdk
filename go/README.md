@@ -89,7 +89,7 @@ Before using the SDK, you need a Databricks workspace URL, a Delta table, and a 
 
 ```bash
 # Add the SDK to your project (use a tagged version for pre-built binaries)
-go get github.com/databricks/zerobus-sdk-go@latest
+go get github.com/databricks/zerobus-sdk/go@latest
 ```
 
 > **Note:** Tagged releases (e.g., `v1.0.0`) come with pre-built Rust libraries for Linux, macOS, and Windows. If you use `@main` or a commit hash, you will need to have Rust installed and run `go generate` to build the library yourself.
@@ -97,7 +97,7 @@ go get github.com/databricks/zerobus-sdk-go@latest
 **In your code:**
 
 ```go
-import zerobus "github.com/databricks/zerobus-sdk-go"
+import zerobus "github.com/databricks/zerobus-sdk/go"
 
 func main() {
     sdk, err := zerobus.NewZerobusSdk(
@@ -155,7 +155,7 @@ package main
 
 import (
     "log"
-    zerobus "github.com/databricks/zerobus-sdk-go"
+    zerobus "github.com/databricks/zerobus-sdk/go"
 )
 
 func main() {
@@ -373,7 +373,7 @@ For advanced use cases, you can implement the `HeadersProvider` interface to sup
 **Example:**
 
 ```go
-import zerobus "github.com/databricks/zerobus-sdk-go"
+import zerobus "github.com/databricks/zerobus-sdk/go"
 
 // Implement the HeadersProvider interface.
 type MyCustomAuthProvider struct {

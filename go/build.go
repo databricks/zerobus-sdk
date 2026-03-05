@@ -11,7 +11,7 @@ import (
 )
 
 // This file provides utilities for building the Rust FFI library.
-// Users must run: go generate github.com/databricks/zerobus-sdk-go
+// Users must run: go generate github.com/databricks/zerobus-sdk/go
 // before building their application.
 
 func init() {
@@ -35,7 +35,7 @@ func init() {
 			"\n"+
 			"The Zerobus Go SDK requires a one-time build step:\n"+
 			"\n"+
-			"  go generate github.com/databricks/zerobus-sdk-go\n"+
+			"  go generate github.com/databricks/zerobus-sdk/go\n"+
 			"\n"+
 			"Or if you're developing locally:\n"+
 			"\n"+
@@ -83,7 +83,7 @@ func needsRebuild(sdkDir, libPath string) bool {
 		return true
 	}
 
-	ffiDir := filepath.Join(sdkDir, "zerobus-ffi", "src")
+	ffiDir := filepath.Join(sdkDir, "..", "rust", "ffi", "src")
 	needsRebuild := false
 
 	filepath.Walk(ffiDir, func(path string, info os.FileInfo, err error) error {
@@ -102,7 +102,7 @@ func needsRebuild(sdkDir, libPath string) bool {
 
 // buildRustLibrary builds the Rust FFI library
 func buildRustLibrary(sdkDir string) error {
-	ffiDir := filepath.Join(sdkDir, "zerobus-ffi")
+	ffiDir := filepath.Join(sdkDir, "..", "rust", "ffi")
 
 	// Check if Rust is installed
 	if _, err := exec.LookPath("cargo"); err != nil {
@@ -138,11 +138,12 @@ func buildRustLibrary(sdkDir string) error {
 	}
 	dstLib := filepath.Join(dstDir, "libzerobus_ffi.a")
 
-	// Try different possible locations
+	// rust/ffi is part of the rust/ workspace, so Cargo outputs to rust/target/
+	workspaceTargetDir := filepath.Join(filepath.Dir(ffiDir), "target")
 	possiblePaths := []string{
-		filepath.Join(ffiDir, "target", "release", "libzerobus_ffi.a"),
-		filepath.Join(ffiDir, "target", "x86_64-pc-windows-gnu", "release", "libzerobus_ffi.a"),
-		filepath.Join(ffiDir, "target", "release", "zerobus_ffi.lib"),
+		filepath.Join(workspaceTargetDir, "release", "libzerobus_ffi.a"),
+		filepath.Join(workspaceTargetDir, "x86_64-pc-windows-gnu", "release", "libzerobus_ffi.a"),
+		filepath.Join(workspaceTargetDir, "release", "zerobus_ffi.lib"),
 	}
 
 	var data []byte

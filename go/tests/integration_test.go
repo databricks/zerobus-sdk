@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/databricks/zerobus-sdk-go"
+	"github.com/databricks/zerobus-sdk/go"
 	"google.golang.org/grpc/codes"
 )
 

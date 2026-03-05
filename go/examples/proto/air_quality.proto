@@ -2,7 +2,7 @@ syntax = "proto2";
 
 package examples;
 
-option go_package = "github.com/databricks/zerobus-sdk-go/examples/pb";
+option go_package = "github.com/databricks/zerobus-sdk/go/examples/pb";
 
 message AirQuality {
     optional string device_name = 1;

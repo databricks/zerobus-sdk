@@ -92,7 +92,7 @@ const file_air_quality_proto_rawDesc = "" +
 	"\vdevice_name\x18\x01 \x01(\tR\n" +
 	"deviceName\x12\x12\n" +
 	"\x04temp\x18\x02 \x01(\x05R\x04temp\x12\x1a\n" +
-	"\bhumidity\x18\x03 \x01(\x03R\bhumidityB2Z0github.com/databricks/zerobus-sdk-go/examples/pb"
+	"\bhumidity\x18\x03 \x01(\x03R\bhumidityB2Z0github.com/databricks/zerobus-sdk/go/examples/pb"
 
 var (
 	file_air_quality_proto_rawDescOnce sync.Once

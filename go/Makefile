@@ -45,19 +45,18 @@ build-rust:
 	mkdir -p $$LIB_DIR; \
 	if [ "$$OS" = "Windows_NT" ] || [[ "$$OS" == *"mingw"* ]] || [[ "$$OS" == *"msys"* ]]; then \
 		echo "Detected Windows - building for x86_64-pc-windows-gnu target"; \
-		cd zerobus-ffi && cargo build --release --target x86_64-pc-windows-gnu; \
-		cd ..; \
-		if [ -f zerobus-ffi/target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a ]; then \
-			cp zerobus-ffi/target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a $$LIB_DIR/; \
-		elif [ -f zerobus-ffi/target/release/zerobus_ffi.lib ]; then \
-			cp zerobus-ffi/target/release/zerobus_ffi.lib $$LIB_DIR/libzerobus_ffi.a; \
+		cd ../rust/ffi && cargo build --release --target x86_64-pc-windows-gnu; \
+		cd -; \
+		if [ -f ../rust/target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a ]; then \
+			cp ../rust/target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a $$LIB_DIR/; \
+		elif [ -f ../rust/target/release/zerobus_ffi.lib ]; then \
+			cp ../rust/target/release/zerobus_ffi.lib $$LIB_DIR/libzerobus_ffi.a; \
 		fi; \
 	else \
-		cd zerobus-ffi && cargo build --release; \
-		cd ..; \
-		cp zerobus-ffi/target/release/libzerobus_ffi.a $$LIB_DIR/; \
-	fi; \
-	cp zerobus-ffi/zerobus.h .
+		cd ../rust/ffi && cargo build --release; \
+		cd -; \
+		cp ../rust/target/release/libzerobus_ffi.a $$LIB_DIR/; \
+	fi
 	@echo "✓ Rust FFI layer built successfully"
 
 build-go: build-rust
@@ -67,7 +66,7 @@ build-go: build-rust
 
 clean:
 	@echo "Cleaning build artifacts..."
-	cd zerobus-ffi && cargo clean
+	cd ../rust/ffi && cargo clean
 	rm -rf lib/
 	rm -f libzerobus_ffi.a
 	rm -rf releases
@@ -85,7 +84,7 @@ fmt-go:
 
 fmt-rust:
 	@echo "Formatting Rust code..."
-	cd zerobus-ffi && cargo fmt --all
+	cd ../rust/ffi && cargo fmt --all
 
 lint: lint-go lint-rust
 
@@ -99,7 +98,7 @@ lint-go:
 
 lint-rust:
 	@echo "Linting Rust code..."
-	cd zerobus-ffi && cargo clippy --all -- -D warnings
+	cd ../rust/ffi && cargo clippy --all -- -D warnings
 
 check: fmt lint
 
@@ -107,7 +106,7 @@ test: test-rust test-go
 
 test-rust:
 	@echo "Running Rust tests..."
-	cd zerobus-ffi && cargo test -- --test-threads=1
+	cd ../rust/ffi && cargo test -- --test-threads=1
 
 test-go:
 	@echo "Running Go unit tests..."

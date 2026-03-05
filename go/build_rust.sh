@@ -5,7 +5,7 @@ set -e
 # It builds the Rust FFI library and places it where CGO expects it
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FFI_DIR="$SCRIPT_DIR/zerobus-ffi"
+FFI_DIR="$SCRIPT_DIR/../rust/ffi"
 OUTPUT_DIR="$SCRIPT_DIR"
 
 # Detect platform
@@ -66,21 +66,22 @@ fi
 
 mkdir -p "$TARGET_LIB_DIR"
 
-if [ -f "target/release/libzerobus_ffi.a" ]; then
-    cp "target/release/libzerobus_ffi.a" "$TARGET_LIB_PATH"
+# Workspace outputs to rust/target/, not rust/ffi/target/
+WORKSPACE_TARGET_DIR="$(dirname "$FFI_DIR")/target"
+
+if [ -f "$WORKSPACE_TARGET_DIR/release/libzerobus_ffi.a" ]; then
+    cp "$WORKSPACE_TARGET_DIR/release/libzerobus_ffi.a" "$TARGET_LIB_PATH"
     echo "✓ Rust library built successfully: $TARGET_LIB_PATH"
-elif [ -f "target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a" ]; then
-    # Windows GNU target
-    cp "target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a" "$TARGET_LIB_PATH"
+elif [ -f "$WORKSPACE_TARGET_DIR/x86_64-pc-windows-gnu/release/libzerobus_ffi.a" ]; then
+    cp "$WORKSPACE_TARGET_DIR/x86_64-pc-windows-gnu/release/libzerobus_ffi.a" "$TARGET_LIB_PATH"
     echo "✓ Rust library built successfully: $TARGET_LIB_PATH (Windows GNU)"
-elif [ -f "target/release/zerobus_ffi.lib" ]; then
-    # Windows MSVC: copy .lib as .a for CGO compatibility
-    cp "target/release/zerobus_ffi.lib" "$TARGET_LIB_PATH"
+elif [ -f "$WORKSPACE_TARGET_DIR/release/zerobus_ffi.lib" ]; then
+    cp "$WORKSPACE_TARGET_DIR/release/zerobus_ffi.lib" "$TARGET_LIB_PATH"
     echo "✓ Rust library built successfully: $TARGET_LIB_PATH (from zerobus_ffi.lib)"
 else
     echo "✗ Error: Could not find Rust library"
-    echo "   Tried: target/release/libzerobus_ffi.a"
-    echo "          target/x86_64-pc-windows-gnu/release/libzerobus_ffi.a"
-    echo "          target/release/zerobus_ffi.lib"
+    echo "   Tried: $WORKSPACE_TARGET_DIR/release/libzerobus_ffi.a"
+    echo "          $WORKSPACE_TARGET_DIR/x86_64-pc-windows-gnu/release/libzerobus_ffi.a"
+    echo "          $WORKSPACE_TARGET_DIR/release/zerobus_ffi.lib"
     exit 1
 fi

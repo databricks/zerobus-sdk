@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/databricks/zerobus-sdk-go/tests/pb"
+	pb "github.com/databricks/zerobus-sdk/go/tests/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"

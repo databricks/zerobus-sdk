@@ -787,7 +787,7 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\x05PROTO\x10\x01\x12\b\n" +
 	"\x04JSON\x10\x022y\n" +
 	"\aZerobus\x12n\n" +
-	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01B2Z0github.com/databricks/zerobus-sdk-go/testutil/pb"
+	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01B2Z0github.com/databricks/zerobus-sdk/go/testutil/pb"
 
 var (
 	file_zerobus_service_proto_rawDescOnce sync.Once
