@@ -19,21 +19,19 @@ jobs:
             static_lib: libzerobus_ffi.a
             dynamic_lib: libzerobus_ffi.so
             artifact_dir: linux-x86-64
-          - os: macos-13
-            target: x86_64-apple-darwin
+            cross: false
+          - os: linux-ubuntu-latest
+            target: aarch64-unknown-linux-gnu
             static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: darwin-x86-64
-          - os: macos-14
-            target: aarch64-apple-darwin
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: darwin-aarch64
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-aarch64
+            cross: true
           - os: windows-server-latest
             target: x86_64-pc-windows-msvc
             static_lib: zerobus_ffi.lib
             dynamic_lib: zerobus_ffi.dll
             artifact_dir: windows-x86-64
+            cross: false
 
     runs-on:
       group: databricks-protected-runner-group
@@ -48,6 +46,15 @@ jobs:
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+
+      - name: Install cross-compilation toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -129,12 +136,11 @@ jobs:
 
             Platforms included:
             - linux-x86-64 (.a, .so)
-            - darwin-x86-64 (.a, .dylib)
-            - darwin-aarch64 (.a, .dylib)
+            - linux-aarch64 (.a, .so)
             - windows-x86-64 (.lib, .dll)
 
             Each platform includes:
             - Static library for Go/C++ (libzerobus_ffi.a / zerobus_ffi.lib)
-            - Dynamic library for C#/others (libzerobus_ffi.so / .dylib / .dll)
+            - Dynamic library for C#/others (libzerobus_ffi.so / .dll)
             - C header file (zerobus.h)
           files: zerobus-ffi-${{ inputs.version }}.tar.gz

@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "0.6.0"
+version = "1.0.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -36,6 +36,9 @@ arrow-array = { version = "56.2.0", default-features = false, optional = true }
 arrow-schema = { version = "56.2.0", default-features = false, optional = true }
 arrow-ipc = { version = "56.2.0", default-features = false, optional = true, features = ["lz4","zstd"] }
 futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 tonic-build = "0.13"
