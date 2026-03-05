@@ -112,6 +112,25 @@ Use `proto2` syntax with `optional` fields to correctly represent nullable Delta
 
 Instead of writing `.proto` files by hand, each SDK ships a tool to generate protobuf schemas directly from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
 
+## HTTP Proxy Support
+
+All SDKs support HTTP CONNECT proxies via environment variables, following gRPC core conventions. The first variable found (in order) is used:
+
+| Proxy | No-proxy |
+|-------|----------|
+| `grpc_proxy` / `GRPC_PROXY` | `no_grpc_proxy` / `NO_GRPC_PROXY` |
+| `https_proxy` / `HTTPS_PROXY` | `no_proxy` / `NO_PROXY` |
+| `http_proxy` / `HTTP_PROXY` | |
+
+The `no_proxy` value is a comma-separated list of hostnames (suffix-matched) or `*` to bypass the proxy entirely.
+
+```bash
+export https_proxy=http://my-proxy:8080
+export no_proxy=localhost,127.0.0.1
+```
+
+The SDK establishes a plaintext HTTP CONNECT tunnel through the proxy, then performs a TLS handshake end-to-end with the Databricks server. The proxy never sees decrypted traffic.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Each SDK also has its own contributing guide with language-specific setup instructions.
