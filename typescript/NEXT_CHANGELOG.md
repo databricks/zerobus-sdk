@@ -1,6 +1,8 @@
 # NEXT CHANGELOG
 
-## Release v0.4.0
+## Release v1.1.0
+
+### Major Changes
 
 ### New Features and Improvements
 
@@ -10,4 +12,9 @@
 
 ### Internal Changes
 
+### Breaking Changes
+
+### Deprecations
+
 ### API Changes
+

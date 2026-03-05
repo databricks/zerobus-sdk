@@ -47,7 +47,7 @@ Example (Async):
 import zerobus._zerobus_core as _core
 from zerobus.sdk.sync import ZerobusSdk, ZerobusStream
 
-__version__ = "0.3.0"
+__version__ = "1.1.0"
 
 # Re-export common types
 TableProperties = _core.TableProperties
