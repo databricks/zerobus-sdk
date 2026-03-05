@@ -58,9 +58,7 @@ async fn start_mock_proxy() -> (String, Arc<AtomicUsize>) {
                     Ok(s) => s,
                     Err(e) => {
                         info!("[mock-proxy] Failed to connect to {}: {}", target, e);
-                        let _ = client
-                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                            .await;
+                        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
                         return;
                     }
                 };
@@ -145,7 +143,10 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         let (proxy_url, connect_count) = start_mock_proxy().await;
-        info!("Mock proxy at: {}, mock server at: {}", proxy_url, server_url);
+        info!(
+            "Mock proxy at: {}, mock server at: {}",
+            proxy_url, server_url
+        );
 
         std::env::set_var("grpc_proxy", &proxy_url);
 
