@@ -41,10 +41,10 @@ mod errors;
 mod headers_provider;
 mod landing_zone;
 mod offset_generator;
+mod proxy;
 mod record_types;
 mod stream_configuration;
 mod stream_options;
-mod proxy;
 mod tls_config;
 
 use std::collections::HashMap;
@@ -845,11 +845,7 @@ impl ZerobusSdk {
 
             // Check for HTTP proxy env vars (https_proxy, HTTPS_PROXY, etc.)
             // and use a proxy connector if one is configured.
-            let host = endpoint
-                .uri()
-                .host()
-                .unwrap_or_default()
-                .to_string();
+            let host = endpoint.uri().host().unwrap_or_default().to_string();
 
             let channel = if !proxy::is_no_proxy(&host) {
                 if let Some(proxy_connector) = proxy::create_proxy_connector() {

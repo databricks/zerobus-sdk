@@ -15,12 +15,7 @@ const PROXY_ENV_VARS: &[&str] = &[
 ];
 
 /// Env var names checked for no-proxy list, in gRPC core precedence order.
-const NO_PROXY_ENV_VARS: &[&str] = &[
-    "no_grpc_proxy",
-    "NO_GRPC_PROXY",
-    "no_proxy",
-    "NO_PROXY",
-];
+const NO_PROXY_ENV_VARS: &[&str] = &["no_grpc_proxy", "NO_GRPC_PROXY", "no_proxy", "NO_PROXY"];
 
 /// Reads the first non-empty value from the given env var names.
 fn read_first_env(names: &[&str]) -> Option<String> {
@@ -121,27 +116,15 @@ mod tests {
             "workspace.cloud.databricks.com",
             "databricks.com"
         ));
-        assert!(host_matches_no_proxy(
-            "foo.example.com",
-            "example.com"
-        ));
+        assert!(host_matches_no_proxy("foo.example.com", "example.com"));
         // Must be a subdomain, not just a string suffix
-        assert!(!host_matches_no_proxy(
-            "notexample.com",
-            "example.com"
-        ));
+        assert!(!host_matches_no_proxy("notexample.com", "example.com"));
     }
 
     #[test]
     fn no_proxy_leading_dot_stripped() {
-        assert!(host_matches_no_proxy(
-            "foo.example.com",
-            ".example.com"
-        ));
-        assert!(host_matches_no_proxy(
-            "example.com",
-            ".example.com"
-        ));
+        assert!(host_matches_no_proxy("foo.example.com", ".example.com"));
+        assert!(host_matches_no_proxy("example.com", ".example.com"));
     }
 
     #[test]
@@ -155,10 +138,7 @@ mod tests {
 
     #[test]
     fn no_proxy_whitespace_handling() {
-        assert!(host_matches_no_proxy(
-            "example.com",
-            "  example.com  "
-        ));
+        assert!(host_matches_no_proxy("example.com", "  example.com  "));
         assert!(host_matches_no_proxy(
             "example.com",
             "other.com , example.com , more.com"
