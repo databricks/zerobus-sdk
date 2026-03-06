@@ -4,7 +4,7 @@ Monorepo for Databricks Zerobus Ingest SDKs.
 
 ## Disclaimer
 
-[Public Preview](https://docs.databricks.com/release-notes/release-types.html): These SDKs are supported for production use cases and are available to all customers. Databricks is actively working on stabilizing the Zerobus Ingest SDKs. Minor version updates may include backwards-incompatible changes.
+[GA](https://docs.databricks.com/release-notes/release-types.html): This SDK is generally available and supported for production use cases. Minor and patch version updates will not contain breaking changes. Major version updates may include breaking changes.
 
 We are keen to hear feedback from you. Please [file issues](https://github.com/databricks/zerobus-sdk/issues), and we will address them.
 
@@ -21,6 +21,20 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | Go | `go/` | *coming soon* |
 | TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk) |
 | Java | [`java/`](java/) | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
+
+## Platform Support
+
+We try to provide prebuilt native binaries for the following platforms:
+
+| Platform | Architecture |
+|----------|-------------|
+| Linux | x86_64 |
+| Linux | aarch64 |
+| Windows | x86_64 |
+| macOS | x86_64 |
+| macOS | aarch64 (Apple Silicon) |
+
+> **Note:** We do not currently have macOS CI runners, so macOS binaries are built locally and may not be available for every SDK or release. If your platform is not supported or you encounter compatibility issues, you can [build from source](CONTRIBUTING.md) or [file an issue](https://github.com/databricks/zerobus-sdk/issues).
 
 ## Prerequisites
 
