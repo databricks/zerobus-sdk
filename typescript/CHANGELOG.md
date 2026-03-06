@@ -2,7 +2,7 @@
 
 ## Release v1.0.0
 
-GA release of the Databricks Zerobus Ingest SDK for Rust.
+GA release of the Databricks Zerobus Ingest SDK for TypeScript.
 
 ### New Features and Improvements
 - Added HTTP proxy support via standard environment variables (`grpc_proxy`, `https_proxy`, `http_proxy`), following gRPC core conventions. Proxied connections use HTTP CONNECT tunneling with end-to-end TLS. Supports `no_grpc_proxy` / `no_proxy` for bypass rules.

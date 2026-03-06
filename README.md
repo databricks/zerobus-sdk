@@ -4,7 +4,7 @@ Monorepo for Databricks Zerobus Ingest SDKs.
 
 ## Disclaimer
 
-[Public Preview](https://docs.databricks.com/release-notes/release-types.html): These SDKs are supported for production use cases and are available to all customers. Databricks is actively working on stabilizing the Zerobus Ingest SDKs. Minor version updates may include backwards-incompatible changes.
+[GA](https://docs.databricks.com/release-notes/release-types.html): This SDK is generally available and supported for production use cases. Minor and patch version updates will not contain breaking changes. Major version updates may include breaking changes.
 
 We are keen to hear feedback from you. Please [file issues](https://github.com/databricks/zerobus-sdk/issues), and we will address them.
 
