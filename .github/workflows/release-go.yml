@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - 'go/v*'
+  workflow_dispatch:
 
 jobs:
   build-rust:
@@ -120,6 +121,7 @@ jobs:
 
   update-tag:
     name: Update Tag with Binaries
+    if: startsWith(github.ref, 'refs/tags/go/')
     needs: build-rust
     runs-on:
       group: databricks-protected-runner-group
