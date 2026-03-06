@@ -2,12 +2,23 @@ package tests
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/databricks/zerobus-sdk/go"
+	zerobus "github.com/databricks/zerobus-sdk/go"
 	"google.golang.org/grpc/codes"
 )
+
+func TestMain(m *testing.M) {
+	// Ignore SIGPIPE to prevent the Rust FFI layer from crashing the
+	// process when the mock server writes to a connection that the
+	// client already closed (e.g. after a timeout).
+	signal.Ignore(syscall.SIGPIPE)
+	os.Exit(m.Run())
+}
 
 const testTableName = "test_catalog.test_schema.test_table"
 
@@ -92,9 +103,9 @@ func TestTimeoutedStreamCreation(t *testing.T) {
 		t.Fatal("Expected stream creation to fail due to timeout, but it succeeded")
 	}
 
-	// Give background tasks a moment to realize the timeout occurred
-	// before we stop the mock server in defer
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the mock server's delayed response to complete before
+	// grpcServer.Stop() tears down the connection.
+	time.Sleep(500 * time.Millisecond)
 }
 
 // TestNonRetriableErrorDuringStreamCreation tests that non-retriable errors fail immediately
