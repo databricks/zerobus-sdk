@@ -271,16 +271,7 @@ go/
 ├── ack.go                          # Acknowledgment handling
 ├── build.go                        # Build utilities and go:generate
 ├── build_rust.sh                   # Rust build script
-├── zerobus.h                       # C header (generated)
 ├── go.mod                          # Go module definition
-├── zerobus-ffi/                    # Rust FFI crate
-│   ├── src/
-│   │   ├── lib.rs                  # FFI wrapper implementation
-│   │   └── tests.rs                # Rust FFI tests
-│   ├── zerobus.h                   # C header for CGO (generated)
-│   ├── Cargo.toml                  # Rust dependencies
-│   ├── Cargo.lock                  # Rust dependency lock file
-│   └── build.rs                    # Build script for cbindgen
 │
 ├── examples/                       # Working examples
 │   ├── json/                       # JSON ingestion examples

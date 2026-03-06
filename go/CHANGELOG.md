@@ -1,5 +1,32 @@
 # Version changelog
 
+## Release v1.0.0.
+
+GA release of the Databricks Zerobus Ingest SDK for Go.
+
+### New Features and Improvements
+- Added HTTP proxy support via standard environment variables (`grpc_proxy`, `https_proxy`, `http_proxy`), following gRPC core conventions. Proxied connections use HTTP CONNECT tunneling with end-to-end TLS. Supports `no_grpc_proxy` / `no_proxy` for bypass rules.
+
+### Deprecations
+
+
+### Bug Fixes
+**IMPORTANT**: Fixed memory safety issue where Go garbage collector could move data while Rust FFI was reading it, causing crashes          
+    - Implemented proper memory pinning using `runtime.Pinner` in all FFI functions that pass Go slices to Rust
+    - Updated `streamIngestProtoRecords`, `streamIngestProtoRecord`, `streamIngestJSONRecords`, `sdkCreateStream`, and
+  `sdkCreateStreamWithHeadersProvider`
+    - Uses `unsafe.SliceData()` for safe pointer conversion (requires Go 1.20+)
+    - Pins data before passing to Rust, ensuring pointers remain valid during FFI calls
+
+### Documentation
+
+
+### Internal Changes
+
+
+### API Changes
+
+
 ## Release v0.2.1
 
 ### Bug Fixes

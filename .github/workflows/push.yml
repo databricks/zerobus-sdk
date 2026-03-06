@@ -11,7 +11,7 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust, java, typescript, python]
+    needs: [changes, rust, java, typescript, python, go]
     if: always()
     steps:
       - run: |

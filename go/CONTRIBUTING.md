@@ -101,8 +101,8 @@ Available make targets:
 
 When making changes to the FFI layer:
 
-1. Update the Rust code in `zerobus-ffi/src/`
-2. Update the C header if needed in `zerobus-ffi/zerobus.h`
+1. Update the Rust code in `../rust/ffi/src/`
+2. Update the C header if needed in `../rust/ffi/zerobus.h`
 3. Update the Go bindings in `ffi.go`
 4. Rebuild with `make build`
 5. Test the changes with `make test`
