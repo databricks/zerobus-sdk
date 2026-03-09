@@ -158,12 +158,13 @@ jobs:
           TREE_ENTRIES="["
           FIRST=true
           for file in $(find go/lib -type f); do
-            CONTENT=$(base64 -w0 < "$file")
+            TMPFILE=$(mktemp)
+            printf '{"encoding":"base64","content":"%s"}' "$(base64 -w0 < "$file")" > "$TMPFILE"
             BLOB_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
               --method POST \
-              -f encoding="base64" \
-              -f content="$CONTENT" \
+              --input "$TMPFILE" \
               --jq '.sha')
+            rm "$TMPFILE"
             if [ "$FIRST" = false ]; then TREE_ENTRIES="$TREE_ENTRIES,"; fi
             TREE_ENTRIES="$TREE_ENTRIES{\"path\":\"$file\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}"
             FIRST=false
