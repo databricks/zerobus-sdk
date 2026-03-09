@@ -149,10 +149,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git add -f go/lib/
-          TREE=$(git write-tree)
           PARENT=$(git rev-parse HEAD)
 
+          # Get the base tree SHA from the current HEAD commit on GitHub
+          BASE_TREE=$(gh api repos/${{ github.repository }}/git/commits/$PARENT --jq '.tree.sha')
+
+          # Upload each file as a blob and build tree entries JSON
+          TREE_ENTRIES="["
+          FIRST=true
+          for file in $(find go/lib -type f); do
+            CONTENT=$(base64 -w0 < "$file")
+            BLOB_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+              --method POST \
+              -f encoding="base64" \
+              -f content="$CONTENT" \
+              --jq '.sha')
+            if [ "$FIRST" = false ]; then TREE_ENTRIES="$TREE_ENTRIES,"; fi
+            TREE_ENTRIES="$TREE_ENTRIES{\"path\":\"$file\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}"
+            FIRST=false
+          done
+          TREE_ENTRIES="$TREE_ENTRIES]"
+
+          # Create the tree on GitHub using the base tree so all existing files are preserved
+          TREE=$(gh api repos/${{ github.repository }}/git/trees \
+            --method POST \
+            -f base_tree="$BASE_TREE" \
+            --field "tree=$TREE_ENTRIES" \
+            --jq '.sha')
+
+          # Create the commit via API (satisfies signed commit requirements)
           COMMIT=$(gh api repos/${{ github.repository }}/git/commits \
             --method POST \
             -f message="Release ${{ github.ref_name }} with pre-built binaries" \
