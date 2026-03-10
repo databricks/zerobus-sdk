@@ -1,5 +1,13 @@
 # Version changelog
 
+## Release v1.0.1
+
+### Bug Fixes
+- Fixed TLS certificate validation failure when behind corporate VPN/proxy with MITM certificates (e.g., GlobalProtect). Changed `reqwest` TLS configuration from `rustls-tls` to `rustls-tls-native-roots` + `rustls-tls-webpki-roots`, so the SDK now loads CA certificates from the OS native trust store (respecting `SSL_CERT_FILE` and system certificate stores) while keeping bundled Mozilla roots as a fallback for minimal environments.
+
+### New Features and Improvements
+- Exported `OAuthHeadersProvider` in the public API, allowing clients to directly construct and use the built-in OAuth 2.0 headers provider.
+
 ## Release v1.0.0
 
 GA release of the Databricks Zerobus Ingest SDK for Rust.
