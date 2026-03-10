@@ -1,5 +1,10 @@
 # Version changelog
 
+## Release v1.0.1
+
+### Bug Fixes
+- Fixed TLS certificate validation failure when behind corporate VPN/proxy with MITM certificates (e.g., GlobalProtect). The underlying Rust native library now loads CA certificates from the OS native trust store (respecting `SSL_CERT_FILE` and system certificate stores) while keeping bundled Mozilla roots as a fallback.
+
 ## Release v1.0.0
 
 GA release of the Databricks Zerobus Ingest SDK for Java.
