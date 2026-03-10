@@ -71,7 +71,6 @@ use databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse, RecordType,
 };
-use headers_provider::OAuthHeadersProvider;
 use landing_zone::LandingZone;
 
 /// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
@@ -86,7 +85,7 @@ pub use builder::ZerobusSdkBuilder;
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
-pub use headers_provider::{HeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
