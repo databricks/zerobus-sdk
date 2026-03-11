@@ -541,7 +541,12 @@ def generate_proto_file(message_name: str, columns: List[Dict[str, str]], output
     # Collect all field definitions and nested message definitions
     fields_and_definitions = ""
 
-    for idx, col in enumerate(columns, start=1):
+    field_number = 1
+    for col in columns:
+        # Skip protobuf reserved field numbers 19000-19999
+        if field_number == 19000:
+            field_number = 20000
+
         field_modifier, proto_type, nested_def = get_proto_field_info(
             col["name"], col["type_text"], col["nullable"], struct_counter, 1
         )
@@ -555,9 +560,11 @@ def generate_proto_file(message_name: str, columns: List[Dict[str, str]], output
 
         # Add field definition
         if field_modifier == "":
-            fields_and_definitions += f"\t{proto_type} {field_name} = {idx};\n"
+            fields_and_definitions += f"\t{proto_type} {field_name} = {field_number};\n"
         else:
-            fields_and_definitions += f"\t{field_modifier} {proto_type} {field_name} = {idx};\n"
+            fields_and_definitions += f"\t{field_modifier} {proto_type} {field_name} = {field_number};\n"
+
+        field_number += 1
 
     # Construct the main message
     proto_content.append(f"message {message_name} {{")
