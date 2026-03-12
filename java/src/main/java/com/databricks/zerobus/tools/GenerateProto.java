@@ -398,6 +398,11 @@ public class GenerateProto {
     // Add fields.
     int fieldNumber = 1;
     for (Map<String, Object> col : columns) {
+      // Skip protobuf reserved field numbers 19000-19999.
+      if (fieldNumber == 19000) {
+        fieldNumber = 20000;
+      }
+
       String fieldName = (String) col.get("name");
       String typeText = (String) col.get("type_text");
       boolean nullable = (Boolean) col.get("nullable");

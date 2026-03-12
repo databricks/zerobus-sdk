@@ -378,7 +378,13 @@ pub fn generate_proto_file(
     let mut struct_counter = 0;
     let mut fields_and_definitions = String::new();
 
-    for (i, col) in columns.iter().enumerate() {
+    let mut field_number: usize = 1;
+    for col in columns.iter() {
+        // Skip protobuf reserved field numbers 19000-19999.
+        if field_number == 19000 {
+            field_number = 20000;
+        }
+
         let (modifier, proto_type, nested_def) = get_proto_field_info(
             &col.name,
             &col.type_text,
@@ -396,19 +402,15 @@ pub fn generate_proto_file(
         if modifier.is_empty() {
             fields_and_definitions.push_str(&format!(
                 "\t{} {} = {};\n",
-                proto_type,
-                field_name,
-                i + 1
+                proto_type, field_name, field_number
             ));
         } else {
             fields_and_definitions.push_str(&format!(
                 "\t{} {} {} = {};\n",
-                modifier,
-                proto_type,
-                field_name,
-                i + 1
+                modifier, proto_type, field_name, field_number
             ));
         }
+        field_number += 1;
     }
 
     // Constructing the main message.
