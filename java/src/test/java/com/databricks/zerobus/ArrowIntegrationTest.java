@@ -103,8 +103,7 @@ public class ArrowIntegrationTest {
 
       try {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-          LargeVarCharVector nameVector =
-              (LargeVarCharVector) batch.getVector("device_name");
+          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
           IntVector tempVector = (IntVector) batch.getVector("temp");
           BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
@@ -120,7 +119,8 @@ public class ArrowIntegrationTest {
           long offset = stream.ingestBatch(batch);
           stream.waitForOffset(offset);
 
-          System.out.println("Arrow single batch: " + rowCount + " rows ingested (offset: " + offset + ")");
+          System.out.println(
+              "Arrow single batch: " + rowCount + " rows ingested (offset: " + offset + ")");
         }
       } finally {
         stream.close();
@@ -149,16 +149,14 @@ public class ArrowIntegrationTest {
       try {
         for (int batchNum = 0; batchNum < 3; batchNum++) {
           try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-            LargeVarCharVector nameVector =
-                (LargeVarCharVector) batch.getVector("device_name");
+            LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
             IntVector tempVector = (IntVector) batch.getVector("temp");
             BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
             int rowCount = 10;
             batch.allocateNew();
             for (int i = 0; i < rowCount; i++) {
-              nameVector.setSafe(
-                  i, ("test-arrow-multi-" + batchNum + "-" + i).getBytes());
+              nameVector.setSafe(i, ("test-arrow-multi-" + batchNum + "-" + i).getBytes());
               tempVector.setSafe(i, 30 + i);
               humidityVector.setSafe(i, 60 + i);
             }
@@ -206,8 +204,7 @@ public class ArrowIntegrationTest {
 
       try {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-          LargeVarCharVector nameVector =
-              (LargeVarCharVector) batch.getVector("device_name");
+          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
           IntVector tempVector = (IntVector) batch.getVector("temp");
           BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
@@ -252,8 +249,7 @@ public class ArrowIntegrationTest {
 
       try {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-          LargeVarCharVector nameVector =
-              (LargeVarCharVector) batch.getVector("device_name");
+          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
           IntVector tempVector = (IntVector) batch.getVector("temp");
           BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
@@ -301,8 +297,7 @@ public class ArrowIntegrationTest {
 
       try {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-          LargeVarCharVector nameVector =
-              (LargeVarCharVector) batch.getVector("device_name");
+          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
           IntVector tempVector = (IntVector) batch.getVector("temp");
           BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
@@ -330,8 +325,7 @@ public class ArrowIntegrationTest {
 
       try {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-          LargeVarCharVector nameVector =
-              (LargeVarCharVector) batch.getVector("device_name");
+          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
           IntVector tempVector = (IntVector) batch.getVector("temp");
           BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 
@@ -381,8 +375,7 @@ public class ArrowIntegrationTest {
       try {
         for (int b = 0; b < batchCount; b++) {
           try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
-            LargeVarCharVector nameVector =
-                (LargeVarCharVector) batch.getVector("device_name");
+            LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
             IntVector tempVector = (IntVector) batch.getVector("temp");
             BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
 

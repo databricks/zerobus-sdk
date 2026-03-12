@@ -85,9 +85,7 @@ public class ZerobusArrowStream implements AutoCloseable {
   // Cached unacked batches (populated on close for use in recreateArrowStream).
   private volatile List<byte[]> cachedUnackedBatches;
 
-  /**
-   * Package-private constructor. Use {@link ZerobusSdk#createArrowStream} to create instances.
-   */
+  /** Package-private constructor. Use {@link ZerobusSdk#createArrowStream} to create instances. */
   ZerobusArrowStream(
       long nativeHandle,
       String tableName,
@@ -268,8 +266,7 @@ public class ZerobusArrowStream implements AutoCloseable {
       ByteArrayOutputStream out = new ByteArrayOutputStream();
       try (BufferAllocator allocator = new RootAllocator();
           VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator);
-          ArrowStreamWriter writer =
-              new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
+          ArrowStreamWriter writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
         writer.start();
         writer.end();
       }
@@ -290,8 +287,7 @@ public class ZerobusArrowStream implements AutoCloseable {
       }
       return out.toByteArray();
     } catch (IOException e) {
-      throw new ZerobusException(
-          "Failed to serialize Arrow batch to IPC: " + e.getMessage(), e);
+      throw new ZerobusException("Failed to serialize Arrow batch to IPC: " + e.getMessage(), e);
     }
   }
 
