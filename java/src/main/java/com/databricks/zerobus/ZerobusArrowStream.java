@@ -117,6 +117,9 @@ public class ZerobusArrowStream implements AutoCloseable {
    * @throws ZerobusException if the stream is closed, the schema doesn't match, or an error occurs
    */
   public long ingestBatch(VectorSchemaRoot batch) throws ZerobusException {
+    if (batch == null) {
+      throw new ZerobusException("Batch must not be null");
+    }
     ensureOpen();
     byte[] ipcBytes = serializeBatchToIpc(batch);
     return nativeIngestBatch(nativeHandle, ipcBytes);
@@ -167,14 +170,17 @@ public class ZerobusArrowStream implements AutoCloseable {
       try {
         cachedUnackedBatches = nativeGetUnackedBatches(handle);
       } catch (Exception e) {
-        logger.debug("No unacked batches to cache: {}", e.getMessage());
+        logger.warn("Failed to cache unacked batches: {}", e.getMessage());
         cachedUnackedBatches = new ArrayList<>();
       }
 
-      nativeClose(handle);
-      nativeHandle = 0;
-      nativeDestroy(handle);
-      logger.info("Arrow stream closed");
+      try {
+        nativeClose(handle);
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+        logger.info("Arrow stream closed");
+      }
     }
   }
 
