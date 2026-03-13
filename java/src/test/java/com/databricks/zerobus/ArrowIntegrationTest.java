@@ -410,4 +410,208 @@ public class ArrowIntegrationTest {
 
     sdk.close();
   }
+
+  // ===================================================================================
+  // Test 7: Arrow stream - double close is safe
+  // ===================================================================================
+
+  @Test
+  @Order(7)
+  @DisplayName("Arrow stream - double close is safe")
+  void testArrowDoubleClose() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+        LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
+        IntVector tempVector = (IntVector) batch.getVector("temp");
+        BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
+
+        batch.allocateNew();
+        nameVector.setSafe(0, "test-double-close".getBytes());
+        tempVector.setSafe(0, 1);
+        humidityVector.setSafe(0, 1);
+        batch.setRowCount(1);
+
+        stream.ingestBatch(batch);
+      }
+
+      stream.close();
+      assertTrue(stream.isClosed());
+
+      // Second close should be a no-op, not throw
+      stream.close();
+      assertTrue(stream.isClosed());
+
+      System.out.println("Arrow double close: safe");
+    }
+  }
+
+  // ===================================================================================
+  // Test 8: Arrow stream - isClosed state transitions
+  // ===================================================================================
+
+  @Test
+  @Order(8)
+  @DisplayName("Arrow stream - isClosed state transitions")
+  void testArrowIsClosedStateTransitions() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      assertFalse(stream.isClosed(), "Stream should be open after creation");
+
+      try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+        LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
+        IntVector tempVector = (IntVector) batch.getVector("temp");
+        BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
+
+        batch.allocateNew();
+        nameVector.setSafe(0, "test-state".getBytes());
+        tempVector.setSafe(0, 1);
+        humidityVector.setSafe(0, 1);
+        batch.setRowCount(1);
+
+        long offset = stream.ingestBatch(batch);
+        assertFalse(stream.isClosed(), "Stream should be open during ingestion");
+
+        stream.waitForOffset(offset);
+        assertFalse(stream.isClosed(), "Stream should be open after ack");
+      }
+
+      stream.close();
+      assertTrue(stream.isClosed(), "Stream should be closed after close()");
+
+      System.out.println("Arrow isClosed transitions: correct");
+    }
+  }
+
+  // ===================================================================================
+  // Test 9: Arrow stream - concurrent streams
+  // ===================================================================================
+
+  @Test
+  @Order(9)
+  @DisplayName("Arrow stream - concurrent streams")
+  void testArrowConcurrentStreams() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream1 =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+      ZerobusArrowStream stream2 =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      try {
+        try (VectorSchemaRoot batch1 = VectorSchemaRoot.create(SCHEMA, allocator);
+            VectorSchemaRoot batch2 = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch1, "test-concurrent-1", 1);
+          fillBatch(batch2, "test-concurrent-2", 1);
+
+          long offset1 = stream1.ingestBatch(batch1);
+          long offset2 = stream2.ingestBatch(batch2);
+
+          stream1.waitForOffset(offset1);
+          stream2.waitForOffset(offset2);
+        }
+
+        System.out.println("Arrow concurrent streams: 2 rows ingested (1 per stream)");
+      } finally {
+        stream1.close();
+        stream2.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 10: Arrow stream - table name accessor
+  // ===================================================================================
+
+  @Test
+  @Order(10)
+  @DisplayName("Arrow stream - table name and options accessors")
+  void testArrowAccessors() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder().setMaxInflightBatches(999).build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        assertEquals(tableName, stream.getTableName());
+        assertEquals(999, stream.getOptions().maxInflightBatches());
+        assertTrue(stream.getOptions().recovery());
+
+        System.out.println("Arrow accessors: tableName=" + stream.getTableName());
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 11: Arrow stream - ingest after close throws
+  // ===================================================================================
+
+  @Test
+  @Order(11)
+  @DisplayName("Arrow stream - ingest after close throws")
+  void testArrowIngestAfterCloseThrows() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+      stream.close();
+
+      try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+        fillBatch(batch, "test-after-close", 1);
+
+        assertThrows(ZerobusException.class, () -> stream.ingestBatch(batch));
+      }
+
+      System.out.println("Arrow ingest after close: correctly throws");
+    }
+  }
+
+  // ===================================================================================
+  // Test 12: Arrow stream - null batch throws
+  // ===================================================================================
+
+  @Test
+  @Order(12)
+  @DisplayName("Arrow stream - null batch throws")
+  void testArrowNullBatchThrows() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      try {
+        assertThrows(ZerobusException.class, () -> stream.ingestBatch(null));
+        System.out.println("Arrow null batch: correctly throws");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Helper
+  // ===================================================================================
+
+  private static void fillBatch(VectorSchemaRoot batch, String prefix, int rowCount) {
+    LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
+    IntVector tempVector = (IntVector) batch.getVector("temp");
+    BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
+
+    batch.allocateNew();
+    for (int i = 0; i < rowCount; i++) {
+      nameVector.setSafe(i, (prefix + "-" + i).getBytes());
+      tempVector.setSafe(i, 20 + i);
+      humidityVector.setSafe(i, 50 + i);
+    }
+    batch.setRowCount(rowCount);
+  }
 }

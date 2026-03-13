@@ -165,8 +165,10 @@ public class ZerobusArrowStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Cache unacked batches before close destroys the stream.
-      // This succeeds for failed streams (is_closed=true) and fails gracefully for active streams.
+      // Close the stream first (flushes pending batches)
+      nativeClose(handle);
+
+      // Cache unacked batches before destroying the handle (for recreateArrowStream)
       try {
         cachedUnackedBatches = nativeGetUnackedBatches(handle);
       } catch (Exception e) {
@@ -174,13 +176,10 @@ public class ZerobusArrowStream implements AutoCloseable {
         cachedUnackedBatches = new ArrayList<>();
       }
 
-      try {
-        nativeClose(handle);
-      } finally {
-        nativeHandle = 0;
-        nativeDestroy(handle);
-        logger.info("Arrow stream closed");
-      }
+      // Now destroy the handle
+      nativeHandle = 0;
+      nativeDestroy(handle);
+      logger.info("Arrow stream closed");
     }
   }
 
