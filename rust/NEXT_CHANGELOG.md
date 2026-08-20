@@ -17,6 +17,9 @@
 
 ### Internal Changes
 
+- Added the feature-gated persistent gRPC transport, durable wire offsets, and
+  resume-watermark reconciliation for recovery after a lost acknowledgment.
+
 ### Breaking Changes
 
 ### Deprecations
