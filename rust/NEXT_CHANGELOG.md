@@ -28,6 +28,8 @@
   on the same table, without the caller passing a partition key (clone one
   supplier across streams to share its cached token; pass a distinct supplier to
   isolate). Existing `oauth(...)` and `headers_provider(...)` paths are unchanged.
+- Added the feature-gated `PersistentStream` API for creating durable ingestion
+  streams and resuming them by `stream_id` from the last committed offset.
 
 ### Bug Fixes
 
