@@ -36,6 +36,8 @@
 ### Documentation
 
 - Added a multiplexed Avro example using loop-then-flush ingestion.
+- Added a persistent JSON example demonstrating durable stream creation,
+  pipelined ingestion followed by one `flush()`, and resume by `stream_id`.
 
 ### Internal Changes
 
