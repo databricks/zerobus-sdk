@@ -6,6 +6,9 @@
 
 ### New Features and Improvements
 
+- Added the feature-gated `PersistentStream` API for creating durable ingestion
+  streams and resuming them by `stream_id` from the last committed offset.
+
 ### Bug Fixes
 
 ### Documentation
