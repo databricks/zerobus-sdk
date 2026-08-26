@@ -23,7 +23,6 @@ use crate::databricks::zerobus::{
 };
 use crate::{OffsetId, ZerobusError, ZerobusResult};
 
-#[cfg(feature = "eos")]
 use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
 
 /// A type alias for a protobuf-encoded record.
@@ -370,7 +369,6 @@ impl EncodedBatch {
         }
     }
 
-    #[cfg(feature = "eos")]
     pub(crate) fn into_persistent_request_payload(
         self,
         offset_id: OffsetId,
@@ -1030,7 +1028,6 @@ mod tests {
             }
         }
 
-        #[cfg(feature = "eos")]
         #[test]
         fn test_into_persistent_request_payload() {
             let record = r#"{"id": 1}"#.to_string();
