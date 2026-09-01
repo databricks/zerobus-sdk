@@ -52,6 +52,8 @@ mod proxy;
 mod record_types;
 pub mod schema;
 mod sdk;
+#[cfg(feature = "arrow-flight")]
+mod stats;
 mod stream;
 mod stream_configuration;
 pub mod stream_options;
@@ -78,6 +80,10 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+#[cfg(feature = "arrow-flight")]
+pub use stats::{
+    channel_exporter, BatchStats, ChannelExporter, ReconnectReason, StatsExporter, StreamStat,
+};
 #[cfg(feature = "testing")]
 pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;

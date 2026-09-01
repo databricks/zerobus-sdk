@@ -103,6 +103,8 @@ pub struct StreamBuilder<'a> {
     grpc_config: StreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
+    #[cfg(feature = "arrow-flight")]
+    stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
 }
 
 impl fmt::Debug for StreamBuilder<'_> {
@@ -152,6 +154,8 @@ impl<'a> StreamBuilder<'a> {
             grpc_config: StreamConfigurationOptions::default(),
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "arrow-flight")]
+            stats_exporter: None,
         }
     }
 
@@ -334,6 +338,30 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Register a telemetry exporter (Arrow streams only).
+    ///
+    /// The exporter receives [`StreamStat`](crate::StreamStat) events (batch
+    /// sends with byte sizes, acknowledgements, reconnects). Its `record` runs
+    /// inline on the stream's IO tasks, so keep it lightweight — use
+    /// [`channel_exporter`](crate::channel_exporter) to offload heavier work.
+    ///
+    /// Takes the exporter by value (`.stats_exporter(MyExporter)`); the SDK wraps
+    /// it in an `Arc` internally to share across its IO tasks. The `'static` bound
+    /// is required because those tasks outlive this call. Pass an `Arc` clone when
+    /// you need to keep a handle (e.g. the [`channel_exporter`](crate::channel_exporter) pair).
+    ///
+    /// Supported only by Arrow Flight streams: configuring it and then calling
+    /// [`build`](Self::build) (a non-Arrow stream) is rejected. Use
+    /// [`build_arrow`](Self::build_arrow).
+    #[cfg(feature = "arrow-flight")]
+    pub fn stats_exporter<E>(mut self, exporter: E) -> Self
+    where
+        E: crate::stats::StatsExporter + 'static,
+    {
+        self.stats_exporter = Some(Arc::new(exporter));
+        self
+    }
+
     /// Set the maximum number of in-flight Arrow batches (Arrow streams only).
     #[cfg(feature = "arrow-flight")]
     pub fn max_inflight_batches(mut self, n: usize) -> Self {
@@ -389,6 +417,12 @@ impl<'a> StreamBuilder<'a> {
                 "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
             ));
         }
+        #[cfg(feature = "arrow-flight")]
+        if self.stats_exporter.is_some() && !matches!(self.format, Some(FormatConfig::Arrow(_))) {
+            return Err(ZerobusError::InvalidArgument(
+                "stats_exporter is only supported for Arrow Flight streams; use .arrow()".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -430,6 +464,8 @@ impl<'a> StreamBuilder<'a> {
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
+        // `validate()` already rejects `stats_exporter` on a non-Arrow format, and the
+        // format match below rejects an Arrow format outright.
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
@@ -537,6 +573,7 @@ impl<'a> StreamBuilder<'a> {
             headers_provider,
             self.arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
+            self.stats_exporter,
         )
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
@@ -855,6 +892,37 @@ mod tests {
             Err(ZerobusError::InvalidArgument(msg)) => {
                 assert!(msg.contains("ack_callback"));
                 assert!(msg.contains("Arrow Flight"));
+            }
+            _ => panic!("expected InvalidArgument error"),
+        }
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn build_rejects_stats_exporter_on_non_arrow_stream() {
+        let (exporter, _rx) =
+            crate::stats::channel_exporter(std::num::NonZeroUsize::new(4).unwrap());
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .stats_exporter(exporter);
+
+        // validate() must reject the same misconfiguration build() does.
+        match builder.validate() {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("stats_exporter"));
+                assert!(msg.contains("Arrow"));
+            }
+            other => panic!("expected InvalidArgument from validate(), got {other:?}"),
+        }
+
+        match builder.build().await {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("stats_exporter"));
+                assert!(msg.contains("Arrow"));
             }
             _ => panic!("expected InvalidArgument error"),
         }
