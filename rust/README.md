@@ -321,6 +321,85 @@ Recovery reconnects and replays only unacknowledged batch suffixes. After a fail
 `close()`, call `get_unacked_batches()` to inspect the retained work; the returned
 set can be empty when every record was already durable.
 
+#### Telemetry *(Beta)*
+
+Arrow Flight streams do not support `ack_callback`, but you can register a
+`StatsExporter` to receive per-batch telemetry:
+
+```rust,ignore
+use databricks_zerobus_ingest_sdk::{channel_exporter, StreamStat};
+
+let (exporter, mut stats_rx) = channel_exporter(1024);
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth("client-id", "client-secret")
+    .arrow(schema)
+    .stats_exporter(exporter)
+    .build_arrow()
+    .await?;
+
+// Drain telemetry on its own task, concurrently with ingestion. The channel is
+// bounded, so a consumer that only reads after flush() would drop events on any
+// stream longer than the buffer. recv() ends (returns None) once the stream is
+// dropped and closes the channel.
+let telemetry = tokio::spawn(async move {
+    while let Some(stat) = stats_rx.recv().await {
+        if let StreamStat::BatchSent { offset, attempt, stats } = stat {
+            // stats.approximate_wire_bytes: FlightData payload after IPC compression
+            //   (lower bound on network bytes; excludes gRPC/HTTP2/TLS framing + schema msg)
+            // stats.uncompressed_bytes: emitted IPC buffer bytes before compression
+            // stats.records: rows in the batch; offset: the batch's ingest offset
+            // attempt: 0 = first send, >0 = retransmit of the unacked suffix after reconnect
+            let _ = (offset, attempt, stats);
+        }
+    }
+});
+
+// Ingest in a loop, then flush() once — never wait per batch.
+for batch in batches {
+    stream.ingest_batch(batch).await?;
+}
+stream.flush().await?;
+
+// Dropping the stream closes the telemetry channel, ending the drain task.
+drop(stream);
+telemetry.await?;
+```
+
+`StreamStat` events:
+- `BatchSent { offset, attempt, stats }` — a batch was encoded and sent. `stats` is a `BatchStats`
+  with `records`, `approximate_wire_bytes`, and `uncompressed_bytes`. Emitted with the **final data
+  frame**, including on retransmission, even if the batch is never acknowledged. Later cancellation
+  or drop preserves the event; a transmission canceled before its final frame emits none. `attempt`
+  is `0` on the first send and `> 0` on a retransmit after a reconnect. Batches buffered
+  during recovery still use `0` on their first send; a replay canceled before its first
+  data frame does not advance the count.
+- `BatchAcked { offset }` — a batch was durably acknowledged. Pure durability signal;
+  byte sizes are on `BatchSent`.
+- `Reconnected { reason }` — `reason` is `ReconnectReason::TransientFailure(err)` (recovery after a
+  retryable failure, carrying the error) or `ReconnectReason::ServerRotation` (a routine
+  server-requested rotation, not an error). Lets a consumer separate incidents from routine rotations.
+
+Each completed retry counts every frame it emits: the whole batch if no rows were
+acknowledged, otherwise only the unacknowledged suffix. Summing `BatchSent` events
+gives completed-transmission payload totals and excludes bytes from earlier
+incomplete attempts. If the first transmission was incomplete, the first event
+can have `attempt > 0`; filtering for `attempt == 0` can miss the batch entirely.
+These events do not guarantee an original-batch size sample for every offset.
+
+The [runnable Arrow example](examples/arrow/README.md#telemetry) prints telemetry
+concurrently with ingestion and drains remaining events during shutdown.
+
+Implement `StatsExporter` directly for custom routing — its `record` runs inline on the
+stream's IO tasks, so keep it lightweight (the built-in `channel_exporter` hands events to
+another task and drops, counting, when its bounded buffer is full).
+
+`uncompressed_bytes` counts the emitted IPC buffers before compression, including
+dictionary buffers when sent. It follows the encoder's treatment of slices and
+shared buffers and excludes IPC metadata, alignment padding, and compression
+length prefixes. It measures transmitted data, not retained heap memory.
+
 For state ownership, replay, rotation, and concurrency invariants, see the
 [Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
 

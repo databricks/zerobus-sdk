@@ -25,6 +25,7 @@ use super::{ArrowStreamConfigurationOptions, BatchSender, ZerobusArrowStream};
 use super::{TestHooks, TestNotifyGate};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
+use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
@@ -45,6 +46,7 @@ pub(super) struct AckProcessor {
     batch_tx: BatchSender,
     options: ArrowStreamConfigurationOptions,
     close: CloseCoordinator,
+    stats_exporter: Option<Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<TestHooks>,
 }
@@ -127,8 +129,9 @@ impl DrainState {
 pub(super) enum AckProcessOutcome {
     Stopped,
     Recovery {
-        error: ZerobusError,
         drained: bool,
+        /// Why recovery is needed; carries the triggering error for a transient failure.
+        reason: ReconnectReason,
     },
     Close {
         request: CloseRequest,
@@ -227,6 +230,7 @@ struct AckProgress<'a> {
     pending_batches: &'a Mutex<Vec<PendingBatch>>,
     last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
     close: &'a CloseCoordinator,
+    stats_exporter: Option<&'a Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: &'a TestNotifyGate,
 }
@@ -240,7 +244,7 @@ impl AckProgress<'_> {
         // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
         // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
         // a waiter; keep the server-provided offset only for diagnostics.
-        let (effective_acked_records, max_acked_offset) = {
+        let (effective_acked_records, max_acked_offset, acked_offsets) = {
             // Ingest publishes submitted_records and commits to the active sender while
             // holding this same lock. Validation therefore cannot observe a submitted
             // watermark before its handoff, or a handoff before its watermark.
@@ -257,17 +261,22 @@ impl AckProgress<'_> {
                 .fetch_max(acked_records, Ordering::AcqRel);
             let effective_acked_records = previous_acked_records.max(acked_records);
             let mut max_acked_offset: Option<OffsetId> = None;
+            // Collect newly-acked offsets; BatchAcked is emitted after the lock is dropped.
+            let mut acked_offsets: Vec<OffsetId> = Vec::new();
             pending.retain(|pending_batch| {
                 if pending_batch.is_fully_acknowledged(effective_acked_records) {
                     let offset_id = pending_batch.offset_id();
                     max_acked_offset =
                         Some(max_acked_offset.map_or(offset_id, |offset| offset.max(offset_id)));
+                    if self.stats_exporter.is_some() {
+                        acked_offsets.push(offset_id);
+                    }
                     false
                 } else {
                     true
                 }
             });
-            (effective_acked_records, max_acked_offset)
+            (effective_acked_records, max_acked_offset, acked_offsets)
         };
         let applied_at = Instant::now();
 
@@ -282,6 +291,16 @@ impl AckProgress<'_> {
         if acked_records > 0 {
             if let Some(notify) = self.ack_applied_gate.lock().await.as_ref() {
                 notify.notify_one();
+            }
+        }
+
+        // Emit durability telemetry before waking waiters: `last_ack_tx.send` can
+        // release `wait_for_offset`/`flush`, so recording first guarantees a caller
+        // that observes the ack also sees the `BatchAcked`, even for an inline
+        // exporter. Byte sizes are reported separately at send time via `BatchSent`.
+        if let Some(exporter) = self.stats_exporter {
+            for offset in acked_offsets {
+                exporter.record(StreamStat::BatchAcked { offset });
             }
         }
 
@@ -360,6 +379,7 @@ impl AckProcessor {
             batch_tx: Arc::clone(&stream.batch_tx),
             options: stream.options.clone(),
             close: stream.close.clone(),
+            stats_exporter: stream.stats_exporter.clone(),
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::clone(&stream.test_hooks),
         }
@@ -391,6 +411,7 @@ impl AckProcessor {
                 ..ArrowStreamConfigurationOptions::default()
             },
             close: CloseCoordinator::new(),
+            stats_exporter: None,
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::new(TestHooks::default()),
         };
@@ -405,6 +426,15 @@ impl AckProcessor {
         ZerobusError::StreamClosedError(tonic::Status::unavailable(
             "Server requested graceful stream rotation",
         ))
+    }
+
+    /// The error value a recovery uses for control flow (retry gating, finalization).
+    /// A rotation is not a real error, so it maps to the rotation sentinel.
+    pub(super) fn recovery_error(reason: &ReconnectReason) -> ZerobusError {
+        match reason {
+            ReconnectReason::TransientFailure(error) => error.clone(),
+            ReconnectReason::ServerRotation => Self::rotation_error(),
+        }
     }
 
     /// Records the latest rotation error without allowing a retryable transport status
@@ -601,10 +631,18 @@ impl AckProcessor {
                 request,
                 outcome: terminal_error.map_or(Ok(()), Err),
             }),
-            None => Ok(AckProcessOutcome::Recovery {
-                error: terminal_error.unwrap_or_else(Self::rotation_error),
-                drained: true,
-            }),
+            None => {
+                // No terminal error means the drain completed a clean server-requested
+                // rotation; a captured error means the rotation window hit a real failure.
+                let reason = match terminal_error {
+                    Some(error) => ReconnectReason::TransientFailure(error),
+                    None => ReconnectReason::ServerRotation,
+                };
+                Ok(AckProcessOutcome::Recovery {
+                    drained: true,
+                    reason,
+                })
+            }
         }
     }
 
@@ -707,6 +745,7 @@ impl AckProcessor {
             pending_batches: self.pending_batches.as_ref(),
             last_ack_tx: &self.last_ack_tx,
             close: &self.close,
+            stats_exporter: self.stats_exporter.as_ref(),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: &self.test_hooks.ack_applied,
         }
@@ -877,7 +916,7 @@ impl AckProcessor {
             .await
         {
             Ok(AckProcessOutcome::Stopped) => Ok(()),
-            Ok(AckProcessOutcome::Recovery { error, .. }) => Err(error),
+            Ok(AckProcessOutcome::Recovery { reason, .. }) => Err(Self::recovery_error(&reason)),
             Ok(AckProcessOutcome::Close { .. }) => {
                 unreachable!("test ACK processor has no close request")
             }
@@ -1240,6 +1279,7 @@ mod tests {
         FlightResponseStream, OffsetId, PendingBatch, RequestBodyControl, ZerobusError,
         MAX_SERVER_ROTATION_GRACE, ROTATION_DRAIN_TIMEOUT_MS,
     };
+    use crate::stats::{channel_exporter, StreamStat};
 
     fn one_col_schema() -> Arc<ArrowSchema> {
         Arc::new(ArrowSchema::new(vec![Field::new(
@@ -1266,6 +1306,7 @@ mod tests {
             offset_id,
             start_record,
             end_record,
+            None,
             Arc::clone(sem).try_acquire_owned().unwrap(),
         )
     }
@@ -1286,6 +1327,49 @@ mod tests {
             last_acked_records,
             is_paused,
         )
+    }
+
+    #[tokio::test]
+    async fn ack_emits_batch_acked_per_offset() {
+        let schema = one_col_schema();
+        let semaphore = Arc::new(Semaphore::new(4));
+        // Two batches: offset 0 (2 rows), offset 1 (3 rows).
+        let pending = Arc::new(Mutex::new(vec![
+            pending_batch(&semaphore, batch_with_rows(&schema, 2), 0, 0, 2),
+            pending_batch(&semaphore, batch_with_rows(&schema, 3), 1, 2, 5),
+        ]));
+        let (mut processor, _request_body, _last_ack_rx) = ack_processor(
+            pending,
+            Arc::new(AtomicU64::new(5)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+
+        let (exporter, mut rx) = channel_exporter(8);
+        processor.stats_exporter = Some(exporter);
+
+        // Ack both batches (5 records).
+        processor
+            .ack_progress()
+            .apply(&FlightAckMetadata {
+                ack_up_to_offset: 1,
+                ack_up_to_records: 5,
+                close_stream_duration_ms: None,
+            })
+            .await
+            .unwrap();
+
+        // BatchAcked is a pure durability signal — offset only, no byte sizes.
+        // StreamStat is not `Eq` (Reconnected carries a ZerobusError), so match offsets.
+        let mut offsets: Vec<_> = vec![rx.recv().await.unwrap(), rx.recv().await.unwrap()]
+            .into_iter()
+            .map(|s| match s {
+                StreamStat::BatchAcked { offset } => offset,
+                other => panic!("expected BatchAcked, got {other:?}"),
+            })
+            .collect();
+        offsets.sort_unstable();
+        assert_eq!(offsets, vec![0, 1]);
     }
 
     #[test]

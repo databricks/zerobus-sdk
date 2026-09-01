@@ -9,6 +9,8 @@
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
   shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.
+- Added pluggable Arrow Flight telemetry (Beta) for batch sizes, send attempts,
+  acknowledgments, and reconnect reasons, via `StatsExporter` and `channel_exporter`.
 
 ### Bug Fixes
 
