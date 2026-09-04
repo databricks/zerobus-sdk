@@ -200,3 +200,9 @@ jobs:
 
       - name: Test (avro tag)
         run: go test -tags avro ./...
+
+      # The examples are a separate module; build them with the tag so the avro
+      # example (and its go.mod) stay compilable.
+      - name: Build examples (avro tag)
+        working-directory: purego/examples
+        run: go build -tags avro ./...

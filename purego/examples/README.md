@@ -14,6 +14,7 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | UC proto JSON single | Protocol Buffers (UC descriptor) | JSON loop, then `Flush` | `dynamic/single` |
 | UC proto JSON batch | Protocol Buffers (UC descriptor) | One JSON batch | `dynamic/batch` |
 | UC proto messages | Protocol Buffers (UC descriptor) | Runtime messages, then `Flush` | `dynamic/proto` |
+| Avro | Avro *(feature in development)* | Objects the SDK encodes, plus pre-encoded bytes | `avro` |
 
 Every example uses **loop-then-`Flush()`**: queue records, then flush once.
 
@@ -63,6 +64,12 @@ go run ./proto/runtime
 go run ./dynamic/single
 go run ./dynamic/batch
 go run ./dynamic/proto
+```
+
+The Avro example is behind the `avro` build tag (feature in development):
+
+```bash
+go run -tags avro ./avro
 ```
 
 ## Regenerating the proto bindings

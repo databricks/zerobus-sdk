@@ -4,8 +4,9 @@ package zerobus
 
 import "github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 
-// WithAvro selects Avro record encoding (Beta); schemaJSON is the writer schema.
-// Ingest pre-encoded datums via IngestRecordOffset. Requires the `avro` build tag.
+// WithAvro selects Avro encoding; schemaJSON is the writer schema, validated at
+// stream creation. Ingest objects via IngestAvroRecordOffset or pre-encoded
+// datums via IngestRecordOffset. Feature in development; requires the avro tag.
 func WithAvro(schemaJSON string) StreamOption {
 	return func(c *streamConfig) {
 		c.recordType = zerobuspb.RecordType_AVRO

@@ -4,10 +4,13 @@
 
 ### New Features and Improvements
 
-- Add Avro record format (Beta), behind the `avro` build tag. Select it with
-  `WithAvro(schemaJSON)` and ingest pre-encoded Avro datums via the standard
-  `IngestRecordOffset` / `IngestRecordsOffset`. Ephemeral streams only; server
-  support is pending.
+- Add Avro record format, behind the `avro` build tag. Select it with
+  `WithAvro(schemaJSON)`, which validates the writer schema at stream creation.
+  Ingest pre-encoded datums (`[]byte`) via `IngestRecordOffset` /
+  `IngestRecordsOffset`, or `AvroRecord` (`map[string]any`) objects the stream
+  encodes via `IngestAvroRecordOffset` / `IngestAvroRecordsOffset`. `AvroRecord`
+  covers every Avro type, including unions (via `Union`), `fixed`, `decimal`,
+  and logical types. Ephemeral streams only; feature in development.
 
 - Tear the connection down gracefully when the server requests a stream pause
   (`CloseStreamSignal`), as a clean `Close` already did: the client half-closes
@@ -34,6 +37,10 @@
   descriptor does not declare fails conversion; unknown fields are not ignored.
 
 ### Internal Changes
+
+- Add `github.com/hamba/avro/v2` dependency for Avro record object encoding.
+  This is only compiled when the `avro` build tag is active, keeping the default
+  build lean.
 
 - Generalize the stream core's durability model so one implementation serves both
   the atomic proto and JSON protocols and the record-count protocol the Arrow

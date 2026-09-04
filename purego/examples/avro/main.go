@@ -12,14 +12,19 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/examples/config"
 	"github.com/databricks/zerobus-sdk/purego/zerobus"
 )
 
-// Avro writer schema (JSON), declared once at stream creation.
+// Avro writer schema (JSON), declared once at stream creation. Shows a union
+// (nullable note) and a logical type (timestamp) alongside primitives.
 const avroSchema = `{"type":"record","name":"Order","fields":[` +
-	`{"name":"id","type":"long"},{"name":"customer_name","type":"string"}]}`
+	`{"name":"id","type":"long"},` +
+	`{"name":"customer_name","type":"string"},` +
+	`{"name":"note","type":["null","string"]},` +
+	`{"name":"created_at","type":{"type":"long","logicalType":"timestamp-millis"}}]}`
 
 func main() {
 	cfg := config.Load()
@@ -37,13 +42,21 @@ func main() {
 		log.Fatalf("create stream: %v", err)
 	}
 
-	// Raw Avro datums encoded against avroSchema (placeholder bytes here).
-	records := [][]byte{{0x02, 0x0a}, {0x04, 0x0b}}
-	for i, rec := range records {
-		if _, err := stream.IngestRecordOffset(rec); err != nil {
+	// Record objects the stream encodes against avroSchema. Queue in a loop,
+	// then Flush once — never wait per record.
+	now := time.Now()
+	orders := []zerobus.AvroRecord{
+		{"id": int64(1), "customer_name": "Ada", "note": zerobus.Union("string", "rush"), "created_at": now},
+		{"id": int64(2), "customer_name": "Grace", "note": zerobus.Union("null", nil), "created_at": now},
+	}
+	for i, order := range orders {
+		if _, err := stream.IngestAvroRecordOffset(order); err != nil {
 			log.Fatalf("ingest record %d: %v", i+1, err)
 		}
 	}
+
+	// Pre-encoded raw Avro datums (bytes) go through IngestRecordOffset:
+	//   stream.IngestRecordOffset([]byte{0x02, 0x0a})
 
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
