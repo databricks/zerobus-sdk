@@ -91,16 +91,11 @@ pub struct StreamConfigurationOptions {
     /// Supported values:
     /// - RecordType::Proto
     /// - RecordType::Json
+    /// - RecordType::Avro (requires the `avro` feature)
     /// - RecordType::Unspecified
     ///
     /// Default: RecordType::Proto
     pub record_type: RecordType,
-
-    /// Avro writer schema (JSON) for `RecordType::Avro` streams; set via
-    /// [`StreamBuilder::avro`](crate::StreamBuilder::avro).
-    ///
-    /// Default: `None`
-    pub avro_schema_json: Option<String>,
 
     /// Maximum time in milliseconds to wait during graceful stream close.
     ///
@@ -195,7 +190,6 @@ impl Default for StreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             record_type: RecordType::Proto,
-            avro_schema_json: None,
             stream_paused_max_wait_time_ms: None,
             ack_callback: None,
             callback_max_wait_time_ms: Some(defaults::CALLBACK_MAX_WAIT_TIME_MS),

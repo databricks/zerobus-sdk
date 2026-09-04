@@ -8,6 +8,7 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
 - [Arrow Flight Examples](arrow/README.md)
+- [Avro Examples](avro/README.md)
 - [Prerequisites](#prerequisites)
   - [Create a Databricks Table](#1-create-a-databricks-table)
   - [Set Up OAuth Service Principal](#2-set-up-oauth-service-principal)
@@ -20,16 +21,17 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 
 ## Overview
 
-The SDK supports three ingestion formats and two ingestion methods:
+The SDK supports four ingestion formats and two ingestion methods:
 
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
 - **[Arrow Flight](arrow/README.md)** - Columnar Arrow `RecordBatch` ingestion over Arrow Flight. Behind the `arrow-flight` feature flag.
+- **[Avro](avro/README.md)** - Row-oriented binary encoding driven by a writer schema. Build records as `AvroValue` the stream encodes (`AvroRecord`), or pass pre-encoded datums (`AvroBytes`). Behind the `avro` feature flag (Beta).
 
 **Ingestion Methods:**
-- **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers)
-- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers)
+- **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers / Avro)
+- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers / Avro)
 - **Arrow batch** (`ingest_batch` / `ingest_ipc_batch`) - Ingest an Arrow `RecordBatch` (one or many rows) over Arrow Flight
 
 **Available Examples:**
@@ -43,6 +45,8 @@ The SDK supports three ingestion formats and two ingestion methods:
 | [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `cargo run -p example_arrow` |
+| [Avro Single](avro/README.md#single-record-example) | Avro | Single-record | `cd avro && cargo run --example avro_single` |
+| [Avro Batch](avro/README.md#batch-example) | Avro | Batch | `cd avro && cargo run --example avro_batch` |
 
 ## Prerequisites
 

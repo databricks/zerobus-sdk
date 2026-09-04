@@ -50,7 +50,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
-- **Avro Ingestion** *(Beta, opt-in)* — Ingest pre-encoded Avro datums on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`, and pass records as `AvroBytes`; see [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Server support is pending.
+- **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.85 (via `apache-avro`); default builds are unaffected. Feature in development.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -93,11 +93,12 @@ tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-JSON and Protocol Buffers share one stream API, with two ingestion methods. Arrow Flight is a separate columnar API.
+JSON and Protocol Buffers share one stream API, with two ingestion methods. Avro *(Beta, opt-in)* rides the same stream API. Arrow Flight is a separate columnar API.
 
 **Serialization:**
 - **JSON** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
 - **Protocol Buffers** (Recommended for production): Type-safe approach with schema validation at compile time
+- **Avro** *(Beta, opt-in)*: Row-oriented encoding against a writer schema. Enable with `features = ["avro"]`; feature in development
 
 **Ingestion Methods:**
 - **Single-record** (`ingest_record_offset`): Ingest records one at a time with per-record acknowledgment
@@ -209,10 +210,15 @@ zerobus_rust_sdk/
 │   │   ├── single.rs                   # Protocol Buffers single-record example
 │   │   ├── batch.rs                    # Protocol Buffers batch ingestion example
 │   │   └── output/                     # Generated schema files (shared)
-│   └── arrow/                          # Arrow Flight example (feature: arrow-flight)
+│   ├── arrow/                          # Arrow Flight example (feature: arrow-flight)
+│   │   ├── README.md
+│   │   ├── Cargo.toml
+│   │   └── src/main.rs                 # Arrow `RecordBatch` ingestion example
+│   └── avro/                           # Avro examples (excluded crate, feature: avro; Beta)
 │       ├── README.md
 │       ├── Cargo.toml
-│       └── src/main.rs                 # Arrow `RecordBatch` ingestion example
+│       ├── single.rs                   # Avro single-record example
+│       └── batch.rs                    # Avro batch ingestion example
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
@@ -250,8 +256,9 @@ zerobus_rust_sdk/
 
 ### JSON / Protocol Buffers Architecture Overview
 
-The following diagram describes the JSON / Protocol Buffers stream. Arrow Flight uses a
-separate Flight request/response exchange and lifecycle state machine.
+The following diagram describes the JSON / Protocol Buffers stream (Avro, when enabled,
+uses this same stream). Arrow Flight uses a separate Flight request/response exchange and
+lifecycle state machine.
 
 ```
 +-----------------+
@@ -401,10 +408,11 @@ async fn example(sdk: ZerobusSdk) -> ZerobusResult<()> {
 
 ## Usage Guide
 
-The SDK supports two approaches for data serialization:
+The SDK supports these approaches for data serialization:
 
 1. **JSON** - Simpler approach that uses JSON strings. No schema generation required, making it ideal for quick prototyping. See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for a complete example.
 2. **Protocol Buffers** - Type-safe approach with schema validation at compile time. Recommended for production use cases. This guide focuses on the Protocol Buffers approach.
+3. **Avro** *(Beta, opt-in)* - Encode against a writer schema declared with `.avro(schema_json)`. Enable with `features = ["avro"]`; feature in development. See [Avro Stream](#avro-stream-beta-opt-in).
 
 For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record_offset()`.
 
@@ -613,6 +621,35 @@ On the wire this is identical to `.compiled_proto(...)`; the difference is that 
 
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
+#### Avro Stream (Beta, opt-in)
+
+*(Requires `features = ["avro"]`; ephemeral streams only, feature in development.)*
+
+Declare the Avro writer schema (JSON) with `.avro(schema)`, then ingest either an
+`AvroRecord` the stream encodes against that schema, or a pre-encoded `AvroBytes`:
+
+```rust,ignore
+use databricks_zerobus_ingest_sdk::{AvroRecord, AvroValue};
+
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .avro(schema_json)
+    .build()
+    .await?;
+
+let record = AvroValue::Record(vec![
+    ("id".to_string(), AvroValue::Long(1)),
+    ("customer_name".to_string(), AvroValue::String("Alice".to_string())),
+]);
+stream.ingest_record_offset(AvroRecord(record)).await?; // queue only — do NOT wait here
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+`AvroValue` is `apache_avro`'s value type (re-exported), so it can represent any Avro
+type — unions, `fixed`, `decimal`, and logical types included. See
+[`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro).
+
 ### 5. Ingest Data
 
 The SDK provides flexible ways to ingest data with different levels of abstraction:
@@ -626,6 +663,8 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
+| `AvroRecord` | Avro | Object: pass an `AvroValue`, SDK encodes it against the writer schema (feature: `avro`, Beta) |
+| `AvroBytes` | Avro | Pre-encoded: pass a raw Avro datum with explicit wrapper (feature: `avro`, Beta) |
 
 > **How acknowledgment works:** `ingest_record_offset()` returns as soon as the record is **queued**; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it returns once everything queued so far is acknowledged. The returned `OffsetId` is a handle you can also wait on individually with `wait_for_offset()` when a specific record must be confirmed before continuing. Avoid calling `wait_for_offset()` after *every* record in a loop, though: that waits out a full round-trip before sending the next record and limits throughput to one record per round-trip.
 
@@ -1091,7 +1130,10 @@ The `examples/` directory contains working examples covering different serializa
 | `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
+| `avro/single.rs` | Avro (Beta) | Single-record | `cd examples/avro && cargo run --example avro_single` |
+| `avro/batch.rs` | Avro (Beta) | Batch | `cd examples/avro && cargo run --example avro_batch` |
 
+> The Avro examples live in an excluded crate (`examples/avro`), so they run with `cd examples/avro` rather than `-p`.
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
 
@@ -1188,18 +1230,18 @@ Represents an active ingestion stream.
 ```rust
 pub async fn ingest_record_offset(
     &self,
-    payload: impl Into<EncodedRecord>
+    payload: impl Into<PreparedInput>
 ) -> ZerobusResult<OffsetId>
 ```
-Ingests a single encoded record (Protocol Buffers or JSON). The await queues the record for sending and returns the logical offset ID directly. Use `wait_for_offset()` to explicitly wait for server acknowledgment of this offset.
+Ingests a single record — any record wrapper or raw payload matching the stream's format (see [Ingest Data](#5-ingest-data)). The await queues the record for sending and returns the logical offset ID directly. Use `wait_for_offset()` to explicitly wait for server acknowledgment of this offset.
 
 ```rust
 pub async fn ingest_records_offset(
     &self,
-    payloads: Vec<impl Into<EncodedRecord>>
+    payloads: Vec<impl Into<PreparedInput>>
 ) -> ZerobusResult<Option<OffsetId>>
 ```
-Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
+Ingests multiple records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
 
 ```rust
 pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
@@ -1364,6 +1406,10 @@ cargo run -p rust-examples-proto --example proto_compiled_batch
 # Build and run Protocol Buffers dynamic-schema examples
 cargo run -p rust-examples-proto --example proto_dynamic_single
 cargo run -p rust-examples-proto --example proto_dynamic_batch
+
+# Build and run Avro examples (Beta; excluded crate, enables the avro feature)
+(cd examples/avro && cargo run --example avro_single)
+(cd examples/avro && cargo run --example avro_batch)
 ```
 
 ## Community and Contributing

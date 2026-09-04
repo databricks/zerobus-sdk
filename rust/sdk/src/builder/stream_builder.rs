@@ -27,6 +27,8 @@ use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "avro")]
+use crate::AvroSchema;
 use crate::{
     MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
@@ -54,7 +56,6 @@ enum FormatConfig {
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
-    /// Avro writer schema as JSON.
     #[cfg(feature = "avro")]
     Avro(String),
 }
@@ -227,7 +228,9 @@ impl<'a> StreamBuilder<'a> {
 
     /// Select Avro record format with the writer schema as JSON (Beta).
     ///
-    /// Ingest pre-encoded datums with [`AvroBytes`](crate::AvroBytes).
+    /// Records are then ingested either as objects the stream encodes against this
+    /// schema ([`AvroRecord`](crate::AvroRecord)) or as pre-encoded datums
+    /// ([`AvroBytes`](crate::AvroBytes)).
     #[cfg(feature = "avro")]
     pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
         self.format = Some(FormatConfig::Avro(schema_json.into()));
@@ -371,10 +374,10 @@ impl<'a> StreamBuilder<'a> {
 
     /// Validate that the builder has all required fields configured.
     ///
-    /// Returns `Ok(())` if table name, authentication, and format are all set.
-    /// This performs the same checks as `build()` without actually opening
-    /// a stream — useful for fail-fast validation during startup or config
-    /// parsing.
+    /// Returns `Ok(())` if table name, authentication, and format are all set — useful
+    /// for fail-fast validation during startup or config parsing. This is a required-fields
+    /// check, not a guarantee that `build()` succeeds: the Avro writer schema is parsed in
+    /// `build()` (before any connection), so a malformed schema surfaces there, not here.
     ///
     /// # Examples
     ///
@@ -400,7 +403,7 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .avro(), or .arrow()".into(),
             ));
         }
         Ok(())
@@ -439,7 +442,7 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open a JSON or Protocol Buffer stream.
+    /// Build and open the configured stream (any record format except Arrow Flight).
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
@@ -447,16 +450,31 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto, message_descriptor, avro_schema_json) = match self
-            .format
-        {
-            Some(FormatConfig::Json) => (RecordType::Json, None, None, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None, None),
+        // Parse the writer schema once, before any connection, so malformed JSON fails at
+        // build(). Keep the raw JSON (sent to the server on stream creation) and the parsed
+        // schema (used to encode records) together in TableProperties for reuse on ingest.
+        #[cfg(feature = "avro")]
+        let avro_schema = match &self.format {
+            Some(FormatConfig::Avro(json)) => {
+                let parsed = apache_avro::Schema::parse_str(json).map_err(|e| {
+                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
+                })?;
+                Some(AvroSchema {
+                    json: json.clone(),
+                    parsed,
+                })
+            }
+            _ => None,
+        };
+
+        let (record_type, descriptor_proto, message_descriptor) = match self.format {
+            Some(FormatConfig::Json) => (RecordType::Json, None, None),
+            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
             Some(FormatConfig::DynamicProto(md)) => {
                 // The wire descriptor is recovered from the already-resolved
                 // MessageDescriptor the caller supplied.
                 let desc = md.descriptor_proto().clone();
-                (RecordType::Proto, Some(desc), Some(md), None)
+                (RecordType::Proto, Some(desc), Some(md))
             }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
@@ -465,21 +483,22 @@ impl<'a> StreamBuilder<'a> {
                 ));
             }
             #[cfg(feature = "avro")]
-            Some(FormatConfig::Avro(schema)) => (RecordType::Avro, None, None, Some(schema)),
+            Some(FormatConfig::Avro(_)) => (RecordType::Avro, None, None),
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .avro() before .build()"
                         .into(),
                 ));
             }
         };
 
         self.grpc_config.record_type = record_type;
-        self.grpc_config.avro_schema_json = avro_schema_json;
         let table_properties = TableProperties {
             table_name: self.table_name,
             descriptor_proto,
             message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
@@ -650,6 +669,28 @@ mod tests {
             .avro(r#"{"type":"record","name":"R","fields":[]}"#);
         assert!(format!("{builder:?}").contains("Avro"));
         builder.validate().expect("validation should succeed");
+    }
+
+    #[cfg(feature = "avro")]
+    #[tokio::test]
+    async fn avro_rejects_invalid_schema_at_build() {
+        let sdk = test_sdk();
+        // Empty and malformed writer schemas are parsed and rejected at build(),
+        // before any connection is attempted.
+        for bad in ["", "{"] {
+            let result = sdk
+                .stream_builder()
+                .table("t")
+                .oauth("a", "b")
+                .avro(bad)
+                .build()
+                .await;
+            match result {
+                Err(ZerobusError::AvroSchemaParseError(_)) => {}
+                Err(e) => panic!("expected AvroSchemaParseError, got {e:?}"),
+                Ok(_) => panic!("expected AvroSchemaParseError, got Ok"),
+            }
+        }
     }
 
     #[test]

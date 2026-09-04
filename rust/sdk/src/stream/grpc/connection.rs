@@ -36,7 +36,6 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        avro_schema_json: Option<String>,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -47,7 +46,6 @@ impl ZerobusStream {
             table_properties,
             headers_provider,
             record_type,
-            avro_schema_json,
         )
         .await;
         if let Err(err) = &result {
@@ -71,7 +69,6 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        avro_schema_json: Option<String>,
         recovery_timeout_ms: u64,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
@@ -87,7 +84,6 @@ impl ZerobusStream {
                 table_properties,
                 headers_provider,
                 record_type,
-                avro_schema_json,
             ),
         )
         .await
@@ -119,7 +115,6 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        avro_schema_json: Option<String>,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -178,6 +173,14 @@ impl ZerobusStream {
         } else {
             None
         };
+
+        #[cfg(feature = "avro")]
+        let avro_schema_json = table_properties
+            .avro_schema
+            .as_ref()
+            .map(|schema| schema.json.clone());
+        #[cfg(not(feature = "avro"))]
+        let avro_schema_json = None;
 
         let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),

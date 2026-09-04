@@ -27,7 +27,8 @@ use tracing::{error, info, warn};
 
 use crate::stream::StreamShutdownHandle;
 use crate::{
-    AckCallback, EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
+    AckCallback, EncodedBatch, EncodedRecord, OffsetId, PreparedInput, ZerobusError, ZerobusResult,
+    ZerobusStream,
 };
 
 const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -406,13 +407,12 @@ impl MultiplexedStream {
     /// this waits for it to drain rather than rerouting.
     pub async fn ingest_record(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl Into<PreparedInput>,
     ) -> ZerobusResult<MessageId> {
         self.check_closed()?;
-        let record = payload.into();
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        let encoded_batch = stream.prepare_record(record)?;
+        let encoded_batch = stream.prepare_record(payload)?;
         self.enqueue_reserved(stream, idx, encoded_batch).await
     }
 
@@ -424,10 +424,10 @@ impl MultiplexedStream {
     pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: Into<PreparedInput>,
     {
         self.check_closed()?;
-        let records: Vec<EncodedRecord> = payload.into_iter().map(Into::into).collect();
+        let records: Vec<T> = payload.into_iter().collect();
         if records.is_empty() {
             return Ok(None);
         }

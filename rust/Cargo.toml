@@ -9,8 +9,10 @@ members = [
     "tools/*",
     "tests",
 ]
-# Excluded: as a member it would force the sdk `avro` feature across the workspace
-# and break ffi/jni. Build it standalone with `cargo build` inside examples/avro.
+# Excluded until ffi/jni support Avro (#830). As a workspace member it would unify the sdk
+# `avro` feature onto ffi/jni, whose exhaustive matches don't yet cover the gated Avro
+# variants. Build it standalone meanwhile; it rejoins `members` once ffi/jni enable `avro`
+# themselves — the feature stays permanently opt-in.
 exclude = ["examples/avro"]
 resolver = "2"
 
