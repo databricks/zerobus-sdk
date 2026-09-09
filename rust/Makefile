@@ -35,6 +35,8 @@ clean:
 fmt:
 	cargo fmt --all
 
+# Enabling the SDK's optional features on the whole workspace would compile
+# them into FFI too, so the SDK and JNI are checked in their own commands.
 lint:
 	cargo clippy --workspace --exclude databricks-zerobus-ingest-sdk --exclude zerobus-jni --all-targets -- -D warnings
 	cargo clippy -p databricks-zerobus-ingest-sdk --all-features --all-targets -- -D warnings
