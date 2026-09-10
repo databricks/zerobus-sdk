@@ -136,6 +136,7 @@ impl MockZerobusServer {
     }
 
     /// Get the number of distinct TCP connections that opened streams.
+    #[allow(dead_code)]
     pub async fn get_connection_count(&self) -> usize {
         self.connection_addresses.lock().await.len()
     }
