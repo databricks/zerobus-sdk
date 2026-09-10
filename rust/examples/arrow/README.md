@@ -9,6 +9,7 @@ The `arrow-flight` feature flag must be enabled.
 - [Overview](#overview)
 - [Running the Example](#running-the-example)
 - [Code Highlights](#code-highlights)
+- [Telemetry](#telemetry)
 - [IPC compression](#ipc-compression)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
@@ -19,6 +20,7 @@ Arrow Flight is a third record format option alongside JSON and Protocol Buffers
 **Features:**
 - Columnar Arrow data sent over the Arrow Flight protocol
 - Logical batch offsets, cumulative durability acknowledgments, and automatic recovery
+- Batch sizes, transmission attempts, acknowledgments, and reconnect telemetry
 
 > **Feature flag.** The Arrow Flight API is behind the `arrow-flight` Cargo feature. The example's `Cargo.toml` enables it for you.
 
@@ -33,11 +35,15 @@ Send multiple rows per `RecordBatch`. Start with natural application-sized batch
    cargo run -p example_arrow
    ```
 
-The example queues 10 `RecordBatch`es of 10,000 rows each, calls `flush()` once
-to confirm all pending data, then closes the stream.
+The example queues 10 `RecordBatch`es of 10,000 rows each while a background task
+prints telemetry. It calls `flush()` once to confirm all pending data, closes and
+drops the stream, then waits for the telemetry task to finish draining.
 
-**Expected output:**
+**Example output** (byte fields abbreviated; telemetry may interleave with other output):
 ```
+BatchSent { offset: 0, attempt: 0, stats: BatchStats { records: 10000, ... } }
+BatchAcked { offset: 0 }
+...
 Flushed all in-flight batches
 Stream closed successfully
 ```
@@ -98,6 +104,26 @@ stream.close().await?;
   they produce no Flight data message to acknowledge
 - **Schema validation**: Each `RecordBatch` must exactly match the client schema
   configured on the stream; the server validates that schema against the target
+
+## Telemetry
+
+The example registers `channel_exporter(1024)` with `.stats_exporter(...)` and
+prints events from a separate Tokio task while ingestion continues:
+
+- `BatchSent` reports the ingest offset, transmission attempt, row count,
+  approximate FlightData bytes, and IPC buffer bytes before compression.
+- `BatchAcked` confirms that the batch is durable.
+- `Reconnected` reports a server rotation or the transient failure that caused recovery.
+
+The channel is bounded and drops events if the consumer falls behind. Drain it
+concurrently; waiting until after `flush()` can fill the channel. After closing,
+drop the stream to release its exporter, then await the drain task. If you keep an
+exporter clone to inspect `dropped()`, release that clone before awaiting the task too.
+
+`BatchSent` counts completed transmissions. A retry reports the whole batch if no
+rows were acknowledged, otherwise only the unacknowledged suffix. Earlier partial
+transmissions have no event, so the first observed event can have `attempt > 0`.
+See the [SDK telemetry docs](../../README.md#telemetry-beta) for aggregation limits.
 
 ## IPC compression
 

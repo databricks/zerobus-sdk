@@ -281,6 +281,7 @@ impl ZerobusSdk {
             stream.headers_provider(),
             stream.options().clone(),
             Arc::clone(&self.sdk_identifier),
+            stream.stats_exporter(),
         )
         .await;
 

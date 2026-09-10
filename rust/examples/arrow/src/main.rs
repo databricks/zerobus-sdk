@@ -5,7 +5,9 @@ use arrow_array::{
     Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
 };
 use arrow_ipc::CompressionType;
-use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    channel_exporter, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
+};
 
 /// One row of the `orders` table.
 #[derive(Clone)]
@@ -90,6 +92,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
+    let (stats_exporter, mut stats_rx) = channel_exporter(1024);
+
     // Optional IPC compression. Trades client CPU for fewer bytes on the wire —
     // enable only when network bandwidth limits throughput. `LZ4_FRAME` is fast
     // with a modest ratio; `ZSTD` compresses more at higher CPU cost.
@@ -100,8 +104,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .arrow(schema.clone())
         .ipc_compression(Some(CompressionType::ZSTD))
         .max_inflight_batches(100)
+        .stats_exporter(stats_exporter)
         .build_arrow()
         .await?;
+
+    // Drain concurrently so console output runs outside the SDK's IO tasks.
+    let telemetry = tokio::spawn(async move {
+        while let Some(stat) = stats_rx.recv().await {
+            // BatchSent includes sizes and attempts; BatchAcked confirms durability;
+            // Reconnected includes the reason. Print all event variants.
+            println!("{stat:?}");
+        }
+    });
 
     // Use application-sized batches to amortize Arrow encoding and Flight RPC overhead.
     const NUM_BATCHES: usize = 10;
@@ -132,6 +146,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     stream.close().await?;
     println!("Stream closed successfully");
+
+    // Release the stream's exporter so the receiver ends, then finish draining.
+    drop(stream);
+    telemetry.await?;
 
     Ok(())
 }

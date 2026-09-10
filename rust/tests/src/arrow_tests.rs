@@ -4054,11 +4054,14 @@ mod arrow_flight_tests {
         #[tokio::test]
         async fn test_ingest_during_reconnect_window_is_not_dropped(
         ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::{channel_exporter, StreamStat};
+
             setup_tracing();
             info!("Starting test_ingest_during_reconnect_window_is_not_dropped");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
+            let (exporter, mut stats_rx) = channel_exporter(32);
 
             // Connection 1: partial-ack A (1 of 3 records) so last_acked_records == 1, then
             // a retriable error on B triggers the reconnect we park at the barrier. B (a
@@ -4083,6 +4086,7 @@ mod arrow_flight_tests {
                 .recovery(true)
                 .recovery_backoff_ms(0)
                 .recovery_retries(5)
+                .stats_exporter(exporter)
                 .build_arrow()
                 .await?;
 
@@ -4094,7 +4098,7 @@ mod arrow_flight_tests {
                 vec![1, 2, 3],
                 vec![Some("a"), Some("b"), Some("c")],
             );
-            stream.ingest_batch(batch_a).await?;
+            let a_offset = stream.ingest_batch(batch_a).await?;
 
             // Wait until A's partial ack (1 of 3) is applied (last_acked_records == 1),
             // otherwise the ack and error can arrive back-to-back and the watermark is 0.
@@ -4136,6 +4140,38 @@ mod arrow_flight_tests {
                 8,
                 "recovered connection must replay A's un-acked suffix, B, and the windowed record"
             );
+
+            // A really was transmitted before recovery; C was only buffered. Check
+            // the public telemetry from both paths once the encoder emits it.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut saw_replayed = false;
+                let mut saw_buffered = false;
+                while !saw_replayed || !saw_buffered {
+                    match stats_rx
+                        .recv()
+                        .await
+                        .expect("stream still owns the exporter")
+                    {
+                        StreamStat::BatchSent {
+                            offset,
+                            attempt,
+                            stats,
+                        } if offset == a_offset && stats.records == 2 => {
+                            assert_eq!(attempt, 1, "A's unacked suffix is a retransmission");
+                            saw_replayed = true;
+                        }
+                        StreamStat::BatchSent {
+                            offset, attempt, ..
+                        } if offset == c_offset => {
+                            assert_eq!(attempt, 0, "C's first transmission follows recovery");
+                            saw_buffered = true;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("replayed and buffered batches must emit send telemetry");
 
             Ok(())
         }
