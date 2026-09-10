@@ -174,12 +174,19 @@ impl ZerobusStream {
             None
         };
 
+        #[cfg(feature = "avro")]
+        let avro_schema_json = table_properties
+            .avro_schema
+            .as_ref()
+            .map(|schema| schema.json.clone());
+        #[cfg(not(feature = "avro"))]
+        let avro_schema_json = None;
+
         let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),
             descriptor_proto,
             record_type: Some(record_type.into()),
-            // Avro is not wired into the ephemeral create path yet.
-            avro_schema_json: None,
+            avro_schema_json,
         });
 
         debug!("Sending CreateStream request.");

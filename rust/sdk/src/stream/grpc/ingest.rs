@@ -11,7 +11,7 @@ use tracing::{debug, error, warn};
 
 use super::types::IngestRequest;
 use super::ZerobusStream;
-use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
+use crate::{EncodedBatch, EncodedRecord, OffsetId, PreparedInput, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
     /// Ingests a single record and returns its logical offset directly.
@@ -21,7 +21,7 @@ impl ZerobusStream {
     ///
     /// # Arguments
     ///
-    /// * `payload` - A record that can be converted to `EncodedRecord` (either JSON string or protobuf bytes)
+    /// * `payload` - The record to ingest, as a record wrapper or raw payload matching the stream's format
     ///
     /// # Returns
     ///
@@ -50,7 +50,7 @@ impl ZerobusStream {
     /// ```
     pub async fn ingest_record_offset(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl Into<PreparedInput>,
     ) -> ZerobusResult<OffsetId> {
         let encoded_batch = self.prepare_record(payload)?;
         self.enqueue_prepared_batch(encoded_batch).await
@@ -63,7 +63,7 @@ impl ZerobusStream {
     ///
     /// # Arguments
     ///
-    /// * `payload` - An iterator of records (each item should be convertible to `EncodedRecord`)
+    /// * `payload` - An iterator of records to ingest, each a record wrapper or raw payload matching the stream's format
     ///
     /// # Returns
     ///
@@ -94,7 +94,7 @@ impl ZerobusStream {
     pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: Into<PreparedInput>,
     {
         let encoded_batch = self.prepare_records(payload)?;
 
@@ -110,9 +110,10 @@ impl ZerobusStream {
     #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_record(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl Into<PreparedInput>,
     ) -> ZerobusResult<EncodedBatch> {
-        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
+        let encoded_record = self.encode_prepared(payload.into())?;
+        let encoded_batch = EncodedBatch::try_from_record(encoded_record, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
                     "Record type does not match stream configuration".to_string(),
@@ -126,16 +127,43 @@ impl ZerobusStream {
     pub(crate) fn prepare_records<I, T>(&self, payload: I) -> ZerobusResult<EncodedBatch>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: Into<PreparedInput>,
     {
-        let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
-            .ok_or_else(|| {
-                ZerobusError::InvalidArgument(
-                    "Record type does not match stream configuration".to_string(),
-                )
-            })?;
+        let encoded_batch = EncodedBatch::try_from_encoded_iter(
+            payload
+                .into_iter()
+                .map(|rec| self.encode_prepared(rec.into())),
+            self.options.record_type,
+        )?;
         self.validate_ingest_payload(&encoded_batch)?;
         Ok(encoded_batch)
+    }
+
+    /// Turns a [`PreparedInput`] into an [`EncodedRecord`]. Only the deferred Avro-object
+    /// path needs the stream's writer schema; every other payload is already encoded.
+    #[allow(clippy::result_large_err)]
+    fn encode_prepared(&self, prepared: PreparedInput) -> ZerobusResult<EncodedRecord> {
+        match prepared {
+            PreparedInput::Ready(record) => Ok(record),
+            #[cfg(feature = "avro")]
+            PreparedInput::AvroObject(value) => {
+                if self.options.record_type != crate::databricks::zerobus::RecordType::Avro {
+                    return Err(ZerobusError::InvalidArgument(
+                        "AvroRecord requires stream record type to be Avro".to_string(),
+                    ));
+                }
+                let schema = self.table_properties.avro_schema.as_ref().ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "Avro schema required but not provided in stream configuration".to_string(),
+                    )
+                })?;
+                let datum = value
+                    .resolve(&schema.parsed)
+                    .and_then(|resolved| apache_avro::to_avro_datum(&schema.parsed, resolved))
+                    .map_err(|e| ZerobusError::AvroEncodingError(e.to_string()))?;
+                Ok(EncodedRecord::Avro(datum))
+            }
+        }
     }
 
     #[allow(clippy::result_large_err)]

@@ -1,24 +1,27 @@
 //! Record types and wrappers for the Zerobus SDK.
 //!
 //! This module contains all the types related to encoding records for ingestion:
-//! - [`EncodedRecord`] - The core enum for encoded records (JSON or Proto)
+//! - [`EncodedRecord`] - The core enum for encoded records (JSON, Protobuf, or Avro)
 //! - [`EncodedBatch`] - A batch of encoded records
 //! - Wrapper types for ergonomic record creation:
 //!   - [`ProtoBytes`] - For pre-serialized protobuf bytes (you handle serialization)
 //!   - [`JsonString`] - For pre-serialized JSON strings (you handle serialization)
 //!   - [`ProtoMessage`] - For protobuf messages (SDK handles serialization automatically)
 //!   - [`JsonValue`] - For JSON-serializable objects (SDK handles serialization automatically)
+//!   - [`AvroRecord`] - For an Avro value the SDK encodes against the writer schema (feature-gated)
 
 use prost::Message;
 use smallvec::{smallvec, SmallVec};
 
+#[cfg(feature = "avro")]
+use crate::databricks::zerobus::AvroRecordBatch;
 use crate::databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ingest_record_batch_request::Batch as IngestRequestBatch,
     ingest_record_request::Record as IngestRequestRecord, IngestRecordBatchRequest,
     IngestRecordRequest, JsonRecordBatch, ProtoEncodedRecordBatch, RecordType,
 };
-use crate::OffsetId;
+use crate::{OffsetId, ZerobusError, ZerobusResult};
 
 /// A type alias for a protobuf-encoded record.
 pub type ProtoEncodedRecord = Vec<u8>;
@@ -26,10 +29,16 @@ pub type ProtoEncodedRecord = Vec<u8>;
 /// A type alias for a JSON-encoded record.
 pub type JsonEncodedRecord = String;
 
+/// A type alias for an Avro-encoded record.
+#[cfg(feature = "avro")]
+pub type AvroEncodedRecord = Vec<u8>;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EncodedRecord {
     Json(JsonEncodedRecord),
     Proto(ProtoEncodedRecord),
+    #[cfg(feature = "avro")]
+    Avro(AvroEncodedRecord),
 }
 
 impl From<ProtoEncodedRecord> for EncodedRecord {
@@ -91,6 +100,19 @@ pub struct JsonString(pub String);
 impl From<JsonString> for EncodedRecord {
     fn from(s: JsonString) -> Self {
         EncodedRecord::Json(s.0)
+    }
+}
+
+/// Wrapper for a pre-encoded Avro binary datum (Beta).
+///
+/// Encode against the stream's writer schema yourself; pass the raw bytes.
+#[cfg(feature = "avro")]
+pub struct AvroBytes(pub Vec<u8>);
+
+#[cfg(feature = "avro")]
+impl From<AvroBytes> for EncodedRecord {
+    fn from(bytes: AvroBytes) -> Self {
+        EncodedRecord::Avro(bytes.0)
     }
 }
 
@@ -157,10 +179,65 @@ impl<T: serde::Serialize> From<JsonValue<T>> for EncodedRecord {
     }
 }
 
+/// Wrapper for an Avro record the stream encodes against its writer schema (Beta).
+///
+/// Hold the record as an [`AvroValue`](crate::AvroValue) (`apache_avro`'s value type,
+/// re-exported); the stream encodes it against the declared writer schema. `AvroValue`
+/// can represent any Avro type, including unions, `fixed`, `decimal`, and logical types.
+/// For data you have already encoded, use [`AvroBytes`](crate::AvroBytes).
+///
+/// # Examples
+///
+/// ```no_run
+/// # use databricks_zerobus_ingest_sdk::{ZerobusStream, AvroRecord, AvroValue};
+/// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
+/// let record = AvroValue::Record(vec![
+///     ("id".to_string(), AvroValue::Long(1)),
+///     ("customer_name".to_string(), AvroValue::String("Alice".to_string())),
+/// ]);
+/// // The stream encodes the value against its writer schema.
+/// let _offset = stream.ingest_record_offset(AvroRecord(record)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "avro")]
+pub struct AvroRecord(pub apache_avro::types::Value);
+
+/// Opaque payload accepted by the `ingest_*` methods; not meant to be named by callers
+/// (hence `#[doc(hidden)]`).
+///
+/// A blanket `From<T: Into<EncodedRecord>>` keeps every existing wrapper working; only
+/// `AvroRecord` maps to the `AvroObject` variant, encoded once the writer schema is known.
+#[doc(hidden)]
+pub enum PreparedInput {
+    /// Already encoded; enqueue as-is.
+    Ready(EncodedRecord),
+    /// An Avro value to encode against the stream's writer schema.
+    #[cfg(feature = "avro")]
+    AvroObject(apache_avro::types::Value),
+}
+
+impl<T: Into<EncodedRecord>> From<T> for PreparedInput {
+    fn from(value: T) -> Self {
+        PreparedInput::Ready(value.into())
+    }
+}
+
+#[cfg(feature = "avro")]
+impl From<AvroRecord> for PreparedInput {
+    fn from(record: AvroRecord) -> Self {
+        PreparedInput::AvroObject(record.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EncodedBatch {
     Proto(SmallVec<[ProtoEncodedRecord; 1]>),
     Json(SmallVec<[JsonEncodedRecord; 1]>),
+    #[cfg(feature = "avro")]
+    Avro(SmallVec<[AvroEncodedRecord; 1]>),
 }
 
 impl EncodedBatch {
@@ -173,48 +250,63 @@ impl EncodedBatch {
         match (value.into(), record_type) {
             (EncodedRecord::Json(s), RecordType::Json) => Some(EncodedBatch::Json(smallvec![s])),
             (EncodedRecord::Proto(v), RecordType::Proto) => Some(EncodedBatch::Proto(smallvec![v])),
+            #[cfg(feature = "avro")]
+            (EncodedRecord::Avro(v), RecordType::Avro) => Some(EncodedBatch::Avro(smallvec![v])),
             _ => None,
         }
     }
 
-    /// Try to convert records into an encoded batch of the provided type.
-    /// If the record type does not match the records' type, None is returned.
-    /// The returned batch will be empty if no records are provided.
-    pub(crate) fn try_from_batch<B, R>(batch: B, record_type: RecordType) -> Option<Self>
+    /// Folds an iterator of already-encoded (and possibly fallible) records into a
+    /// batch of the given type, in a single pass into the target `SmallVec`.
+    ///
+    /// Returns the first per-record error, or `InvalidArgument` if a record's encoding
+    /// does not match `record_type`. An empty iterator yields an empty batch.
+    pub(crate) fn try_from_encoded_iter<I>(iter: I, record_type: RecordType) -> ZerobusResult<Self>
     where
-        B: IntoIterator<Item = R>,
-        R: Into<EncodedRecord>,
+        I: IntoIterator<Item = ZerobusResult<EncodedRecord>>,
     {
-        let mut batch_iter = batch.into_iter();
-        let (lower, upper) = batch_iter.size_hint();
+        let iter = iter.into_iter();
+        let (lower, upper) = iter.size_hint();
         let size_hint = upper.unwrap_or(lower);
+        let mismatch = || {
+            ZerobusError::InvalidArgument(
+                "Record type does not match stream configuration".to_string(),
+            )
+        };
 
         match record_type {
-            RecordType::Json => batch_iter
-                .try_fold(
-                    SmallVec::with_capacity(size_hint),
-                    |mut vec, record| match record.into() {
-                        EncodedRecord::Json(value) => {
-                            vec.push(value);
-                            Some(vec)
-                        }
-                        _ => None,
-                    },
-                )
-                .map(EncodedBatch::Json),
-            RecordType::Proto => batch_iter
-                .try_fold(
-                    SmallVec::with_capacity(size_hint),
-                    |mut vec, record| match record.into() {
-                        EncodedRecord::Proto(value) => {
-                            vec.push(value);
-                            Some(vec)
-                        }
-                        _ => None,
-                    },
-                )
-                .map(EncodedBatch::Proto),
-            _ => None,
+            RecordType::Json => {
+                let mut vec = SmallVec::with_capacity(size_hint);
+                for record in iter {
+                    match record? {
+                        EncodedRecord::Json(value) => vec.push(value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                Ok(EncodedBatch::Json(vec))
+            }
+            RecordType::Proto => {
+                let mut vec = SmallVec::with_capacity(size_hint);
+                for record in iter {
+                    match record? {
+                        EncodedRecord::Proto(value) => vec.push(value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                Ok(EncodedBatch::Proto(vec))
+            }
+            #[cfg(feature = "avro")]
+            RecordType::Avro => {
+                let mut vec = SmallVec::with_capacity(size_hint);
+                for record in iter {
+                    match record? {
+                        EncodedRecord::Avro(value) => vec.push(value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                Ok(EncodedBatch::Avro(vec))
+            }
+            _ => Err(mismatch()),
         }
     }
 
@@ -254,6 +346,24 @@ impl EncodedBatch {
                     offset_id: Some(offset_id),
                 })
             }
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) if records.len() == 1 => {
+                RequestPayload::IngestRecord(IngestRecordRequest {
+                    record: Some(IngestRequestRecord::AvroEncodedRecord(
+                        records.into_iter().next().unwrap(),
+                    )),
+                    offset_id: Some(offset_id),
+                })
+            }
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => {
+                RequestPayload::IngestRecordBatch(IngestRecordBatchRequest {
+                    batch: Some(IngestRequestBatch::AvroBatch(AvroRecordBatch {
+                        records: records.into_vec(),
+                    })),
+                    offset_id: Some(offset_id),
+                })
+            }
         }
     }
 
@@ -262,6 +372,8 @@ impl EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => records.len(),
             EncodedBatch::Json(records) => records.len(),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => records.len(),
         }
     }
 
@@ -274,6 +386,8 @@ impl EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => records.iter().map(|r| r.len()).sum(),
             EncodedBatch::Json(records) => records.iter().map(|s| s.len()).sum(),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => records.iter().map(|r| r.len()).sum(),
         }
     }
 }
@@ -286,6 +400,8 @@ impl IntoIterator for EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => EncodedBatchIter::Proto(records.into_iter()),
             EncodedBatch::Json(records) => EncodedBatchIter::Json(records.into_iter()),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => EncodedBatchIter::Avro(records.into_iter()),
         }
     }
 }
@@ -293,6 +409,8 @@ impl IntoIterator for EncodedBatch {
 pub enum EncodedBatchIter {
     Proto(smallvec::IntoIter<[ProtoEncodedRecord; 1]>),
     Json(smallvec::IntoIter<[JsonEncodedRecord; 1]>),
+    #[cfg(feature = "avro")]
+    Avro(smallvec::IntoIter<[AvroEncodedRecord; 1]>),
 }
 
 impl Iterator for EncodedBatchIter {
@@ -302,6 +420,8 @@ impl Iterator for EncodedBatchIter {
         match self {
             EncodedBatchIter::Proto(iter) => iter.next().map(EncodedRecord::Proto),
             EncodedBatchIter::Json(iter) => iter.next().map(EncodedRecord::Json),
+            #[cfg(feature = "avro")]
+            EncodedBatchIter::Avro(iter) => iter.next().map(EncodedRecord::Avro),
         }
     }
 
@@ -309,6 +429,8 @@ impl Iterator for EncodedBatchIter {
         match self {
             EncodedBatchIter::Proto(iter) => iter.size_hint(),
             EncodedBatchIter::Json(iter) => iter.size_hint(),
+            #[cfg(feature = "avro")]
+            EncodedBatchIter::Avro(iter) => iter.size_hint(),
         }
     }
 }
@@ -433,8 +555,118 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "avro")]
+    mod avro {
+        use super::*;
+
+        #[test]
+        fn avro_bytes_to_encoded_record() {
+            let bytes = vec![1, 2, 3];
+            match EncodedRecord::from(AvroBytes(bytes.clone())) {
+                EncodedRecord::Avro(data) => assert_eq!(data, bytes),
+                _ => panic!("Expected Avro variant"),
+            }
+        }
+
+        #[test]
+        fn try_from_record_matches_avro() {
+            let batch =
+                EncodedBatch::try_from_record(AvroBytes(vec![9]), RecordType::Avro).unwrap();
+            assert!(matches!(batch, EncodedBatch::Avro(_)));
+            // Wrong record_type yields None.
+            assert!(EncodedBatch::try_from_record(AvroBytes(vec![9]), RecordType::Json).is_none());
+        }
+
+        #[test]
+        fn single_avro_record_uses_avro_encoded_record() {
+            let batch = EncodedBatch::Avro(smallvec![vec![1, 2, 3]]);
+            match batch.into_request_payload(7) {
+                RequestPayload::IngestRecord(req) => {
+                    assert_eq!(req.offset_id, Some(7));
+                    assert!(matches!(
+                        req.record,
+                        Some(IngestRequestRecord::AvroEncodedRecord(_))
+                    ));
+                }
+                _ => panic!("Expected IngestRecord"),
+            }
+        }
+
+        #[test]
+        fn multi_avro_records_use_avro_batch() {
+            let records = vec![vec![1], vec![2]];
+            let batch = EncodedBatch::Avro(SmallVec::from_vec(records.clone()));
+            assert_eq!(batch.get_record_count(), 2);
+            assert_eq!(batch.total_byte_size(), 2);
+            match batch.into_request_payload(3) {
+                RequestPayload::IngestRecordBatch(req) => match req.batch {
+                    Some(IngestRequestBatch::AvroBatch(avro)) => assert_eq!(avro.records, records),
+                    _ => panic!("Expected AvroBatch"),
+                },
+                _ => panic!("Expected IngestRecordBatch"),
+            }
+        }
+
+        #[test]
+        fn avro_record_becomes_prepared_avro_object() {
+            let value = apache_avro::types::Value::Record(vec![
+                ("id".to_string(), apache_avro::types::Value::Long(1)),
+                (
+                    "name".to_string(),
+                    apache_avro::types::Value::String("Alice".to_string()),
+                ),
+            ]);
+            match PreparedInput::from(AvroRecord(value.clone())) {
+                PreparedInput::AvroObject(v) => assert_eq!(v, value),
+                _ => panic!("Expected AvroObject variant"),
+            }
+        }
+
+        #[test]
+        fn avro_value_resolves_and_encodes_against_schema() {
+            // The exhaustive object path: an AvroValue resolved against the writer schema
+            // and encoded to a datum (the pipeline `encode_prepared` runs on the stream).
+            let schema_str = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}"#;
+            let schema = apache_avro::Schema::parse_str(schema_str).unwrap();
+            let value = apache_avro::types::Value::Record(vec![
+                ("id".to_string(), apache_avro::types::Value::Long(123)),
+                (
+                    "name".to_string(),
+                    apache_avro::types::Value::String("Alice".to_string()),
+                ),
+            ]);
+
+            let resolved = value.resolve(&schema).unwrap();
+            let datum = apache_avro::to_avro_datum(&schema, resolved).unwrap();
+            assert!(!datum.is_empty());
+        }
+
+        #[test]
+        fn test_avro_bytes_becomes_ready_via_blanket_impl() {
+            let bytes = vec![1, 2, 3, 4, 5];
+
+            match PreparedInput::from(AvroBytes(bytes.clone())) {
+                PreparedInput::Ready(EncodedRecord::Avro(data)) => assert_eq!(data, bytes),
+                _ => panic!("Expected Ready(Avro) variant"),
+            }
+        }
+    }
+
     mod encoded_batch_try_from {
         use super::*;
+
+        /// Adapts an iterator of infallible records into the fallible
+        /// [`EncodedBatch::try_from_encoded_iter`] API these tests exercise.
+        fn from_batch<B, R>(batch: B, record_type: RecordType) -> ZerobusResult<EncodedBatch>
+        where
+            B: IntoIterator<Item = R>,
+            R: Into<EncodedRecord>,
+        {
+            EncodedBatch::try_from_encoded_iter(
+                batch.into_iter().map(|r| Ok(r.into())),
+                record_type,
+            )
+        }
 
         #[test]
         fn test_try_from_record_json_with_json_type() {
@@ -544,9 +776,9 @@ mod tests {
                 r#"{"id": 2}"#.to_string(),
                 r#"{"id": 3}"#.to_string(),
             ];
-            let batch = EncodedBatch::try_from_batch(records.clone(), RecordType::Json);
+            let batch = from_batch(records.clone(), RecordType::Json);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             let batch = batch.unwrap();
             assert_eq!(batch.get_record_count(), 3);
             match batch {
@@ -560,9 +792,9 @@ mod tests {
         #[test]
         fn test_try_from_batch_proto_records() {
             let records = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
-            let batch = EncodedBatch::try_from_batch(records.clone(), RecordType::Proto);
+            let batch = from_batch(records.clone(), RecordType::Proto);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             let batch = batch.unwrap();
             assert_eq!(batch.get_record_count(), 3);
             match batch {
@@ -576,9 +808,9 @@ mod tests {
         #[test]
         fn test_try_from_batch_empty() {
             let records: Vec<String> = vec![];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Json);
+            let batch = from_batch(records, RecordType::Json);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             let batch = batch.unwrap();
             assert!(batch.is_empty());
         }
@@ -586,17 +818,17 @@ mod tests {
         #[test]
         fn test_try_from_batch_json_with_proto_type_fails() {
             let records = vec![r#"{"id": 1}"#.to_string(), r#"{"id": 2}"#.to_string()];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Proto);
+            let batch = from_batch(records, RecordType::Proto);
 
-            assert!(batch.is_none());
+            assert!(batch.is_err());
         }
 
         #[test]
         fn test_try_from_batch_proto_with_json_type_fails() {
             let records = vec![vec![1, 2], vec![3, 4]];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Json);
+            let batch = from_batch(records, RecordType::Json);
 
-            assert!(batch.is_none());
+            assert!(batch.is_err());
         }
 
         #[test]
@@ -605,18 +837,18 @@ mod tests {
                 JsonString(r#"{"id": 1}"#.to_string()),
                 JsonString(r#"{"id": 2}"#.to_string()),
             ];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Json);
+            let batch = from_batch(records, RecordType::Json);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             assert_eq!(batch.unwrap().get_record_count(), 2);
         }
 
         #[test]
         fn test_try_from_batch_with_proto_bytes_wrappers() {
             let records = vec![ProtoBytes(vec![1, 2]), ProtoBytes(vec![3, 4])];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Proto);
+            let batch = from_batch(records, RecordType::Proto);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             assert_eq!(batch.unwrap().get_record_count(), 2);
         }
 
@@ -632,9 +864,9 @@ mod tests {
                     value: 2,
                 }),
             ];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Json);
+            let batch = from_batch(records, RecordType::Json);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             assert_eq!(batch.unwrap().get_record_count(), 2);
         }
 
@@ -650,9 +882,9 @@ mod tests {
                     value: 2,
                 }),
             ];
-            let batch = EncodedBatch::try_from_batch(records, RecordType::Proto);
+            let batch = from_batch(records, RecordType::Proto);
 
-            assert!(batch.is_some());
+            assert!(batch.is_ok());
             assert_eq!(batch.unwrap().get_record_count(), 2);
         }
     }
