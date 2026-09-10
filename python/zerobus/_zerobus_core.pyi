@@ -12,8 +12,10 @@ class RecordType:
     """Type of records to ingest into the stream."""
 
     value: int
+    UNSPECIFIED: RecordType
     PROTO: RecordType
     JSON: RecordType
+    AVRO: RecordType
 
     def __int__(self) -> int: ...
     def __eq__(self, other: Self) -> bool: ...
@@ -24,8 +26,17 @@ class TableProperties:
 
     table_name: str
     descriptor_proto: Optional[bytes]
+    # avro_schema is only available when built with the avro feature
+    avro_schema: Optional[str]
+    # Record format this stream will use: "proto", "json", or "avro"
+    record_format: str
 
-    def __init__(self, table_name: str, descriptor_proto: Optional[Union[bytes, Any]] = None) -> None:
+    def __init__(
+        self,
+        table_name: str,
+        descriptor_proto: Optional[Union[bytes, Any]] = None,
+        avro_schema: Optional[str] = None,
+    ) -> None:
         """
         Create table properties.
 
@@ -35,6 +46,7 @@ class TableProperties:
                 - bytes: Serialized FileDescriptorProto
                 - Descriptor: Protobuf Descriptor object (e.g., MyMessage.DESCRIPTOR)
                 - None: For JSON mode (no descriptor needed)
+            avro_schema: Avro schema JSON string (only available with avro feature)
         """
         ...
 

@@ -39,12 +39,19 @@ The native extension module is `_zerobus_core`, exposed as three submodules:
 
 Run from `python/`:
 
-- `make dev` — Create venv, install deps, build Rust extension
-- `make build-rust` — Release build of the Rust extension
-- `make develop-rust` — Debug build (faster iteration)
+- `make dev` — Create venv, install deps, build Rust extension (includes all features)
+- `make build-rust` — Release build of the Rust extension (includes all features)
+- `make develop-rust` — Debug build (faster iteration, includes all features)
 - `make test` — pytest with coverage
 - `make lint` — pycodestyle + autoflake
 - `make fmt` — black + autoflake + isort
+
+## Features
+
+The Rust extension is built with `--all-features` by default, which enables:
+- `avro` feature: Avro record format support via fastavro (requires `pip install databricks-zerobus-ingest-sdk[avro]`)
+
+See `Cargo.toml` in `python/rust/` for feature definitions.
 
 ## FFI boundary: PyO3
 

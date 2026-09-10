@@ -76,7 +76,7 @@ jobs:
           .venv/Scripts/python -m pip install --upgrade pip
           test -f LICENSE || cp ../LICENSE LICENSE
           .venv/Scripts/python -m pip install -r requirements-dev.lock
-          .venv/Scripts/python -m maturin develop
+          .venv/Scripts/python -m maturin develop --all-features
           .venv/Scripts/python -m pytest --cov=zerobus --cov-report html --cov-report xml tests
 
   # Builds one abi3 wheel on the oldest supported Python and imports it on every

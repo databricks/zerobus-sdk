@@ -58,10 +58,28 @@ class ZerobusStream:
     2. Second await: Waits for acknowledgment
 
     This allows batching submissions without blocking on acknowledgments.
+    Handles Avro encoding transparently when avro_schema is set.
     """
 
-    def __init__(self, rust_stream: _RustZerobusStream):
+    def __init__(self, rust_stream: _RustZerobusStream, avro_schema=None):
         self._inner = rust_stream
+        self._avro_schema = avro_schema  # Parsed fastavro schema or None
+
+    def _encode_payload(self, payload):
+        """Encode payload to bytes if avro schema set; else pass through."""
+        if self._avro_schema is None:
+            return payload
+        from zerobus.sdk.shared.avro import encode_payload
+
+        return encode_payload(self._avro_schema, payload)
+
+    def _encode_payloads(self, payloads):
+        """Encode list of payloads; pass through if avro schema not set."""
+        if self._avro_schema is None:
+            return payloads
+        from zerobus.sdk.shared.avro import encode_payloads
+
+        return encode_payloads(self._avro_schema, payloads)
 
     async def ingest_record(self, payload: Any):
         """Ingest a single record (deprecated - use ingest_record_offset).
@@ -86,6 +104,8 @@ class ZerobusStream:
         Returns:
             An awaitable future that, when awaited, waits for acknowledgment and returns the offset
         """
+        # Encode if avro
+        payload = self._encode_payload(payload)
         # Stage 1: Submit record and get offset (fast!)
         offset = await self._inner.ingest_record_offset(payload)
 
@@ -104,6 +124,7 @@ class ZerobusStream:
         acknowledgment in the background. The idiomatic flow is to ingest in a loop and
         ``await flush()`` once to confirm durability (or use an ``AckCallback``).
         """
+        payload = self._encode_payload(payload)
         return await self._inner.ingest_record_offset(payload)
 
     def ingest_record_nowait(self, payload: Any):
@@ -113,10 +134,12 @@ class ZerobusStream:
         before the task allocates an offset, so this is not a safe durability path.
         Prefer ``ingest_record_offset()`` or ``ingest_records_offset()``.
         """
+        payload = self._encode_payload(payload)
         return self._inner.ingest_record_nowait(payload)
 
     async def ingest_records_offset(self, payloads):
         """Submit batch of records and return final offset."""
+        payloads = self._encode_payloads(payloads)
         return await self._inner.ingest_records_offset(payloads)
 
     def ingest_records_nowait(self, payloads):
@@ -125,6 +148,7 @@ class ZerobusStream:
         Same detached-task caveats as ``ingest_record_nowait()``. Prefer
         ``ingest_records_offset()``.
         """
+        payloads = self._encode_payloads(payloads)
         return self._inner.ingest_records_nowait(payloads)
 
     async def wait_for_offset(self, offset: int):
@@ -332,6 +356,10 @@ class ZerobusSdk:
             options: Optional stream configuration
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
         """
+        from zerobus.sdk.shared.avro import parse_table_schema
+
+        avro_schema = parse_table_schema(table_properties)
+
         if headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
             rust_stream = await self._inner.create_stream_with_headers_provider(
@@ -340,12 +368,12 @@ class ZerobusSdk:
         else:
             # Use OAuth authentication
             rust_stream = await self._inner.create_stream(client_id, client_secret, table_properties, options)
-        return ZerobusStream(rust_stream)
+        return ZerobusStream(rust_stream, avro_schema=avro_schema)
 
     async def recreate_stream(self, old_stream: ZerobusStream):
-        """Recreate a stream from an old stream."""
+        """Recreate a stream from an old stream, preserving avro schema if set."""
         rust_stream = await self._inner.recreate_stream(old_stream._inner)
-        return ZerobusStream(rust_stream)
+        return ZerobusStream(rust_stream, avro_schema=old_stream._avro_schema)
 
 
 # Re-export common types for convenience

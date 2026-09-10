@@ -14,15 +14,14 @@ use crate::arrow::{ArrowStreamConfigurationOptions, ZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================
 // STREAM-BUILDER HELPERS
 // =============================================================================
 
-/// Apply table name + record-format selection (JSON or compiled-proto, based
-/// on whether `TableProperties` carried a descriptor) to the builder.
+/// Apply table name + record-format selection (proto/avro/json) to the builder.
 fn apply_table_and_format<'a>(
     builder: StreamBuilder<'a>,
     table_properties: &TableProperties,
@@ -30,7 +29,13 @@ fn apply_table_and_format<'a>(
     let builder = builder.table(table_properties.table_name.clone());
     match table_properties.descriptor_proto.clone() {
         Some(descriptor) => builder.compiled_proto(descriptor),
-        None => builder.json(),
+        None => {
+            #[cfg(feature = "avro")]
+            if let Some(schema) = table_properties.avro_schema.clone() {
+                return builder.avro(schema);
+            }
+            builder.json()
+        }
     }
 }
 
@@ -86,6 +91,7 @@ impl RecordAcknowledgment {
 pub struct ZerobusStream {
     inner: Arc<RwLock<RustStream>>,
     runtime: Arc<Runtime>,
+    format: RecordFormat,
 }
 
 #[pymethods]
@@ -101,7 +107,7 @@ impl ZerobusStream {
         py: Python,
         payload: &Bound<'_, PyAny>,
     ) -> PyResult<RecordAcknowledgment> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
@@ -126,7 +132,7 @@ impl ZerobusStream {
 
     /// Ingest a single record and return the offset directly (optimized API)
     fn ingest_record_offset(&self, py: Python, payload: &Bound<'_, PyAny>) -> PyResult<i64> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
@@ -143,7 +149,7 @@ impl ZerobusStream {
 
     /// Ingest a single record without waiting for acknowledgment (fire-and-forget)
     fn ingest_record_nowait(&self, payload: &Bound<'_, PyAny>) -> PyResult<()> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
 
         self.runtime.spawn(async move {
@@ -160,7 +166,7 @@ impl ZerobusStream {
         py: Python,
         payloads: &Bound<'_, PyAny>,
     ) -> PyResult<Option<i64>> {
-        let record_payloads = extract_record_payloads(payloads)?;
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
         if record_payloads.is_empty() {
             return Ok(None);
         }
@@ -181,7 +187,7 @@ impl ZerobusStream {
 
     /// Ingest multiple records without waiting for acknowledgments (batch fire-and-forget)
     fn ingest_records_nowait(&self, payloads: &Bound<'_, PyAny>) -> PyResult<()> {
-        let record_payloads = extract_record_payloads(payloads)?;
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
         let stream = self.inner.clone();
 
         self.runtime.spawn(async move {
@@ -351,6 +357,8 @@ impl ZerobusSdk {
     ) -> PyResult<ZerobusStream> {
         let opts = options.unwrap_or_default();
         opts.validate()?;
+
+        let format = table_properties.resolve_format(opts.record_type)?;
         let sdk = self.inner.clone();
         let runtime = self.runtime.clone();
         let runtime_for_stream = self.runtime.clone();
@@ -368,6 +376,7 @@ impl ZerobusSdk {
         Ok(ZerobusStream {
             inner: Arc::new(RwLock::new(stream)),
             runtime: runtime_for_stream,
+            format,
         })
     }
 
@@ -382,6 +391,8 @@ impl ZerobusSdk {
     ) -> PyResult<ZerobusStream> {
         let opts = options.unwrap_or_default();
         opts.validate()?;
+
+        let format = table_properties.resolve_format(opts.record_type)?;
         let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
         let sdk = self.inner.clone();
         let runtime = self.runtime.clone();
@@ -400,6 +411,7 @@ impl ZerobusSdk {
         Ok(ZerobusStream {
             inner: Arc::new(RwLock::new(stream)),
             runtime: runtime_for_stream,
+            format,
         })
     }
 
@@ -475,6 +487,7 @@ impl ZerobusSdk {
         Ok(ZerobusStream {
             inner: Arc::new(RwLock::new(new_stream)),
             runtime: runtime_for_stream,
+            format: old_stream.format,
         })
     }
 }

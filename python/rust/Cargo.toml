@@ -8,6 +8,9 @@ rust-version = "1.88"
 name = "_zerobus_core"
 crate-type = ["cdylib"]
 
+[features]
+avro = ["databricks-zerobus-ingest-sdk/avro"]
+
 [dependencies]
 # Relax once 0.29.1 is available.
 pyo3 = { version = "=0.29.0", features = ["extension-module", "abi3-py39"] }
