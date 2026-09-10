@@ -150,6 +150,8 @@ type ZerobusSdk struct {
 // Records can be ingested concurrently and will be acknowledged asynchronously.
 type ZerobusStream struct {
 	ptr unsafe.Pointer
+	// avroSchema parsed (avro tag only); holds hamba avro.Schema for object encoding
+	avroSchema unsafe.Pointer
 }
 
 type sdkOptions struct {

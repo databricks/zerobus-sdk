@@ -58,6 +58,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Automatic OAuth 2.0 authentication** with Unity Catalog
 - **Simple JSON ingestion** - No code generation required for basic use cases
 - **Protocol Buffers support** for type-safe, efficient data encoding
+- **Avro support** (Beta, `avro` build tag) - Avro record ingestion (object-based with automatic JSON encoding or pre-encoded bytes)
 - **Batch ingestion** - Ingest multiple records at once for maximum throughput
 - **Backpressure control** to manage memory usage
 - **Automatic retry and recovery** for transient failures
@@ -631,6 +632,52 @@ for partition := 0; partition < 4; partition++ {
     }(p)
 }
 wg.Wait()
+```
+
+**Avro record ingestion (Beta, `avro` build tag):**
+
+```go
+// Create an Avro stream with a writer schema
+schemaJSON := `{
+    "type": "record",
+    "name": "User",
+    "fields": [
+        {"name": "id", "type": "int"},
+        {"name": "name", "type": "string"}
+    ]
+}`
+avroStream, err := sdk.CreateAvroStream(
+    zerobus.AvroTableProperties{
+        TableName: "catalog.schema.users",
+        SchemaJSON: schemaJSON,
+    },
+    clientID, clientSecret, options,
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer avroStream.Close()
+
+// Ingest records as Go objects (automatic JSON encoding)
+records := []interface{}{
+    map[string]interface{}{"id": 1, "name": "Alice"},
+    map[string]interface{}{"id": 2, "name": "Bob"},
+}
+offset, err := avroStream.IngestAvroRecordsOffset(records)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Batch queued with offset: %d", offset)
+
+if err := avroStream.Flush(); err != nil {
+    log.Fatal(err)
+}
+```
+
+For pre-encoded Avro bytes (if you already have encoded data):
+```go
+avroData := /* pre-encoded Avro datum */
+offset, err := avroStream.IngestAvroBytesOffset(avroData)
 ```
 
 ### 5. Handle Acknowledgments
@@ -1505,6 +1552,37 @@ make fmt
 
 # Run linters
 make lint
+```
+
+### Building with Avro Support (Beta)
+
+Avro support is gated behind the `avro` build tag and requires Zerobus server Avro support (pending).
+
+```bash
+# Build Rust FFI with avro feature
+make build-avro-rust
+
+# Build Go SDK with avro tag
+make build-avro-go
+
+# Build both (Rust FFI with avro + Go with avro tag)
+make build-avro
+
+# Run tests with avro tag
+make test-avro
+
+# Run linters with avro tag
+make lint-avro
+```
+
+To use Avro in your own project:
+
+```bash
+# Build your code with the avro build tag
+go build -tags avro ./...
+
+# Run your code with the avro tag
+go run -tags avro main.go
 ```
 
 ### Platform-Specific Build Notes
