@@ -167,39 +167,35 @@ static void test_ingest_validation(void)
     zerobus_error_t *err = NULL;
 
     /* NULL stream. */
-    CHECK_EQ_INT(zerobus_stream_ingest_json_record(NULL, sv("{}"), &err),
+    CHECK_EQ_INT(zerobus_stream_ingest_json_record(NULL, sv("{}"), NULL, &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
 
     /* Empty record. */
     CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                     stream, (zerobus_string_view_t){NULL, 0}, &err),
+                     stream, (zerobus_string_view_t){NULL, 0}, NULL, &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
 
-    /* Malformed JSON. */
     CHECK_EQ_INT(
-        zerobus_stream_ingest_json_record(stream, sv("{not json"), &err),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
-    zerobus_error_free(err);
-    err = NULL;
-
-    /* Well-formed JSON is admitted. */
+        zerobus_stream_ingest_json_record(stream, sv("record"), NULL, &err),
+        ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK(err == NULL);
     CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                     stream, sv("{\"id\":1,\"m\":\"hi\"}"), &err),
-                 ZEROBUS_STATUS_OK);
+                     stream, sv("{\"id\":1,\"m\":\"hi\"}"), NULL, &err),
+                 ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK(err == NULL);
 
-    /* A record past the size ceiling is refused before JSON parsing. */
+    /* A record past the size ceiling is refused by the size gate. */
     size_t big = 11u * 1024u * 1024u;
     char *buf = (char *)malloc(big);
     CHECK(buf != NULL);
     if (buf != NULL) {
         memset(buf, 'a', big);
         CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                         stream, (zerobus_string_view_t){buf, big}, &err),
+                         stream, (zerobus_string_view_t){buf, big}, NULL, &err),
                      ZEROBUS_STATUS_INVALID_ARGUMENT);
         zerobus_error_free(err);
         free(buf);
@@ -227,7 +223,8 @@ static void test_flush_close_idempotent(void)
     zerobus_error_free(err);
     err = NULL;
 
-    CHECK_EQ_INT(zerobus_stream_flush(stream, &err), ZEROBUS_STATUS_OK);
+    CHECK_EQ_INT(zerobus_stream_flush(stream, &err),
+                 ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK_EQ_INT(zerobus_stream_close(stream, &err), ZEROBUS_STATUS_OK);
     /* Idempotent: a second close still succeeds. */
     CHECK_EQ_INT(zerobus_stream_close(stream, &err), ZEROBUS_STATUS_OK);
@@ -235,19 +232,20 @@ static void test_flush_close_idempotent(void)
 
     /* After close, ingest is rejected with FAILED_PRECONDITION. */
     CHECK_EQ_INT(
-        zerobus_stream_ingest_json_record(stream, sv("{\"id\":2}"), &err),
+        zerobus_stream_ingest_json_record(stream, sv("{\"id\":2}"), NULL, &err),
         ZEROBUS_STATUS_FAILED_PRECONDITION);
     zerobus_error_free(err);
     err = NULL;
 
     /* Even a malformed record: the closed check precedes record validation. */
     CHECK_EQ_INT(
-        zerobus_stream_ingest_json_record(stream, sv("{not json"), &err),
+        zerobus_stream_ingest_json_record(stream, sv("{not json"), NULL, &err),
         ZEROBUS_STATUS_FAILED_PRECONDITION);
     zerobus_error_free(err);
 
-    /* Flush after close remains valid (nothing pending). */
-    CHECK_EQ_INT(zerobus_stream_flush(stream, NULL), ZEROBUS_STATUS_OK);
+    /* Flush after close is rejected, like ingest. */
+    CHECK_EQ_INT(zerobus_stream_flush(stream, NULL),
+                 ZEROBUS_STATUS_FAILED_PRECONDITION);
 
     zerobus_stream_free(stream);
     zerobus_sdk_free(sdk);
@@ -261,6 +259,49 @@ static void test_stream_free_null_safe(void)
     CHECK(1);
 }
 
+/* A non-NULL *out_error on entry is refused at every entry point, and the
+ * existing error is left untouched (not overwritten, freed, or replaced). */
+static void test_stream_out_error_must_be_null(void)
+{
+    zerobus_sdk_t *sdk = make_sdk();
+    zerobus_stream_t *stream = make_stream(sdk);
+
+    zerobus_error_t *err = NULL;
+    /* Seed a live error through a genuine failure. */
+    zerobus_stream_builder_t *stb = NULL;
+    CHECK_EQ_INT(zerobus_stream_builder_new(NULL, &stb, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err != NULL);
+    const zerobus_error_t *seeded = err;
+
+    /* The guard runs first, so the other arguments do not matter. */
+    zerobus_stream_t *st = NULL;
+    CHECK_EQ_INT(zerobus_stream_builder_new(sdk, &stb, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_builder_set_table(stb, sv("c.s.t"), &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &st, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_stream_ingest_json_record(stream, sv("{\"id\":1}"), NULL, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_flush(stream, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_close(stream, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+
+    CHECK(err == seeded); /* same object: untouched */
+    CHECK(stb == NULL);
+    CHECK(st == NULL);
+    zerobus_error_free(err);
+
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+}
+
 int main(void)
 {
     test_stream_builder_validation();
@@ -269,5 +310,6 @@ int main(void)
     test_ingest_validation();
     test_flush_close_idempotent();
     test_stream_free_null_safe();
+    test_stream_out_error_must_be_null();
     TEST_MAIN_RETURN();
 }

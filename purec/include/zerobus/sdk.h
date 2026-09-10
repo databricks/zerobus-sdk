@@ -12,9 +12,8 @@ extern "C" {
 
 /*
  * SDK builder. The endpoint setters validate the URL and copy their inputs, so
- * a malformed endpoint is rejected at set time. TLS is always enabled with
- * system root certificates. The builder is not consumed by build and must be
- * freed separately.
+ * a malformed endpoint is rejected at set time. The builder is not consumed by
+ * build and must be freed separately.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_sdk_builder_new(
     zerobus_sdk_builder_t **out_builder, zerobus_error_t **out_error);

@@ -25,19 +25,11 @@
 #define ZB_STATIC static
 #endif
 
-/* Caps JSON container nesting so a deeply nested record cannot overflow the
- * stack through the validator's recursion. */
-#define ZB_JSON_MAX_DEPTH 1024
-
 /* {NULL, 0} is empty; {NULL, nonzero} is invalid and also reported as empty. */
 bool zb_is_empty(zerobus_string_view_t view);
 
 /* Non-empty, well-formed UTF-8, no embedded NUL. */
 bool zb_is_valid_string(zerobus_string_view_t view);
-
-/* Exactly one well-formed JSON value, surrounded only by optional whitespace.
- * Structural check, not a schema check. */
-bool zb_is_valid_json(zerobus_string_view_t view);
 
 /*
  * Report whether a table name is a fully qualified catalog.schema.table: three
@@ -50,21 +42,19 @@ bool zb_table_name_is_valid(zerobus_string_view_t table);
 typedef enum {
     ZB_URL_OK = 0,
     ZB_URL_NO_SCHEME,  /* neither "http://" nor "https://" */
-    ZB_URL_EMPTY_HOST, /* nothing between the scheme and the port/path */
+    ZB_URL_EMPTY_HOST, /* nothing between the scheme and the port */
     ZB_URL_BAD_HOST,   /* empty label, userinfo, IPv6 literal, or a bad char */
     ZB_URL_BAD_PORT,   /* ":port" is empty or not a number in 1..65535 */
-    ZB_URL_OOM         /* allocating the returned host copy failed */
+    ZB_URL_HAS_PATH    /* a path, query, fragment, or trailing '/' after host */
 } zb_url_result;
 
 /*
- * Validate an "http(s)://host[:port][/path]" endpoint. *out_is_https reports
- * the scheme (which scheme is acceptable is the caller's policy). On ZB_URL_OK,
- * and when out_host is non-NULL, *out_host is a freshly allocated host (no port
- * or path) that the caller frees. On failure *out_host is NULL and
- * *out_is_https is untouched.
+ * Validate that endpoint is a bare "http(s)://host[:port]" origin. Anything
+ * after the host and optional port — a path, query, fragment, or even a
+ * trailing "/" — is rejected (ZB_URL_HAS_PATH), so the accepted string is safe
+ * to store and append a path to (e.g. the OAuth "/oidc/v1/token").
  */
-zb_url_result zb_url_validate(const char *endpoint, char **out_host,
-                              bool *out_is_https);
+zb_url_result zb_url_validate(zerobus_string_view_t endpoint);
 
 /* Replace *target with a copy of view, freeing the previous value. False on
  * OOM, leaving *target untouched. */
@@ -93,7 +83,6 @@ void zb_secure_free_cstr(char *s);
 
 #ifdef ZB_TESTING
 bool is_valid_utf8(const char *text, size_t len);
-bool is_valid_json(const char *text, size_t len);
 bool host_labels_are_valid(const char *host, size_t len);
 #endif
 

@@ -11,14 +11,10 @@
  * records must be replaced with ones matching the selected table.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zerobus/zerobus.h>
-
-static zerobus_string_view_t string_view(const char *value)
-{
-    return (zerobus_string_view_t){value, strlen(value)};
-}
 
 static void print_error(const zerobus_error_t *error)
 {
@@ -32,11 +28,19 @@ static void print_error(const zerobus_error_t *error)
 
 int main(int argc, char **argv)
 {
-    if (argc != 6) {
+    if (argc != 5) {
         fprintf(stderr,
                 "usage: %s <zerobus-endpoint> <uc-endpoint> "
-                "<table> <client-id> <client-secret>\n",
+                "<table> <client-id>\n"
+                "the OAuth client secret is read from the "
+                "DATABRICKS_CLIENT_SECRET environment variable\n",
                 argv[0]);
+        return 2;
+    }
+
+    const char *client_secret = getenv("DATABRICKS_CLIENT_SECRET");
+    if (client_secret == NULL) {
+        fputs("DATABRICKS_CLIENT_SECRET must be set\n", stderr);
         return 2;
     }
 
@@ -58,14 +62,14 @@ int main(int argc, char **argv)
         goto fail;
     }
 
-    status = zerobus_sdk_builder_set_endpoint(sdk_builder, string_view(argv[1]),
-                                              &error);
+    status = zerobus_sdk_builder_set_endpoint(
+        sdk_builder, zerobus_string_view(argv[1]), &error);
     if (status != ZEROBUS_STATUS_OK) {
         goto fail;
     }
 
     status = zerobus_sdk_builder_set_unity_catalog_endpoint(
-        sdk_builder, string_view(argv[2]), &error);
+        sdk_builder, zerobus_string_view(argv[2]), &error);
     if (status != ZEROBUS_STATUS_OK) {
         goto fail;
     }
@@ -83,14 +87,15 @@ int main(int argc, char **argv)
         goto fail;
     }
 
-    status = zerobus_stream_builder_set_table(stream_builder,
-                                              string_view(argv[3]), &error);
+    status = zerobus_stream_builder_set_table(
+        stream_builder, zerobus_string_view(argv[3]), &error);
     if (status != ZEROBUS_STATUS_OK) {
         goto fail;
     }
 
     status = zerobus_stream_builder_set_oauth(
-        stream_builder, string_view(argv[4]), string_view(argv[5]), &error);
+        stream_builder, zerobus_string_view(argv[4]),
+        zerobus_string_view(client_secret), &error);
     if (status != ZEROBUS_STATUS_OK) {
         goto fail;
     }
@@ -103,18 +108,22 @@ int main(int argc, char **argv)
     zerobus_stream_builder_free(stream_builder);
     stream_builder = NULL;
 
-    /* Queue all records. Do NOT wait for each record's acknowledgment. */
+    /* Queue all records. Do NOT wait for each record's acknowledgment.
+     * The networking core is not implemented yet, so ingest and flush validate
+     * their inputs and return ZEROBUS_STATUS_UNIMPLEMENTED. Treat that as the
+     * expected outcome during development. */
     for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); ++i) {
         status = zerobus_stream_ingest_json_record(
-            stream, string_view(records[i]), &error);
-        if (status != ZEROBUS_STATUS_OK) {
+            stream, zerobus_string_view(records[i]), NULL, &error);
+        if (status != ZEROBUS_STATUS_OK &&
+            status != ZEROBUS_STATUS_UNIMPLEMENTED) {
             goto fail;
         }
     }
 
     /* One durability barrier for everything admitted above. */
     status = zerobus_stream_flush(stream, &error);
-    if (status != ZEROBUS_STATUS_OK) {
+    if (status != ZEROBUS_STATUS_OK && status != ZEROBUS_STATUS_UNIMPLEMENTED) {
         goto fail;
     }
 
@@ -123,10 +132,15 @@ int main(int argc, char **argv)
         goto fail;
     }
 
-    printf("ingested %zu records\n", sizeof(records) / sizeof(records[0]));
+    printf("exercised the ingest lifecycle for %zu records (no network I/O "
+           "yet)\n",
+           sizeof(records) / sizeof(records[0]));
     exit_code = 0;
 
 fail:
+    if (stream != NULL) {
+        zerobus_stream_close(stream, NULL);
+    }
     if (error != NULL) {
         print_error(error);
         zerobus_error_free(error);

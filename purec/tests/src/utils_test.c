@@ -12,35 +12,6 @@ static bool utf8_ok(const char *s)
     return is_valid_utf8(s, strlen(s));
 }
 
-static bool json_ok(const char *s)
-{
-    return is_valid_json(s, strlen(s));
-}
-
-/* Wrap "0" in `depth` levels of `open`/`close` and report whether it validates,
- * e.g. nested_ok("[", "]", 3) checks "[[[0]]]". */
-static bool nested_ok(const char *open, const char *close, size_t depth)
-{
-    size_t ol = strlen(open), cl = strlen(close);
-    char *buf = (char *)malloc(depth * ol + 1 + depth * cl);
-    if (buf == NULL) {
-        return false;
-    }
-    char *p = buf;
-    for (size_t i = 0; i < depth; ++i) {
-        memcpy(p, open, ol);
-        p += ol;
-    }
-    *p++ = '0';
-    for (size_t i = 0; i < depth; ++i) {
-        memcpy(p, close, cl);
-        p += cl;
-    }
-    bool ok = is_valid_json(buf, (size_t)(p - buf));
-    free(buf);
-    return ok;
-}
-
 static bool labels_ok(const char *s)
 {
     return host_labels_are_valid(s, strlen(s));
@@ -54,10 +25,6 @@ static void test_view_classification(void)
     CHECK(zb_is_empty((zerobus_string_view_t){"x", 0}));
     CHECK(zb_is_empty((zerobus_string_view_t){NULL, 5})); /* invalid */
     CHECK(!zb_is_empty(sv("x")));
-
-    CHECK(zb_is_valid_json(sv("{\"a\":1}")));
-    CHECK(!zb_is_valid_json(sv("{bad")));
-    CHECK(!zb_is_valid_json((zerobus_string_view_t){NULL, 0}));
 
     CHECK(zb_is_valid_string(sv("hello")));
     CHECK(!zb_is_valid_string((zerobus_string_view_t){NULL, 0}));
@@ -91,97 +58,6 @@ static void test_utf8(void)
     CHECK(!is_valid_utf8("\xE2\x9C\x28", 3));     /* bad later continuation */
 }
 
-static void test_json(void)
-{
-    /* Guard: is_valid_json rejects NULL and zero length up front. */
-    CHECK(!is_valid_json(NULL, 0));
-    CHECK(!is_valid_json("x", 0));
-
-    /* Literals, objects, arrays, whitespace. */
-    CHECK(json_ok("{}"));
-    CHECK(json_ok("[]"));
-    CHECK(json_ok("true"));
-    CHECK(json_ok("false"));
-    CHECK(json_ok("null"));
-    CHECK(json_ok("{\"id\":1,\"message\":\"hello\"}"));
-    CHECK(json_ok("[1, 2, 3, true, false, null]"));
-    CHECK(json_ok("[[1],[2,3],{\"k\":[]}]"));
-    CHECK(json_ok("  \t\n{\"k\": \"v\"}\r ")); /* surrounding whitespace ok */
-
-    /* Numbers. */
-    CHECK(json_ok("0"));
-    CHECK(json_ok("-0"));
-    CHECK(json_ok("123"));
-    CHECK(json_ok("-12.5e+3"));
-    CHECK(json_ok("1E10"));
-    CHECK(json_ok("1.5e-3"));
-    CHECK(!json_ok("01")); /* leading zero */
-    CHECK(!json_ok("1.")); /* fraction without a digit */
-    CHECK(!json_ok("-"));  /* lone minus */
-    CHECK(!json_ok("1e")); /* exponent without a digit */
-    CHECK(!json_ok("+1")); /* leading plus */
-    CHECK(!json_ok(".5")); /* fraction without an integer part */
-
-    /* Strings and escapes. */
-    CHECK(json_ok("\"a \\\"quoted\\\" string\""));
-    CHECK(json_ok("\"\\n\\t\\r\\b\\f\\/\\\\\"")); /* all single escapes */
-    CHECK(json_ok("\"\\u00e9\""));                /* valid \u escape */
-    CHECK(json_ok("\"\\uD800\""));  /* lone surrogate: structural only */
-    CHECK(!json_ok("\"\\x\""));     /* invalid escape */
-    CHECK(!json_ok("\"\\u12\""));   /* \u too short */
-    CHECK(!json_ok("\"\\uzzzz\"")); /* \u bad hex */
-    CHECK(!json_ok("\"\x01\""));    /* unescaped control char */
-    CHECK(!json_ok("\"abc"));       /* unterminated string */
-    CHECK(!json_ok("\"\\"));        /* backslash at end of input */
-    CHECK(!json_ok("\xFF"));        /* non-empty but invalid UTF-8 */
-
-    /* Object member not followed by ',' or '}'. */
-    CHECK(!json_ok("{\"a\":1 2}"));
-
-    /* Arrays. */
-    CHECK(!json_ok("["));       /* unterminated */
-    CHECK(!json_ok("[1"));      /* unterminated after a value */
-    CHECK(!json_ok("[1, 2,]")); /* trailing comma */
-    CHECK(!json_ok("[1 2]"));   /* missing comma */
-
-    /* Objects. */
-    CHECK(!json_ok("{"));          /* unterminated */
-    CHECK(!json_ok("{\"k\"}"));    /* missing colon */
-    CHECK(!json_ok("{\"k\": }"));  /* missing value */
-    CHECK(!json_ok("{\"k\":1"));   /* unterminated after a member */
-    CHECK(!json_ok("{\"k\":1,}")); /* trailing comma */
-    CHECK(!json_ok("{1:2}"));      /* non-string key */
-
-    /* Whole-value framing. */
-    CHECK(!json_ok(""));       /* empty is not a JSON value */
-    CHECK(!json_ok("   "));    /* whitespace only */
-    CHECK(!json_ok("nul"));    /* incomplete literal */
-    CHECK(!json_ok("42 abc")); /* trailing garbage after a value */
-}
-
-static void test_json_depth(void)
-{
-    /* A long run of bare openers must be rejected, not overflow the stack. */
-    size_t runaway = ZB_JSON_MAX_DEPTH * 1000;
-    char *deep = (char *)malloc(runaway);
-    CHECK(deep != NULL);
-    if (deep != NULL) {
-        memset(deep, '[', runaway);
-        CHECK(!is_valid_json(deep, runaway));
-        free(deep);
-    }
-
-    /* Nesting exactly at the cap validates; one level deeper is rejected. */
-    CHECK(nested_ok("[", "]", ZB_JSON_MAX_DEPTH));
-    CHECK(!nested_ok("[", "]", ZB_JSON_MAX_DEPTH + 1));
-    CHECK(nested_ok("{\"a\":", "}", ZB_JSON_MAX_DEPTH));
-    CHECK(!nested_ok("{\"a\":", "}", ZB_JSON_MAX_DEPTH + 1));
-
-    /* Alternating object/array nesting. */
-    CHECK(nested_ok("{\"a\":[", "]}", ZB_JSON_MAX_DEPTH / 2));
-    CHECK(!nested_ok("{\"a\":[", "]}", ZB_JSON_MAX_DEPTH / 2 + 1));
-}
-
 static void test_table_name(void)
 {
     CHECK(zb_table_name_is_valid(sv("catalog.schema.table")));
@@ -198,105 +74,82 @@ static void test_table_name(void)
 
 static void test_url_validate(void)
 {
-    char *host = NULL;
-    bool https = false;
-
-    CHECK_EQ_INT(zb_url_validate("https://ws.zerobus.r.cloud.databricks.com",
-                                 &host, &https),
-                 ZB_URL_OK);
-    CHECK(host != NULL &&
-          strcmp(host, "ws.zerobus.r.cloud.databricks.com") == 0);
-    CHECK(https);
-    free(host);
-    host = NULL;
-
-    /* Port and path are stripped from the returned host. */
+    /* Accepted: bare origins, http or https, with or without a port, and a
+     * single-label host (no workspace-subdomain requirement). */
     CHECK_EQ_INT(
-        zb_url_validate("https://host.example.com:8443/path", &host, &https),
+        zb_url_validate(sv("https://ws.zerobus.r.cloud.databricks.com")),
         ZB_URL_OK);
-    CHECK(host != NULL && strcmp(host, "host.example.com") == 0);
-    free(host);
-    host = NULL;
-
-    /* Both out-params are optional. */
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com", NULL, NULL),
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:8443")),
                  ZB_URL_OK);
-
-    /* http is valid syntax; the scheme is reported, not rejected. Requiring
-     * TLS is the caller's policy. */
-    CHECK_EQ_INT(zb_url_validate("http://host.example.com", &host, &https),
-                 ZB_URL_OK);
-    CHECK(!https);
-    free(host);
-    host = NULL;
-
+    CHECK_EQ_INT(zb_url_validate(sv("http://host.example.com")), ZB_URL_OK);
+    CHECK_EQ_INT(zb_url_validate(sv("http://localhost:8080")), ZB_URL_OK);
+    CHECK_EQ_INT(zb_url_validate(sv("https://localhost")), ZB_URL_OK);
     /* A single trailing dot is the DNS root form. */
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com.", &host, &https),
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com.")), ZB_URL_OK);
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:443")),
                  ZB_URL_OK);
-    free(host);
-    host = NULL;
+    /* The scheme is case-insensitive (RFC 3986 §3.1). */
+    CHECK_EQ_INT(zb_url_validate(sv("HTTPS://host.example.com")), ZB_URL_OK);
+    CHECK_EQ_INT(zb_url_validate(sv("HtTp://localhost")), ZB_URL_OK);
 
-    /* No scheme at all. */
-    CHECK_EQ_INT(zb_url_validate("host.example.com", &host, &https),
+    /* No scheme, an unsupported one, a bare truncated scheme, or no input. */
+    CHECK_EQ_INT(zb_url_validate(sv("host.example.com")), ZB_URL_NO_SCHEME);
+    CHECK_EQ_INT(zb_url_validate(sv("ftp://host.example.com")),
                  ZB_URL_NO_SCHEME);
-    CHECK(host == NULL);
-    CHECK_EQ_INT(zb_url_validate("ftp://host.example.com", &host, &https),
+    CHECK_EQ_INT(zb_url_validate(sv("http")), ZB_URL_NO_SCHEME);
+    CHECK_EQ_INT(zb_url_validate((zerobus_string_view_t){NULL, 0}),
                  ZB_URL_NO_SCHEME);
-    CHECK_EQ_INT(zb_url_validate(NULL, &host, &https), ZB_URL_NO_SCHEME);
 
     /* Missing host. */
-    CHECK_EQ_INT(zb_url_validate("https://", &host, &https), ZB_URL_EMPTY_HOST);
-    CHECK_EQ_INT(zb_url_validate("https:///path", &host, &https),
-                 ZB_URL_EMPTY_HOST);
-    CHECK_EQ_INT(zb_url_validate("https://:443", &host, &https),
-                 ZB_URL_EMPTY_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://")), ZB_URL_EMPTY_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https:///path")), ZB_URL_EMPTY_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://:443")), ZB_URL_EMPTY_HOST);
 
-    /* Empty labels are not a valid hostname. */
-    CHECK_EQ_INT(zb_url_validate("https://a..b", &host, &https),
-                 ZB_URL_BAD_HOST);
-    CHECK(host == NULL);
-    CHECK_EQ_INT(zb_url_validate("https://.a", &host, &https), ZB_URL_BAD_HOST);
-    CHECK_EQ_INT(zb_url_validate("https://a..b:443/p", &host, &https),
-                 ZB_URL_BAD_HOST);
+    /* Empty labels are not a valid hostname; a malformed host is reported even
+     * when a path also follows. */
+    CHECK_EQ_INT(zb_url_validate(sv("https://a..b")), ZB_URL_BAD_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://.a")), ZB_URL_BAD_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://a..b:443/p")), ZB_URL_BAD_HOST);
 
-    /* Userinfo, IPv6 literals, and unsafe host characters are rejected. */
-    CHECK_EQ_INT(
-        zb_url_validate("https://user@host.example.com", &host, &https),
-        ZB_URL_BAD_HOST);
-    CHECK(host == NULL);
-    CHECK_EQ_INT(zb_url_validate("https://[::1]", &host, &https),
+    /* Userinfo, IPv6 literals, and forbidden host characters are rejected. */
+    CHECK_EQ_INT(zb_url_validate(sv("https://user@host.example.com")),
                  ZB_URL_BAD_HOST);
-    CHECK_EQ_INT(zb_url_validate("https://ho st.example.com", &host, &https),
+    /* Userinfo with a password: '@' is caught before the ':' split, so this is
+     * BAD_HOST, not a bogus BAD_PORT. */
+    CHECK_EQ_INT(zb_url_validate(sv("https://user:pass@host.example.com")),
+                 ZB_URL_BAD_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://[::1]")), ZB_URL_BAD_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://ho st.example.com")),
+                 ZB_URL_BAD_HOST);
+    CHECK_EQ_INT(zb_url_validate(sv("https://ho^st.example.com")),
                  ZB_URL_BAD_HOST);
 
     /* A ":port" must be a number in 1..65535. */
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com:", &host, &https),
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:")),
                  ZB_URL_BAD_PORT);
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com:abc", &host, &https),
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:abc")),
                  ZB_URL_BAD_PORT);
-    CHECK_EQ_INT(
-        zb_url_validate("https://host.example.com:99999", &host, &https),
-        ZB_URL_BAD_PORT);
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com:0", &host, &https),
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:99999")),
                  ZB_URL_BAD_PORT);
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com:443", &host, &https),
-                 ZB_URL_OK);
-    free(host);
-    host = NULL;
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:0")),
+                 ZB_URL_BAD_PORT);
 
-    /* The authority ends at '?' or '#'; the host is extracted and the rest
-     * ignored. */
-    CHECK_EQ_INT(zb_url_validate("https://host.example.com?x=1", &host, &https),
-                 ZB_URL_OK);
-    CHECK(host != NULL && strcmp(host, "host.example.com") == 0);
-    free(host);
-    host = NULL;
-    CHECK_EQ_INT(
-        zb_url_validate("https://host.example.com#frag", &host, &https),
-        ZB_URL_OK);
-    CHECK(host != NULL && strcmp(host, "host.example.com") == 0);
-    free(host);
-    host = NULL;
+    /* Only a bare origin is accepted: a path, query, fragment, or even a
+     * trailing '/' is rejected. */
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com/")),
+                 ZB_URL_HAS_PATH);
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com/path")),
+                 ZB_URL_HAS_PATH);
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com:8443/path")),
+                 ZB_URL_HAS_PATH);
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com?x=1")),
+                 ZB_URL_HAS_PATH);
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com#frag")),
+                 ZB_URL_HAS_PATH);
+    /* Backslash is a path delimiter for http/https (WHATWG '\' == '/'), so it
+     * ends the authority like '/'. */
+    CHECK_EQ_INT(zb_url_validate(sv("https://host.example.com\\path")),
+                 ZB_URL_HAS_PATH);
 }
 
 static void test_host_labels(void)
@@ -372,8 +225,6 @@ int main(void)
 {
     test_view_classification();
     test_utf8();
-    test_json();
-    test_json_depth();
     test_table_name();
     test_url_validate();
     test_host_labels();

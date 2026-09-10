@@ -75,6 +75,33 @@ zerobus_string_view_t zerobus_error_message(const zerobus_error_t *error)
     return (zerobus_string_view_t){error->message, error->message_len};
 }
 
+zerobus_status_t zerobus_error_status(const zerobus_error_t *error)
+{
+    if (error == NULL) {
+        return ZEROBUS_STATUS_UNKNOWN;
+    }
+    return error->code;
+}
+
+/* Temporary status-based classification until the transport core defines
+ * retryability precisely. */
+bool zerobus_error_is_retryable(const zerobus_error_t *error)
+{
+    if (error == NULL) {
+        return false;
+    }
+    switch (error->code) {
+    case ZEROBUS_STATUS_INVALID_ARGUMENT:
+    case ZEROBUS_STATUS_UNAUTHENTICATED:
+    case ZEROBUS_STATUS_PERMISSION_DENIED:
+    case ZEROBUS_STATUS_NOT_FOUND:
+    case ZEROBUS_STATUS_UNIMPLEMENTED:
+        return false;
+    default:
+        return true;
+    }
+}
+
 void zerobus_error_free(zerobus_error_t *error)
 {
     if (error == NULL) {

@@ -32,11 +32,11 @@ zerobus_stream_builder_new(zerobus_sdk_t *sdk,
                            zerobus_stream_builder_t **out_builder,
                            zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
-    }
     if (out_builder != NULL) {
         *out_builder = NULL;
+    }
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (sdk == NULL || out_builder == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -57,8 +57,8 @@ zerobus_stream_builder_set_table(zerobus_stream_builder_t *builder,
                                  zerobus_string_view_t table_name,
                                  zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (builder == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -83,8 +83,8 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
     zerobus_stream_builder_t *builder, zerobus_string_view_t client_id,
     zerobus_string_view_t client_secret, zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (builder == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -109,27 +109,16 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
     return ZEROBUS_STATUS_OK;
 }
 
-void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
-{
-    if (builder == NULL) {
-        return;
-    }
-    free(builder->table);
-    free(builder->client_id);
-    zb_secure_free_cstr(builder->client_secret);
-    free(builder);
-}
-
 zerobus_status_t
 zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                              zerobus_stream_t **out_stream,
                              zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
-    }
     if (out_stream != NULL) {
         *out_stream = NULL;
+    }
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (builder == NULL || out_stream == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -162,15 +151,25 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     return ZEROBUS_STATUS_OK;
 }
 
-/* ---- ingest ------------------------------------------------------------ */
-
-zerobus_status_t
-zerobus_stream_ingest_json_record(zerobus_stream_t *stream,
-                                  zerobus_string_view_t json_record,
-                                  zerobus_error_t **out_error)
+void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
+    if (builder == NULL) {
+        return;
+    }
+    free(builder->table);
+    free(builder->client_id);
+    zb_secure_free_cstr(builder->client_secret);
+    free(builder);
+}
+
+/* ---- stream ------------------------------------------------------------ */
+
+zerobus_status_t zerobus_stream_ingest_json_record(
+    zerobus_stream_t *stream, zerobus_string_view_t json_record,
+    zerobus_offset_t *out_offset, zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (stream == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -182,58 +181,58 @@ zerobus_stream_ingest_json_record(zerobus_stream_t *stream,
     }
     if (zb_is_empty(json_record)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record must be a non-empty JSON value");
+                       "record must be non-empty");
     }
     if (json_record.len > ZB_MAX_PAYLOAD_BYTES) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "record of %zu bytes exceeds the %u-byte limit",
                        json_record.len, (unsigned)ZB_MAX_PAYLOAD_BYTES);
     }
-    if (!zb_is_valid_json(json_record)) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record is not a well-formed UTF-8 JSON value");
-    }
 
-    /* TODO: copy the record, assign its sequence, and queue it for the sender.
-     */
-    return ZEROBUS_STATUS_OK;
+    /* TODO: copy the record, assign its offset, and queue it for the sender. On
+     * success write the offset to *out_offset when non-NULL. Returns
+     * UNIMPLEMENTED until the networking core lands. */
+    (void)out_offset;
+    return ZEROBUS_STATUS_UNIMPLEMENTED;
 }
-
-/* ---- flush ------------------------------------------------------------- */
 
 zerobus_status_t zerobus_stream_flush(zerobus_stream_t *stream,
                                       zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (stream == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
     }
-    /* TODO: wait for the server to acknowledge every queued record. */
-    return ZEROBUS_STATUS_OK;
+    if (stream->closed) {
+        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                       "stream is closing or closed");
+    }
+    /* TODO: wait for the server to acknowledge every queued record. Returns
+     * UNIMPLEMENTED until the networking core lands. */
+    return ZEROBUS_STATUS_UNIMPLEMENTED;
 }
-
-/* ---- close ------------------------------------------------------------- */
 
 zerobus_status_t zerobus_stream_close(zerobus_stream_t *stream,
                                       zerobus_error_t **out_error)
 {
-    if (out_error != NULL) {
-        *out_error = NULL;
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (stream == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
+    }
+    if (stream->closed) {
+        return ZEROBUS_STATUS_OK;
     }
     /* TODO: flush pending records before teardown, returning any flush error.
      */
     stream->closed = true;
     return ZEROBUS_STATUS_OK;
 }
-
-/* ---- free -------------------------------------------------------------- */
 
 void zerobus_stream_free(zerobus_stream_t *stream)
 {

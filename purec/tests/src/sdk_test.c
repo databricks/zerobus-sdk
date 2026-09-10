@@ -48,16 +48,16 @@ static void test_sdk_builder_validation(void)
     zerobus_sdk_builder_free(b);
 }
 
-static void test_sdk_builder_bad_endpoint(void)
+static void test_sdk_builder_endpoint_rules(void)
 {
     zerobus_error_t *err = NULL;
     zerobus_sdk_builder_t *b = NULL;
     zerobus_sdk_builder_new(&b, NULL);
 
-    /* The zerobus endpoint setter validates the URL immediately (fail-fast),
-     * leaving the builder's previous value untouched on rejection. */
+    /* The setter validates the URL immediately (fail-fast), leaving the
+     * builder's previous value untouched on rejection. */
 
-    /* Missing scheme. */
+    /* Rejected: missing scheme. */
     CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
                      b, sv("ws.zerobus.databricks.com"), &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
@@ -65,55 +65,52 @@ static void test_sdk_builder_bad_endpoint(void)
     zerobus_error_free(err);
     err = NULL;
 
-    /* Plaintext scheme is rejected (secrets must not traverse http). */
-    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
-                     b, sv("http://ws.zerobus.databricks.com"), &err),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
-    zerobus_error_free(err);
-    err = NULL;
-
-    /* Single-label host has no workspace subdomain. */
-    CHECK_EQ_INT(
-        zerobus_sdk_builder_set_endpoint(b, sv("https://localhostname"), &err),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
-    zerobus_error_free(err);
-    err = NULL;
-
-    /* Scheme present but no host. */
+    /* Rejected: no host, an empty label, a malformed port. */
     CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(b, sv("https://"), &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
-
-    /* Host with an empty label. */
     CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(b, sv("https://a..b"), &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
-
-    /* A malformed ":port". */
     CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
                      b, sv("https://ws.zerobus.databricks.com:notaport"), &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
 
-    /* Single label with a DNS-root trailing dot still has no subdomain. */
-    CHECK_EQ_INT(
-        zerobus_sdk_builder_set_endpoint(b, sv("https://localhost."), &err),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    /* Rejected: a path or a trailing slash — only a bare origin is stored. */
+    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
+                     b, sv("https://ws.zerobus.databricks.com/path"), &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    zerobus_error_free(err);
+    err = NULL;
+    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
+                     b, sv("https://ws.zerobus.databricks.com/"), &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
 
-    /* The UC endpoint setter validates too, but without the subdomain rule:
-     * a bad host is rejected, while a single-label host is accepted. */
+    /* Accepted: http (plaintext, for local/dev) and a single-label host — no
+     * https-only or workspace-subdomain rule. */
+    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
+                     b, sv("http://ws.zerobus.databricks.com"), &err),
+                 ZEROBUS_STATUS_OK);
+    CHECK(err == NULL);
+    CHECK_EQ_INT(
+        zerobus_sdk_builder_set_endpoint(b, sv("https://localhost:8080"), &err),
+        ZEROBUS_STATUS_OK);
+    CHECK(err == NULL);
+
+    /* The UC endpoint setter uses the same rules. */
     CHECK_EQ_INT(zerobus_sdk_builder_set_unity_catalog_endpoint(
                      b, sv("https://a..b"), &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
     CHECK_EQ_INT(zerobus_sdk_builder_set_unity_catalog_endpoint(
-                     b, sv("https://localhost"), &err),
+                     b, sv("http://localhost"), &err),
                  ZEROBUS_STATUS_OK);
     CHECK(err == NULL);
 
@@ -207,13 +204,44 @@ static void test_sdk_free_null_safe(void)
     CHECK(1);
 }
 
+/* A non-NULL *out_error on entry is refused at every entry point, and the
+ * existing error is left untouched (not overwritten, freed, or replaced). */
+static void test_sdk_out_error_must_be_null(void)
+{
+    zerobus_error_t *err = NULL;
+    /* Seed a live error through a genuine failure. */
+    CHECK_EQ_INT(zerobus_sdk_builder_new(NULL, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err != NULL);
+    const zerobus_error_t *seeded = err;
+
+    /* The guard runs first, so the other arguments do not matter. */
+    zerobus_sdk_builder_t *b = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    CHECK_EQ_INT(zerobus_sdk_builder_new(&b, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(b, sv("https://a.b.c"), &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_sdk_builder_set_unity_catalog_endpoint(
+                     b, sv("https://a.b"), &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+
+    CHECK(err == seeded); /* same object: untouched */
+    CHECK(b == NULL);
+    CHECK(sdk == NULL);
+    zerobus_error_free(err);
+}
+
 int main(void)
 {
     test_sdk_builder_validation();
-    test_sdk_builder_bad_endpoint();
+    test_sdk_builder_endpoint_rules();
     test_sdk_builder_edges();
     test_sdk_build_ok();
     test_sdk_setter_transactional();
     test_sdk_free_null_safe();
+    test_sdk_out_error_must_be_null();
     TEST_MAIN_RETURN();
 }

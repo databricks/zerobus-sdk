@@ -47,6 +47,40 @@ static void test_fail_null_out(void)
     CHECK_EQ_INT(s, ZEROBUS_STATUS_INTERNAL);
 }
 
+static void test_error_status(void)
+{
+    zerobus_error_t *e = zb_error_newf(ZEROBUS_STATUS_UNAVAILABLE, "temporary");
+    CHECK(e != NULL);
+    CHECK_EQ_INT(zerobus_error_status(e), ZEROBUS_STATUS_UNAVAILABLE);
+    zerobus_error_free(e);
+
+    /* A NULL error reports UNKNOWN. */
+    CHECK_EQ_INT(zerobus_error_status(NULL), ZEROBUS_STATUS_UNKNOWN);
+}
+
+static void test_error_is_retryable(void)
+{
+    zerobus_error_t *retry = zb_error_newf(ZEROBUS_STATUS_UNAVAILABLE, "again");
+    CHECK(retry != NULL);
+    CHECK(zerobus_error_is_retryable(retry));
+    zerobus_error_free(retry);
+
+    zerobus_error_t *fatal =
+        zb_error_newf(ZEROBUS_STATUS_INVALID_ARGUMENT, "nope");
+    CHECK(fatal != NULL);
+    CHECK(!zerobus_error_is_retryable(fatal));
+    zerobus_error_free(fatal);
+
+    /* Transient transport failures are retryable. */
+    zerobus_error_t *internal = zb_error_newf(ZEROBUS_STATUS_INTERNAL, "blip");
+    CHECK(internal != NULL);
+    CHECK(zerobus_error_is_retryable(internal));
+    zerobus_error_free(internal);
+
+    /* A NULL error is not retryable. */
+    CHECK(!zerobus_error_is_retryable(NULL));
+}
+
 int main(void)
 {
     test_error_newf();
@@ -54,5 +88,7 @@ int main(void)
     test_error_free_null();
     test_fail_sets_error();
     test_fail_null_out();
+    test_error_status();
+    test_error_is_retryable();
     TEST_MAIN_RETURN();
 }

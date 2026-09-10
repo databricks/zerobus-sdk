@@ -7,8 +7,10 @@
 #ifndef ZEROBUS_COMMON_H
 #define ZEROBUS_COMMON_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /*
  * ZEROBUS_API decorates the public symbols and ZEROBUS_CALL pins their calling
@@ -52,18 +54,18 @@ typedef struct zerobus_string_view {
     size_t len;
 } zerobus_string_view_t;
 
-/* C uses a compound literal. C++ (which has none) uses a braced temporary. */
-#ifdef __cplusplus
-#define ZEROBUS_STRING_LITERAL(value)                                          \
-    (zerobus_string_view_t{(value), sizeof(value) - 1u})
-#else
-#define ZEROBUS_STRING_LITERAL(value)                                          \
-    ((zerobus_string_view_t){(value), sizeof(value) - 1u})
-#endif
+static inline zerobus_string_view_t zerobus_string_view(const char *data)
+{
+    zerobus_string_view_t view = {data, data ? strlen(data) : 0};
+    return view;
+}
 
 /*
  * Status codes have a fixed-width ABI. Values are explicit and are never
  * reordered or reused.
+ *
+ * The set is not frozen until version 1.0: new codes may be added (never
+ * renumbered) as the networking core adds error paths.
  */
 typedef uint32_t zerobus_status_t;
 
@@ -83,6 +85,10 @@ enum {
     ZEROBUS_STATUS_OUT_OF_MEMORY = 12,
     ZEROBUS_STATUS_INTERNAL = 13
 };
+
+/* A record's position within its stream: returned by ingest as a handle to
+ * wait on, monotonically increasing. */
+typedef int64_t zerobus_offset_t;
 
 #ifdef __cplusplus
 } /* extern "C" */
