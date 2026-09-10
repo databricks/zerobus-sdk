@@ -289,6 +289,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         return WithReadLockAsync(NativeInterop.StreamGetUnackedRecordsAsync);
     }
 
+
     // ── Close / Dispose ──────────────────────────────────────────────────
 
     /// <summary>

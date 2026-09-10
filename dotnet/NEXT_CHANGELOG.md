@@ -4,6 +4,15 @@
 
 ### New Features and Improvements
 
+- Added Avro record format support (Beta, experimental).
+  `CreateAvroStream(tableName, avroSchemaJson, ...)` creates a typed
+  `AvroZerobusStream` accepting raw Avro binary payloads or record objects.
+  Feature-gated off by default; enable with `dotnet build -p:ZerobusAvro=true`.
+  Ephemeral-only; server support pending.
+- Added Avro record-object ingestion on `AvroZerobusStream`:
+  `IngestRecord(object)` and `IngestRecords(object[])` (+async variants) serialize
+  records to JSON with `System.Text.Json` and encode them against the stream's schema.
+
 ### Deprecations
 
 ### Bug Fixes
