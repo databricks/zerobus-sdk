@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <ZerobusAvro>true</ZerobusAvro>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Zerobus\Zerobus.csproj" />
+  </ItemGroup>
+
+</Project>

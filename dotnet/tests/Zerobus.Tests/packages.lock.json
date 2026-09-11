@@ -121,13 +121,31 @@
         "resolved": "13.0.3",
         "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
       },
+      "System.CodeDom": {
+        "type": "Transitive",
+        "resolved": "7.0.0",
+        "contentHash": "GLltyqEsE5/3IE+zYRP5sNa1l44qKl9v+bfdMcwg+M9qnQf47wK3H0SUR/T+3N4JEQXF3vV4CSuuo0rsg+nq2A=="
+      },
       "System.Diagnostics.EventLog": {
         "type": "Transitive",
         "resolved": "6.0.0",
         "contentHash": "lcyUiXTsETK2ALsZrX+nWuHSIQeazhqPphLfaRxzdGaG93+0kELqpgEHtwWOlQe7+jSFnKwaCAgL4kjeZCQJnw=="
       },
       "Databricks.Zerobus.Ingest.Sdk": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "Apache.Avro": "[1.11.3, )"
+        }
+      },
+      "Apache.Avro": {
+        "type": "CentralTransitive",
+        "requested": "[1.11.3, )",
+        "resolved": "1.11.3",
+        "contentHash": "rmm+jcVKDbwe5wYM3UBQ8N+CGicre+epSvP7KuB1crUV7Z0mGL9ndTZLxdCm8006gf/zgVhPfbee43FIYccXzQ==",
+        "dependencies": {
+          "Newtonsoft.Json": "10.0.3",
+          "System.CodeDom": "7.0.0"
+        }
       }
     },
     "net8.0": {
@@ -250,13 +268,31 @@
         "resolved": "13.0.3",
         "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
       },
+      "System.CodeDom": {
+        "type": "Transitive",
+        "resolved": "7.0.0",
+        "contentHash": "GLltyqEsE5/3IE+zYRP5sNa1l44qKl9v+bfdMcwg+M9qnQf47wK3H0SUR/T+3N4JEQXF3vV4CSuuo0rsg+nq2A=="
+      },
       "System.Diagnostics.EventLog": {
         "type": "Transitive",
         "resolved": "6.0.0",
         "contentHash": "lcyUiXTsETK2ALsZrX+nWuHSIQeazhqPphLfaRxzdGaG93+0kELqpgEHtwWOlQe7+jSFnKwaCAgL4kjeZCQJnw=="
       },
       "Databricks.Zerobus.Ingest.Sdk": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "Apache.Avro": "[1.11.3, )"
+        }
+      },
+      "Apache.Avro": {
+        "type": "CentralTransitive",
+        "requested": "[1.11.3, )",
+        "resolved": "1.11.3",
+        "contentHash": "rmm+jcVKDbwe5wYM3UBQ8N+CGicre+epSvP7KuB1crUV7Z0mGL9ndTZLxdCm8006gf/zgVhPfbee43FIYccXzQ==",
+        "dependencies": {
+          "Newtonsoft.Json": "10.0.3",
+          "System.CodeDom": "7.0.0"
+        }
       }
     }
   }

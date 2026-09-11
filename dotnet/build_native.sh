@@ -162,7 +162,10 @@ build_target() {
     target_path="$target_dir/$LIB_NAME"
 
     echo "→ Building $rid ($rust_target)"
-    cargo build --release --target "$rust_target"
+
+    # Always build with all features; the .NET-level gate controls exposure
+    cargo build --release --all-features --target "$rust_target"
+
     cargo_out="../target/$rust_target/release/$LIB_NAME"
 
     if [[ ! -f "$cargo_out" ]]; then
