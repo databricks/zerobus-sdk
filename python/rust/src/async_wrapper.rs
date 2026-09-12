@@ -15,7 +15,7 @@ use crate::arrow::{ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================
@@ -29,7 +29,13 @@ fn apply_table_and_format<'a>(
     let builder = builder.table(table_properties.table_name.clone());
     match table_properties.descriptor_proto.clone() {
         Some(descriptor) => builder.compiled_proto(descriptor),
-        None => builder.json(),
+        None => {
+            #[cfg(feature = "avro")]
+            if let Some(schema) = table_properties.avro_schema.clone() {
+                return builder.avro(schema);
+            }
+            builder.json()
+        }
     }
 }
 
@@ -87,6 +93,7 @@ impl PyAckFuture {
 #[pyclass]
 pub struct ZerobusStream {
     pub(crate) inner: Arc<RwLock<RustStream>>,
+    format: RecordFormat,
 }
 
 #[pymethods]
@@ -102,7 +109,7 @@ impl ZerobusStream {
         py: Python<'py>,
         payload: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream_clone = self.inner.clone();
 
         // Stage 1: enqueue, get offset. Stage 2: lazy wait_for_offset.
@@ -136,7 +143,7 @@ impl ZerobusStream {
         py: Python<'py>,
         payload: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
 
         future_into_py(py, async move {
@@ -151,7 +158,7 @@ impl ZerobusStream {
 
     /// Ingest a single record without waiting (fire-and-forget async)
     fn ingest_record_nowait(&self, payload: &Bound<'_, PyAny>) -> PyResult<()> {
-        let record_payload = extract_record_payload(payload)?;
+        let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
 
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
@@ -168,7 +175,7 @@ impl ZerobusStream {
         py: Python<'py>,
         payloads: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let record_payloads = extract_record_payloads(payloads)?;
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
         let stream = self.inner.clone();
 
         future_into_py(py, async move {
@@ -183,7 +190,7 @@ impl ZerobusStream {
 
     /// Ingest a batch of records without waiting (async)
     fn ingest_records_nowait(&self, payloads: &Bound<'_, PyAny>) -> PyResult<()> {
-        let record_payloads = extract_record_payloads(payloads)?;
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
         let stream = self.inner.clone();
 
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
@@ -322,6 +329,7 @@ impl ZerobusSdk {
         let table_properties = table_properties.clone();
         let opts = options.unwrap_or_default();
         opts.validate()?;
+        let format = table_properties.resolve_format(opts.record_type)?;
 
         future_into_py(py, async move {
             let sdk_guard = sdk.read().await;
@@ -331,6 +339,7 @@ impl ZerobusSdk {
             let stream = builder.build().await.map_err(map_error)?;
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
+                format,
             })
         })
     }
@@ -349,6 +358,7 @@ impl ZerobusSdk {
         let opts = options.unwrap_or_default();
         opts.validate()?;
         let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
+        let format = table_properties.resolve_format(opts.record_type)?;
 
         future_into_py(py, async move {
             let sdk_guard = sdk.read().await;
@@ -358,6 +368,7 @@ impl ZerobusSdk {
             let stream = builder.build().await.map_err(map_error)?;
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
+                format,
             })
         })
     }
@@ -421,6 +432,7 @@ impl ZerobusSdk {
     ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
         let old_stream_inner = old_stream.inner.clone();
+        let format = old_stream.format;
 
         future_into_py(py, async move {
             let guard = old_stream_inner.read().await;
@@ -432,6 +444,7 @@ impl ZerobusSdk {
 
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(new_stream)),
+                format,
             })
         })
     }

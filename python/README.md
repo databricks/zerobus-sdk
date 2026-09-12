@@ -107,6 +107,12 @@ installs `pyarrow` 22.0.0 or later, which is the first release with 3.14 wheels.
 On earlier versions it installs `pyarrow` below 22.0.0. Core ingestion (Protobuf
 and JSON) does not need `pyarrow` at all.
 
+Avro record format support is available with the `avro` extra (currently beta):
+
+```bash
+pip install "databricks-zerobus-ingest-sdk[avro]"
+```
+
 ## Quick Start
 
 ### Choose Your Serialization Format

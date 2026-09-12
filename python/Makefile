@@ -36,7 +36,7 @@ dev:
 	$(VENV) -m pip install --upgrade pip
 	@test -f LICENSE || cp ../LICENSE LICENSE
 	$(VENV) -m pip install -r requirements-dev.lock
-	$(VENV) -m maturin develop
+	$(VENV) -m maturin develop --all-features
 
 lock-dev: # requires uv
 	@test -f LICENSE || cp ../LICENSE LICENSE
@@ -48,7 +48,7 @@ install:
 build:
 	@echo "Building release wheel with $(PYTHON)..."
 	$(VENV) -m pip install --upgrade pip maturin
-	$(VENV) -m maturin build --release --strip --out dist
+	$(VENV) -m maturin build --release --strip --all-features --out dist
 	@echo ""
 	@echo "✓ Release wheel built successfully in dist/"
 	@ls -lh dist/*.whl 2>/dev/null || true
@@ -85,13 +85,13 @@ test:
 build-rust:
 	@echo "Building Rust extension (release mode)..."
 	@which maturin >/dev/null 2>&1 || (echo "Error: maturin not found. Install with: pip install maturin" && exit 1)
-	$(VENV) -m maturin build --release
+	$(VENV) -m maturin build --release --all-features
 	@echo "✓ Rust extension built successfully"
 
 develop-rust:
 	@echo "Building and installing Rust extension (development mode)..."
 	@which maturin >/dev/null 2>&1 || (echo "Error: maturin not found. Install with: pip install maturin" && exit 1)
-	$(VENV) -m maturin develop
+	$(VENV) -m maturin develop --all-features
 	@echo "✓ Rust extension installed in development mode"
 
 clean-rust:

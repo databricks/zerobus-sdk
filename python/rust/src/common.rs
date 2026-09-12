@@ -14,9 +14,9 @@ use databricks_zerobus_ingest_sdk::{
 /// crate version via `env!("CARGO_PKG_VERSION")` at the call site.
 pub(crate) const SDK_IDENTIFIER_PREFIX: &str = "zerobus-sdk-py";
 
-/// Type of records to ingest into the stream
+/// Type of records to ingest into the stream. Defaults to `UNSPECIFIED` (0).
 #[pyclass(from_py_object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecordType {
     #[pyo3(get)]
     pub value: i32,
@@ -24,6 +24,12 @@ pub struct RecordType {
 
 #[pymethods]
 impl RecordType {
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn UNSPECIFIED() -> Self {
+        RecordType { value: 0 }
+    }
+
     #[classattr]
     #[allow(non_snake_case)]
     fn PROTO() -> Self {
@@ -36,6 +42,12 @@ impl RecordType {
         RecordType { value: 2 }
     }
 
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn AVRO() -> Self {
+        RecordType { value: 4 }
+    }
+
     fn __int__(&self) -> i32 {
         self.value
     }
@@ -46,16 +58,12 @@ impl RecordType {
 
     fn __repr__(&self) -> String {
         match self.value {
+            0 => "RecordType.UNSPECIFIED".to_string(),
             1 => "RecordType.PROTO".to_string(),
             2 => "RecordType.JSON".to_string(),
+            4 => "RecordType.AVRO".to_string(),
             _ => format!("RecordType({})", self.value),
         }
-    }
-}
-
-impl Default for RecordType {
-    fn default() -> Self {
-        Self { value: 1 } // PROTO
     }
 }
 
@@ -68,13 +76,27 @@ pub struct TableProperties {
 
     // Internal field - stores the parsed DescriptorProto
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
+
+    #[cfg(feature = "avro")]
+    #[pyo3(get)]
+    pub avro_schema: Option<String>,
 }
 
 #[pymethods]
 impl TableProperties {
     #[new]
-    #[pyo3(signature = (table_name, descriptor_proto=None))]
-    fn new(table_name: String, descriptor_proto: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    #[pyo3(signature = (table_name, descriptor_proto=None, avro_schema=None))]
+    fn new(
+        table_name: String,
+        descriptor_proto: Option<&Bound<'_, PyAny>>,
+        avro_schema: Option<String>,
+    ) -> PyResult<Self> {
+        #[cfg(not(feature = "avro"))]
+        if avro_schema.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "avro_schema parameter requires the 'avro' feature (install: pip install databricks-zerobus-ingest-sdk[avro])",
+            ));
+        }
         let rust_descriptor = if let Some(obj) = descriptor_proto {
             if obj.is_none() {
                 None
@@ -152,19 +174,107 @@ impl TableProperties {
         Ok(Self {
             table_name,
             descriptor_proto: rust_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema,
         })
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "TableProperties(table_name='{}', descriptor_proto={})",
-            self.table_name,
-            if self.descriptor_proto.is_some() {
-                "Some(...)"
-            } else {
-                "None"
-            }
-        )
+        #[cfg(feature = "avro")]
+        {
+            format!(
+                "TableProperties(table_name='{}', descriptor_proto={}, avro_schema={})",
+                self.table_name,
+                if self.descriptor_proto.is_some() {
+                    "Some(...)"
+                } else {
+                    "None"
+                },
+                if self.avro_schema.is_some() {
+                    "Some(...)"
+                } else {
+                    "None"
+                }
+            )
+        }
+        #[cfg(not(feature = "avro"))]
+        {
+            format!(
+                "TableProperties(table_name='{}', descriptor_proto={})",
+                self.table_name,
+                if self.descriptor_proto.is_some() {
+                    "Some(...)"
+                } else {
+                    "None"
+                }
+            )
+        }
+    }
+
+    /// Record format implied by the schema: "proto", "json", or "avro".
+    #[getter]
+    #[pyo3(name = "record_format")]
+    fn record_format_str(&self) -> &'static str {
+        self.inferred_format().as_str()
+    }
+}
+
+/// The record encoding of a stream, fixed at creation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RecordFormat {
+    Proto,
+    Json,
+    #[cfg(feature = "avro")]
+    Avro,
+}
+
+impl RecordFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            RecordFormat::Proto => "proto",
+            RecordFormat::Json => "json",
+            #[cfg(feature = "avro")]
+            RecordFormat::Avro => "avro",
+        }
+    }
+
+    /// The `RecordType` value a client sets to request this format.
+    fn record_type_value(self) -> i32 {
+        match self {
+            RecordFormat::Proto => 1,
+            RecordFormat::Json => 2,
+            #[cfg(feature = "avro")]
+            RecordFormat::Avro => 4,
+        }
+    }
+}
+
+impl TableProperties {
+    /// The record format implied by the supplied schema.
+    fn inferred_format(&self) -> RecordFormat {
+        if self.descriptor_proto.is_some() {
+            return RecordFormat::Proto;
+        }
+        #[cfg(feature = "avro")]
+        if self.avro_schema.is_some() {
+            return RecordFormat::Avro;
+        }
+        RecordFormat::Json
+    }
+
+    /// The stream's record format. `UNSPECIFIED` takes the schema's implied
+    /// format; any other `record_type` must match it.
+    pub(crate) fn resolve_format(&self, record_type: RecordType) -> PyResult<RecordFormat> {
+        let inferred = self.inferred_format();
+        if record_type.value == 0 || record_type.value == inferred.record_type_value() {
+            Ok(inferred)
+        } else {
+            Err(PyValueError::new_err(format!(
+                "record_type {} conflicts with the schema, which implies {}",
+                record_type.__repr__(),
+                inferred.as_str(),
+            )))
+        }
     }
 }
 
@@ -356,7 +466,7 @@ impl Default for StreamConfigurationOptions {
             recovery_retries: 4,
             server_lack_of_ack_timeout_ms: 60_000,
             flush_timeout_ms: 300_000,
-            record_type: RecordType { value: 1 }, // PROTO
+            record_type: RecordType::default(), // UNSPECIFIED
             stream_paused_max_wait_time_ms: None,
             callback_max_wait_time_ms: Some(5_000),
             ack_callback: None,
@@ -442,47 +552,78 @@ impl StreamConfigurationOptions {
 // SHARED HELPERS (used by sync_wrapper and async_wrapper)
 // =============================================================================
 
-/// Coerce a Python record payload into a Rust `EncodedRecord`.
-pub(crate) fn extract_record_payload(payload: &Bound<'_, PyAny>) -> PyResult<EncodedRecord> {
-    if let Ok(bytes) = payload.cast::<PyBytes>() {
-        Ok(EncodedRecord::Proto(bytes.as_bytes().to_vec()))
-    } else if let Ok(json_str) = payload.extract::<String>() {
-        Ok(EncodedRecord::Json(json_str))
-    } else if let Ok(bytes) = payload.extract::<Vec<u8>>() {
-        Ok(EncodedRecord::Proto(bytes))
-    } else if payload.hasattr("SerializeToString")? {
-        let serialize_method = payload.getattr("SerializeToString")?;
-        let serialized_bytes: Vec<u8> = serialize_method.call0()?.extract()?;
-        Ok(EncodedRecord::Proto(serialized_bytes))
-    } else {
-        let py = payload.py();
-        let json_module = py.import("json")?;
-        let json_dumps = json_module.getattr("dumps")?;
-        let json_str: String = json_dumps.call1((payload,))?.extract()?;
-        Ok(EncodedRecord::Json(json_str))
+/// Coerce a Python record payload into an `EncodedRecord` according to the
+/// stream's `RecordFormat`. Each format accepts its pre-encoded bytes form or
+/// its native Python object; any other type is a `TypeError`.
+pub(crate) fn extract_record_payload(
+    payload: &Bound<'_, PyAny>,
+    format: RecordFormat,
+) -> PyResult<EncodedRecord> {
+    match format {
+        RecordFormat::Proto => Ok(EncodedRecord::Proto(extract_proto_bytes(payload)?)),
+        RecordFormat::Json => Ok(EncodedRecord::Json(extract_json_string(payload)?)),
+        #[cfg(feature = "avro")]
+        RecordFormat::Avro => Ok(EncodedRecord::Avro(extract_avro_bytes(payload)?)),
     }
 }
 
-pub(crate) fn extract_record_payloads(payloads: &Bound<'_, PyAny>) -> PyResult<Vec<EncodedRecord>> {
+/// Proto: a protobuf message (serialized via `SerializeToString`) or bytes.
+fn extract_proto_bytes(payload: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = payload.cast::<PyBytes>() {
+        Ok(bytes.as_bytes().to_vec())
+    } else if payload.hasattr("SerializeToString")? {
+        let serialized: Vec<u8> = payload.getattr("SerializeToString")?.call0()?.extract()?;
+        Ok(serialized)
+    } else if let Ok(bytes) = payload.extract::<Vec<u8>>() {
+        Ok(bytes)
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "proto stream expects a protobuf message or bytes",
+        ))
+    }
+}
+
+/// JSON: a JSON string, or any JSON-serializable object encoded via `json.dumps`.
+fn extract_json_string(payload: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(json_str) = payload.extract::<String>() {
+        Ok(json_str)
+    } else {
+        let py = payload.py();
+        let json_dumps = py.import("json")?.getattr("dumps")?;
+        json_dumps.call1((payload,))?.extract()
+    }
+}
+
+/// Avro: bytes pre-encoded by the Python layer (via fastavro against the schema).
+#[cfg(feature = "avro")]
+fn extract_avro_bytes(payload: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = payload.cast::<PyBytes>() {
+        Ok(bytes.as_bytes().to_vec())
+    } else if let Ok(bytes) = payload.extract::<Vec<u8>>() {
+        Ok(bytes)
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Avro payload must be bytes (pre-encoded by the Python layer)",
+        ))
+    }
+}
+
+pub(crate) fn extract_record_payloads(
+    payloads: &Bound<'_, PyAny>,
+    format: RecordFormat,
+) -> PyResult<Vec<EncodedRecord>> {
     let mut out = Vec::new();
 
     if let Ok(list) = payloads.cast::<PyList>() {
         out.reserve(list.len());
         for item in list.iter() {
-            out.push(extract_record_payload(&item)?);
-        }
-    } else if let Ok(bytes_list) = payloads.extract::<Vec<Vec<u8>>>() {
-        for bytes in bytes_list {
-            out.push(EncodedRecord::Proto(bytes));
-        }
-    } else if let Ok(json_list) = payloads.extract::<Vec<String>>() {
-        for json in json_list {
-            out.push(EncodedRecord::Json(json));
+            out.push(extract_record_payload(&item, format)?);
         }
     } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Payloads must be a list",
-        ));
+        // Any other sequence/iterable of records; each item is coerced by format.
+        for item in payloads.try_iter()? {
+            out.push(extract_record_payload(&item?, format)?);
+        }
     }
 
     Ok(out)
@@ -492,12 +633,13 @@ pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> Py
     match record {
         EncodedRecord::Proto(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
         EncodedRecord::Json(json_str) => PyBytes::new(py, json_str.as_bytes()).into_any().unbind(),
+        #[cfg(feature = "avro")]
+        EncodedRecord::Avro(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
     }
 }
 
 /// Apply a Python `StreamConfigurationOptions` to a `StreamBuilder` via the
-/// builder's setters. Record format is set separately by `apply_table_and_format`
-/// from `TableProperties`; `StreamConfigurationOptions.record_type` is ignored.
+/// builder's setters. Record format is applied separately by `apply_table_and_format`.
 pub(crate) fn apply_grpc_options<'a>(
     builder: StreamBuilder<'a>,
     opts: &StreamConfigurationOptions,
