@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "error.h"
+#include "zerobus/common.h"
 #include "zerobus/error.h"
 
 static char *format_message(const char *fmt, va_list ap, size_t *out_len)
@@ -92,6 +93,7 @@ bool zerobus_error_is_retryable(const zerobus_error_t *error)
     }
     switch (error->code) {
     case ZEROBUS_STATUS_INVALID_ARGUMENT:
+    case ZEROBUS_STATUS_FAILED_PRECONDITION:
     case ZEROBUS_STATUS_UNAUTHENTICATED:
     case ZEROBUS_STATUS_PERMISSION_DENIED:
     case ZEROBUS_STATUS_NOT_FOUND:

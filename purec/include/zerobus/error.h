@@ -47,7 +47,10 @@ ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_error_status(const zerobus_error_t *error);
 
 /* Whether retrying the failed operation may succeed (a transient failure).
- * Derived from the status code. False for a NULL error. */
+ * Derived from the status code. False for a NULL error.
+ *
+ * Temporary status-based classification until the transport core defines
+ * retryability precisely. */
 ZEROBUS_API bool ZEROBUS_CALL
 zerobus_error_is_retryable(const zerobus_error_t *error);
 

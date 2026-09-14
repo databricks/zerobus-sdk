@@ -43,20 +43,23 @@ help:
 	@echo "  make check      - fmt-check + lint (static gates, no tests)"
 	@echo "  make verify     - Full workspace check: check + tests, plain and sanitized"
 	@echo "  make coverage   - Coverage build+test, then gcov: read .gcov files for uncovered lines (#####)"
-	@echo "  make clean      - Remove the build dirs (build, build-*, and BUILD_DIR)"
+	@echo "  make clean      - Remove the build dirs (build and build-*)"
 	@echo ""
 	@echo "  Add SANITIZE=address (or thread/undefined) to build+test with a"
 	@echo "  sanitizer, e.g. 'make test SANITIZE=address'."
+	@echo ""
+	@echo "  Override BUILD_DIR to build elsewhere. Tip: name it build-*"
+	@echo "  and 'make clean' will remove it for you."
 
 configure:
-	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	cmake -S . -B "$(BUILD_DIR)" -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(SANITIZE_FLAG) $(CMAKE_EXTRA)
 
 build: configure
-	cmake --build $(BUILD_DIR) -j $(JOBS)
+	cmake --build "$(BUILD_DIR)" -j $(JOBS)
 
 test: build
-	cd $(BUILD_DIR) && ctest --output-on-failure
+	cd "$(BUILD_DIR)" && ctest --output-on-failure
 
 examples: build
 	@echo "Examples built under $(BUILD_DIR)/examples/"
@@ -86,12 +89,12 @@ verify:
 # Coverage: build and test with gcov instrumentation, then run gcov.
 # Read the generated .gcov files to see which lines are not covered.
 coverage:
-	rm -rf $(COV_DIR)
-	cmake -S . -B $(COV_DIR) -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="--coverage -O0 -g" \
+	rm -rf "$(COV_DIR)"
+	cmake -S . -B "$(COV_DIR)" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="--coverage -O0 -g" \
 		-DCMAKE_EXE_LINKER_FLAGS="--coverage" $(CMAKE_EXTRA)
-	cmake --build $(COV_DIR) -j $(JOBS)
-	cd $(COV_DIR) && ctest --output-on-failure
-	cd $(COV_OBJ_DIR) && $(GCOV) *.gcno
+	cmake --build "$(COV_DIR)" -j $(JOBS)
+	cd "$(COV_DIR)" && ctest --output-on-failure
+	cd "$(COV_OBJ_DIR)" && $(GCOV) *.gcno
 
 clean:
-	rm -rf $(BUILD_DIR) build build-*
+	rm -rf build build-*
