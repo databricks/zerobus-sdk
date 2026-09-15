@@ -4,45 +4,45 @@
     "net10.0": {
       "Microsoft.SourceLink.GitHub": {
         "type": "Direct",
-        "requested": "[10.0.103, )",
-        "resolved": "10.0.103",
-        "contentHash": "qZk7r40ftpZY+/sO019sgWAWfNqC2CLSspDdAxNYCJU/bCi/8jVwvOMjzb/d5gjCRNzQ4OCYgBfhdpQyVwLTyw==",
+        "requested": "[10.0.111, )",
+        "resolved": "10.0.111",
+        "contentHash": "ebijs4AieV43Anczb4JjtazG+bd6RcLl+k324ISeTiZ9lqk3pozbvav+BOt8CJxeRkCAhjjHlYzDQYg+93UIeA==",
         "dependencies": {
-          "Microsoft.Build.Tasks.Git": "10.0.103",
-          "Microsoft.SourceLink.Common": "10.0.103"
+          "Microsoft.Build.Tasks.Git": "10.0.111",
+          "Microsoft.SourceLink.Common": "10.0.111"
         }
       },
       "Microsoft.Build.Tasks.Git": {
         "type": "Transitive",
-        "resolved": "10.0.103",
-        "contentHash": "QoiCMcPuxC6eqRQmrmF9zBY96ejIznXtve/lJJbonGD9I5Aygf2AUCOWslGiCEtBbfWRSuUnepBjuuVOdAl5ag=="
+        "resolved": "10.0.111",
+        "contentHash": "IRJmiczCoN50PaT8pCFVGXEN1erN1kqWJaink4zN/2QprrQ/4rFhuhawaOQRoxnXQQw0ZFc+Hd+WuxNwz9RqbQ=="
       },
       "Microsoft.SourceLink.Common": {
         "type": "Transitive",
-        "resolved": "10.0.103",
-        "contentHash": "cMtGW5/r0ck72Jg2QwZcNTX59z+iB/B1kW84VMa/eX8L19DhHIuIcQjfK0pgLLBxd60Jl0Bj9GUolcM0MnJnZA=="
+        "resolved": "10.0.111",
+        "contentHash": "UMlgtOondQTLESEKkPhF0m/btzzA9bnJnj4S2Tm6mBe+Ls0ZQ5ZPJ9mG3+DoWIVUk7oVPD08uaYtj4rFz/liNg=="
       }
     },
     "net8.0": {
       "Microsoft.SourceLink.GitHub": {
         "type": "Direct",
-        "requested": "[10.0.103, )",
-        "resolved": "10.0.103",
-        "contentHash": "qZk7r40ftpZY+/sO019sgWAWfNqC2CLSspDdAxNYCJU/bCi/8jVwvOMjzb/d5gjCRNzQ4OCYgBfhdpQyVwLTyw==",
+        "requested": "[10.0.111, )",
+        "resolved": "10.0.111",
+        "contentHash": "ebijs4AieV43Anczb4JjtazG+bd6RcLl+k324ISeTiZ9lqk3pozbvav+BOt8CJxeRkCAhjjHlYzDQYg+93UIeA==",
         "dependencies": {
-          "Microsoft.Build.Tasks.Git": "10.0.103",
-          "Microsoft.SourceLink.Common": "10.0.103"
+          "Microsoft.Build.Tasks.Git": "10.0.111",
+          "Microsoft.SourceLink.Common": "10.0.111"
         }
       },
       "Microsoft.Build.Tasks.Git": {
         "type": "Transitive",
-        "resolved": "10.0.103",
-        "contentHash": "QoiCMcPuxC6eqRQmrmF9zBY96ejIznXtve/lJJbonGD9I5Aygf2AUCOWslGiCEtBbfWRSuUnepBjuuVOdAl5ag=="
+        "resolved": "10.0.111",
+        "contentHash": "IRJmiczCoN50PaT8pCFVGXEN1erN1kqWJaink4zN/2QprrQ/4rFhuhawaOQRoxnXQQw0ZFc+Hd+WuxNwz9RqbQ=="
       },
       "Microsoft.SourceLink.Common": {
         "type": "Transitive",
-        "resolved": "10.0.103",
-        "contentHash": "cMtGW5/r0ck72Jg2QwZcNTX59z+iB/B1kW84VMa/eX8L19DhHIuIcQjfK0pgLLBxd60Jl0Bj9GUolcM0MnJnZA=="
+        "resolved": "10.0.111",
+        "contentHash": "UMlgtOondQTLESEKkPhF0m/btzzA9bnJnj4S2Tm6mBe+Ls0ZQ5ZPJ9mG3+DoWIVUk7oVPD08uaYtj4rFz/liNg=="
       }
     }
   }

@@ -58,6 +58,8 @@ rotation, recovery, and terminal finalization.
   rebuilding, and IPC materialization.
 - [`metadata.rs`](metadata.rs) defines request and acknowledgment metadata.
 - [`options.rs`](options.rs) defines Arrow-specific configuration and contracts.
+- [`stats_size.rs`](stats_size.rs) reads row counts and uncompressed buffer sizes
+  from encoded IPC frames for the optional telemetry exporter.
 - `c_data.rs`, when enabled internally, imports canonical Arrow C Data into a
   Rust-owned `RecordBatch`.
 
@@ -150,8 +152,9 @@ Applying an acknowledgment:
 1. Rejects a watermark beyond `submitted_records`.
 2. Advances `last_acked_records` monotonically.
 3. Removes fully acknowledged pending ranges.
-4. Publishes the highest completed logical offset.
-5. Records when an explicit close target became durable.
+4. Dispatches `BatchAcked` for each removed offset when telemetry is enabled.
+5. Publishes the highest completed logical offset.
+6. Records when an explicit close target became durable.
 
 Partial acknowledgments leave a `PendingBatch` in place. Recovery or terminal
 retrieval slices that batch to its unacknowledged suffix rather than replaying
@@ -198,6 +201,20 @@ returns the trigger for the interrupted attempt.
 Authentication rejection invalidates cached credentials under a bounded
 deadline. Invalidation runs independently of explicit close so a rejected token
 is not left cached merely because close won the recovery race.
+
+## Telemetry
+
+`PendingBatch` shares an attempt counter with each outbound copy across automatic
+reconnects. The request body advances it on the first data frame. One accumulator
+tracks the current batch because the encoder drains its frames before pulling
+another batch. `BatchSent` is dispatched with the final frame; partial transmissions
+and transmissions with unreadable IPC statistics have no send event.
+
+The supervisor dispatches `BatchAcked` before publishing the acknowledged offset,
+and `Reconnected` after replay handoff and sender publication. Replay send events
+may precede `Reconnected`. Exporter calls can overlap across the request-body and
+supervisor tasks. See the [public telemetry contract](../../../../README.md#telemetry-beta)
+for delivery and aggregation limits.
 
 ## Transport and wrapper ownership
 

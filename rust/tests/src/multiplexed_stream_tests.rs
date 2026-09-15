@@ -662,6 +662,7 @@ mod multi_stream_tests {
         assert!(mux.is_closed());
         // A ready acknowledgment wins even though close also cancelled the mux token.
         mux.wait_for_message_id(offset).await?;
+        mux.close().await?;
 
         Ok(())
     }
@@ -695,6 +696,10 @@ mod failure_tests {
                         ack_up_to_offset: 0,
                         gate: Arc::clone(&healthy_ack),
                     },
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("second lane failure"),
+                        delay_ms: 0,
+                    },
                 ],
             )
             .await;
@@ -711,7 +716,7 @@ mod failure_tests {
                     },
                     MockResponse::Error {
                         status: tonic::Status::permission_denied("sub-stream failure"),
-                        delay_ms: 0,
+                        delay_ms: 100,
                     },
                 ],
             )
@@ -729,15 +734,41 @@ mod failure_tests {
 
         // Second ingest (stream 1 = FAIL) — queuing succeeds
         let offset1 = mux.ingest_record(b"record2".to_vec()).await?;
+        // Queue another record on stream 0 before stream 1's delayed failure.
+        let offset2 = mux.ingest_record(b"record3".to_vec()).await?;
 
         // But waiting for ack surfaces the sub-stream error
         let result = mux.wait_for_message_id(offset1).await;
         assert!(result.is_err(), "Expected error from failed sub-stream");
-        let sibling_result = tokio::time::timeout(Duration::from_secs(1), healthy_wait)
-            .await
-            .expect("poisoning must wake sibling acknowledgment waits");
+        assert!(
+            matches!(poll!(&mut healthy_wait), Poll::Pending),
+            "A sibling failure must not fail a healthy lane's message wait"
+        );
+        let mut poisoned_flush = Box::pin(mux.flush());
+        assert!(
+            matches!(poll!(&mut poisoned_flush), Poll::Pending),
+            "An already-poisoned mux must still flush its healthy lanes"
+        );
         healthy_ack.release();
-        assert!(sibling_result.is_err());
+        tokio::time::timeout(Duration::from_secs(1), healthy_wait)
+            .await
+            .expect("healthy message wait should finish after its acknowledgment")?;
+        let flush_error = tokio::time::timeout(Duration::from_secs(1), poisoned_flush)
+            .await
+            .expect("poisoned flush should finish after the healthy acknowledgment")
+            .expect_err("poisoned flush must return the stored lane failure");
+        assert!(
+            matches!(&flush_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            "Expected stored PermissionDenied from poisoned flush, got {flush_error:?}"
+        );
+        let second_lane_error = mux
+            .wait_for_message_id(offset2)
+            .await
+            .expect_err("the second lane should surface its own failure");
+        assert!(
+            matches!(&second_lane_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::Unauthenticated),
+            "Expected second lane's Unauthenticated error, got {second_lane_error:?}"
+        );
 
         // The sub-stream closed (non-retryable error), so the mux should reject
         // further ingestion with the original failure. Healthy siblings remain
@@ -764,6 +795,8 @@ mod failure_tests {
 
         let (mock_server, server_url) = start_mock_server().await?;
         let healthy_ack = Arc::new(MockResponseGate::new());
+        let terminal_error_gate = Arc::new(MockResponseGate::new());
+        let terminal_error_sent = Arc::new(tokio::sync::Notify::new());
         mock_server
             .inject_responses(
                 TABLE_OK,
@@ -787,28 +820,66 @@ mod failure_tests {
                         stream_id: "s1".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::Error {
+                    MockResponse::GatedError {
                         status: tonic::Status::permission_denied("fail"),
-                        delay_ms: 0,
+                        gate: Arc::clone(&terminal_error_gate),
+                        sent: Arc::clone(&terminal_error_sent),
                     },
                 ],
             )
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let s1 = create_test_stream(&sdk, TABLE_OK, default_options()).await?;
-        let s2 = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
+        let s1 = create_test_stream(
+            &sdk,
+            TABLE_FAIL,
+            TestOpts {
+                flush_timeout_ms: Some(50),
+                ..default_options()
+            },
+        )
+        .await?;
+        let s2 = create_test_stream(&sdk, TABLE_OK, default_options()).await?;
         let mux = MultiplexedStream::new(vec![s1, s2]);
 
-        mux.ingest_record(b"healthy".to_vec()).await?;
         mux.ingest_record(b"failing".to_vec()).await?;
+        mux.ingest_record(b"healthy".to_vec()).await?;
 
-        // A terminal lane must end flush without waiting for the healthy lane.
-        let flush_result = tokio::time::timeout(Duration::from_secs(1), mux.flush())
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while mock_server.get_write_count().await < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both mock responses should be armed");
+
+        // Lane 0's flush times out before its gated terminal error arrives.
+        // Lane 1 keeps the aggregate flush pending long enough for lane 0 to
+        // become terminal, so the mux must re-read the final PermissionDenied.
+        let mut flush = Box::pin(mux.flush());
+        assert!(matches!(poll!(&mut flush), Poll::Pending));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(75)).await;
+        assert!(matches!(poll!(&mut flush), Poll::Pending));
+        tokio::time::resume();
+        let terminal_error_was_sent = terminal_error_sent.notified();
+        tokio::pin!(terminal_error_was_sent);
+        terminal_error_gate.release();
+        tokio::time::timeout(Duration::from_secs(1), &mut terminal_error_was_sent)
             .await
-            .expect("flush must not wait for a poisoned sibling");
+            .expect("terminal error should be sent after releasing its gate");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(poll!(&mut flush), Poll::Pending));
         healthy_ack.release();
-        assert!(flush_result.is_err(), "Expected flush to fail");
+        let flush_result = tokio::time::timeout(Duration::from_secs(1), flush)
+            .await
+            .expect("flush should finish after the healthy lane acknowledges");
+        assert!(
+            matches!(&flush_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            "Expected terminal PermissionDenied from flush, got {flush_result:?}"
+        );
         assert!(
             mux.is_closed(),
             "Expected mux poisoned after sub-stream close"
@@ -1018,6 +1089,15 @@ mod failure_tests {
         assert!(result.is_err(), "Expected error from failed sub-stream");
         assert!(mux.is_closed(), "Expected mux to be poisoned");
 
+        let close_error = mux
+            .close()
+            .await
+            .expect_err("poisoned mux close should preserve the terminal failure");
+        assert!(
+            matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            "Expected PermissionDenied to beat the healthy lane timeout, got {close_error:?}"
+        );
+
         let mut unacked: Vec<_> = mux
             .get_unacked_records()
             .await?
@@ -1149,8 +1229,11 @@ mod failure_tests {
         for (waiter_index, result) in results.into_iter().enumerate() {
             match result {
                 Ok(message_id) => successes.push((waiter_index, message_id)),
-                Err(ZerobusError::InvalidStateError(_))
-                | Err(ZerobusError::StreamClosedError(_)) => errors += 1,
+                Err(ZerobusError::StreamClosedError(status))
+                    if status.code() == tonic::Code::PermissionDenied =>
+                {
+                    errors += 1
+                }
                 Err(e) => panic!("unexpected ingest error: {e:?}"),
             }
         }
@@ -1233,48 +1316,6 @@ mod failure_tests {
             !mux.is_closed(),
             "capacity timeout should not poison the mux"
         );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_public_is_closed_reports_closed_substream(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-
-        // Public `is_closed()` should be an eager status check: even when the
-        // mux has not lazily observed the failed lane through ingest/flush/wait,
-        // it should report a sub-stream that has closed asynchronously.
-        let (mock_server, server_url) = start_mock_server().await?;
-        mock_server
-            .inject_responses(
-                TABLE_FAIL,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "s1".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::Error {
-                        status: tonic::Status::permission_denied("async close"),
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
-
-        let sdk = create_test_sdk(&server_url).await?;
-        let stream = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
-
-        let _ = stream.ingest_record_offset(b"data".to_vec()).await?;
-        let mux = MultiplexedStream::new(vec![stream]);
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !mux.is_closed() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("mux public is_closed should report the closed inner stream");
 
         Ok(())
     }

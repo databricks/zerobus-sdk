@@ -111,6 +111,8 @@ pub struct ZerobusStream {
     /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
     /// It orchestrates the receiver and sender tasks.
     supervisor_task: tokio::task::JoinHandle<Result<(), ZerobusError>>,
+    /// Cached outcome of the bounded supervisor shutdown attempt.
+    supervisor_shutdown_result: Option<ZerobusResult<()>>,
     /// The generator of logical offset IDs. Used to generate monotonically increasing offset IDs, even if the stream recovers.
     logical_offset_id_generator: OffsetIdGenerator,
     /// Signal that the stream is caught up to the given offset.
@@ -210,6 +212,7 @@ impl ZerobusStream {
             landing_zone,
             oneshot_map,
             supervisor_task,
+            supervisor_shutdown_result: None,
             logical_offset_id_generator,
             logical_last_received_offset_id_tx,
             _logical_last_received_offset_id_rx,

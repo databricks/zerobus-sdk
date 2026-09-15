@@ -74,6 +74,13 @@ pub enum MockResponse {
     /// Error response
     #[allow(dead_code)]
     Error { status: Status, delay_ms: u64 },
+    /// Error response released explicitly by a test.
+    #[allow(dead_code)]
+    GatedError {
+        status: Status,
+        gate: Arc<MockResponseGate>,
+        sent: Arc<tokio::sync::Notify>,
+    },
 }
 
 /// Mock gRPC server for testing the Rust SDK
@@ -136,6 +143,7 @@ impl MockZerobusServer {
     }
 
     /// Get the number of distinct TCP connections that opened streams.
+    #[allow(dead_code)]
     pub async fn get_connection_count(&self) -> usize {
         self.connection_addresses.lock().await.len()
     }
@@ -602,6 +610,12 @@ async fn handle_mock_response(
                 sleep(Duration::from_millis(*delay_ms)).await;
             }
             let _ = tx.send(Err(status.clone())).await;
+            (false, current_index + 1)
+        }
+        MockResponse::GatedError { status, gate, sent } => {
+            gate.wait().await;
+            let _ = tx.send(Err(status.clone())).await;
+            sent.notify_waiters();
             (false, current_index + 1)
         }
         MockResponse::CreateStream { .. } => (true, current_index + 1),

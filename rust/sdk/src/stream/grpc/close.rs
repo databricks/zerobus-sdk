@@ -4,55 +4,20 @@
 //! flag, and cancels the supervisor and callback tasks. The IO tasks observe
 //! the cancellation and unwind on their own.
 
-#[cfg(feature = "testing")]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-#[cfg(feature = "testing")]
-use std::sync::Arc;
 
 use tokio::time::Duration;
-#[cfg(feature = "testing")]
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::ZerobusStream;
-use crate::ZerobusResult;
+use crate::{ZerobusError, ZerobusResult};
 
 /// Maximum time to wait for the supervisor task to finish during stream
 /// teardown.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
-
-/// Cloneable, task-independent subset of stream state needed for terminal
-/// shutdown. Multiplexed-stream poison cleanup keeps these handles so it can
-/// finish safely even if the initiating API future is cancelled.
-#[cfg(feature = "testing")]
-#[derive(Clone)]
-pub(crate) struct StreamShutdownHandle {
-    is_closed: Arc<AtomicBool>,
-    terminal_token: CancellationToken,
-    cancellation_token: CancellationToken,
-}
-
-#[cfg(feature = "testing")]
-impl StreamShutdownHandle {
-    pub(crate) fn new(
-        is_closed: Arc<AtomicBool>,
-        terminal_token: CancellationToken,
-        cancellation_token: CancellationToken,
-    ) -> Self {
-        Self {
-            is_closed,
-            terminal_token,
-            cancellation_token,
-        }
-    }
-
-    pub(crate) fn signal(&self) {
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.terminal_token.cancel();
-        self.cancellation_token.cancel();
-    }
-}
+/// Give cooperative tasks a chance to acknowledge abort, without waiting on
+/// synchronous user code that Tokio cannot interrupt.
+const ABORT_WAIT_TIMEOUT_MS: u64 = 100;
 
 impl ZerobusStream {
     /// Returns whether the stream has been closed.
@@ -97,35 +62,79 @@ impl ZerobusStream {
         let flush_result = self.flush().await;
         self.is_closed.store(true, Ordering::Relaxed);
         self.terminal_token.cancel();
-        self.shutdown_all_tasks_gracefully().await;
+        let _ = self.shutdown_supervisor().await;
+        self.shutdown_callbacks().await;
         flush_result
     }
 
-    /// Gracefully shuts down the supervisor task.
-    ///
-    /// Signals cancellation and waits for the task to exit. If the timeout
-    /// is provided and expires, forcefully aborts the task.
-    async fn shutdown_all_tasks_gracefully(&mut self) {
-        self.cancellation_token.cancel();
+    /// Stops a mux lane after its flush attempt. Cache the outcome and close
+    /// the lane before the caller starts cancellable callback draining.
+    #[cfg(feature = "testing")]
+    pub(crate) async fn close_after_flush(&mut self) -> Option<ZerobusError> {
+        if let Some(result) = &self.supervisor_shutdown_result {
+            return result.as_ref().err().cloned();
+        }
+        let task_error = self.shutdown_supervisor().await;
+        // The supervisor publishes the final error before cancelling this
+        // token. A clean shutdown's transient watch error must not be promoted
+        // to a terminal cause.
+        let lane_error = if self.terminal_token.is_cancelled() {
+            self.server_error_rx.borrow().clone()
+        } else {
+            None
+        };
+        let result = lane_error.or(task_error).map_or(Ok(()), Err);
+        self.supervisor_shutdown_result = Some(result.clone());
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.terminal_token.cancel();
+        result.err()
+    }
 
-        // Shutdown supervisor task.
-        match tokio::time::timeout(
+    /// Waits up to one second for cooperative shutdown, then at most 100ms
+    /// after abort. Synchronous user code may outlive that budget; the retained
+    /// handle is aborted and the timeout outcome is cached for retries.
+    async fn shutdown_supervisor(&mut self) -> Option<ZerobusError> {
+        if let Some(result) = &self.supervisor_shutdown_result {
+            return result.as_ref().err().cloned();
+        }
+        self.cancellation_token.cancel();
+        let joined = match tokio::time::timeout(
             Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
             &mut self.supervisor_task,
         )
         .await
         {
-            Ok(_) => {
-                debug!("Supervisor task exited gracefully");
-            }
+            Ok(result) => Some(result),
             Err(_) => {
                 warn!("Supervisor task did not exit within timeout, aborting");
                 self.supervisor_task.abort();
+                tokio::time::timeout(
+                    Duration::from_millis(ABORT_WAIT_TIMEOUT_MS),
+                    &mut self.supervisor_task,
+                )
+                .await
+                .ok()
             }
-        }
-        // Shutdown callback handler task, if there are any callbacks.
-        if let Some(task) = self.callback_handler_task.take() {
+        };
+        let result = match joined {
+            Some(Ok(result)) => result,
+            Some(Err(join_error)) if join_error.is_cancelled() => Ok(()),
+            Some(Err(join_error)) => Err(ZerobusError::UnexpectedStreamResponseError(format!(
+                "Supervisor task failed during shutdown: {join_error}"
+            ))),
+            None => Err(ZerobusError::ConnectionTimeout(
+                "Supervisor task did not stop after abort".into(),
+            )),
+        };
+        self.supervisor_shutdown_result = Some(result.clone());
+        result.err()
+    }
+
+    /// Retain the handle while awaiting callbacks so cancellation can be resumed.
+    pub(crate) async fn shutdown_callbacks(&mut self) {
+        if let Some(task) = self.callback_handler_task.as_mut() {
             Self::shutdown_callback_task(task, self.options.callback_max_wait_time_ms).await;
+            self.callback_handler_task.take();
         }
     }
 
@@ -136,11 +145,11 @@ impl ZerobusStream {
     /// Split out so the teardown can be exercised in isolation by tests
     /// (`CallbackHandlerHarness`, `testing` feature).
     pub(super) async fn shutdown_callback_task(
-        mut task: tokio::task::JoinHandle<()>,
+        task: &mut tokio::task::JoinHandle<()>,
         callback_max_wait_time_ms: Option<u64>,
     ) {
         if let Some(callback_max_wait_time_ms) = callback_max_wait_time_ms {
-            match tokio::time::timeout(Duration::from_millis(callback_max_wait_time_ms), &mut task)
+            match tokio::time::timeout(Duration::from_millis(callback_max_wait_time_ms), &mut *task)
                 .await
             {
                 Ok(_) => {
@@ -153,7 +162,7 @@ impl ZerobusStream {
             }
         } else {
             debug!("Callback max wait time is not set, waiting indefinitely");
-            let _ = (&mut task).await;
+            let _ = task.await;
         }
     }
 
@@ -164,15 +173,177 @@ impl ZerobusStream {
     // `close` or `Drop`.
     #[cfg(feature = "testing")]
     pub(crate) fn signal_shutdown(&self) {
-        self.shutdown_handle().signal();
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.terminal_token.cancel();
+        self.cancellation_token.cancel();
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    use tokio::sync::{oneshot, watch, Mutex, RwLock};
+    use tokio::task::JoinHandle;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::{
+        landing_zone::LandingZone, MultiplexedStream, NoAuthHeadersProvider, StreamType,
+        TableProperties,
+    };
+
+    // Substitute only background tasks; tests exercise public close, flush,
+    // and recovery, with explicit gates and no gRPC server scheduling.
+    fn test_stream(
+        supervisor: JoinHandle<ZerobusResult<()>>,
+        callback: Option<JoinHandle<()>>,
+    ) -> (ZerobusStream, watch::Sender<Option<ZerobusError>>) {
+        let (ack_tx, ack_rx) = watch::channel(None);
+        let (error_tx, error_rx) = watch::channel(None);
+        let stream = ZerobusStream {
+            stream_id: Some("cancelled-close".into()),
+            stream_type: StreamType::Ephemeral,
+            headers_provider: Arc::new(NoAuthHeadersProvider),
+            options: crate::StreamConfigurationOptions {
+                callback_max_wait_time_ms: None,
+                flush_timeout_ms: 1_000,
+                ..Default::default()
+            },
+            table_properties: TableProperties {
+                table_name: "catalog.schema.table".into(),
+                descriptor_proto: None,
+                message_descriptor: None,
+                #[cfg(feature = "avro")]
+                avro_schema: None,
+            },
+            landing_zone: Arc::new(LandingZone::new(1)),
+            oneshot_map: Arc::new(Mutex::new(Default::default())),
+            supervisor_task: supervisor,
+            supervisor_shutdown_result: None,
+            logical_offset_id_generator: Default::default(),
+            logical_last_received_offset_id_tx: ack_tx,
+            _logical_last_received_offset_id_rx: ack_rx,
+            failed_records: Arc::new(RwLock::new(Vec::new())),
+            is_closed: Arc::new(AtomicBool::new(false)),
+            sync_mutex: Arc::new(Mutex::new(())),
+            terminal_token: CancellationToken::new(),
+            server_error_rx: error_rx,
+            cancellation_token: CancellationToken::new(),
+            callback_handler_task: callback,
+            dynamic_message_descriptor: None,
+        };
+        (stream, error_tx)
     }
 
-    #[cfg(feature = "testing")]
-    pub(crate) fn shutdown_handle(&self) -> StreamShutdownHandle {
-        StreamShutdownHandle::new(
-            Arc::clone(&self.is_closed),
-            self.terminal_token.clone(),
-            self.cancellation_token.clone(),
-        )
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_mux_close_skips_flush_and_resumes_callbacks() {
+        let (release_callback, callback_gate) = oneshot::channel();
+        let callback = tokio::spawn(async { callback_gate.await.unwrap() });
+        let (stream, _error_tx) = test_stream(tokio::spawn(async { Ok(()) }), Some(callback));
+        stream
+            .ingest_record_offset(b"unacked".to_vec())
+            .await
+            .unwrap();
+        let lane_closed = Arc::clone(&stream.is_closed);
+        let mut mux = MultiplexedStream::new(vec![stream]);
+
+        // First flush times out after 1s, then close parks on callback draining.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1_100), mux.close())
+                .await
+                .is_err()
+        );
+        assert!(lane_closed.load(Ordering::Relaxed));
+        for _ in 0..2 {
+            assert!(tokio::time::timeout(Duration::from_millis(20), mux.close())
+                .await
+                .is_err());
+        }
+        release_callback.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(20), mux.close())
+            .await
+            .expect("retry must not flush the stopped lane for another second");
+        assert!(
+            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded)
+        );
+        let records: Vec<_> = mux.get_unacked_records().await.unwrap().collect();
+        assert!(
+            matches!(records.as_slice(), [crate::EncodedRecord::Proto(bytes)] if bytes == b"unacked")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_mux_close_retains_terminal_failure_after_all_acks() {
+        let (release_callback, callback_gate) = oneshot::channel();
+        let callback = tokio::spawn(async { callback_gate.await.unwrap() });
+        let (mut stream, error_tx) = test_stream(tokio::spawn(async { Ok(()) }), Some(callback));
+        let offset = stream
+            .ingest_record_offset(b"acked".to_vec())
+            .await
+            .unwrap();
+        stream
+            .logical_last_received_offset_id_tx
+            .send(Some(offset))
+            .unwrap();
+        stream.landing_zone.remove_all();
+        let cancelled = stream.cancellation_token.clone();
+        let terminal = stream.terminal_token.clone();
+        let closed = Arc::clone(&stream.is_closed);
+        // Publish the terminal failure during close, after its all-acked flush.
+        stream.supervisor_task = tokio::spawn(async move {
+            cancelled.cancelled().await;
+            let error =
+                ZerobusError::StreamClosedError(tonic::Status::permission_denied("terminal close"));
+            closed.store(true, Ordering::Relaxed);
+            error_tx.send(Some(error.clone())).unwrap();
+            terminal.cancel();
+            Err(error)
+        });
+        let mut mux = MultiplexedStream::new(vec![stream]);
+        assert!(tokio::time::timeout(Duration::from_millis(20), mux.close())
+            .await
+            .is_err());
+        release_callback.send(()).unwrap();
+        for _ in 0..2 {
+            let result = tokio::time::timeout(Duration::from_millis(20), mux.close())
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ordinary_close_bounds_post_abort_wait_on_synchronous_code() {
+        // Ensure an assertion failure also releases the blocking task, so the
+        // test runtime can shut down even when the close deadline regresses.
+        struct ReleaseOnDrop(std::sync::mpsc::Sender<()>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (release, blocked) = std::sync::mpsc::channel();
+        let release_guard = ReleaseOnDrop(release);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let supervisor = tokio::spawn(async move {
+            entered_tx.send(()).unwrap();
+            blocked.recv().unwrap(); // Models a synchronous credentials callback.
+            Ok(())
+        });
+        let (mut stream, _error_tx) = test_stream(supervisor, None);
+        entered_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), stream.close())
+            .await
+            .expect("close must remain bounded after abort")
+            .unwrap();
+        assert!(matches!(
+            stream.supervisor_shutdown_result,
+            Some(Err(ZerobusError::ConnectionTimeout(_)))
+        ));
+        assert!(!stream.supervisor_task.is_finished());
+        drop(release_guard);
     }
 }

@@ -52,12 +52,16 @@ mod proxy;
 mod record_types;
 pub mod schema;
 mod sdk;
+#[cfg(feature = "arrow-flight")]
+mod stats;
 mod stream;
 mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
 mod token_cache;
 
+#[cfg(feature = "avro")]
+pub use apache_avro::types::Value as AvroValue;
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
@@ -73,11 +77,19 @@ pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
+#[doc(hidden)]
+pub use record_types::PreparedInput;
+#[cfg(feature = "avro")]
+pub use record_types::{AvroBytes, AvroEncodedRecord, AvroRecord};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+#[cfg(feature = "arrow-flight")]
+pub use stats::{
+    channel_exporter, BatchStats, ChannelExporter, ReconnectReason, StatsExporter, StreamStat,
+};
 #[cfg(feature = "testing")]
 pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
@@ -110,6 +122,16 @@ pub enum StreamType {
     Persistent,
 }
 
+/// The Avro writer schema in the two forms the SDK needs: the raw JSON sent to the server
+/// on stream creation, and the parsed schema used to encode records at ingest. Held
+/// together so the two always coexist.
+#[cfg(feature = "avro")]
+#[derive(Debug, Clone)]
+pub(crate) struct AvroSchema {
+    pub(crate) json: String,
+    pub(crate) parsed: apache_avro::Schema,
+}
+
 /// The properties of the table to ingest to.
 ///
 /// Configure the table via the builder API:
@@ -124,6 +146,8 @@ pub(crate) struct TableProperties {
     pub(crate) table_name: String,
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
     pub(crate) message_descriptor: Option<MessageDescriptor>,
+    #[cfg(feature = "avro")]
+    pub(crate) avro_schema: Option<AvroSchema>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;

@@ -91,6 +91,7 @@ pub struct StreamConfigurationOptions {
     /// Supported values:
     /// - RecordType::Proto
     /// - RecordType::Json
+    /// - RecordType::Avro (requires the `avro` feature)
     /// - RecordType::Unspecified
     ///
     /// Default: RecordType::Proto
