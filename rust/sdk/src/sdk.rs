@@ -226,6 +226,9 @@ impl ZerobusSdk {
     /// or continue ingestion after closing a stream with unacknowledged batches.
     /// It creates a new stream with the same configuration and automatically ingests
     /// any batches that were not acknowledged in the original stream.
+    /// The telemetry exporter is shared with the original stream, but logical offsets
+    /// and transmission attempts start over. Recreation itself emits no `Reconnected`
+    /// event; use separate exporters when stream identity matters to your telemetry.
     ///
     /// # Arguments
     ///
@@ -281,6 +284,7 @@ impl ZerobusSdk {
             stream.headers_provider(),
             stream.options().clone(),
             Arc::clone(&self.sdk_identifier),
+            stream.stats_exporter(),
         )
         .await;
 

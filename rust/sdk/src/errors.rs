@@ -247,7 +247,7 @@ impl ZerobusError {
 ///
 /// Shared by both transports (proto `stream/grpc` and Arrow Flight) so their
 /// initial-setup credential-refresh behavior stays identical. It applies only to
-/// initial setup; reconnect paths keep the plain `recovery && is_retryable()` rule.
+/// initial setup; reconnect paths apply their own retry and credential-refresh policies.
 pub(crate) fn should_retry_initial_connection(
     error: &ZerobusError,
     recovery_enabled: bool,
