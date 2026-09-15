@@ -32,9 +32,6 @@ zerobus_stream_builder_new(zerobus_sdk_t *sdk,
                            zerobus_stream_builder_t **out_builder,
                            zerobus_error_t **out_error)
 {
-    if (out_builder != NULL) {
-        *out_builder = NULL;
-    }
     if (out_error != NULL && *out_error != NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
@@ -114,9 +111,6 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                              zerobus_stream_t **out_stream,
                              zerobus_error_t **out_error)
 {
-    if (out_stream != NULL) {
-        *out_stream = NULL;
-    }
     if (out_error != NULL && *out_error != NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }

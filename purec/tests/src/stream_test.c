@@ -302,6 +302,50 @@ static void test_stream_out_error_must_be_null(void)
     zerobus_sdk_free(sdk);
 }
 
+/* The realloc-style out-handle contract: a failed call leaves the caller's
+ * out-handle untouched — the handle is written only on success. */
+static void test_stream_out_handle_untouched_on_failure(void)
+{
+    zerobus_sdk_t *sdk = make_sdk();
+
+    /* A sentinel we never dereference: any non-NULL value distinct from a real
+     * handle works, so point it at a local object. */
+    int marker;
+    zerobus_stream_builder_t *const builder_sentinel =
+        (zerobus_stream_builder_t *)&marker;
+    zerobus_stream_t *const stream_sentinel = (zerobus_stream_t *)&marker;
+
+    /* builder_new rejected for a NULL sdk: out_builder is not touched. */
+    zerobus_error_t *err = NULL;
+    zerobus_stream_builder_t *stb = builder_sentinel;
+    CHECK_EQ_INT(zerobus_stream_builder_new(NULL, &stb, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(stb == builder_sentinel);
+    zerobus_error_free(err);
+    err = NULL;
+
+    /* A real builder with nothing set: build fails the precondition and must
+     * not touch out_stream. */
+    CHECK_EQ_INT(zerobus_stream_builder_new(sdk, &stb, NULL),
+                 ZEROBUS_STATUS_OK);
+    zerobus_stream_t *stream = stream_sentinel;
+    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, &err),
+                 ZEROBUS_STATUS_FAILED_PRECONDITION);
+    CHECK(stream == stream_sentinel);
+    zerobus_error_free(err);
+    err = NULL;
+
+    /* build rejected for a NULL builder: out_stream still untouched. */
+    stream = stream_sentinel;
+    CHECK_EQ_INT(zerobus_stream_builder_build(NULL, &stream, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(stream == stream_sentinel);
+    zerobus_error_free(err);
+
+    zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+}
+
 int main(void)
 {
     test_stream_builder_validation();
@@ -311,5 +355,6 @@ int main(void)
     test_flush_close_idempotent();
     test_stream_free_null_safe();
     test_stream_out_error_must_be_null();
+    test_stream_out_handle_untouched_on_failure();
     TEST_MAIN_RETURN();
 }

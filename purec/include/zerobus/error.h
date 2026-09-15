@@ -11,10 +11,13 @@ extern "C" {
 #endif
 
 /*
- * Error-reporting contract for every failable function.
+ * Out-parameter contract for every failable function.
  *
- * Failable functions take an optional out-parameter,
- * `zerobus_error_t **out_error`:
+ * A failable function returns a zerobus_status_t. Details come back through
+ * out-parameters: an error on failure, and (for functions that create one) a
+ * handle on success.
+ *
+ * Error — `zerobus_error_t **out_error`:
  *
  *   - Pass NULL to discard the error detail. The status code is still returned.
  *   - Otherwise `*out_error` MUST be NULL on entry. On failure the function
@@ -34,6 +37,13 @@ extern "C" {
  *         zerobus_error_free(err);
  *         err = NULL;               // required before passing &err again
  *     }
+ *
+ * Handle — e.g. `zerobus_sdk_t **out_sdk`:
+ *
+ *   Written only on success, left untouched on failure. Unlike out_error, the
+ *   handle need not be NULL on entry. On success it overwrites the slot without
+ *   freeing any prior value, so do not pass a variable that still holds a
+ *   handle you need.
  */
 
 /* The returned view is borrowed from the error, valid only until it is freed.

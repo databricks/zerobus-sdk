@@ -234,6 +234,51 @@ static void test_sdk_out_error_must_be_null(void)
     zerobus_error_free(err);
 }
 
+/* The realloc-style out-handle contract: a failed call leaves the caller's
+ * out-handle untouched — the handle is written only on success. */
+static void test_sdk_out_handle_untouched_on_failure(void)
+{
+    /* A sentinel we never dereference: any non-NULL value distinct from a real
+     * handle works, so point it at a local object. */
+    int marker;
+    zerobus_sdk_builder_t *const builder_sentinel =
+        (zerobus_sdk_builder_t *)&marker;
+    zerobus_sdk_t *const sdk_sentinel = (zerobus_sdk_t *)&marker;
+
+    /* Seed a live error through a genuine failure. */
+    zerobus_error_t *err = NULL;
+    CHECK_EQ_INT(zerobus_sdk_builder_new(NULL, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err != NULL);
+
+    /* builder_new rejected for a NULL sdk: out_builder is not touched. */
+    zerobus_sdk_builder_t *b = builder_sentinel;
+    CHECK_EQ_INT(zerobus_sdk_builder_new(&b, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(b == builder_sentinel);
+    zerobus_error_free(err);
+    err = NULL;
+
+    /* A real builder with no endpoints set: build fails the precondition and
+     * must not touch out_sdk. */
+    CHECK_EQ_INT(zerobus_sdk_builder_new(&b, NULL), ZEROBUS_STATUS_OK);
+    zerobus_sdk_t *sdk = sdk_sentinel;
+    CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, &err),
+                 ZEROBUS_STATUS_FAILED_PRECONDITION);
+    CHECK(sdk == sdk_sentinel);
+    zerobus_error_free(err);
+    err = NULL;
+
+    /* build rejected for a NULL builder: out_sdk still untouched. */
+    sdk = sdk_sentinel;
+    CHECK_EQ_INT(zerobus_sdk_builder_build(NULL, &sdk, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(sdk == sdk_sentinel);
+    zerobus_error_free(err);
+
+    zerobus_sdk_builder_free(b);
+}
+
 int main(void)
 {
     test_sdk_builder_validation();
@@ -243,5 +288,6 @@ int main(void)
     test_sdk_setter_transactional();
     test_sdk_free_null_safe();
     test_sdk_out_error_must_be_null();
+    test_sdk_out_handle_untouched_on_failure();
     TEST_MAIN_RETURN();
 }

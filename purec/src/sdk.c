@@ -21,9 +21,6 @@ struct zerobus_sdk {
 zerobus_status_t zerobus_sdk_builder_new(zerobus_sdk_builder_t **out_builder,
                                          zerobus_error_t **out_error)
 {
-    if (out_builder != NULL) {
-        *out_builder = NULL;
-    }
     if (out_error != NULL && *out_error != NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
@@ -128,9 +125,6 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                                            zerobus_sdk_t **out_sdk,
                                            zerobus_error_t **out_error)
 {
-    if (out_sdk != NULL) {
-        *out_sdk = NULL;
-    }
     if (out_error != NULL && *out_error != NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
