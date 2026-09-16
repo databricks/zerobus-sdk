@@ -353,7 +353,8 @@ impl MultiplexedStream {
     /// Ingests a batch of records into a single sub-stream (round-robin).
     ///
     /// The whole batch lands on one sub-stream so a single returned id covers
-    /// it. Returns `None` for an empty batch.
+    /// it. Returns `None` for an empty batch unless the mux is already closed
+    /// or poisoned, in which case it returns an error.
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
     pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where

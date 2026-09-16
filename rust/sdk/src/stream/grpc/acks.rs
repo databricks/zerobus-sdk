@@ -68,9 +68,9 @@ impl ZerobusStream {
                             return Ok(());
                         }
                     }
-                    // The supervisor always sends the real error to server_error_tx
-                    // before setting is_closed=true, so check error_rx first to
-                    // return the actual error instead of a generic one.
+                    // fail_stream sets is_closed, publishes the error, then cancels
+                    // terminal_token. This path can observe closure before the final
+                    // watch value; mux terminal_error() waits on the token before reading it.
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(server_error);
                     }
@@ -285,11 +285,9 @@ impl ZerobusStream {
     pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>> {
         if self.is_closed.load(Ordering::Relaxed) {
             // The supervisor only moves landing-zone records into
-            // `failed_records` on a stream failure. A stream torn down without
-            // one (flush timed out during `close`, or `signal_shutdown` from a
-            // poisoned MultiplexedStream) can still hold unacked records in the
-            // landing zone; drain them here so they are reported too and so
-            // repeat calls return the same result.
+            // `failed_records` on a stream failure. A close whose flush timed
+            // out can still leave unacked records in the landing zone; drain
+            // them here too and retain them so repeat calls return the same result.
             let mut failed = self.failed_records.write().await;
             failed.extend(
                 self.landing_zone

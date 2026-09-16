@@ -660,7 +660,7 @@ mod multi_stream_tests {
 
         mux.close().await?;
         assert!(mux.is_closed());
-        // A ready acknowledgment wins even though close also cancelled the mux token.
+        // The lane-specific wait still succeeds for an acknowledged record after close.
         mux.wait_for_message_id(offset).await?;
         mux.close().await?;
 
@@ -1248,6 +1248,14 @@ mod failure_tests {
         assert_eq!(successes[0].1.sub_offset(), 1);
         assert_eq!(errors, WAITERS - 1);
         assert!(mux.is_closed(), "Mux should report the failed sub-stream");
+        let error = mux
+            .ingest_record(b"after-poison".to_vec())
+            .await
+            .expect_err("ingest after poison must return the stored lane failure");
+        assert!(
+            matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            "Expected stored PermissionDenied after capacity-wait failure, got {error:?}"
+        );
         assert_eq!(mock_server.get_write_count().await, 2);
 
         Ok(())

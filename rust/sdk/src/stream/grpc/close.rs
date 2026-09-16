@@ -25,15 +25,19 @@ impl ZerobusStream {
         self.is_closed.load(Ordering::Relaxed)
     }
 
-    /// Closes the stream gracefully after flushing all pending records.
+    /// Closes the stream after a flush attempt.
     ///
-    /// This method first calls `flush()` to ensure all pending records are acknowledged,
-    /// then shuts down the stream and releases all resources. Always call this method
-    /// when you're done with a stream to ensure data integrity.
+    /// If already closed, returns immediately without flushing or awaiting cleanup.
+    /// Otherwise, calls `flush()`, then requests task shutdown even if flushing fails.
+    /// Supervisor shutdown waits up to one second, then at most 100 ms after abort.
+    /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
+    /// These waits are separate from the flush timeout.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the stream was closed successfully after flushing all records.
+    /// `Ok(())` if the stream was already closed or flushing succeeded. Task shutdown
+    /// errors are not returned. Blocked synchronous user code can outlive the teardown
+    /// waits, so `Ok(())` does not guarantee all tasks have exited or resources are released.
     ///
     /// # Errors
     ///
