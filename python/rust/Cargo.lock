@@ -522,6 +522,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "protoc-bin-vendored",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",

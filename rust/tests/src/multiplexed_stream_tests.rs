@@ -29,10 +29,18 @@ fn default_options() -> TestOpts {
 
 /// Helper: create an SDK pointed at a mock server.
 async fn create_test_sdk(server_url: &str) -> Result<ZerobusSdk, Box<dyn std::error::Error>> {
+    create_test_sdk_with_connection_mode(server_url, true).await
+}
+
+async fn create_test_sdk_with_connection_mode(
+    server_url: &str,
+    connection_per_stream: bool,
+) -> Result<ZerobusSdk, Box<dyn std::error::Error>> {
     Ok(ZerobusSdk::builder()
         .endpoint(server_url)
         .unity_catalog_url("https://mock-uc.com")
         .tls_config(Arc::new(NoTlsConfig))
+        .connection_per_stream(connection_per_stream)
         .build()?)
 }
 
@@ -57,6 +65,85 @@ async fn create_test_stream(
 
 mod construction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn builder_respects_connection_per_stream() -> Result<(), Box<dyn std::error::Error>> {
+        const TABLE: &str = "builder.schema.connections";
+
+        for (connection_per_stream, expected_connections) in [(true, 3), (false, 1)] {
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE,
+                    (0..3)
+                        .map(|i| MockResponse::CreateStream {
+                            stream_id: format!("stream-{i}"),
+                            delay_ms: 0,
+                        })
+                        .collect(),
+                )
+                .await;
+            let sdk =
+                create_test_sdk_with_connection_mode(&server_url, connection_per_stream).await?;
+            let mut mux = sdk
+                .stream_builder()
+                .table(TABLE)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .json()
+                .max_inflight_requests(3)
+                .multiplexed(3)
+                .build()
+                .await?;
+
+            assert_eq!(
+                mock_server.get_connection_count().await,
+                expected_connections
+            );
+            mux.close().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_build_releases_inflight_headers_provider(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        struct BlockedHeaders(tokio::sync::Notify);
+        #[async_trait::async_trait]
+        impl databricks_zerobus_ingest_sdk::HeadersProvider for BlockedHeaders {
+            async fn get_headers(
+                &self,
+            ) -> Result<std::collections::HashMap<&'static str, String>, ZerobusError> {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        let (_, server_url) = start_mock_server().await?;
+        let sdk = create_test_sdk(&server_url).await?;
+        let provider = Arc::new(BlockedHeaders(tokio::sync::Notify::new()));
+        let build_provider = provider.clone();
+        let build = tokio::spawn(async move {
+            sdk.stream_builder()
+                .table("cancel.schema.table")
+                .headers_provider(build_provider)
+                .json()
+                .max_inflight_requests(1)
+                .multiplexed(1)
+                .build()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), provider.0.notified()).await?;
+        build.abort();
+        assert!(matches!(build.await, Err(error) if error.is_cancelled()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&provider) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled construction must release the supervisor's provider");
+        Ok(())
+    }
 
     #[test]
     #[should_panic(expected = "MultiplexedStream requires at least one sub-stream")]

@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Added `StreamBuilder::multiplexed(n)` (Beta) for JSON and protobuf streams, with
+  concurrent construction, a shared in-flight budget, and a separate
+  `multiplexed_ack_callback` for `MessageId` notifications. Existing ordinary
+  `ack_callback` usage is unchanged.
+
 - Add Avro record format (Beta), behind the off-by-default `avro` feature. Select it with
   `StreamBuilder::avro(schema_json)`, then ingest an `AvroRecord(AvroValue)` the stream
   encodes against the writer schema, or a pre-encoded `AvroBytes`. Ephemeral streams only;
