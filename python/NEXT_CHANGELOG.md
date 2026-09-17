@@ -14,6 +14,7 @@
 ### Documentation
 
 ### Internal Changes
+- Type stubs mark `TableProperties.table_name`, `avro_schema`, and `record_format` as read-only properties. Assignment already raised `AttributeError` at runtime.
 
 ### Breaking Changes
 - `StreamConfigurationOptions.record_type` was previously ignored; it is now validated against the format inferred from `TableProperties`. An explicit `record_type` that disagrees — e.g. `RecordType.PROTO` on a table with no descriptor (a JSON stream), or `RecordType.JSON` on a descriptor table — now raises `ValueError` at stream creation. Migration: omit `record_type` (it defaults to `RecordType.UNSPECIFIED`), or set it to match `TableProperties.record_format`.
