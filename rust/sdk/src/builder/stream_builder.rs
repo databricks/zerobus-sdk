@@ -467,7 +467,9 @@ impl<'a> StreamBuilder<'a> {
     /// each sub-stream, but there is no global record, message-ID, or callback
     /// order. Different sub-stream callback workers may invoke the shared
     /// callback concurrently.
-    /// Multiplexing does not accelerate record serialization.
+    ///
+    /// For a JSON stream, first migrate to compiled Protocol Buffers and
+    /// measure throughput again before considering multiplexing.
     ///
     /// `stream_count` must be in `1..=64` and cannot exceed the configured
     /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
