@@ -39,6 +39,8 @@
 
 ### Internal Changes
 
+- Made gRPC graceful-close deadline tests deterministic with a paused clock and
+  acknowledgment barriers, avoiding false failures from Windows scheduling delays.
 - Updated multiplexed-stream failure handling to reject new ingestion after a
   mux operation observes a failed lane, preserve typed lane errors, wait for
   healthy lanes during flush, and close lanes concurrently. Healthy lanes stay
