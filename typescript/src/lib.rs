@@ -1021,7 +1021,7 @@ impl ZerobusSdk {
             Some(0) => RustRecordType::Json,
             Some(1) => RustRecordType::Proto,
             Some(2) => RustRecordType::Avro,
-            _ => RustRecordType::Unspecified,
+            _ => RustRecordType::Proto,
         };
 
         let headers_tsfn = match headers_provider {
