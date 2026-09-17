@@ -27,6 +27,8 @@ use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "avro")]
+use crate::AvroSchema;
 use crate::{
     MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
@@ -54,6 +56,8 @@ enum FormatConfig {
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
+    #[cfg(feature = "avro")]
+    Avro(String),
 }
 
 /// A fluent builder for creating Zerobus ingestion streams.
@@ -103,6 +107,8 @@ pub struct StreamBuilder<'a> {
     grpc_config: StreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
+    #[cfg(feature = "arrow-flight")]
+    stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
 }
 
 impl fmt::Debug for StreamBuilder<'_> {
@@ -120,6 +126,8 @@ impl fmt::Debug for StreamBuilder<'_> {
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(_)) => "Avro",
             None => "None",
         };
         f.debug_struct("StreamBuilder")
@@ -152,6 +160,8 @@ impl<'a> StreamBuilder<'a> {
             grpc_config: StreamConfigurationOptions::default(),
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "arrow-flight")]
+            stats_exporter: None,
         }
     }
 
@@ -217,6 +227,17 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
         self.format = Some(FormatConfig::Arrow(schema));
+        self
+    }
+
+    /// Select Avro record format with the writer schema as JSON (Beta).
+    ///
+    /// Records are then ingested either as objects the stream encodes against this
+    /// schema ([`AvroRecord`](crate::AvroRecord)) or as pre-encoded datums
+    /// ([`AvroBytes`](crate::AvroBytes)).
+    #[cfg(feature = "avro")]
+    pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
+        self.format = Some(FormatConfig::Avro(schema_json.into()));
         self
     }
 
@@ -334,6 +355,30 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Register a telemetry exporter (Arrow streams only).
+    ///
+    /// The exporter receives [`StreamStat`](crate::StreamStat) events (batch
+    /// sends with byte sizes, acknowledgements, reconnects). Its `record` runs
+    /// inline on the stream's IO tasks, so keep it lightweight — use
+    /// [`channel_exporter`](crate::channel_exporter) to offload heavier work.
+    ///
+    /// Takes the exporter by value (`.stats_exporter(MyExporter)`); the SDK wraps
+    /// it in an `Arc` internally to share across its IO tasks. The `'static` bound
+    /// is required because those tasks outlive this call. Pass an `Arc` clone when
+    /// you need to keep a handle (e.g. the [`channel_exporter`](crate::channel_exporter) pair).
+    ///
+    /// Supported only by Arrow Flight streams: configuring it and then calling
+    /// [`build`](Self::build) (a non-Arrow stream) is rejected. Use
+    /// [`build_arrow`](Self::build_arrow).
+    #[cfg(feature = "arrow-flight")]
+    pub fn stats_exporter<E>(mut self, exporter: E) -> Self
+    where
+        E: crate::stats::StatsExporter + 'static,
+    {
+        self.stats_exporter = Some(Arc::new(exporter));
+        self
+    }
+
     /// Set the maximum number of in-flight Arrow batches (Arrow streams only).
     #[cfg(feature = "arrow-flight")]
     pub fn max_inflight_batches(mut self, n: usize) -> Self {
@@ -357,10 +402,10 @@ impl<'a> StreamBuilder<'a> {
 
     /// Validate that the builder has all required fields configured.
     ///
-    /// Returns `Ok(())` if table name, authentication, and format are all set.
-    /// This performs the same checks as `build()` without actually opening
-    /// a stream — useful for fail-fast validation during startup or config
-    /// parsing.
+    /// Returns `Ok(())` if table name, authentication, and format are all set — useful
+    /// for fail-fast validation during startup or config parsing. This is a required-fields
+    /// check, not a guarantee that `build()` succeeds: the Avro writer schema is parsed in
+    /// `build()` (before any connection), so a malformed schema surfaces there, not here.
     ///
     /// # Examples
     ///
@@ -386,7 +431,13 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .avro(), or .arrow()".into(),
+            ));
+        }
+        #[cfg(feature = "arrow-flight")]
+        if self.stats_exporter.is_some() && !matches!(self.format, Some(FormatConfig::Arrow(_))) {
+            return Err(ZerobusError::InvalidArgument(
+                "stats_exporter is only supported for Arrow Flight streams; use .arrow()".into(),
             ));
         }
         Ok(())
@@ -425,13 +476,32 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open a JSON or Protocol Buffer stream.
+    /// Build and open the configured stream (any record format except Arrow Flight).
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
+        // `validate()` already rejects `stats_exporter` on a non-Arrow format, and the
+        // format match below rejects an Arrow format outright.
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
+
+        // Parse the writer schema once, before any connection, so malformed JSON fails at
+        // build(). Keep the raw JSON (sent to the server on stream creation) and the parsed
+        // schema (used to encode records) together in TableProperties for reuse on ingest.
+        #[cfg(feature = "avro")]
+        let avro_schema = match &self.format {
+            Some(FormatConfig::Avro(json)) => {
+                let parsed = apache_avro::Schema::parse_str(json).map_err(|e| {
+                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
+                })?;
+                Some(AvroSchema {
+                    json: json.clone(),
+                    parsed,
+                })
+            }
+            _ => None,
+        };
 
         let (record_type, descriptor_proto, message_descriptor) = match self.format {
             Some(FormatConfig::Json) => (RecordType::Json, None, None),
@@ -448,9 +518,11 @@ impl<'a> StreamBuilder<'a> {
                     "Arrow format requires .build_arrow() instead of .build()".into(),
                 ));
             }
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(_)) => (RecordType::Avro, None, None),
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .avro() before .build()"
                         .into(),
                 ));
             }
@@ -461,6 +533,8 @@ impl<'a> StreamBuilder<'a> {
             table_name: self.table_name,
             descriptor_proto,
             message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
@@ -537,6 +611,7 @@ impl<'a> StreamBuilder<'a> {
             headers_provider,
             self.arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
+            self.stats_exporter,
         )
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
@@ -618,6 +693,41 @@ mod tests {
             .dynamic_proto(md);
         assert!(format!("{builder:?}").contains("DynamicProto"));
         builder.validate().expect("validation should succeed");
+    }
+
+    #[cfg(feature = "avro")]
+    #[test]
+    fn avro_sets_format_and_validates() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .avro(r#"{"type":"record","name":"R","fields":[]}"#);
+        assert!(format!("{builder:?}").contains("Avro"));
+        builder.validate().expect("validation should succeed");
+    }
+
+    #[cfg(feature = "avro")]
+    #[tokio::test]
+    async fn avro_rejects_invalid_schema_at_build() {
+        let sdk = test_sdk();
+        // Empty and malformed writer schemas are parsed and rejected at build(),
+        // before any connection is attempted.
+        for bad in ["", "{"] {
+            let result = sdk
+                .stream_builder()
+                .table("t")
+                .oauth("a", "b")
+                .avro(bad)
+                .build()
+                .await;
+            match result {
+                Err(ZerobusError::AvroSchemaParseError(_)) => {}
+                Err(e) => panic!("expected AvroSchemaParseError, got {e:?}"),
+                Ok(_) => panic!("expected AvroSchemaParseError, got Ok"),
+            }
+        }
     }
 
     #[test]
@@ -855,6 +965,37 @@ mod tests {
             Err(ZerobusError::InvalidArgument(msg)) => {
                 assert!(msg.contains("ack_callback"));
                 assert!(msg.contains("Arrow Flight"));
+            }
+            _ => panic!("expected InvalidArgument error"),
+        }
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn build_rejects_stats_exporter_on_non_arrow_stream() {
+        let (exporter, _rx) =
+            crate::stats::channel_exporter(std::num::NonZeroUsize::new(4).unwrap());
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .stats_exporter(exporter);
+
+        // validate() must reject the same misconfiguration build() does.
+        match builder.validate() {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("stats_exporter"));
+                assert!(msg.contains("Arrow"));
+            }
+            other => panic!("expected InvalidArgument from validate(), got {other:?}"),
+        }
+
+        match builder.build().await {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("stats_exporter"));
+                assert!(msg.contains("Arrow"));
             }
             _ => panic!("expected InvalidArgument error"),
         }

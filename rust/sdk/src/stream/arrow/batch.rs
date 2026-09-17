@@ -4,6 +4,8 @@
 //! until acknowledgment, replay elimination, or terminal finalization.
 
 use std::io::Cursor;
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 
 use arrow_ipc::{reader::StreamReader, writer::IpcWriteOptions, CompressionType};
 use bytes::Bytes;
@@ -11,7 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Duration, Instant};
 use tracing::debug;
 
-use super::{configured_deadline, RecordBatch};
+use super::{configured_deadline, OutboundBatch, RecordBatch};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
@@ -29,8 +31,12 @@ pub(super) struct PendingBatch {
     /// Time this batch most recently became pending on the active connection.
     /// Only replay onto a replacement connection refreshes this timestamp.
     enqueued_at: Instant,
+    /// Shared with outbound copies across reconnects. The encoder advances this
+    /// counter on the first data frame, so preparing or queuing a replay does not
+    /// count as a transmission. Absent when telemetry is disabled.
+    send_attempts: Option<Arc<AtomicU32>>,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
-    permit: OwnedSemaphorePermit,
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Stable identity used to confirm that a fired ACK deadline still belongs to the
@@ -55,24 +61,7 @@ impl PendingBatch {
         offset_id: OffsetId,
         start_record: u64,
         end_record: u64,
-        permit: OwnedSemaphorePermit,
-    ) -> Self {
-        Self::new_at(
-            batch,
-            offset_id,
-            start_record,
-            end_record,
-            Instant::now(),
-            permit,
-        )
-    }
-
-    fn new_at(
-        batch: RecordBatch,
-        offset_id: OffsetId,
-        start_record: u64,
-        end_record: u64,
-        enqueued_at: Instant,
+        send_attempts: Option<Arc<AtomicU32>>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
         Self {
@@ -80,13 +69,18 @@ impl PendingBatch {
             offset_id,
             start_record,
             end_record,
-            enqueued_at,
-            permit,
+            enqueued_at: Instant::now(),
+            send_attempts,
+            _permit: permit,
         }
     }
 
     pub(super) fn offset_id(&self) -> OffsetId {
         self.offset_id
+    }
+
+    pub(super) fn send_attempts(&self) -> Option<Arc<AtomicU32>> {
+        self.send_attempts.clone()
     }
 
     pub(super) fn is_fully_acknowledged(&self, acked_records: u64) -> bool {
@@ -199,12 +193,12 @@ pub(super) fn refresh_pending_ack_deadlines(
 pub(super) fn rebuild_pending_for_replay(
     pending: &mut Vec<PendingBatch>,
     acked_before_disconnect: u64,
-) -> (Vec<RecordBatch>, u64) {
+) -> (Vec<OutboundBatch>, u64) {
     let mut rebuilt = Vec::with_capacity(pending.len());
     let mut replay = Vec::with_capacity(pending.len());
     let mut cumulative_records = 0;
 
-    for pending_batch in pending.drain(..) {
+    for mut pending_batch in pending.drain(..) {
         let Some(batch) = pending_batch.unacknowledged_suffix(acked_before_disconnect) else {
             debug!(target: super::LOG_TARGET, offset_id = pending_batch.offset_id, "Skipping fully-acked batch");
             continue;
@@ -214,16 +208,15 @@ pub(super) fn rebuild_pending_for_replay(
         let start_record = cumulative_records;
         let end_record = cumulative_records + record_count;
         cumulative_records = end_record;
-
-        replay.push(batch.clone());
-        rebuilt.push(PendingBatch::new_at(
-            batch,
-            pending_batch.offset_id,
-            start_record,
-            end_record,
-            pending_batch.enqueued_at,
-            pending_batch.permit,
-        ));
+        replay.push(OutboundBatch {
+            offset: pending_batch.offset_id,
+            send_attempts: pending_batch.send_attempts(),
+            batch: batch.clone(),
+        });
+        pending_batch.batch = batch;
+        pending_batch.start_record = start_record;
+        pending_batch.end_record = end_record;
+        rebuilt.push(pending_batch);
     }
 
     *pending = rebuilt;
@@ -320,6 +313,7 @@ mod tests {
             0,
             start_record,
             end_record,
+            None,
             Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         )
     }

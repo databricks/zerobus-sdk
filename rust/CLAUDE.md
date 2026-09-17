@@ -18,7 +18,7 @@ rust/
 ├── sdk/          # Core SDK crate (databricks-zerobus-ingest-sdk)
 ├── ffi/          # C FFI crate — cbindgen generates zerobus.h (used by Go, Java)
 ├── jni/          # JNI crate — Java Native Interface bindings
-├── examples/     # JSON and proto ingestion examples
+├── examples/     # JSON, proto, Arrow Flight, and Avro ingestion examples
 ├── tests/        # Integration tests
 └── tools/        # Schema generation CLI
 ```
@@ -31,7 +31,7 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `errors.rs` — `ZerobusError` enum with `is_retryable()` classification
 - `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
 - `landing_zone.rs` — Batches records before sending over gRPC
-- `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`
+- `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`; `AvroRecord`/`AvroBytes` and the `PreparedInput` ingest payload (Avro types behind `avro`)
 - `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules
   (behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
 
@@ -65,6 +65,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 ## Feature flags
 
 - `arrow-flight` — Arrow Flight support. Opt-in.
+- `avro` — Avro record format (Beta). Off by default; requires Rust 1.85 (via `apache-avro`). Select with `.avro(schema)`, then ingest `AvroRecord` (encoded against the writer schema) or pre-encoded `AvroBytes`. Ephemeral streams only; feature in development.
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.

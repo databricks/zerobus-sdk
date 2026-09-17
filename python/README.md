@@ -61,7 +61,7 @@ The Zerobus Python SDK is a thin wrapper around the [Zerobus Rust SDK](../rust/)
 - **Rust-backed performance** - Native Rust implementation via PyO3 bindings for maximum throughput
 - **Sync and Async support** - Both synchronous and asynchronous Python APIs
 - **Automatic recovery** - Built-in retry and reconnection for transient failures
-- **Multiple serialization formats** - JSON, Protocol Buffers, and Arrow Flight ingestion
+- **Multiple serialization formats** - JSON, Protocol Buffers, Avro, and Arrow Flight ingestion
 - **OAuth 2.0 authentication** - Secure authentication with client credentials, automatically refreshed
 - **Acknowledgment callbacks** - Receive notifications when records are acknowledged or encounter errors
 - **Flexible configuration** - Fine-tune timeouts, retries, and recovery behavior
@@ -107,13 +107,23 @@ installs `pyarrow` 22.0.0 or later, which is the first release with 3.14 wheels.
 On earlier versions it installs `pyarrow` below 22.0.0. Core ingestion (Protobuf
 and JSON) does not need `pyarrow` at all.
 
+Avro record format is built in (beta). Encoding **dict** records needs `fastavro`, installed
+with the `avro` extra; pre-encoded Avro bytes need no extra:
+
+```bash
+pip install "databricks-zerobus-ingest-sdk[avro]"
+```
+
 ## Quick Start
 
 ### Choose Your Serialization Format
 
 1. **Protocol Buffers** (Recommended) - Strongly-typed schemas with compact binary encoding. More efficient over the wire and the best choice for production and high-throughput workloads.
 2. **JSON** - Simple, no schema compilation needed. Good for getting started or quick prototyping, but each record carries higher per-record overhead (text serialization plus UTF-8 validation), so it is slower than Protocol Buffers for high-volume ingestion.
-3. Arrow Flight - High-throughput columnar ingestion for applications that already produce Arrow data. Install the `arrow` extra and see the [sync](examples/sync_example_arrow.py) or [async](examples/async_example_arrow.py) example.
+3. **Avro** (beta) - Row-oriented binary encoding against a declared writer schema. See the [sync](examples/sync_example_avro.py) or [async](examples/async_example_avro.py) example.
+   - If you're sending **dict records**, they're encoded with `fastavro` — install the `avro` extra.
+   - If you're sending **pre-encoded Avro bytes**, they pass through unchanged — no extra needed.
+4. Arrow Flight - High-throughput columnar ingestion for applications that already produce Arrow data. Install the `arrow` extra and see the [sync](examples/sync_example_arrow.py) or [async](examples/async_example_arrow.py) example.
 
 ### Option 1: JSON (Simplest)
 
@@ -313,13 +323,14 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 
 ### Available Options
 
-The record format is inferred from `TableProperties`: omitting `descriptor_proto` selects JSON,
-while providing a Protobuf descriptor selects Protobuf. `record_type` is retained for backward
-compatibility but does not select the format.
+The record format is inferred from `TableProperties`: a Protobuf descriptor selects Protobuf,
+an `avro_schema` selects Avro, and neither selects JSON. `record_type` defaults to
+`RecordType.UNSPECIFIED` (infer from `TableProperties`); a non-`UNSPECIFIED` value does not
+select the format but must match the inferred one, otherwise stream creation raises `ValueError`.
 
 | Option                           | Type            | Default            | Description                                                                                                          |
 | -------------------------------- | --------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `record_type`                    | `RecordType`    | `RecordType.PROTO` | Retained for backward compatibility; format comes from `TableProperties.descriptor_proto`                            |
+| `record_type`                    | `RecordType`    | `RecordType.UNSPECIFIED` | Optional; when not `UNSPECIFIED` it must match the format inferred from `TableProperties`                       |
 | `max_inflight_records`           | `int`           | `1000000`          | Maximum number of unacknowledged records                                                                             |
 | `recovery`                       | `bool`          | `True`             | Enable automatic stream recovery                                                                                     |
 | `recovery_timeout_ms`            | `int`           | `15000`            | Timeout for recovery operations (ms)                                                                                 |
@@ -558,6 +569,9 @@ TableProperties("catalog.schema.table")
 
 # Protobuf mode
 TableProperties("catalog.schema.table", descriptor_proto=MyMessage.DESCRIPTOR)
+
+# Avro mode (beta) — mutually exclusive with descriptor_proto
+TableProperties("catalog.schema.table", avro_schema=json_schema)
 ```
 
 ### `StreamConfigurationOptions`

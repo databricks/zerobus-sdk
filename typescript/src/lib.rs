@@ -42,6 +42,8 @@ pub enum RecordType {
     Json = 0,
     /// Protocol Buffers encoding - records are binary protobuf messages
     Proto = 1,
+    /// Avro encoding - records are raw Avro binary datums (Beta)
+    Avro = 2,
 }
 
 /// Configuration options for the Zerobus stream.
@@ -1026,6 +1028,7 @@ impl ZerobusSdk {
         let record_type = match opts.record_type {
             Some(0) => RustRecordType::Json,
             Some(1) => RustRecordType::Proto,
+            Some(2) => RustRecordType::Avro,
             _ => RustRecordType::Proto,
         };
 
@@ -1094,6 +1097,11 @@ impl ZerobusSdk {
 
                 let builder = match record_type {
                     RustRecordType::Json => builder.json(),
+                    RustRecordType::Avro => {
+                        return Err(napi::Error::from_reason(
+                            "Avro record type is not supported",
+                        ))
+                    }
                     RustRecordType::Proto | RustRecordType::Unspecified => {
                         let desc = descriptor_proto.ok_or_else(|| {
                             napi::Error::from_reason(

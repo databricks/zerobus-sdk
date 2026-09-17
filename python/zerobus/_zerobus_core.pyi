@@ -12,8 +12,10 @@ class RecordType:
     """Type of records to ingest into the stream."""
 
     value: int
+    UNSPECIFIED: RecordType
     PROTO: RecordType
     JSON: RecordType
+    AVRO: RecordType
 
     def __int__(self) -> int: ...
     def __eq__(self, other: Self) -> bool: ...
@@ -22,10 +24,20 @@ class RecordType:
 class TableProperties:
     """Table properties for the stream."""
 
+    # Readable attributes (getters). descriptor_proto is a constructor-only param
+    # (no getter), so it is intentionally not listed here.
     table_name: str
-    descriptor_proto: Optional[bytes]
+    # Avro writer schema (JSON); mutually exclusive with descriptor_proto
+    avro_schema: Optional[str]
+    # Record format this stream will use: "proto", "json", or "avro"
+    record_format: str
 
-    def __init__(self, table_name: str, descriptor_proto: Optional[Union[bytes, Any]] = None) -> None:
+    def __init__(
+        self,
+        table_name: str,
+        descriptor_proto: Optional[Union[bytes, Any]] = None,
+        avro_schema: Optional[str] = None,
+    ) -> None:
         """
         Create table properties.
 
@@ -35,6 +47,7 @@ class TableProperties:
                 - bytes: Serialized FileDescriptorProto
                 - Descriptor: Protobuf Descriptor object (e.g., MyMessage.DESCRIPTOR)
                 - None: For JSON mode (no descriptor needed)
+            avro_schema: Avro writer schema (JSON string); mutually exclusive with descriptor_proto
         """
         ...
 
@@ -112,7 +125,7 @@ class StreamConfigurationOptions:
     """Timeout for flushing the stream in milliseconds (default: 300000)"""
 
     record_type: RecordType
-    """Type of records to ingest into the stream (default: RecordType.PROTO)"""
+    """Optional record format; when not UNSPECIFIED it must match the format inferred from TableProperties (default: RecordType.UNSPECIFIED)"""
 
     stream_paused_max_wait_time_ms: Optional[int]
     """Maximum time in milliseconds to wait during graceful stream close (default: None - wait for full server duration)"""
@@ -148,7 +161,7 @@ class StreamConfigurationOptions:
             recovery_retries: Maximum number of recovery attempts (default: 4)
             server_lack_of_ack_timeout_ms: Server acknowledgment timeout in ms (default: 60000)
             flush_timeout_ms: Flush operation timeout in ms (default: 300000)
-            record_type: Serialization format (default: RecordType.PROTO)
+            record_type: Optional record format; must match the format inferred from TableProperties when not UNSPECIFIED (default: RecordType.UNSPECIFIED)
             stream_paused_max_wait_time_ms: Max wait time during graceful close in ms (default: None)
             callback_max_wait_time_ms: Max wait time for callbacks after close in ms (default: 5000)
             ack_callback: Callback invoked once per successfully queued ingest submission that later acknowledges or fails (default: None)
