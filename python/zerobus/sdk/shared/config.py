@@ -52,9 +52,10 @@ Configuration options for stream behavior.
 All parameters are optional and will use defaults if not specified.
 
 Args:
-    record_type: Retained for backward compatibility. The record format is inferred
-        from TableProperties: a descriptor selects Protobuf and no descriptor selects
-        JSON. Default: RecordType.PROTO
+    record_type: Optional. The record format is inferred from TableProperties (a
+        descriptor selects Protobuf, an avro_schema selects Avro, neither selects JSON).
+        A value other than RecordType.UNSPECIFIED must match that inferred format, else
+        stream creation raises ValueError. Default: RecordType.UNSPECIFIED
     max_inflight_records: Maximum number of records that can be sent to the
         server before waiting for acknowledgment. Default: 1000000
     recovery: Whether to enable automatic recovery of the stream in case of

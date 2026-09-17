@@ -46,6 +46,13 @@ Run from `python/`:
 - `make lint` — pycodestyle + autoflake
 - `make fmt` — black + autoflake + isort
 
+## Features
+
+Avro record format support is always compiled in — the `avro` feature is enabled on the
+`databricks-zerobus-ingest-sdk` dependency in `python/rust/Cargo.toml`. The `avro` pip
+extra installs `fastavro`, which is required only for encoding dict records; pre-encoded
+Avro bytes need no extra.
+
 ## FFI boundary: PyO3
 
 PyO3 handles memory management automatically via Python reference counting. Key considerations:
