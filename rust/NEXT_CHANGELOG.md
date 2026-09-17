@@ -19,9 +19,21 @@
 
 ### Bug Fixes
 
+- Bounded the post-abort supervisor wait during gRPC stream close, including
+  when a synchronous credentials callback is blocked.
+
 ### Documentation
 
 ### Internal Changes
+
+- Updated multiplexed-stream failure handling to reject new ingestion after a
+  mux operation observes a failed lane, preserve typed lane errors, wait for
+  healthy lanes during flush, and close lanes concurrently. Healthy lanes stay
+  active until explicit close or drop. Message acknowledgment waits remain
+  scoped to their own lane.
+- Fixed interrupted mux close so retrying finishes callback draining and lane
+  finalization without repeating a completed flush attempt or losing the
+  terminal error, preserving access to unacknowledged records.
 
 ### Breaking Changes
 

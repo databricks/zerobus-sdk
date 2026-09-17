@@ -299,18 +299,17 @@ impl ZerobusStream {
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) async fn enqueue_reserved_admitted<F, Fut, G>(
+    pub(crate) async fn enqueue_reserved_admitted<F>(
         &self,
         encoded_batch: EncodedBatch,
         reservation: crate::landing_zone::CapacityReservation,
         admit: F,
     ) -> ZerobusResult<OffsetId>
     where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = ZerobusResult<G>>,
+        F: FnOnce() -> ZerobusResult<()>,
     {
         let _guard = self.sync_mutex.lock().await;
-        let admission_guard = admit().await?;
+        admit()?;
         self.check_open()?;
 
         let offset_id = self.logical_offset_id_generator.next();
@@ -326,7 +325,6 @@ impl ZerobusStream {
             }),
             reservation,
         );
-        drop(admission_guard);
         Ok(offset_id)
     }
 }
