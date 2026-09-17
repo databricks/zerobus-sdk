@@ -21,13 +21,28 @@ type Stream struct {
 	// sdk is the SDK that created this stream. Close deregisters from it so a
 	// long-lived SDK does not retain streams the caller has already closed.
 	sdk *SDK
+
+	// avroEnc encodes AvroRecord objects; nil unless this is an Avro stream
+	// built with the avro tag. Feature in development.
+	avroEnc avroObjectEncoder
 }
 
-// IngestRecordOffset queues one record and returns its logical offset.
-// It blocks only on backpressure and returns -1 on error.
+// avroObjectEncoder encodes an AvroRecord's fields to a raw Avro datum against
+// the writer schema. Implemented only in the avro build.
+type avroObjectEncoder interface {
+	encode(fields map[string]any) ([]byte, error)
+}
+
+// newAvroObjectEncoder parses the writer schema once (fail-fast) and returns an
+// encoder. Set by the avro build's init; nil otherwise.
+var newAvroObjectEncoder func(schemaJSON string) (avroObjectEncoder, error)
+
+// IngestRecordOffset queues one pre-encoded record and returns its logical
+// offset. It blocks only on backpressure and returns -1 on error.
 //
 // record is the raw record payload: serialized protobuf bytes for a proto
-// stream, or UTF-8 JSON bytes for a JSON stream.
+// stream, UTF-8 JSON for a JSON stream, or a raw datum for an Avro stream. For
+// Avro records the SDK can encode for you, see IngestAvroRecordOffset (avro tag).
 //
 // For throughput, queue records in a loop and call Flush once.
 func (s *Stream) IngestRecordOffset(record []byte) (int64, error) {
@@ -40,8 +55,8 @@ func (s *Stream) IngestRecordOffsetContext(ctx context.Context, record []byte) (
 	return off, wrapErr("IngestRecordOffset", err)
 }
 
-// IngestRecordsOffset queues records as one batch and returns its logical offset.
-// Empty batch returns -1 with nil error; failures return -1 with error.
+// IngestRecordsOffset queues pre-encoded records as one batch and returns its
+// logical offset. Empty batch returns -1 with nil error; failures return -1.
 //
 // Prefer this in hot paths to reduce overhead.
 func (s *Stream) IngestRecordsOffset(records [][]byte) (int64, error) {
