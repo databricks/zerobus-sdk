@@ -37,6 +37,7 @@ endif()
 
 set(ZEROBUS_SOURCES
   src/error.c
+  src/internal/log.c
   src/utils.c
   src/sdk.c
   src/stream.c

@@ -160,11 +160,14 @@ static void test_stream_oauth_transactional(void)
 
 static void test_ingest_validation(void)
 {
-    zerobus_sdk_t *sdk = make_sdk();
-    zerobus_stream_t *stream = make_stream(sdk);
-    CHECK(stream != NULL);
-
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
     zerobus_error_t *err = NULL;
+    char *buf = NULL;
+
+    sdk = make_sdk();
+    stream = make_stream(sdk);
+    REQUIRE(stream != NULL);
 
     /* NULL stream. */
     CHECK_EQ_INT(zerobus_stream_ingest_json_record(NULL, sv("{}"), NULL, &err),
@@ -190,17 +193,16 @@ static void test_ingest_validation(void)
 
     /* A record past the size ceiling is refused by the size gate. */
     size_t big = 11u * 1024u * 1024u;
-    char *buf = (char *)malloc(big);
-    CHECK(buf != NULL);
-    if (buf != NULL) {
-        memset(buf, 'a', big);
-        CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                         stream, (zerobus_string_view_t){buf, big}, NULL, &err),
-                     ZEROBUS_STATUS_INVALID_ARGUMENT);
-        zerobus_error_free(err);
-        free(buf);
-    }
+    buf = (char *)malloc(big);
+    REQUIRE(buf != NULL);
+    memset(buf, 'a', big);
+    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
+                     stream, (zerobus_string_view_t){buf, big}, NULL, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
 
+zb_cleanup:
+    zerobus_error_free(err);
+    free(buf);
     zerobus_stream_free(stream);
     zerobus_sdk_free(sdk);
 }

@@ -13,9 +13,9 @@ struct zerobus_error {
 };
 
 /*
- * Build an owned error with a printf-formatted message. Returns NULL only if
- * allocating the error itself fails, which callers surface as
- * ZEROBUS_STATUS_OUT_OF_MEMORY with *out_error == NULL.
+ * Build an owned error with a printf-formatted message. Returns NULL if object
+ * or message allocation, or message formatting, fails. Callers preserve their
+ * original status when error details are unavailable.
  */
 zerobus_error_t *zb_error_newf(zerobus_status_t code, const char *fmt, ...)
 #if defined(__GNUC__)

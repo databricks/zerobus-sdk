@@ -203,22 +203,23 @@ static void test_strdup(void)
 
 static void test_secure(void)
 {
+    char *p = NULL;
+
     /* Early-out paths must be safe. */
     zb_secure_zero(NULL, 8);
     zb_secure_free(NULL, 0);
     zb_secure_free_cstr(NULL); /* NULL-safe */
 
-    char *p = zb_strndup("secret", 6);
-    CHECK(p != NULL);
-    if (p != NULL) {
-        zb_secure_zero(p, 6); /* the actual overwrite loop */
-        CHECK(p[0] == '\0');
-        zb_secure_free(p, 6);
-    }
+    p = zb_strndup("secret", 6);
+    REQUIRE(p != NULL);
+    zb_secure_zero(p, 6); /* the actual overwrite loop */
+    CHECK(p[0] == '\0');
 
     /* zb_secure_free_cstr zeroes strlen(s) bytes and frees a real copy. */
     zb_secure_free_cstr(zb_strndup("tmp", 3));
-    CHECK(1);
+
+zb_cleanup:
+    zb_secure_free(p, 6);
 }
 
 int main(void)
