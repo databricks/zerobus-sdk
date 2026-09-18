@@ -6,8 +6,11 @@
 
 #include "log.h"
 
-static bool initialized;
-static enum zb_log_level configured_level = ZB_LOG_OFF;
+static struct {
+    bool initialized;
+    enum zb_log_level level;
+    FILE *output;
+} config = {.initialized = false, .level = ZB_LOG_OFF, .output = NULL};
 
 static const char *const level_names[] = {"OFF",  "ERROR", "WARN",
                                           "INFO", "DEBUG", "TRACE"};
@@ -15,7 +18,7 @@ static const char *const level_names[] = {"OFF",  "ERROR", "WARN",
 static void zb_log_init(void)
 {
     int saved_errno = errno;
-    initialized = true;
+    config.output = stderr;
     const char *value = getenv("ZEROBUS_LOG_LEVEL");
     if (value != NULL && value[0] != '\0') {
         static const char *const values[] = {"off",  "error", "warn",
@@ -23,7 +26,7 @@ static void zb_log_init(void)
         size_t i;
         for (i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
             if (strcmp(value, values[i]) == 0) {
-                configured_level = (enum zb_log_level)i;
+                config.level = (enum zb_log_level)i;
                 break;
             }
         }
@@ -32,32 +35,53 @@ static void zb_log_init(void)
                 "[zerobus][WARN] zb_log_init: invalid ZEROBUS_LOG_LEVEL: "
                 "logging disabled\n",
                 stderr);
+            (void)fflush(stderr);
         }
     }
+    if (config.level != ZB_LOG_OFF) {
+        const char *path = getenv("ZEROBUS_LOG_FILE");
+        if (path != NULL && path[0] != '\0') {
+            /* The stream remains open until normal process exit. */
+            FILE *output = fopen(path, "a");
+            if (output != NULL) {
+                config.output = output;
+            } else {
+                (void)fputs("[zerobus][WARN] zb_log_init: cannot open "
+                            "ZEROBUS_LOG_FILE: using stderr\n",
+                            stderr);
+                (void)fflush(stderr);
+            }
+        }
+    }
+    config.initialized = true;
     errno = saved_errno;
 }
 
 bool zb_log_enabled(enum zb_log_level level)
 {
-    if (!initialized) {
+    if (!config.initialized) {
         zb_log_init();
     }
-    return level > ZB_LOG_OFF && level <= ZB_LOG_TRACE &&
-           level <= configured_level;
+    return level > ZB_LOG_OFF && level <= ZB_LOG_TRACE && level <= config.level;
 }
 
 void zb_log_write(enum zb_log_level level, const char *function,
                   const char *fmt, ...)
 {
+    if (config.output == NULL) {
+        return;
+    }
     int saved_errno = errno;
-    (void)fprintf(stderr, "[zerobus][%s] %s: ", level_names[level], function);
+    (void)fprintf(config.output, "[zerobus][%s] %s: ", level_names[level],
+                  function);
     va_list ap;
     va_start(ap, fmt);
-    int written = vfprintf(stderr, fmt, ap);
+    int written = vfprintf(config.output, fmt, ap);
     va_end(ap);
     if (written < 0) {
-        (void)fputs("format failed", stderr);
+        (void)fputs("format failed", config.output);
     }
-    (void)fputc('\n', stderr);
+    (void)fputc('\n', config.output);
+    (void)fflush(config.output);
     errno = saved_errno;
 }

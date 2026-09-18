@@ -13,7 +13,8 @@ enum zb_log_level {
 };
 
 bool zb_log_enabled(enum zb_log_level level);
-/* Unfiltered output, level must be ERROR through TRACE. Use macros instead. */
+/* Unfiltered output, a no-op before initialization by zb_log_enabled.
+ * Level must be ERROR through TRACE. Use macros instead. */
 void zb_log_write(enum zb_log_level level, const char *function,
                   const char *fmt, ...)
 #if defined(__GNUC__)
