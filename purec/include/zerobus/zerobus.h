@@ -6,7 +6,16 @@
  *
  * The SDK is under early development: the functions validate inputs and honor
  * the documented status/ownership rules, but the networking core is not
- * implemented yet. See README.md.
+ * implemented yet.
+ *
+ * Logging: set ZEROBUS_LOG_LEVEL before launching the application to one of
+ * off, error, warn, info, debug, trace (lowercase). Each level includes more
+ * severe messages. Unset, empty, and off are silent in every build type.
+ * An invalid nonempty value emits one warning, then disables logging.
+ * Diagnostics go only to stderr, statuses and error objects are unaffected.
+ *
+ * Thread-safety: this SDK, including logging, currently requires a single
+ * caller thread. Concurrent initialization and calls are not supported yet.
  */
 #ifndef ZEROBUS_H
 #define ZEROBUS_H

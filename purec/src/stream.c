@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "error.h"
+#include "internal/log.h"
 #include "utils.h"
 #include "zerobus/stream.h"
 
@@ -42,10 +43,12 @@ zerobus_stream_builder_new(zerobus_sdk_t *sdk,
     zerobus_stream_builder_t *b =
         (zerobus_stream_builder_t *)calloc(1, sizeof(*b));
     if (b == NULL) {
+        ZB_ERROR("stream builder allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     b->sdk = sdk;
     *out_builder = b;
+    ZB_DEBUG("stream builder created");
     return ZEROBUS_STATUS_OK;
 }
 
@@ -71,6 +74,7 @@ zerobus_stream_builder_set_table(zerobus_stream_builder_t *builder,
             "table name must be fully qualified as catalog.schema.table");
     }
     if (!zb_replace_string(&builder->table, table_name)) {
+        ZB_ERROR("stream table allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     return ZEROBUS_STATUS_OK;
@@ -95,6 +99,7 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
     char *id_copy = zb_strdup_view(client_id);
     char *secret_copy = zb_strdup_view(client_secret);
     if (id_copy == NULL || secret_copy == NULL) {
+        ZB_ERROR("stream credentials allocation failed");
         free(id_copy);
         zb_secure_free_cstr(secret_copy);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
@@ -130,6 +135,7 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     /* TODO: mint an OAuth token and open the authenticated stream. */
     zerobus_stream_t *s = (zerobus_stream_t *)calloc(1, sizeof(*s));
     if (s == NULL) {
+        ZB_ERROR("stream allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     s->sdk = builder->sdk;
@@ -137,11 +143,13 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     s->client_id = zb_strdup(builder->client_id);
     s->client_secret = zb_strdup(builder->client_secret);
     if (s->table == NULL || s->client_id == NULL || s->client_secret == NULL) {
+        ZB_ERROR("stream configuration allocation failed");
         zerobus_stream_free(s);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
 
     *out_stream = s;
+    ZB_DEBUG("stream created");
     return ZEROBUS_STATUS_OK;
 }
 
@@ -154,6 +162,7 @@ void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
     free(builder->client_id);
     zb_secure_free_cstr(builder->client_secret);
     free(builder);
+    ZB_DEBUG("stream builder freed");
 }
 
 /* ---- stream ------------------------------------------------------------ */
@@ -225,6 +234,7 @@ zerobus_status_t zerobus_stream_close(zerobus_stream_t *stream,
     /* TODO: flush pending records before teardown, returning any flush error.
      */
     stream->closed = true;
+    ZB_DEBUG("stream closed");
     return ZEROBUS_STATUS_OK;
 }
 
@@ -238,4 +248,5 @@ void zerobus_stream_free(zerobus_stream_t *stream)
     free(stream->client_id);
     zb_secure_free_cstr(stream->client_secret);
     free(stream);
+    ZB_DEBUG("stream freed");
 }
