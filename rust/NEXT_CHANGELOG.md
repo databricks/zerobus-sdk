@@ -17,6 +17,27 @@
 - Added pluggable Arrow Flight telemetry (Beta) for batch sizes, send attempts,
   acknowledgments, and reconnect reasons, via `StatsExporter` and `channel_exporter`.
 
+- Added first-class external-IdP token federation (`FederatedTokenProvider`,
+  `IdpTokenSupplier`) alongside the existing OAuth client-credentials path. It
+  exchanges an external IdP token (for example an Entra ID token) for a
+  Zerobus-scoped Databricks token via the RFC 8693 token-exchange grant, caches
+  and refreshes it through the existing `TokenCache`, and supports both
+  account-level federation (no `client_id`, identity synced via Automatic
+  Identity Management) and workload identity federation (a service principal
+  `client_id` with no secret). Opt in via `StreamBuilder::federated_auth(supplier,
+  client_id)`, where `client_id` is `None` for account-level federation or the
+  service principal id for workload identity. The client-credentials and
+  token-exchange grants now share one request-shaping path, keeping them at
+  parity. The cached lifetime of an exchanged token is additionally capped at the
+  subject JWT's remaining life (`min(expires_in, exp - now)`), so it is never
+  served past the point its subject token expired. The shared token cache is
+  partitioned by identity so entries never collide — workload keys by its service
+  principal `client_id`, account-level by the supplier's own identity — so two
+  distinct identities driven from one SDK instance never serve each other's token
+  on the same table, without the caller passing a partition key (clone one
+  supplier across streams to share its cached token; pass a distinct supplier to
+  isolate). Existing `oauth(...)` and `headers_provider(...)` paths are unchanged.
+
 ### Bug Fixes
 
 - Bounded the post-abort supervisor wait during gRPC stream close, including
