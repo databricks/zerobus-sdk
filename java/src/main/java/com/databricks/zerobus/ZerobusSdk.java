@@ -100,7 +100,7 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
-    this(serverEndpoint, unityCatalogEndpoint, null, true);
+    this(serverEndpoint, unityCatalogEndpoint, null);
   }
 
   /**
@@ -129,7 +129,13 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName) {
-    this(serverEndpoint, unityCatalogEndpoint, applicationName, true);
+    this.serverEndpoint = serverEndpoint;
+    this.unityCatalogEndpoint = unityCatalogEndpoint;
+    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName);
+    if (this.nativeHandle == 0) {
+      throw new RuntimeException("Failed to create native SDK instance");
+    }
+    logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
   /**
@@ -153,7 +159,8 @@ public class ZerobusSdk implements AutoCloseable {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
     this.nativeHandle =
-        nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
+        nativeCreateWithConnectionPerStream(
+            serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
@@ -933,6 +940,9 @@ public class ZerobusSdk implements AutoCloseable {
   // Native methods implemented in Rust
 
   private static native long nativeCreate(
+      String serverEndpoint, String unityCatalogEndpoint, String applicationName);
+
+  private static native long nativeCreateWithConnectionPerStream(
       String serverEndpoint,
       String unityCatalogEndpoint,
       String applicationName,

@@ -73,13 +73,15 @@ public class ZerobusSdkBuilderTests
     }
 
     [Test]
-    public void ConnectionPerStream_ReturnsSameBuilderInstance()
+    public void ConnectionPerStream_Build_Succeeds()
     {
-        using var builder = ZerobusSdk.CreateBuilder();
+        var builder = ZerobusSdk.CreateBuilder()
+            .Endpoint("https://zerobus.databricks.com")
+            .UnityCatalogUrl("https://workspace.databricks.com")
+            .ConnectionPerStream(false);
 
-        var returned = builder.ConnectionPerStream(false);
-
-        Assert.That(returned, Is.SameAs(builder));
+        using var sdk = builder.Build();
+        Assert.That(sdk, Is.Not.Null);
     }
 
     // -------------------------------------------------------------------------

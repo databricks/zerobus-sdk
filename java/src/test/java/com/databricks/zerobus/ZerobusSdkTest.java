@@ -67,7 +67,14 @@ public class ZerobusSdkTest {
   void preservesNativeCreationSignatures() throws Exception {
     assertNotNull(
         ZerobusSdk.class.getDeclaredMethod(
-            "nativeCreate", String.class, String.class, String.class, boolean.class));
+            "nativeCreate", String.class, String.class, String.class));
+    assertNotNull(
+        ZerobusSdk.class.getDeclaredMethod(
+            "nativeCreateWithConnectionPerStream",
+            String.class,
+            String.class,
+            String.class,
+            boolean.class));
     assertNotNull(
         ZerobusSdk.class.getDeclaredMethod(
             "nativeCreateStream",

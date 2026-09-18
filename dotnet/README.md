@@ -85,8 +85,7 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .Build();
 ```
 
-`ConnectionPerStream` applies to JSON/protobuf streams. Arrow Flight streams
-already use dedicated connections and are unaffected.
+`ConnectionPerStream` applies to JSON/protobuf streams.
 
 HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
 workloads over the public internet, packet loss and TCP retransmissions can

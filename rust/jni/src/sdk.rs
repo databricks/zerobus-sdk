@@ -48,26 +48,18 @@ impl NativeSdkHandle {
     }
 }
 
-/// Create a new ZerobusSdk instance.
-///
-/// # JNI Signature
-/// ```java
-/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream);
-/// ```
-#[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
+fn create_sdk<'local>(
+    env: &mut JNIEnv<'local>,
     server_endpoint: JString<'local>,
     unity_catalog_endpoint: JString<'local>,
     application_name: JString<'local>,
-    connection_per_stream: jboolean,
+    connection_per_stream: bool,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
         Ok(s) => s.into(),
         Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid server endpoint: {}", e));
+            throw_zerobus_exception(env, &format!("Invalid server endpoint: {}", e));
             return 0;
         }
     };
@@ -75,7 +67,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     let unity_catalog_endpoint: String = match env.get_string(&unity_catalog_endpoint) {
         Ok(s) => s.into(),
         Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid Unity Catalog endpoint: {}", e));
+            throw_zerobus_exception(env, &format!("Invalid Unity Catalog endpoint: {}", e));
             return 0;
         }
     };
@@ -86,7 +78,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
         match env.get_string(&application_name) {
             Ok(s) => Some(s.into()),
             Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid application name: {}", e));
+                throw_zerobus_exception(env, &format!("Invalid application name: {}", e));
                 return 0;
             }
         }
@@ -98,7 +90,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
         .endpoint(server_endpoint)
         .unity_catalog_url(unity_catalog_endpoint)
         .sdk_identifier(sdk_identifier)
-        .connection_per_stream(connection_per_stream != JNI_FALSE);
+        .connection_per_stream(connection_per_stream);
     let builder = match application_name {
         Some(name) => builder.application_name(name),
         None => builder,
@@ -106,10 +98,59 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     match builder.build() {
         Ok(sdk) => NativeSdkHandle::new(sdk).into_raw(),
         Err(e) => {
-            throw_from_zerobus_error(&mut env, &e);
+            throw_from_zerobus_error(env, &e);
             0
         }
     }
+}
+
+/// Create a new ZerobusSdk instance using the default connection ownership.
+///
+/// # JNI Signature
+/// ```java
+/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint, String applicationName);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+) -> jlong {
+    create_sdk(
+        &mut env,
+        server_endpoint,
+        unity_catalog_endpoint,
+        application_name,
+        true,
+    )
+}
+
+/// Create a new ZerobusSdk instance with configurable connection ownership.
+///
+/// # JNI Signature
+/// ```java
+/// private static native long nativeCreateWithConnectionPerStream(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithConnectionPerStream<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+) -> jlong {
+    create_sdk(
+        &mut env,
+        server_endpoint,
+        unity_catalog_endpoint,
+        application_name,
+        connection_per_stream != JNI_FALSE,
+    )
 }
 
 /// Destroy a ZerobusSdk instance.
