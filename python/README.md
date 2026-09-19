@@ -298,6 +298,77 @@ asyncio.run(main())
 
 See the [`examples/`](examples/) directory for complete runnable examples.
 
+## Authentication
+
+`create_stream()` supports three authentication methods: `auth` (external-IdP
+federation), a custom `headers_provider`, and `client_id`/`client_secret` (OAuth).
+`auth` and `client_id`/`client_secret` are mutually exclusive — passing both
+raises `ValueError` rather than silently preferring one. When `auth` is given
+alongside `headers_provider`, `auth` takes precedence.
+
+### OAuth client credentials (default)
+
+```python
+stream = sdk.create_stream(
+    client_id="your-client-id",
+    client_secret="your-client-secret",
+    table_properties=table_properties,
+)
+```
+
+### External-IdP federation (e.g. Entra ID)
+
+Use `auth=FederatedToken(...)` to authenticate with an external identity
+provider instead of a Databricks OAuth secret. You provide a callback that
+returns the current external IdP token; the SDK exchanges it for a
+Zerobus-scoped Databricks token (RFC 8693 token exchange) and caches and
+refreshes that token for you. The callback may be synchronous (sync SDK) or
+asynchronous (async SDK).
+
+```python
+from zerobus import FederatedToken
+
+def get_idp_token():
+    # Return the current external IdP (e.g. Entra ID) access token.
+    ...
+
+# Account-level federation: no Databricks service principal. The identity is
+# synced into Databricks via Automatic Identity Management (SCIM). Build the
+# FederatedToken once and reuse it across create_stream calls: the exchanged
+# Databricks token is cached per token instance, so reusing one shares that cache
+# (a distinct instance is a distinct identity and re-mints its own token).
+auth = FederatedToken(idp_token_supplier=get_idp_token)
+stream = sdk.create_stream(table_properties=table_properties, auth=auth)
+another_stream = sdk.create_stream(table_properties=other_table, auth=auth)
+
+# Workload identity federation: a Databricks service principal with a client_id
+# and no secret, with a federation policy attached.
+workload_auth = FederatedToken(
+    idp_token_supplier=get_idp_token, databricks_client_id="<sp-client-id>"
+)
+stream = sdk.create_stream(table_properties=table_properties, auth=workload_auth)
+```
+
+The callback is invoked only when a fresh token must be minted (a cache miss or
+refresh), not on every request, so keep it reasonably fast — ideally returning a
+cached IdP token rather than doing a blocking network call on each invocation.
+
+> **Note:** A **synchronous** callback runs inline while it blocks, holding the
+> interpreter (GIL), so a slow blocking one stalls the SDK for the whole IdP
+> round-trip and cannot be interrupted by `recovery_timeout_ms`. This holds on the
+> **async** SDK too: a sync callback is invoked before the await point, so it
+> blocks the event loop / a worker just as it blocks the sync SDK. For IdP calls
+> that may do real network I/O, use the **async** SDK with an `async def` callback
+> (the SDK awaits it without holding the GIL), or keep a sync callback fast by
+> returning an already-cached token.
+
+See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
+
+### Custom headers provider
+
+For advanced cases you can supply your own `HeadersProvider` via
+`headers_provider=`; see the [`HeadersProvider`](#headersprovider) reference.
+
 ## Configuration
 
 Configure stream behavior by passing a `StreamConfigurationOptions` object to `create_stream()`:
@@ -599,7 +670,7 @@ budget expires.
 
 ### `HeadersProvider`
 
-For custom authentication (e.g. custom token providers), implement `HeadersProvider` and pass it to `create_stream()`. Must include both `authorization` and `x-databricks-zerobus-table-name` headers. See [`examples/`](examples/) for implementation details.
+For custom authentication (e.g. custom token providers), implement `HeadersProvider` and pass it to `create_stream()`. Must include both `authorization` and `x-databricks-zerobus-table-name` headers. You may also override the optional `invalidate(self)` hook to drop cached auth state after the server rejects a token; the SDK calls it so a fresh token is fetched on the next `get_headers()`. See [`examples/`](examples/) for implementation details.
 
 ### `RecordAcknowledgment` (Sync only, deprecated)
 

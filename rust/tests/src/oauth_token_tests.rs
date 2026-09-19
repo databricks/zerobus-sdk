@@ -199,19 +199,22 @@ mod token_minting_and_caching_tests {
     async fn proactive_refresh_replaces_the_cached_token() {
         setup_tracing();
         let (oauth, uc_url) = start_mock_oauth_server().await;
-        // token-1 is short-lived (60s < the 300s refresh window) so the second call
-        // proactively refreshes; token-2 is long-lived so the third call is a plain
-        // cache hit. This is the successful-refresh path (the hung/backoff tests only
-        // exercise a *failing* refresh).
+        // token-1 has a short 4s TTL; the refresh lead time scales to
+        // min(300s buffer, 4s/2) = 2s, so once ~3s of its life has elapsed it is
+        // inside its refresh window and the next call proactively refreshes it.
+        // token-2 is long-lived so the third call is a plain cache hit. This is the
+        // successful-refresh path (the hung/backoff tests exercise a *failing* one).
         oauth
             .set_responses(vec![
-                MockTokenResponse::ok("token-1").with_expires_in(Some("60")),
+                MockTokenResponse::ok("token-1").with_expires_in(Some("4")),
                 MockTokenResponse::ok("token-2"),
             ])
             .await;
         let provider = oauth_provider(uc_url);
 
         let first = bearer_token(&provider.get_headers().await.unwrap());
+        // Let token-1 age into its (scaled) refresh window without expiring.
+        tokio::time::sleep(Duration::from_secs(3)).await;
         let second = bearer_token(&provider.get_headers().await.unwrap());
         let third = bearer_token(&provider.get_headers().await.unwrap());
 
@@ -264,12 +267,15 @@ mod token_minting_and_caching_tests {
     async fn dead_on_arrival_refresh_falls_back_to_cached() {
         setup_tracing();
         let (oauth, uc_url) = start_mock_oauth_server().await;
-        // Seed a still-valid token in its refresh window; the refresh then returns a
-        // dead-on-arrival token (1s TTL, ~1.2s late), so the cache must fall back to
-        // the still-valid seed rather than install and serve the DOA token.
+        // Seed a still-valid token, then let it age into its refresh window; the
+        // refresh then returns a dead-on-arrival token (1s TTL, ~1.2s late), so the
+        // cache must fall back to the still-valid seed rather than install and serve
+        // the DOA token. The seed's 6s TTL (refresh window = min(300s, 3s) = 3s,
+        // entered after a 4s wait) leaves ~2s of life — enough to outlast the
+        // refresh's 1.2s delay and still be served as the fallback.
         oauth
             .set_responses(vec![
-                MockTokenResponse::ok("token-1").with_expires_in(Some("60")),
+                MockTokenResponse::ok("token-1").with_expires_in(Some("6")),
                 MockTokenResponse::ok("token-2")
                     .with_expires_in(Some("1"))
                     .with_delay(Duration::from_millis(1200)),
@@ -278,6 +284,7 @@ mod token_minting_and_caching_tests {
         let provider = oauth_provider(uc_url);
 
         let first = bearer_token(&provider.get_headers().await.unwrap());
+        tokio::time::sleep(Duration::from_secs(4)).await;
         let second = bearer_token(&provider.get_headers().await.unwrap());
 
         assert_eq!(first, "token-1");
@@ -459,12 +466,13 @@ mod stream_creation_tests {
         setup_tracing();
         let (grpc, grpc_url) = start_mock_server().await.unwrap();
         let (oauth, uc_url) = start_mock_oauth_server().await;
-        // The first mint yields a short-lived token (60s < the 300s refresh
-        // buffer, so it is immediately in its refresh window); the proactive
-        // refresh triggered by the second stream then hangs and never replies.
+        // The first mint yields a short-lived token (6s TTL; refresh window =
+        // min(300s, 3s) = 3s, entered after a 4s wait, leaving ~2s of life > the
+        // 500ms refresh cap); the proactive refresh triggered by the second stream
+        // then hangs and never replies.
         oauth
             .set_responses(vec![
-                MockTokenResponse::ok("token-1").with_expires_in(Some("60")),
+                MockTokenResponse::ok("token-1").with_expires_in(Some("6")),
                 MockTokenResponse::Hang,
             ])
             .await;
@@ -504,6 +512,9 @@ mod stream_creation_tests {
             .await;
         assert!(first.is_ok(), "first stream: {:?}", first.err());
         assert_eq!(oauth.mint_count(), 1);
+
+        // Let the cached token age into its refresh window (without expiring).
+        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // Second stream: the cached token is in its refresh window, so a
         // proactive refresh fires and hangs. The 500ms cap must make the SDK
@@ -661,14 +672,15 @@ mod stream_creation_tests {
         setup_tracing();
         let (grpc, grpc_url) = start_mock_server().await.unwrap();
         let (oauth, uc_url) = start_mock_oauth_server().await;
-        // Seed a short-lived token (already in its 300s refresh window), then fail
-        // the refresh. Only the slot-winner's refresh reaches the endpoint; the rest
-        // of the burst is suppressed by the post-fallback backoff. One 503 suffices:
-        // if the backoff failed to hold, the extra refreshers would fall through to
-        // the mock's default OK response and still push mint_count past 2.
+        // Seed a short-lived token (6s TTL) and let it age into its refresh window,
+        // then fail the refresh. Only the slot-winner's refresh reaches the
+        // endpoint; the rest of the burst is suppressed by the post-fallback
+        // backoff. One 503 suffices: if the backoff failed to hold, the extra
+        // refreshers would fall through to the mock's default OK response and still
+        // push mint_count past 2.
         oauth
             .set_responses(vec![
-                MockTokenResponse::ok("token-1").with_expires_in(Some("60")),
+                MockTokenResponse::ok("token-1").with_expires_in(Some("6")),
                 MockTokenResponse::error(503, "token endpoint down"),
             ])
             .await;
@@ -689,9 +701,14 @@ mod stream_creation_tests {
         assert!(seed.is_ok(), "seed stream: {:?}", seed.err());
         assert_eq!(oauth.mint_count(), 1);
 
+        // Let the seed age into its refresh window (leaving ~2s of life) so the
+        // burst triggers a refresh rather than a plain cache hit.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
         // Concurrent burst: whichever build wins the slot refreshes (503 → falls
-        // back to the cached token and arms a ~5s backoff); the others wake inside
-        // the backoff window and serve the cached token without refreshing.
+        // back to the cached token and arms a backoff of ~remaining/2); the others
+        // wake inside the backoff window and serve the cached token without
+        // refreshing. The whole burst completes in well under that backoff.
         let builds: Vec<_> = (0..CONCURRENT_BUILDS)
             .map(|_| {
                 sdk.stream_builder()
