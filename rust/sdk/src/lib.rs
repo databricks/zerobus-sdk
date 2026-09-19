@@ -45,7 +45,6 @@ mod dynamic_proto;
 mod errors;
 mod headers_provider;
 mod landing_zone;
-#[cfg(feature = "testing")]
 mod multiplexed_stream;
 mod offset_generator;
 mod proxy;
@@ -62,7 +61,7 @@ mod token_cache;
 
 #[cfg(feature = "avro")]
 pub use apache_avro::types::Value as AvroValue;
-pub use builder::{StreamBuilder, ZerobusSdkBuilder};
+pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use dynamic_proto::{
@@ -73,7 +72,6 @@ pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
-#[cfg(feature = "testing")]
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};

@@ -73,7 +73,6 @@ impl ZerobusStream {
 
     /// Stops a mux lane after its flush attempt. Cache the outcome and close
     /// the lane before the caller starts cancellable callback draining.
-    #[cfg(feature = "testing")]
     pub(crate) async fn close_after_flush(&mut self) -> Option<ZerobusError> {
         if let Some(result) = &self.supervisor_shutdown_result {
             return result.as_ref().err().cloned();
@@ -175,7 +174,6 @@ impl ZerobusStream {
     // cancellation token and `is_closed` flag, both of which are already
     // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
     // `close` or `Drop`.
-    #[cfg(feature = "testing")]
     pub(crate) fn signal_shutdown(&self) {
         self.is_closed.store(true, Ordering::Relaxed);
         self.terminal_token.cancel();

@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Added `StreamBuilder::multiplexed(n)` (Beta) for JSON and protobuf streams, with
+  concurrent construction, a shared in-flight budget, and a separate
+  `multiplexed_ack_callback` for `MessageId` notifications. Existing ordinary
+  `ack_callback` usage is unchanged.
+
 - Add Avro record format (Beta), behind the off-by-default `avro` feature. Select it with
   `StreamBuilder::avro(schema_json)`, then ingest an `AvroRecord(AvroValue)` the stream
   encodes against the writer schema, or a pre-encoded `AvroBytes`. Ephemeral streams only;
@@ -16,6 +21,11 @@
   shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.
 - Added pluggable Arrow Flight telemetry (Beta) for batch sizes, send attempts,
   acknowledgments, and reconnect reasons, via `StatsExporter` and `channel_exporter`.
+- Multi-lane multiplexed construction opens sub-streams concurrently with
+  bounded random startup jitter and cleans up successful opens if construction
+  fails or is cancelled. A single lane opens immediately.
+- Multiplexed streams divide the mux-wide `max_inflight_requests` budget evenly
+  across sub-streams.
 
 ### Bug Fixes
 
@@ -24,8 +34,13 @@
 
 ### Documentation
 
+- Added multiplexed-stream guidance and a complete compiled-protobuf example
+  with queued ingestion, periodic flushing, `MessageId` callbacks, and close.
+
 ### Internal Changes
 
+- Made gRPC graceful-close deadline tests deterministic with a paused clock and
+  acknowledgment barriers, avoiding false failures from Windows scheduling delays.
 - Updated multiplexed-stream failure handling to reject new ingestion after a
   mux operation observes a failed lane, preserve typed lane errors, wait for
   healthy lanes during flush, and close lanes concurrently. Healthy lanes stay
@@ -81,3 +96,10 @@
   `impl Into<EncodedRecord>`. A blanket `From<T: Into<EncodedRecord>>` keeps every existing
   caller compiling unchanged; the wider bound is what lets an Avro record object
   (`AvroRecord`) be ingested. `PreparedInput` is `#[doc(hidden)]`.
+
+- Exported `MultiplexedStream`, `MultiplexedStreamBuilder`, and `MessageId` with
+  default features.
+- Added `StreamBuilder::multiplexed_ack_callback` for `MessageId` callbacks
+  while preserving `ack_callback` for ordinary `OffsetId` callbacks; each
+  terminal mode rejects the other mode's callback.
+- Added `MultiplexedStream::new_record()` for dynamic-protobuf records.
