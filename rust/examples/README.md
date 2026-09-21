@@ -48,6 +48,7 @@ The SDK supports four ingestion formats and two ingestion methods:
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `cargo run -p example_arrow` |
 | [Avro Single](avro/README.md#single-record-example) | Avro | Single-record | `cd avro && cargo run --example avro_single` |
 | [Avro Batch](avro/README.md#batch-example) | Avro | Batch | `cd avro && cargo run --example avro_batch` |
+| [Avro Multiplexed](avro/README.md#multiplexed-example) | Avro | Multiplexed | `cd avro && cargo run --example avro_multiplexed` |
 
 ## Prerequisites
 

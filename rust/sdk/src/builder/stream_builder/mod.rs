@@ -70,29 +70,51 @@ enum FormatConfig {
     Avro(String),
 }
 
-type GrpcFormat = (
-    RecordType,
-    Option<prost_types::DescriptorProto>,
-    Option<MessageDescriptor>,
-);
+struct GrpcFormat {
+    record_type: RecordType,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    message_descriptor: Option<MessageDescriptor>,
+    #[cfg(feature = "avro")]
+    avro_schema: Option<Arc<AvroSchema>>,
+}
 
 impl FormatConfig {
     fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
-        match self {
-            Self::Json => Ok((RecordType::Json, None, None)),
-            Self::CompiledProto(descriptor) => Ok((RecordType::Proto, Some(*descriptor), None)),
-            Self::DynamicProto(descriptor) => Ok((
+        let (record_type, descriptor_proto, message_descriptor) = match self {
+            Self::Json => (RecordType::Json, None, None),
+            Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
+            Self::DynamicProto(descriptor) => (
                 RecordType::Proto,
                 Some(descriptor.descriptor_proto().clone()),
                 Some(descriptor),
-            )),
+            ),
             #[cfg(feature = "arrow-flight")]
-            Self::Arrow(_) => Err(ZerobusError::InvalidArgument(
-                "Arrow format requires .build_arrow() instead of .build()".into(),
-            )),
+            Self::Arrow(_) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Arrow format requires .build_arrow() instead of .build()".into(),
+                ));
+            }
             #[cfg(feature = "avro")]
-            Self::Avro(_) => Ok((RecordType::Avro, None, None)),
-        }
+            Self::Avro(json) => {
+                let parsed = apache_avro::Schema::parse_str(&json).map_err(|e| {
+                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
+                })?;
+                return Ok(GrpcFormat {
+                    record_type: RecordType::Avro,
+                    descriptor_proto: None,
+                    message_descriptor: None,
+                    avro_schema: Some(Arc::new(AvroSchema { json, parsed })),
+                });
+            }
+        };
+
+        Ok(GrpcFormat {
+            record_type,
+            descriptor_proto,
+            message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema: None,
+        })
     }
 }
 
@@ -481,8 +503,9 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// `stream_count` must be in `1..=64` and cannot exceed the configured
     /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
-    /// across sub-streams using integer division. JSON, compiled protobuf, and
-    /// dynamic protobuf are supported; Arrow Flight and Avro are not.
+    /// across sub-streams using integer division. JSON, compiled protobuf,
+    /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
+    /// Arrow Flight is not.
     pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
         MultiplexedStreamBuilder::new(self, stream_count)
     }
@@ -582,37 +605,22 @@ impl<'a> StreamBuilder<'a> {
         // format match below rejects an Arrow format outright.
         self.validate()?;
 
-        // Parse the writer schema once, before any connection, so malformed JSON fails at
-        // build(). Keep the raw JSON (sent to the server on stream creation) and the parsed
-        // schema (used to encode records) together in TableProperties for reuse on ingest.
-        #[cfg(feature = "avro")]
-        let avro_schema = match &self.format {
-            Some(FormatConfig::Avro(json)) => {
-                let parsed = apache_avro::Schema::parse_str(json).map_err(|e| {
-                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
-                })?;
-                Some(AvroSchema {
-                    json: json.clone(),
-                    parsed,
-                })
-            }
-            _ => None,
-        };
-
-        let (record_type, descriptor_proto, message_descriptor) = self
+        // Avro schemas are parsed here, before any connection is opened. The raw JSON and
+        // parsed schema remain together in TableProperties for stream creation and ingest.
+        let format = self
             .format
             .take()
             .expect("format was validated")
             .into_grpc()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        self.grpc_config.record_type = record_type;
+        self.grpc_config.record_type = format.record_type;
         let table_properties = TableProperties {
             table_name: self.table_name,
-            descriptor_proto,
-            message_descriptor,
+            descriptor_proto: format.descriptor_proto,
+            message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
-            avro_schema,
+            avro_schema: format.avro_schema,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;

@@ -90,20 +90,29 @@ async fn callback_modes_validate_before_opening_connections() {
 
 #[cfg(feature = "avro")]
 #[tokio::test]
-async fn multiplexed_rejects_avro_before_opening_connections() {
+async fn multiplexed_avro_rejects_bad_schema_before_connecting() {
     let sdk = test_sdk();
     let builder = sdk
         .stream_builder()
         .table("t")
         .oauth("a", "b")
-        .avro(r#""string""#)
+        .avro(r#"{"type":"record","name":"R","fields":[]}"#)
         .multiplexed(2);
-    assert!(
-        matches!(builder.validate(), Err(ZerobusError::InvalidArgument(message)) if message.contains("Avro"))
-    );
-    assert!(
-        matches!(builder.build().await, Err(ZerobusError::InvalidArgument(message)) if message.contains("Avro"))
-    );
+    builder
+        .validate()
+        .expect("Avro should support multiplexing");
+
+    for bad in ["", "{"] {
+        let result = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .avro(bad)
+            .multiplexed(2)
+            .build()
+            .await;
+        assert!(matches!(result, Err(ZerobusError::AvroSchemaParseError(_))));
+    }
 }
 
 #[test]

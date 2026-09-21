@@ -736,9 +736,9 @@ stream.flush().await?;
 stream.close().await?;
 ```
 
-The stream count must be between 1 and 64. JSON, compiled protobuf, and
-dynamic protobuf are supported. Arrow Flight and Avro are not multiplexed; use
-their ordinary builders instead. For maximum protobuf encoding throughput,
+The stream count must be between 1 and 64. JSON, compiled protobuf, dynamic
+protobuf, and Avro (with the `avro` feature) are supported. Arrow Flight is not
+multiplexed. For maximum protobuf encoding throughput,
 prefer compiled protobuf—multiplexing addresses stream/network bottlenecks,
 not the reflection cost of constructing dynamic records.
 
@@ -795,6 +795,9 @@ stream.flush().await?; // wait once for all pending acknowledgments
 `AvroValue` is `apache_avro`'s value type (re-exported), so it can represent any Avro
 type — unions, `fixed`, `decimal`, and logical types included. See
 [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro).
+Avro can also be multiplexed by calling `.multiplexed(n)` after `.avro(schema)`;
+all managed sub-streams use the same writer schema. See the
+[`avro_multiplexed`](examples/avro/multiplexed.rs) example.
 
 ### 5. Ingest Data
 
@@ -1283,6 +1286,7 @@ The `examples/` directory contains working examples covering different serializa
 | `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | `avro/single.rs` | Avro (Beta) | Single-record | `cd examples/avro && cargo run --example avro_single` |
 | `avro/batch.rs` | Avro (Beta) | Batch | `cd examples/avro && cargo run --example avro_batch` |
+| `avro/multiplexed.rs` | Avro (Beta) | Multiplexed | `cd examples/avro && cargo run --example avro_multiplexed` |
 
 > The Avro examples live in an excluded crate (`examples/avro`), so they run with `cd examples/avro` rather than `-p`.
 

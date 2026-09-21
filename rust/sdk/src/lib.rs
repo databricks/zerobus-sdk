@@ -31,6 +31,9 @@
 //!
 //! See the `examples/` directory for complete working examples.
 
+#[cfg(feature = "avro")]
+use std::sync::Arc;
+
 pub mod databricks {
     pub mod zerobus {
         include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
@@ -124,7 +127,7 @@ pub enum StreamType {
 /// on stream creation, and the parsed schema used to encode records at ingest. Held
 /// together so the two always coexist.
 #[cfg(feature = "avro")]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct AvroSchema {
     pub(crate) json: String,
     pub(crate) parsed: apache_avro::Schema,
@@ -145,7 +148,7 @@ pub(crate) struct TableProperties {
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
     pub(crate) message_descriptor: Option<MessageDescriptor>,
     #[cfg(feature = "avro")]
-    pub(crate) avro_schema: Option<AvroSchema>,
+    pub(crate) avro_schema: Option<Arc<AvroSchema>>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;

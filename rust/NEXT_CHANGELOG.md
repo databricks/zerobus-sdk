@@ -9,7 +9,8 @@
 - Added `StreamBuilder::multiplexed(n)` (Beta) for JSON and protobuf streams, with
   concurrent construction, a shared in-flight budget, and a separate
   `multiplexed_ack_callback` for `MessageId` notifications. Existing ordinary
-  `ack_callback` usage is unchanged.
+  `ack_callback` usage is unchanged. Multiplexed Avro streams are also supported
+  when the `avro` feature is enabled; every lane shares the configured writer schema.
 - Multi-lane multiplexed construction opens sub-streams concurrently with
   bounded random startup jitter and cleans up successful opens if construction
   fails or is cancelled. A single lane opens immediately.
@@ -26,6 +27,7 @@
 
 - Added multiplexed-stream guidance and a complete compiled-protobuf example
   with queued ingestion, periodic flushing, `MessageId` callbacks, and close.
+- Added a multiplexed Avro example using loop-then-flush ingestion.
 
 ### Internal Changes
 

@@ -14,6 +14,7 @@ The `avro` feature flag must be enabled.
 - [Batch Example](#batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+- [Multiplexed Example](#multiplexed-example)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -27,6 +28,7 @@ Avro is a third record format option alongside JSON and Protocol Buffers: a comp
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
+- **`multiplexed.rs`** - Route Avro records across managed sub-streams when one stream is the bottleneck
 
 > **Beta / feature flag.** Avro is behind the `avro` Cargo feature (the examples' `Cargo.toml` enables it for you). It is **Beta**: ephemeral streams only, and the feature is in development. The `avro` feature requires Rust 1.85 (via `apache-avro`).
 
@@ -144,6 +146,31 @@ stream.flush().await?;
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
+
+## Multiplexed Example
+
+Use multiplexing when one Avro gRPC stream is the throughput bottleneck and
+global ordering is not required. Configure the writer schema before the
+terminal `.multiplexed(n)` call:
+
+```rust
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .avro(AVRO_SCHEMA)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+for record in records {
+    let _message_id = stream.ingest_record(AvroRecord(record)).await?;
+}
+stream.flush().await?;
+```
+
+Each lane uses the same writer schema. Run the complete example with
+`cargo run --example avro_multiplexed`.
 
 ## Adapting for Your Custom Table
 

@@ -8,7 +8,7 @@ use futures::future::join_all;
 use rand::Rng;
 use tracing::{error, warn};
 
-#[cfg(any(feature = "arrow-flight", feature = "avro"))]
+#[cfg(feature = "arrow-flight")]
 use super::FormatConfig;
 use super::StreamBuilder;
 use crate::headers_provider::HeadersProvider;
@@ -57,6 +57,10 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
     /// Validate the common stream configuration, mux-compatible format,
     /// callback selection, and stream count without opening a connection.
+    ///
+    /// This is a configuration check, not a guarantee that [`build`](Self::build)
+    /// succeeds: the Avro writer schema is parsed in `build()` (before any
+    /// connection), so a malformed schema surfaces there, not here.
     pub fn validate(&self) -> ZerobusResult<()> {
         self.inner.validate_common()?;
         let max_streams = crate::multiplexed_stream::MAX_STREAMS;
@@ -84,13 +88,6 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         if self.inner.grpc_config.ack_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
                 "ack_callback is only valid for ordinary streams; use multiplexed_ack_callback before .multiplexed(...)"
-                    .into(),
-            ));
-        }
-        #[cfg(feature = "avro")]
-        if matches!(self.inner.format, Some(FormatConfig::Avro(_))) {
-            return Err(ZerobusError::InvalidArgument(
-                "Avro format is not supported for multiplexed streams; use .build() on an ordinary StreamBuilder"
                     .into(),
             ));
         }
@@ -137,20 +134,22 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         let delays = self.sample_jitter_delays();
         let multiplexed_callback = self.inner.multiplexed_callback.take();
 
-        let (record_type, descriptor_proto, message_descriptor) = self
+        // Parse Avro once before opening any lane. TableProperties clones share the same
+        // immutable writer schema allocation across lanes, supervisors, and retries.
+        let format = self
             .inner
             .format
             .take()
             .expect("format was validated")
             .into_grpc()?;
-        self.inner.grpc_config.record_type = record_type;
+        self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
             table_name: self.inner.table_name.clone(),
-            descriptor_proto,
-            message_descriptor,
+            descriptor_proto: format.descriptor_proto,
+            message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
-            avro_schema: None,
+            avro_schema: format.avro_schema,
         };
         let sdk = self.inner.sdk;
         let max_inflight_requests_per_stream = self
