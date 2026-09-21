@@ -15,6 +15,7 @@ use tokio::time::Duration;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -214,7 +215,7 @@ impl ZerobusStream {
             // Separate token for recv_task's close path
             let recv_drain_token = CancellationToken::new();
 
-            let mut recv_task = Self::spawn_receiver_task(
+            let mut recv_task = AbortOnDropHandle::new(Self::spawn_receiver_task(
                 response_grpc_stream,
                 logical_last_received_offset_id_tx.clone(),
                 landing_zone_receiver,
@@ -224,14 +225,14 @@ impl ZerobusStream {
                 server_error_tx.clone(),
                 recv_drain_token.clone(),
                 callback_tx.clone(),
-            );
-            let mut send_task = Self::spawn_sender_task(
+            ));
+            let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 tx,
                 landing_zone_sender,
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
-            );
+            ));
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {

@@ -26,8 +26,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::{
-    AckCallback, EncodedBatch, EncodedRecord, OffsetId, PreparedInput, ZerobusError, ZerobusResult,
-    ZerobusStream,
+    AckCallback, DynamicRecord, EncodedBatch, EncodedRecord, MessageDescriptor, OffsetId,
+    PreparedInput, ZerobusError, ZerobusResult, ZerobusStream,
 };
 
 const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,6 +35,7 @@ const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
 const STREAM_BITS: u32 = 6;
+pub(crate) const MAX_STREAMS: usize = 1 << STREAM_BITS;
 const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 
 /// Opaque identifier returned by ingest methods on MultiplexedStream.
@@ -42,6 +43,10 @@ const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 ///
 /// Unlike a `ZerobusStream` offset, `MessageId` values are not ordered — pass
 /// them to [`MultiplexedStream::wait_for_message_id`] to await acknowledgment.
+///
+/// # Beta
+///
+/// Multiplexed streams are a Beta API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(i64);
 
@@ -109,7 +114,6 @@ impl AckCallback for MultiplexedAckCallbackAdapter {
 ///
 /// The adapter captures the sub-stream index and converts each stream-local
 /// [`OffsetId`] into the [`MessageId`] exposed by [`MultiplexedStream`].
-#[allow(dead_code)]
 pub(crate) fn multiplexed_ack_callback(
     stream_index: usize,
     callback: Arc<dyn AckCallback<MessageId>>,
@@ -127,8 +131,20 @@ pub(crate) fn multiplexed_ack_callback(
 
 /// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
 ///
-/// See the [module-level documentation](self) for routing, `MessageId`, and
-/// poisoning semantics.
+/// A selected sub-stream that is at capacity waits for room rather than
+/// rerouting, preserving ordering within each lane. There is no global record,
+/// [`MessageId`], acknowledgment, callback, or recovery order across lanes.
+///
+/// After a mux operation observes a terminal lane failure, the mux rejects new
+/// ingestion and preserves that lane's typed error. Healthy lanes remain alive
+/// to process already-accepted records until [`close`](Self::close) or drop.
+/// [`flush`](Self::flush) waits for every lane's flush attempt, and unacknowledged
+/// records can be recovered with [`get_unacked_records`](Self::get_unacked_records)
+/// or [`get_unacked_batches`](Self::get_unacked_batches).
+///
+/// # Beta
+///
+/// This API is in Beta.
 pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
@@ -148,7 +164,12 @@ impl MultiplexedStream {
     /// # Panics
     ///
     /// Panics if `streams` is empty or holds more than 64 sub-streams.
+    #[cfg(feature = "testing")]
     pub fn new(streams: Vec<ZerobusStream>) -> Self {
+        Self::from_streams(streams)
+    }
+
+    pub(crate) fn from_streams(streams: Vec<ZerobusStream>) -> Self {
         assert!(
             !streams.is_empty(),
             "MultiplexedStream requires at least one sub-stream"
@@ -166,6 +187,17 @@ impl MultiplexedStream {
             failure: OnceLock::new(),
             close_flush_result: None,
         }
+    }
+
+    /// Returns the schema descriptor configured with [`crate::StreamBuilder::dynamic_proto`].
+    /// Returns an error if this is not a dynamic-protobuf stream.
+    pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
+        self.streams[0].message_descriptor()
+    }
+
+    /// Creates an empty record using this mux's dynamic-protobuf schema.
+    pub fn new_record(&self) -> ZerobusResult<DynamicRecord> {
+        self.streams[0].new_record()
     }
 
     #[allow(clippy::result_large_err)]
@@ -594,7 +626,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "MultiplexedStream requires at least one sub-stream")]
     fn test_constructor_panics_on_empty_streams() {
-        MultiplexedStream::new(vec![]);
+        MultiplexedStream::from_streams(vec![]);
     }
 
     #[test]

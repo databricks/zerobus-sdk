@@ -16,7 +16,6 @@ impl ZerobusStream {
     /// Returns the final server error after this stream becomes terminal.
     /// Multiplexed streams use this to preserve the lane's typed failure when
     /// they discover an asynchronously closed lane.
-    #[cfg(feature = "testing")]
     pub(crate) async fn terminal_error(&self) -> Option<ZerobusError> {
         self.terminal_token.cancelled().await;
         self.server_error_rx.borrow().clone()

@@ -3497,7 +3497,7 @@ mod failure_scenarios_tests {
                         },
                         MockResponse::RecordAck {
                             ack_up_to_offset: 4,
-                            delay_ms: 50,
+                            delay_ms: 0,
                         },
                     ],
                 )
@@ -3966,15 +3966,11 @@ mod failure_scenarios_tests {
 mod graceful_close_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_default_graceful_close_waits_for_full_server_duration(
+    async fn assert_graceful_close_waits_for_server_duration(
+        client_max_wait_ms: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-        info!("Starting test_default_graceful_close_waits_for_full_server_duration");
-
-        const SERVER_DURATION_SECONDS: i64 = 1;
-
         let (mock_server, server_url) = start_mock_server().await?;
+        let ack_gate = Arc::new(mock_grpc::MockResponseGate::new());
 
         mock_server
             .inject_responses(
@@ -3984,13 +3980,17 @@ mod graceful_close_tests {
                         stream_id: "test_stream_default_graceful".to_string(),
                         delay_ms: 0,
                     },
+                    MockResponse::CloseStreamSignal {
+                        duration_seconds: 1,
+                        delay_ms: 0,
+                    },
                     MockResponse::RecordAck {
                         ack_up_to_offset: 1,
                         delay_ms: 0,
                     },
-                    MockResponse::CloseStreamSignal {
-                        duration_seconds: SERVER_DURATION_SECONDS,
-                        delay_ms: 0,
+                    MockResponse::GatedRecordAck {
+                        ack_up_to_offset: 2,
+                        gate: Arc::clone(&ack_gate),
                     },
                     MockResponse::CreateStream {
                         stream_id: "test_stream_recovered".to_string(),
@@ -4004,48 +4004,65 @@ mod graceful_close_tests {
             )
             .await;
 
-        let sdk = ZerobusSdk::builder()
-            .endpoint(server_url.clone())
-            .unity_catalog_url("https://mock-uc.com")
-            .tls_config(Arc::new(NoTlsConfig))
-            .build()?;
+        run_with_paused_time_watchdog(async {
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let provider = Arc::new(CountingHeadersProvider::default());
+            let mut builder = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider.clone())
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true);
+            if let Some(client_max_wait_ms) = client_max_wait_ms {
+                builder = builder.stream_paused_max_wait_time_ms(Some(client_max_wait_ms));
+            }
+            let stream = builder.build().await?;
 
-        let stream = sdk
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(true)
-            .build()
-            .await?;
+            let mut offsets = Vec::new();
+            for record_index in 0..4 {
+                let payload = format!("record-{record_index}").into_bytes();
+                offsets.push(stream.ingest_record_offset(payload).await?);
+            }
 
-        for i in 0..3 {
-            let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record_offset(payload).await?;
-        }
+            stream.wait_for_offset(offsets[1]).await?;
+            tokio::time::advance(std::time::Duration::from_millis(900)).await;
+            ack_gate.release();
+            stream.wait_for_offset(offsets[2]).await?;
+            assert_eq!(
+                provider
+                    .get_headers_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "The original stream must still be active before the server deadline"
+            );
+            let flush = stream.flush();
+            tokio::pin!(flush);
+            assert!(futures::poll!(&mut flush).is_pending());
 
-        // Give time for records to be sent and CloseStreamSignal to be received.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            tokio::time::advance(std::time::Duration::from_millis(101)).await;
+            flush.await?;
+            assert_eq!(
+                provider
+                    .get_headers_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "Recovery must complete after the server deadline without advancing to the client limit"
+            );
+            assert_eq!(mock_server.get_write_count().await, 5);
+            Ok(())
+        })
+        .await
+    }
 
-        let start_time = std::time::Instant::now();
-        stream.flush().await?;
-        let elapsed = start_time.elapsed();
-
-        assert!(
-            elapsed.as_millis() >= 900,
-            "Expected to wait at least 900ms (most of server duration), but took {}ms",
-            elapsed.as_millis()
-        );
-        assert!(
-            elapsed.as_millis() <= 1200,
-            "Expected to wait no more than 1200ms, but took {}ms",
-            elapsed.as_millis()
-        );
-        // 3 writes to first stream + 1 resent to second stream.
-        assert_eq!(mock_server.get_write_count().await, 4);
-
-        Ok(())
+    #[tokio::test(start_paused = true)]
+    async fn test_default_graceful_close_waits_for_full_server_duration(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_graceful_close_waits_for_server_duration(None).await
     }
 
     #[tokio::test]
@@ -4214,87 +4231,9 @@ mod graceful_close_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_client_max_greater_than_server() -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-        info!("Starting test_client_max_greater_than_server");
-
-        const SERVER_DURATION_SECONDS: i64 = 1;
-        const CLIENT_MAX_WAIT_MS: u64 = 2000;
-
-        let (mock_server, server_url) = start_mock_server().await?;
-
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "test_stream_client_greater".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 1,
-                        delay_ms: 0,
-                    },
-                    MockResponse::CloseStreamSignal {
-                        duration_seconds: SERVER_DURATION_SECONDS,
-                        delay_ms: 0,
-                    },
-                    MockResponse::CreateStream {
-                        stream_id: "test_stream_recovered".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
-
-        let sdk = ZerobusSdk::builder()
-            .endpoint(server_url.clone())
-            .unity_catalog_url("https://mock-uc.com")
-            .tls_config(Arc::new(NoTlsConfig))
-            .build()?;
-
-        let stream = sdk
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(true)
-            .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
-            .build()
-            .await?;
-
-        for i in 0..3 {
-            let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record_offset(payload).await?;
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let start_time = std::time::Instant::now();
-        stream.flush().await?;
-        let elapsed = start_time.elapsed();
-
-        assert!(
-            elapsed.as_millis() >= 900,
-            "Expected to wait at least 900ms (server duration), but took {}ms",
-            elapsed.as_millis()
-        );
-        assert!(
-            elapsed.as_millis() < 1500,
-            "Should wait close to server duration (1000ms), not client max, took {}ms",
-            elapsed.as_millis()
-        );
-
-        // 3 writes to first stream + 1 resent to second stream.
-        assert_eq!(mock_server.get_write_count().await, 4);
-
-        Ok(())
+        assert_graceful_close_waits_for_server_duration(Some(2_000)).await
     }
 
     #[tokio::test]

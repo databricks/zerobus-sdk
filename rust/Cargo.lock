@@ -868,6 +868,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "protoc-bin-vendored",
+ "rand 0.9.2",
  "reqwest",
  "rstest",
  "self_cell",

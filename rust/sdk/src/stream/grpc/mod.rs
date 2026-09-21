@@ -138,6 +138,53 @@ pub struct ZerobusStream {
     dynamic_message_descriptor: Option<MessageDescriptor>,
 }
 
+/// Owns tasks spawned while a stream is opening. If the constructor future is
+/// cancelled before it can move those handles into `ZerobusStream`, dropping
+/// this guard cancels and aborts them instead of detaching them.
+type StreamInitializationTasks = (
+    tokio::task::JoinHandle<Result<(), ZerobusError>>,
+    Option<tokio::task::JoinHandle<()>>,
+);
+
+struct StreamInitializationGuard {
+    cancellation_token: CancellationToken,
+    tasks: Option<StreamInitializationTasks>,
+}
+
+impl StreamInitializationGuard {
+    fn new(
+        cancellation_token: CancellationToken,
+        supervisor_task: tokio::task::JoinHandle<Result<(), ZerobusError>>,
+        callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    ) -> Self {
+        Self {
+            cancellation_token,
+            tasks: Some((supervisor_task, callback_handler_task)),
+        }
+    }
+
+    fn disarm(mut self) -> StreamInitializationTasks {
+        self.tasks
+            .take()
+            .expect("initialization guard must own its tasks")
+    }
+}
+
+impl Drop for StreamInitializationGuard {
+    fn drop(&mut self) {
+        let Some((supervisor, callback)) = self.tasks.take() else {
+            return;
+        };
+        self.cancellation_token.cancel();
+        // Aborting the supervisor also drops its abort-on-drop IO handles.
+        // No records have been admitted before construction completes.
+        supervisor.abort();
+        if let Some(callback) = callback {
+            callback.abort();
+        }
+    }
+}
+
 impl ZerobusStream {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
@@ -195,11 +242,17 @@ impl ZerobusStream {
             cancellation_token.clone(),
             callback_tx.clone(),
         ));
+        let initialization_guard = StreamInitializationGuard::new(
+            cancellation_token.clone(),
+            supervisor_task,
+            callback_handler_task,
+        );
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
                 "Supervisor task died before stream creation".to_string(),
             )
         })??);
+        let (supervisor_task, callback_handler_task) = initialization_guard.disarm();
 
         // Cloned out before `table_properties` is moved into the struct below.
         let dynamic_message_descriptor = table_properties.message_descriptor.clone();

@@ -298,7 +298,6 @@ impl ZerobusStream {
         }
     }
 
-    #[cfg(feature = "testing")]
     pub(crate) async fn enqueue_reserved_admitted<F>(
         &self,
         encoded_batch: EncodedBatch,
