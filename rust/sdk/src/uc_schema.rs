@@ -4,8 +4,10 @@
 //! [`crate::schema`]: reads `GET /api/2.1/unity-catalog/tables/{full_name}` and
 //! converts it via [`descriptor_from_uc_schema`].
 //!
-//! Fetching is a separate step, so the descriptor can be inspected and reused
-//! across streams (cloning it is cheap — Arc-backed).
+//! Use [`StreamBuilder::dynamic_proto_uc_schema`](crate::StreamBuilder::dynamic_proto_uc_schema)
+//! to fetch during stream creation with the builder's OAuth credentials.
+//! The functions in this module fetch separately, so the descriptor can be
+//! inspected and reused across streams (cloning it is cheap — Arc-backed).
 //! [`ZerobusSdk::fetch_message_descriptor`](crate::ZerobusSdk::fetch_message_descriptor)
 //! wraps [`fetch_message_descriptor`] with the SDK's `unity_catalog_url`:
 //!

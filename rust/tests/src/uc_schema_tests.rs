@@ -1,10 +1,16 @@
-//! Tests for fetching a table's schema from Unity Catalog
-//! (`uc_schema::fetch_message_descriptor`), against a tiny in-process HTTP mock.
+//! Tests for fetching a table's schema from Unity Catalog, directly or when
+//! building a dynamic protobuf stream, against local HTTP and gRPC mocks.
+
+mod mock_grpc;
 
 use std::sync::{Arc, Mutex};
 
 use databricks_zerobus_ingest_sdk::uc_schema::fetch_message_descriptor;
-use databricks_zerobus_ingest_sdk::ZerobusError;
+use databricks_zerobus_ingest_sdk::{
+    databricks::zerobus::RecordType, ProtoBytes, ZerobusError, ZerobusSdk,
+};
+use mock_grpc::{start_mock_server, MockResponse};
+use prost::Message as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -55,7 +61,8 @@ async fn start_mock(schema_status: u16, schema_body: impl Into<String>) -> MockU
                 let (status, body) = if target.contains("/oidc/") {
                     (
                         200,
-                        r#"{"access_token":"tok-123","expires_in":3600}"#.to_string(),
+                        r#"{"access_token":"tok-123","token_type":"Bearer","expires_in":3600}"#
+                            .to_string(),
                     )
                 } else {
                     (schema_status, schema_body.to_string())
@@ -125,6 +132,160 @@ async fn fetches_descriptor_and_sends_expected_requests() {
     assert!(reqs[0].1.starts_with("Basic "), "got {}", reqs[0].1);
     assert_eq!(reqs[1].0, format!("/api/2.1/unity-catalog/tables/{TABLE}"));
     assert_eq!(reqs[1].1, "Bearer tok-123");
+}
+
+#[tokio::test]
+async fn builder_fetches_schema_and_ingests_dynamic_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mock = start_mock(200, table_json()).await;
+    let (grpc, grpc_url) = start_mock_server().await?;
+    grpc.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "uc-schema-stream".into(),
+                delay_ms: 0,
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 2,
+                delay_ms: 0,
+            },
+        ],
+    )
+    .await;
+    let sdk = ZerobusSdk::builder()
+        .endpoint(grpc_url)
+        .unity_catalog_url(&mock.url)
+        .no_tls()
+        .build()?;
+    let builder = sdk
+        .stream_builder()
+        .table("old.schema.table")
+        .oauth("old-client", "old-secret")
+        .json()
+        .dynamic_proto_uc_schema()
+        .table(TABLE)
+        .oauth("cid", "csec")
+        .recovery(false);
+    builder.validate()?;
+    assert!(mock.requests.lock().unwrap().is_empty());
+    let mut stream = builder.build().await?;
+    let descriptor = stream.message_descriptor()?;
+    assert_eq!(descriptor.name(), "SalesOrders");
+    assert_eq!(descriptor.get_field_by_name("id").unwrap().number(), 1);
+    assert_eq!(
+        descriptor.get_field_by_name("customer").unwrap().number(),
+        2
+    );
+
+    let creates = grpc.get_create_requests().await;
+    assert_eq!(creates.len(), 1);
+    assert_eq!(creates[0].table_name.as_deref(), Some(TABLE));
+    assert_eq!(creates[0].record_type, Some(RecordType::Proto as i32));
+    let wire_descriptor =
+        prost_types::DescriptorProto::decode(creates[0].descriptor_proto.as_deref().unwrap())?;
+    assert_eq!(&wire_descriptor, descriptor.descriptor_proto());
+
+    for id in 0..3i64 {
+        let mut record = stream.new_record()?;
+        record.set("id", id)?.set("customer", "Alice")?;
+        stream
+            .ingest_record_offset(ProtoBytes(record.encode()?))
+            .await?;
+    }
+    stream.flush().await?;
+    assert_eq!(grpc.get_write_count().await, 3);
+    stream.close().await?;
+    {
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "metadata token, schema, and ingestion token"
+        );
+        assert_eq!(requests[0].1, "Basic Y2lkOmNzZWM=");
+        assert_eq!(
+            requests[1].0,
+            format!("/api/2.1/unity-catalog/tables/{TABLE}")
+        );
+        assert_eq!(requests[1].1, "Bearer tok-123");
+    }
+
+    let mut next_stream = sdk
+        .stream_builder()
+        .table(TABLE)
+        .oauth("cid", "csec")
+        .dynamic_proto_uc_schema()
+        .recovery(false)
+        .build()
+        .await?;
+    next_stream.close().await?;
+    assert_eq!(
+        mock.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.starts_with("/api/2.1/unity-catalog/tables/"))
+            .count(),
+        2,
+        "each build fetches a fresh schema"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn builder_propagates_schema_errors_before_connecting_grpc(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (grpc, grpc_url) = start_mock_server().await?;
+    for status in [404, 503] {
+        let mock = start_mock(status, "schema unavailable").await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(&grpc_url)
+            .unity_catalog_url(&mock.url)
+            .no_tls()
+            .build()?;
+        let result = sdk
+            .stream_builder()
+            .table(TABLE)
+            .oauth("cid", "csec")
+            .dynamic_proto_uc_schema()
+            .recovery(false)
+            .build()
+            .await;
+        assert!(
+            matches!(result, Err(ZerobusError::SchemaFetchError { retryable, .. }) if retryable == (status == 503))
+        );
+        assert_eq!(mock.requests.lock().unwrap().len(), 2);
+    }
+    assert_eq!(grpc.get_connection_count().await, 0);
+    assert!(grpc.get_create_requests().await.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn builder_format_override_skips_schema_fetch() -> Result<(), Box<dyn std::error::Error>> {
+    let mock = start_mock(200, table_json()).await;
+    let (grpc, grpc_url) = start_mock_server().await?;
+    let sdk = ZerobusSdk::builder()
+        .endpoint(grpc_url)
+        .unity_catalog_url(&mock.url)
+        .no_tls()
+        .build()?;
+    let mut stream = sdk
+        .stream_builder()
+        .table(TABLE)
+        .dynamic_proto_uc_schema()
+        .json()
+        .no_auth()
+        .build()
+        .await?;
+    assert!(mock.requests.lock().unwrap().is_empty());
+    let creates = grpc.get_create_requests().await;
+    assert_eq!(creates.len(), 1);
+    assert_eq!(creates[0].record_type, Some(RecordType::Json as i32));
+    assert!(creates[0].descriptor_proto.is_none());
+    stream.close().await?;
+    Ok(())
 }
 
 #[tokio::test]

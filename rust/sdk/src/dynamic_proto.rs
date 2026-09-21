@@ -13,6 +13,8 @@
 //! [`prost_reflect::DescriptorPool`]. To read the schema straight from Unity
 //! Catalog instead, see [`crate::uc_schema`] (or
 //! [`ZerobusSdk::fetch_message_descriptor`](crate::ZerobusSdk::fetch_message_descriptor)).
+//! [`StreamBuilder::dynamic_proto_uc_schema`](crate::StreamBuilder::dynamic_proto_uc_schema)
+//! fetches it during stream creation using the builder's OAuth credentials.
 //!
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!

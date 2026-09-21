@@ -8,9 +8,9 @@ use databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ephemeral_stream_response::Payload as ResponsePayload,
     zerobus_server::{Zerobus, ZerobusServer},
-    CloseStreamSignal, CreateIngestStreamResponse, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordResponse, PersistentStreamRequest, PersistentStreamResponse, RetireStreamRequest,
-    RetireStreamResponse,
+    CloseStreamSignal, CreateIngestStreamRequest, CreateIngestStreamResponse,
+    EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordResponse, PersistentStreamRequest,
+    PersistentStreamResponse, RetireStreamRequest, RetireStreamResponse,
 };
 use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
@@ -92,6 +92,7 @@ pub struct MockZerobusServer {
     delayed_setup_armed: Arc<Notify>,
     /// Distinct TCP peers used to open logical streams.
     connection_addresses: Arc<Mutex<HashSet<SocketAddr>>>,
+    create_requests: Arc<Mutex<Vec<CreateIngestStreamRequest>>>,
 }
 
 impl MockZerobusServer {
@@ -104,6 +105,7 @@ impl MockZerobusServer {
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             delayed_setup_armed: Arc::new(Notify::new()),
             connection_addresses: Arc::new(Mutex::new(HashSet::new())),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -140,6 +142,12 @@ impl MockZerobusServer {
         self.connection_addresses.lock().await.len()
     }
 
+    // This shared mock is also compiled into tests that do not inspect stream setup.
+    #[allow(dead_code)]
+    pub async fn get_create_requests(&self) -> Vec<CreateIngestStreamRequest> {
+        self.create_requests.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -151,6 +159,7 @@ impl MockZerobusServer {
         *self.write_count.lock().await = 0;
         *self.stream_counter.lock().await = 0;
         self.connection_addresses.lock().await.clear();
+        self.create_requests.lock().await.clear();
     }
 }
 
@@ -195,6 +204,7 @@ impl Zerobus for MockZerobusServer {
         let write_count = Arc::clone(&self.write_count);
         let response_indices = Arc::clone(&self.response_indices);
         let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
+        let create_requests = Arc::clone(&self.create_requests);
 
         tokio::spawn(async move {
             let mut table_name = String::new();
@@ -207,6 +217,7 @@ impl Zerobus for MockZerobusServer {
                     Ok(request) => {
                         if let Some(RequestPayload::CreateStream(create_request)) = request.payload
                         {
+                            create_requests.lock().await.push(create_request.clone());
                             table_name = create_request.table_name.unwrap_or_default();
                             info!("Received CreateStream request for table: {}", table_name);
 
@@ -483,6 +494,7 @@ async fn start_mock_server_inner(
         response_indices: Arc::clone(&mock_server.response_indices),
         delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
         connection_addresses: Arc::clone(&mock_server.connection_addresses),
+        create_requests: Arc::clone(&mock_server.create_requests),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

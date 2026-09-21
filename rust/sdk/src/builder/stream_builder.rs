@@ -52,6 +52,7 @@ enum FormatConfig {
     Json,
     CompiledProto(Box<prost_types::DescriptorProto>),
     DynamicProto(MessageDescriptor),
+    DynamicProtoUcSchema,
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
 }
@@ -118,6 +119,7 @@ impl fmt::Debug for StreamBuilder<'_> {
             Some(FormatConfig::Json) => "Json",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
+            Some(FormatConfig::DynamicProtoUcSchema) => "DynamicProtoUcSchema",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
             None => "None",
@@ -210,6 +212,44 @@ impl<'a> StreamBuilder<'a> {
     /// [`compiled_proto`](Self::compiled_proto).
     pub fn dynamic_proto(mut self, descriptor: MessageDescriptor) -> Self {
         self.format = Some(FormatConfig::DynamicProto(descriptor));
+        self
+    }
+
+    /// Select dynamic protobuf format using the table's Unity Catalog schema.
+    ///
+    /// [`build()`](Self::build) fetches the schema once using the final
+    /// [`table`](Self::table) and [`oauth`](Self::oauth) settings and the SDK's
+    /// configured Unity Catalog URL. The credentials must be able to read table
+    /// metadata and ingest records. Custom headers providers are not supported.
+    ///
+    /// Create records with [`ZerobusStream::new_record`]. The descriptor remains
+    /// a snapshot during stream recovery; building a new stream fetches it again.
+    /// To inspect or reuse a descriptor across streams, use
+    /// [`ZerobusSdk::fetch_message_descriptor`] and [`dynamic_proto`](Self::dynamic_proto).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusSdk, ZerobusError};
+    /// # async fn example(sdk: &ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .dynamic_proto_uc_schema()
+    ///     .build()
+    ///     .await?;
+    /// for id in 0..10i64 {
+    ///     let mut record = stream.new_record()?;
+    ///     record.set("id", id)?;
+    ///     stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?;
+    /// }
+    /// stream.flush().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn dynamic_proto_uc_schema(mut self) -> Self {
+        self.format = Some(FormatConfig::DynamicProtoUcSchema);
         self
     }
 
@@ -357,10 +397,10 @@ impl<'a> StreamBuilder<'a> {
 
     /// Validate that the builder has all required fields configured.
     ///
-    /// Returns `Ok(())` if table name, authentication, and format are all set.
-    /// This performs the same checks as `build()` without actually opening
-    /// a stream — useful for fail-fast validation during startup or config
-    /// parsing.
+    /// Checks that table name, authentication, and format are set, including
+    /// OAuth and a Unity Catalog URL for [`dynamic_proto_uc_schema`](Self::dynamic_proto_uc_schema).
+    /// Does not make network requests or fetch schemas; schema fetch and
+    /// conversion errors are returned by [`build()`](Self::build).
     ///
     /// # Examples
     ///
@@ -386,8 +426,21 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .dynamic_proto_uc_schema(), or .arrow()".into(),
             ));
+        }
+        if matches!(self.format, Some(FormatConfig::DynamicProtoUcSchema)) {
+            if !matches!(self.auth, Some(AuthConfig::OAuth { .. })) {
+                return Err(ZerobusError::InvalidArgument(
+                    ".dynamic_proto_uc_schema() requires .oauth() credentials to read table metadata"
+                        .into(),
+                ));
+            }
+            if self.sdk.unity_catalog_url.trim().is_empty() {
+                return Err(ZerobusError::InvalidUCEndpointError(
+                    "unity_catalog_url is required; set it on the SDK builder".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -429,6 +482,8 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
+    /// For [`dynamic_proto_uc_schema`](Self::dynamic_proto_uc_schema), also returns
+    /// errors from [`ZerobusSdk::fetch_message_descriptor`] before opening a stream.
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
@@ -442,6 +497,24 @@ impl<'a> StreamBuilder<'a> {
                 let desc = md.descriptor_proto().clone();
                 (RecordType::Proto, Some(desc), Some(md))
             }
+            Some(FormatConfig::DynamicProtoUcSchema) => {
+                let Some(AuthConfig::OAuth {
+                    client_id,
+                    client_secret,
+                }) = self.auth.as_ref()
+                else {
+                    return Err(ZerobusError::InvalidArgument(
+                        ".dynamic_proto_uc_schema() requires .oauth() credentials to read table metadata"
+                            .into(),
+                    ));
+                };
+                let md = self
+                    .sdk
+                    .fetch_message_descriptor(&self.table_name, client_id, client_secret)
+                    .await?;
+                let desc = md.descriptor_proto().clone();
+                (RecordType::Proto, Some(desc), Some(md))
+            }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
                 return Err(ZerobusError::InvalidArgument(
@@ -450,7 +523,7 @@ impl<'a> StreamBuilder<'a> {
             }
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .dynamic_proto_uc_schema() before .build()"
                         .into(),
                 ));
             }
@@ -618,6 +691,86 @@ mod tests {
             .dynamic_proto(md);
         assert!(format!("{builder:?}").contains("DynamicProto"));
         builder.validate().expect("validation should succeed");
+    }
+
+    #[test]
+    fn dynamic_proto_uc_schema_validates_without_fetching_and_redacts_credentials() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .dynamic_proto_uc_schema()
+            .oauth("private-client-id", "private-client-secret")
+            .table("catalog.schema.table");
+        builder
+            .validate()
+            .expect("validation should not fetch a schema");
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("DynamicProtoUcSchema"));
+        assert!(!debug.contains("private-client-id"));
+        assert!(!debug.contains("private-client-secret"));
+    }
+
+    #[test]
+    fn dynamic_proto_uc_schema_requires_oauth() {
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl HeadersProvider for StubProvider {
+            async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
+                Ok(HashMap::new())
+            }
+        }
+
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("cid", "csec")
+            .dynamic_proto_uc_schema()
+            .headers_provider(Arc::new(StubProvider));
+        assert!(matches!(
+            builder.validate(),
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+        builder.oauth("cid", "csec").validate().unwrap();
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn dynamic_proto_uc_schema_rejects_no_auth() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .dynamic_proto_uc_schema()
+            .no_auth();
+        assert!(matches!(
+            builder.validate(),
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn dynamic_proto_uc_schema_requires_uc_url_unless_format_is_overridden() {
+        for url in ["", "   "] {
+            let mut sdk = test_sdk();
+            sdk.unity_catalog_url = url.into();
+            let builder = sdk
+                .stream_builder()
+                .table("catalog.schema.table")
+                .oauth("cid", "csec")
+                .dynamic_proto_uc_schema();
+            assert!(matches!(
+                builder.validate(),
+                Err(ZerobusError::InvalidUCEndpointError(_))
+            ));
+            let builder = builder.json();
+            builder.validate().unwrap();
+            assert!(matches!(builder.format, Some(FormatConfig::Json)));
+            assert!(matches!(
+                builder.dynamic_proto_uc_schema().validate(),
+                Err(ZerobusError::InvalidUCEndpointError(_))
+            ));
+        }
     }
 
     #[test]

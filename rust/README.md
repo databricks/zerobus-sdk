@@ -612,29 +612,20 @@ On the wire this is identical to `.compiled_proto(...)`; the difference is that 
 
 ##### Fetching the Schema from Unity Catalog
 
-Rather than assembling the columns yourself, let the SDK read the table's schema from Unity Catalog. `fetch_message_descriptor` resolves the descriptor from the live table metadata; pass it to `.dynamic_proto(...)` as usual:
+Use `.dynamic_proto_uc_schema()` to fetch the table's schema from Unity Catalog during `.build()`. It uses the builder's table and OAuth credentials, and the SDK's configured `unity_catalog_url`:
 
 ```rust
-// Fetch the descriptor once from Unity Catalog (uses the SDK's unity_catalog_url).
-let descriptor = sdk
-    .fetch_message_descriptor("catalog.schema.orders", client_id, client_secret)
-    .await?;
-
-// Inspect it if the columns are unknown to the program...
-for field in descriptor.fields() {
-    println!("{} ({:?})", field.name(), field.kind());
-}
-
-// ...then plug it into the ordinary dynamic-proto selector. Cloning a descriptor
-// is cheap (Arc-backed), so one fetch can serve many streams.
 let mut stream = sdk
     .stream_builder().table("catalog.schema.orders")
     .oauth(client_id, client_secret)
-    .dynamic_proto(descriptor)
+    .dynamic_proto_uc_schema()
     .build()
     .await?;
 
-// Records are built exactly as above — `new_record()` uses the fetched schema.
+for field in stream.message_descriptor()?.fields() {
+    println!("{} ({:?})", field.name(), field.kind());
+}
+
 for i in 0..100_000i64 {
     let mut record = stream.new_record()?;
     record.set("id", i)?.set("customer_name", "Alice Smith")?;
@@ -643,9 +634,19 @@ for i in 0..100_000i64 {
 stream.flush().await?; // wait once for all pending acknowledgments
 ```
 
-The fetch needs OAuth credentials able to read the table's metadata (they are presented to the Unity Catalog REST API) and `unity_catalog_url` on the SDK builder. For direct control over the endpoint — outside an `SDK`, or against a different workspace — call `uc_schema::fetch_message_descriptor(unity_catalog_url, table, client_id, client_secret)`.
+The OAuth credentials must also be able to read the table's metadata. This selector requires `.oauth(...)`; a custom headers provider cannot supply the metadata credentials. Each `.build()` fetches a fresh schema, while stream recovery reuses the fetched descriptor.
 
-The fetched schema is a snapshot. Compatible schema evolution may be accepted; incompatible changes fail stream creation with `ZerobusError::CreateStreamError`, so re-fetch the descriptor before rebuilding the stream. A failed fetch surfaces as `ZerobusError::SchemaFetchError`. Note that `DATE` and `TIMESTAMP` columns map to integers (days and microseconds since the Unix epoch) — see the [`schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/schema/) module for the full type mapping, and [`uc_schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/uc_schema/) for the fetch API.
+To inspect or reuse a descriptor across streams, or use separate metadata credentials, fetch it explicitly and pass it to `.dynamic_proto(descriptor)`:
+
+```rust
+let descriptor = sdk
+    .fetch_message_descriptor("catalog.schema.orders", client_id, client_secret)
+    .await?;
+```
+
+For a different workspace URL, call `uc_schema::fetch_message_descriptor(unity_catalog_url, table, client_id, client_secret)`.
+
+The fetched schema is a snapshot. Compatible schema evolution may be accepted; incompatible changes fail stream creation with `ZerobusError::CreateStreamError`. Rebuild with `.dynamic_proto_uc_schema()` or re-fetch an explicitly supplied descriptor to use the current schema. A failed fetch surfaces as `ZerobusError::SchemaFetchError`. Note that `DATE` and `TIMESTAMP` columns map to integers (days and microseconds since the Unix epoch) — see the [`schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/schema/) module for the full type mapping, and [`uc_schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/uc_schema/) for the fetch API.
 
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 

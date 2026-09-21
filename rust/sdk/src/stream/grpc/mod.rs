@@ -235,11 +235,12 @@ impl ZerobusStream {
     /// # Errors
     ///
     /// [`ZerobusError::InvalidArgument`] if this isn't a dynamic-proto stream
-    /// (i.e. not built with [`dynamic_proto`](crate::StreamBuilder::dynamic_proto)).
+    /// (i.e. not built with [`dynamic_proto`](crate::StreamBuilder::dynamic_proto)
+    /// or [`dynamic_proto_uc_schema`](crate::StreamBuilder::dynamic_proto_uc_schema)).
     pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
         self.dynamic_message_descriptor.clone().ok_or_else(|| {
             ZerobusError::InvalidArgument(
-                "stream was not built with .dynamic_proto(); no message descriptor available"
+                "stream was not built with .dynamic_proto() or .dynamic_proto_uc_schema(); no message descriptor available"
                     .into(),
             )
         })

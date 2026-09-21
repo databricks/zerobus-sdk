@@ -10,28 +10,23 @@
   Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
   shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.
 
-- Dynamic protobuf streams can resolve their schema from Unity Catalog, so a
-  runtime descriptor no longer has to be assembled by hand. Fetch the descriptor
-  from the live table metadata and pass it to the existing `.dynamic_proto(...)`
-  selector:
+- Dynamic protobuf streams can fetch their schema from Unity Catalog during
+  stream creation with `.dynamic_proto_uc_schema()`:
 
   ```rust
-  let descriptor = sdk
-      .fetch_message_descriptor("catalog.schema.table", client_id, client_secret)
-      .await?;
-
   let stream = sdk
       .stream_builder()
       .table("catalog.schema.table")
       .oauth(client_id, client_secret)
-      .dynamic_proto(descriptor)
+      .dynamic_proto_uc_schema()
       .build()
       .await?;
   ```
 
-  `ZerobusSdk::fetch_message_descriptor()` uses the SDK's configured
-  `unity_catalog_url`; the underlying `uc_schema` module takes the endpoint
-  directly. The fetch needs OAuth credentials able to read the table's metadata.
+  Uses the SDK's `unity_catalog_url` and the stream's OAuth credentials, which
+  must also be able to read table metadata. `ZerobusSdk::fetch_message_descriptor()`
+  and the `uc_schema` module support explicit fetching for descriptor reuse or
+  separate metadata credentials.
 
 ### Bug Fixes
 
@@ -75,6 +70,7 @@
   `CreateIngestStreamRequest.avro_schema_json`, `IngestRecordRequest.avro_encoded_record`,
   `IngestRecordBatchRequest.avro_batch`, `AvroRecordBatch`). See **Breaking Changes** for
   the downstream-compilation impact and migration.
-- Added `ZerobusSdk::fetch_message_descriptor()`, the `uc_schema` module
+- Added `StreamBuilder::dynamic_proto_uc_schema()`,
+  `ZerobusSdk::fetch_message_descriptor()`, the `uc_schema` module
   (`fetch_message_descriptor`, `fetch_table_schema`), and the
   `ZerobusError::SchemaFetchError { message, retryable }` variant. All additive.

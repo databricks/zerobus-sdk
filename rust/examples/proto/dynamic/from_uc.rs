@@ -1,7 +1,6 @@
 //! Dynamic protobuf ingestion with the schema fetched from Unity Catalog.
 //!
-//! Unlike `dynamic/single.rs`, which builds the descriptor in code, this fetches
-//! it with `fetch_message_descriptor` and feeds it to the usual `.dynamic_proto(...)`.
+//! `.dynamic_proto_uc_schema()` fetches the descriptor during stream creation.
 //!
 //! Throughput: ingest in a loop, then `flush()` once — never wait per record.
 
@@ -26,23 +25,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
-    // Descriptor from live table metadata — no columns or `.proto` needed up front.
-    let descriptor = sdk
-        .fetch_message_descriptor(TABLE_NAME, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    let mut stream = sdk
+        .stream_builder()
+        .table(TABLE_NAME)
+        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .dynamic_proto_uc_schema()
+        .build()
         .await?;
+    let descriptor = stream.message_descriptor()?;
     println!(
         "Fetched schema '{}' with {} fields",
         descriptor.name(),
         descriptor.fields().count()
     );
-
-    let mut stream = sdk
-        .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
-        .dynamic_proto(descriptor)
-        .build()
-        .await?;
 
     // (customer_name, quantity, price) — adjust the field names to your table.
     let orders = [("Alice Smith", 2i32, 25.99f64), ("Bob Johnson", 1, 89.99)];
