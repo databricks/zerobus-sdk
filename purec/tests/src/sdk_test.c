@@ -12,7 +12,7 @@ static void test_sdk_builder_validation(void)
     err = NULL;
 
     zerobus_sdk_builder_t *b = NULL;
-    CHECK_EQ_INT(zerobus_sdk_builder_new(&b, &err), ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_new(&b, &err));
     CHECK(b != NULL);
     CHECK(err == NULL);
 
@@ -37,9 +37,8 @@ static void test_sdk_builder_validation(void)
     err = NULL;
 
     /* Endpoint set, but no UC endpoint. */
-    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
-                     b, sv("https://ws.zerobus.r.cloud.databricks.com"), &err),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_set_endpoint(
+        b, sv("https://ws.zerobus.r.cloud.databricks.com"), &err));
     CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, &err),
                  ZEROBUS_STATUS_FAILED_PRECONDITION);
     zerobus_error_free(err);
@@ -94,13 +93,11 @@ static void test_sdk_builder_endpoint_rules(void)
 
     /* Accepted: http (plaintext, for local/dev) and a single-label host — no
      * https-only or workspace-subdomain rule. */
-    CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(
-                     b, sv("http://ws.zerobus.databricks.com"), &err),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_set_endpoint(
+        b, sv("http://ws.zerobus.databricks.com"), &err));
     CHECK(err == NULL);
-    CHECK_EQ_INT(
-        zerobus_sdk_builder_set_endpoint(b, sv("https://localhost:8080"), &err),
-        ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_set_endpoint(b, sv("https://localhost:8080"),
+                                              &err));
     CHECK(err == NULL);
 
     /* The UC endpoint setter uses the same rules. */
@@ -109,9 +106,8 @@ static void test_sdk_builder_endpoint_rules(void)
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
-    CHECK_EQ_INT(zerobus_sdk_builder_set_unity_catalog_endpoint(
-                     b, sv("http://localhost"), &err),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+        b, sv("http://localhost"), &err));
     CHECK(err == NULL);
 
     zerobus_sdk_builder_free(b);
@@ -161,7 +157,7 @@ static void test_sdk_build_ok(void)
 
     zerobus_error_t *err = NULL;
     zerobus_sdk_t *sdk = NULL;
-    CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, &err), ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_build(b, &sdk, &err));
     CHECK(sdk != NULL);
     CHECK(err == NULL);
 
@@ -175,13 +171,10 @@ static void test_sdk_setter_transactional(void)
     zerobus_sdk_builder_t *b = NULL;
     zerobus_sdk_builder_new(&b, NULL);
 
-    CHECK_EQ_INT(
-        zerobus_sdk_builder_set_endpoint(
-            b, sv("https://myws.zerobus.us-west.cloud.databricks.com"), NULL),
-        ZEROBUS_STATUS_OK);
-    CHECK_EQ_INT(zerobus_sdk_builder_set_unity_catalog_endpoint(
-                     b, sv("https://myws.cloud.databricks.com"), NULL),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_set_endpoint(
+        b, sv("https://myws.zerobus.us-west.cloud.databricks.com"), NULL));
+    CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+        b, sv("https://myws.cloud.databricks.com"), NULL));
 
     /* A later rejected set_endpoint must not clobber the good value. */
     CHECK_EQ_INT(zerobus_sdk_builder_set_endpoint(b, sv("https://a..b"), NULL),
@@ -189,7 +182,7 @@ static void test_sdk_setter_transactional(void)
 
     /* Build still succeeds using the endpoint set before the failed call. */
     zerobus_sdk_t *sdk = NULL;
-    CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, NULL), ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
     CHECK(sdk != NULL);
 
     zerobus_sdk_builder_free(b);
@@ -261,7 +254,8 @@ static void test_sdk_out_handle_untouched_on_failure(void)
 
     /* A real builder with no endpoints set: build fails the precondition and
      * must not touch out_sdk. */
-    CHECK_EQ_INT(zerobus_sdk_builder_new(&b, NULL), ZEROBUS_STATUS_OK);
+    b = NULL;
+    REQUIRE_OK(zerobus_sdk_builder_new(&b, NULL));
     zerobus_sdk_t *sdk = sdk_sentinel;
     CHECK_EQ_INT(zerobus_sdk_builder_build(b, &sdk, &err),
                  ZEROBUS_STATUS_FAILED_PRECONDITION);
@@ -274,8 +268,9 @@ static void test_sdk_out_handle_untouched_on_failure(void)
     CHECK_EQ_INT(zerobus_sdk_builder_build(NULL, &sdk, &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(sdk == sdk_sentinel);
-    zerobus_error_free(err);
 
+cleanup:
+    zerobus_error_free(err);
     zerobus_sdk_builder_free(b);
 }
 

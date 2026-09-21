@@ -44,6 +44,17 @@ static int zb_test_failures = 0;
         }                                                                      \
     } while (0)
 
+#define CHECK_OK(call) CHECK_EQ_INT(call, ZEROBUS_STATUS_OK)
+
+#define REQUIRE_OK(call)                                                       \
+    do {                                                                       \
+        zerobus_status_t result_ = (call);                                     \
+        CHECK_OK(result_);                                                     \
+        if (result_ != ZEROBUS_STATUS_OK) {                                    \
+            goto cleanup;                                                      \
+        }                                                                      \
+    } while (0)
+
 #define TEST_MAIN_RETURN() return zb_test_failures == 0 ? 0 : 1
 
 #define sv(s) zerobus_string_view(s)

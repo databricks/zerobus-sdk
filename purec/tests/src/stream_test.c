@@ -52,8 +52,7 @@ static void test_stream_builder_validation(void)
     zerobus_error_free(err);
     err = NULL;
 
-    CHECK_EQ_INT(zerobus_stream_builder_new(sdk, &stb, &err),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_stream_builder_new(sdk, &stb, &err));
     CHECK(stb != NULL);
 
     /* Empty table. */
@@ -135,12 +134,10 @@ static void test_stream_oauth_transactional(void)
     zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL);
 
     /* A second valid set_oauth replaces (and frees) the first. */
-    CHECK_EQ_INT(
-        zerobus_stream_builder_set_oauth(stb, sv("id1"), sv("sec1"), NULL),
-        ZEROBUS_STATUS_OK);
-    CHECK_EQ_INT(
-        zerobus_stream_builder_set_oauth(stb, sv("id2"), sv("sec2"), NULL),
-        ZEROBUS_STATUS_OK);
+    CHECK_OK(
+        zerobus_stream_builder_set_oauth(stb, sv("id1"), sv("sec1"), NULL));
+    CHECK_OK(
+        zerobus_stream_builder_set_oauth(stb, sv("id2"), sv("sec2"), NULL));
 
     /* A rejected set_oauth must not clobber the credentials already set. */
     CHECK_EQ_INT(
@@ -149,8 +146,7 @@ static void test_stream_oauth_transactional(void)
 
     /* Build still succeeds using the credentials set before the failed call. */
     zerobus_stream_t *stream = NULL;
-    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, NULL),
-                 ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_stream_builder_build(stb, &stream, NULL));
     CHECK(stream != NULL);
 
     zerobus_stream_free(stream);
@@ -227,9 +223,9 @@ static void test_flush_close_idempotent(void)
 
     CHECK_EQ_INT(zerobus_stream_flush(stream, &err),
                  ZEROBUS_STATUS_UNIMPLEMENTED);
-    CHECK_EQ_INT(zerobus_stream_close(stream, &err), ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_stream_close(stream, &err));
     /* Idempotent: a second close still succeeds. */
-    CHECK_EQ_INT(zerobus_stream_close(stream, &err), ZEROBUS_STATUS_OK);
+    CHECK_OK(zerobus_stream_close(stream, &err));
     CHECK(err == NULL);
 
     /* After close, ingest is rejected with FAILED_PRECONDITION. */
@@ -328,8 +324,8 @@ static void test_stream_out_handle_untouched_on_failure(void)
 
     /* A real builder with nothing set: build fails the precondition and must
      * not touch out_stream. */
-    CHECK_EQ_INT(zerobus_stream_builder_new(sdk, &stb, NULL),
-                 ZEROBUS_STATUS_OK);
+    stb = NULL;
+    REQUIRE_OK(zerobus_stream_builder_new(sdk, &stb, NULL));
     zerobus_stream_t *stream = stream_sentinel;
     CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, &err),
                  ZEROBUS_STATUS_FAILED_PRECONDITION);
@@ -342,8 +338,9 @@ static void test_stream_out_handle_untouched_on_failure(void)
     CHECK_EQ_INT(zerobus_stream_builder_build(NULL, &stream, &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(stream == stream_sentinel);
-    zerobus_error_free(err);
 
+cleanup:
+    zerobus_error_free(err);
     zerobus_stream_builder_free(stb);
     zerobus_sdk_free(sdk);
 }
