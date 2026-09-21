@@ -43,6 +43,10 @@ const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 ///
 /// Unlike a `ZerobusStream` offset, `MessageId` values are not ordered — pass
 /// them to [`MultiplexedStream::wait_for_message_id`] to await acknowledgment.
+///
+/// # Beta
+///
+/// Multiplexed streams are a Beta API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(i64);
 
@@ -127,8 +131,20 @@ pub(crate) fn multiplexed_ack_callback(
 
 /// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
 ///
-/// See the [module-level documentation](self) for routing, `MessageId`, and
-/// poisoning semantics.
+/// A selected sub-stream that is at capacity waits for room rather than
+/// rerouting, preserving ordering within each lane. There is no global record,
+/// [`MessageId`], acknowledgment, callback, or recovery order across lanes.
+///
+/// After a mux operation observes a terminal lane failure, the mux rejects new
+/// ingestion and preserves that lane's typed error. Healthy lanes remain alive
+/// to process already-accepted records until [`close`](Self::close) or drop.
+/// [`flush`](Self::flush) waits for every lane's flush attempt, and unacknowledged
+/// records can be recovered with [`get_unacked_records`](Self::get_unacked_records)
+/// or [`get_unacked_batches`](Self::get_unacked_batches).
+///
+/// # Beta
+///
+/// This API is in Beta.
 pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,

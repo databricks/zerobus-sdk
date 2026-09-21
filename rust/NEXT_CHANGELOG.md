@@ -31,6 +31,9 @@
 
 - Bounded the post-abort supervisor wait during gRPC stream close, including
   when a synchronous credentials callback is blocked.
+- Cancelled gRPC stream construction now cancels and aborts supervisor,
+  callback, sender, and receiver tasks before ownership is returned. This
+  applies to ordinary and multiplexed stream builds.
 
 ### Documentation
 
