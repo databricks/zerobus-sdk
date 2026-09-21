@@ -8,6 +8,10 @@
 - Add Avro record format support. Create an Avro stream with `TableProperties(..., avro_schema=json_schema)`; records can be passed as dicts (encoded via fastavro — install the `avro` extra) or pre-encoded bytes (no extra needed).
 - `TableProperties` exposes a read-only `record_format` property (`"proto"`, `"json"`, or `"avro"`).
 
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Pass `connection_per_stream=False` to the synchronous or asynchronous
+  `ZerobusSdk` constructor to share one HTTP/2 connection across streams.
+
 ### Bug Fixes
 - Records are now coerced strictly by the stream's declared format instead of being inferred from each payload's type. A payload that doesn't match the stream — e.g. a `str` on a proto stream — now raises `TypeError` rather than being silently mis-encoded.
 

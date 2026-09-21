@@ -55,7 +55,26 @@ public class ZerobusSdkTest {
   }
 
   @Test
+  void constructsWithSharedConnectionMode() {
+    assumeNativeLibrary();
+    try (ZerobusSdk sdk =
+        new ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, "my-app/1.0", false)) {
+      assertNotNull(sdk);
+    }
+  }
+
+  @Test
   void preservesNativeCreationSignatures() throws Exception {
+    assertNotNull(
+        ZerobusSdk.class.getDeclaredMethod(
+            "nativeCreate", String.class, String.class, String.class));
+    assertNotNull(
+        ZerobusSdk.class.getDeclaredMethod(
+            "nativeCreateWithConnectionPerStream",
+            String.class,
+            String.class,
+            String.class,
+            boolean.class));
     assertNotNull(
         ZerobusSdk.class.getDeclaredMethod(
             "nativeCreateStream",

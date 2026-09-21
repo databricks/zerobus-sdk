@@ -327,7 +327,13 @@ class sync:
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+        def __init__(
+            self,
+            host: str,
+            unity_catalog_url: str,
+            application_name: Optional[str] = None,
+            connection_per_stream: bool = True,
+        ) -> None:
             """
             Create a synchronous Zerobus SDK instance.
 
@@ -337,6 +343,8 @@ class sync:
                 application_name: Optional caller identifier (conventionally
                     "<product>/<version>") appended to the HTTP user-agent header on
                     gRPC requests toward the Zerobus server.
+                connection_per_stream: Whether each JSON/protobuf stream gets a
+                    dedicated gRPC connection. Defaults to True.
             """
             ...
 
@@ -480,7 +488,13 @@ class aio:
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+        def __init__(
+            self,
+            host: str,
+            unity_catalog_url: str,
+            application_name: Optional[str] = None,
+            connection_per_stream: bool = True,
+        ) -> None:
             """
             Create an asynchronous Zerobus SDK instance.
 
@@ -490,6 +504,8 @@ class aio:
                 application_name: Optional caller identifier (conventionally
                     "<product>/<version>") appended to the HTTP user-agent header on
                     gRPC requests toward the Zerobus server.
+                connection_per_stream: Whether each JSON/protobuf stream gets a
+                    dedicated gRPC connection. Defaults to True.
             """
             ...
 
