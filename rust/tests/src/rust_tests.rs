@@ -3497,7 +3497,7 @@ mod failure_scenarios_tests {
                         },
                         MockResponse::RecordAck {
                             ack_up_to_offset: 4,
-                            delay_ms: 50,
+                            delay_ms: 0,
                         },
                     ],
                 )
