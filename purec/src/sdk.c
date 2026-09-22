@@ -2,6 +2,7 @@
 #include <stdlib.h>
 
 #include "error.h"
+#include "internal/log.h"
 #include "utils.h"
 #include "zerobus/sdk.h"
 
@@ -30,14 +31,15 @@ zerobus_status_t zerobus_sdk_builder_new(zerobus_sdk_builder_t **out_builder,
     }
     zerobus_sdk_builder_t *b = (zerobus_sdk_builder_t *)calloc(1, sizeof(*b));
     if (b == NULL) {
+        ZB_ERROR("SDK builder allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     *out_builder = b;
+    ZB_DEBUG("SDK builder created");
     return ZEROBUS_STATUS_OK;
 }
 
-/* Accepts a bare http(s)://host[:port] origin for both endpoints; https is the
- * norm, http is for a local plaintext server. */
+/* Accepts a bare http(s)://host[:port] origin for both endpoints */
 static bool validate_endpoint(zerobus_string_view_t endpoint, const char *label,
                               zerobus_error_t **out_error)
 {
@@ -91,6 +93,7 @@ zerobus_sdk_builder_set_endpoint(zerobus_sdk_builder_t *builder,
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (!zb_replace_string(&builder->endpoint, zerobus_endpoint)) {
+        ZB_ERROR("SDK endpoint allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     return ZEROBUS_STATUS_OK;
@@ -116,6 +119,7 @@ zerobus_status_t zerobus_sdk_builder_set_unity_catalog_endpoint(
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (!zb_replace_string(&builder->uc_endpoint, unity_catalog_endpoint)) {
+        ZB_ERROR("SDK Unity Catalog endpoint allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     return ZEROBUS_STATUS_OK;
@@ -145,16 +149,19 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
      * TODO: initialize shared TLS/OAuth/transport state. */
     zerobus_sdk_t *sdk = (zerobus_sdk_t *)calloc(1, sizeof(*sdk));
     if (sdk == NULL) {
+        ZB_ERROR("SDK allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     sdk->endpoint = zb_strdup(builder->endpoint);
     sdk->uc_endpoint = zb_strdup(builder->uc_endpoint);
     if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL) {
+        ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
 
     *out_sdk = sdk;
+    ZB_DEBUG("SDK created");
     return ZEROBUS_STATUS_OK;
 }
 
@@ -166,6 +173,7 @@ void zerobus_sdk_builder_free(zerobus_sdk_builder_t *builder)
     free(builder->endpoint);
     free(builder->uc_endpoint);
     free(builder);
+    ZB_DEBUG("SDK builder freed");
 }
 
 /* ---- SDK --------------------------------------------------------------- */
@@ -179,4 +187,5 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
     free(sdk);
+    ZB_DEBUG("SDK freed");
 }

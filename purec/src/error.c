@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "error.h"
+#include "internal/log.h"
 #include "zerobus/common.h"
 #include "zerobus/error.h"
 
@@ -14,15 +15,23 @@ static char *format_message(const char *fmt, va_list ap, size_t *out_len)
     int needed = vsnprintf(NULL, 0, fmt, ap2);
     va_end(ap2);
     if (needed < 0) {
+        ZB_ERROR("error message formatting failed");
         *out_len = 0;
         return NULL;
     }
     char *buf = (char *)malloc((size_t)needed + 1);
     if (buf == NULL) {
+        ZB_ERROR("error message allocation failed");
         *out_len = 0;
         return NULL;
     }
-    vsnprintf(buf, (size_t)needed + 1, fmt, ap);
+    int written = vsnprintf(buf, (size_t)needed + 1, fmt, ap);
+    if (written < 0 || written != needed) {
+        ZB_ERROR("error message formatting failed");
+        free(buf);
+        *out_len = 0;
+        return NULL;
+    }
     *out_len = (size_t)needed;
     return buf;
 }
@@ -36,6 +45,7 @@ static zerobus_error_t *error_vnewf(zerobus_status_t code, const char *fmt,
 {
     zerobus_error_t *err = (zerobus_error_t *)calloc(1, sizeof(*err));
     if (err == NULL) {
+        ZB_ERROR("error object allocation failed");
         return NULL;
     }
     err->code = code;
