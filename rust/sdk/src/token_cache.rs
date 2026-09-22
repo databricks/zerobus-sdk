@@ -525,6 +525,19 @@ impl TokenCache {
     }
 
     fn needs_refresh(&self, cached: &CachedToken) -> bool {
+        // An expired token always needs a refresh, independent of the refresh
+        // window below. That comparison is `remaining < effective_buffer`, and for
+        // an already-expired token `remaining` saturates to zero; with a zero (or
+        // near-zero) refresh buffer `effective_buffer` is also zero, so `0 < 0` is
+        // false and the expired token would be served indefinitely. This checks
+        // expiry directly so it can never happen — restoring the pre-refactor
+        // behavior for callers that set `token_refresh_buffer(Duration::ZERO)`
+        // (which disables *proactive* refresh but must still re-mint on expiry).
+        // (`arm_refresh_backoff` keeps `refresh_retry_at <= expires_at`, so an
+        // expired token is never inside a backoff window; the ordering is safe.)
+        if cached.is_expired() {
+            return true;
+        }
         // Within a post-fallback backoff window, don't refresh yet (see
         // `arm_refresh_backoff`).
         if cached.in_backoff_window() {
@@ -816,6 +829,56 @@ mod tests {
         assert_eq!(
             c, "tok1",
             "once inside the scaled window the token refreshes"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_refresh_buffer_still_remints_expired_token() {
+        // Regression: a zero refresh buffer disables *proactive* refresh (serve a
+        // still-valid token right up to expiry) but must NOT serve a token past
+        // expiry. The refresh window is `remaining < effective_buffer`, and with a
+        // zero buffer `effective_buffer` is zero while an expired token's
+        // `remaining` saturates to zero, so `0 < 0` never fires; only the direct
+        // expiry check in `needs_refresh` re-mints. This guards existing OAuth
+        // callers that set `token_refresh_buffer(Duration::ZERO)`, not just the
+        // federated path.
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let mints = AtomicUsize::new(0);
+        let make = |_reason| async {
+            let n = mints.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched(&format!("tok{n}"), Some(10)))
+        };
+
+        // Cold mint.
+        let (a, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(a, "tok0");
+
+        // 5s in (still valid): a zero buffer means no proactive refresh, so the
+        // still-valid token is served from cache without re-minting.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let (b, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(
+            b, "tok0",
+            "a still-valid token must be served under a zero buffer"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 1);
+
+        // 11s in (past the 10s TTL): the expired token must be re-minted, never served.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let (c, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(
+            c, "tok1",
+            "an expired token must be re-minted even with a zero buffer"
         );
         assert_eq!(mints.load(Ordering::SeqCst), 2);
     }
