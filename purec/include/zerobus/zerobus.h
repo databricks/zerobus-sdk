@@ -21,8 +21,9 @@
  * and remain fixed for the run. An opened file stays open until process exit.
  * Statuses and error objects are unaffected by logging.
  *
- * Thread-safety: this SDK, including logging, currently requires a single
- * caller thread. Concurrent initialization and calls are not supported yet.
+ * Thread-safety: logging initialization and writes are synchronized. Other SDK
+ * operations currently require a single caller thread; concurrent calls are
+ * not supported yet.
  */
 #ifndef ZEROBUS_H
 #define ZEROBUS_H
