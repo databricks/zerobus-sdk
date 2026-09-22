@@ -1,4 +1,5 @@
 /* Unit tests for the SDK builder and SDK handle (sdk.c). */
+#include "sdk.h"
 #include "test_common.h"
 
 static void test_sdk_builder_validation(void)
@@ -197,6 +198,37 @@ static void test_sdk_free_null_safe(void)
     CHECK(1);
 }
 
+static void test_sdk_retained_reference(void)
+{
+    zerobus_sdk_builder_t *builder = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_sdk_t *retained = NULL;
+    zerobus_stream_builder_t *stream_builder = NULL;
+
+    REQUIRE_OK(zerobus_sdk_builder_new(&builder, NULL));
+    REQUIRE_OK(
+        zerobus_sdk_builder_set_endpoint(builder, sv("https://a.b"), NULL));
+    REQUIRE_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+        builder, sv("https://c.d"), NULL));
+    REQUIRE_OK(zerobus_sdk_builder_build(builder, &sdk, NULL));
+
+    zb_sdk_ref(sdk);
+    retained = sdk;
+    zerobus_sdk_free(sdk);
+    sdk = NULL;
+    REQUIRE_OK(zerobus_stream_builder_new(retained, &stream_builder, NULL));
+    zerobus_sdk_free(retained);
+    retained = NULL;
+    CHECK_OK(
+        zerobus_stream_builder_set_table(stream_builder, sv("c.s.t"), NULL));
+
+cleanup:
+    zerobus_stream_builder_free(stream_builder);
+    zerobus_sdk_free(retained);
+    zerobus_sdk_free(sdk);
+    zerobus_sdk_builder_free(builder);
+}
+
 /* A non-NULL *out_error on entry is refused at every entry point, and the
  * existing error is left untouched (not overwritten, freed, or replaced). */
 static void test_sdk_out_error_must_be_null(void)
@@ -282,6 +314,7 @@ int main(void)
     test_sdk_build_ok();
     test_sdk_setter_transactional();
     test_sdk_free_null_safe();
+    test_sdk_retained_reference();
     test_sdk_out_error_must_be_null();
     test_sdk_out_handle_untouched_on_failure();
     TEST_MAIN_RETURN();

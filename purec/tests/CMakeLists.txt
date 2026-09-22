@@ -21,4 +21,5 @@ set_tests_properties(internal_log_test PROPERTIES ENVIRONMENT
   "ZEROBUS_LOG_LEVEL=info;ZEROBUS_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/log_test.log")
 
 # A synchronization regression must fail instead of hanging the test suite.
-set_tests_properties(internal_concurrency_test PROPERTIES TIMEOUT 30)
+set_tests_properties(sdk_test stream_test internal_concurrency_test
+                     PROPERTIES TIMEOUT 30)

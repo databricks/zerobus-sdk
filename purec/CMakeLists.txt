@@ -4,8 +4,7 @@ project(zerobus_c LANGUAGES C VERSION 0.0.1)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-# Reject compiler extensions: build as -std=c99, not -std=gnu99, so a GNU-ism
-# cannot slip in unnoticed against the documented C99 baseline.
+# Keep consumers on strict C99, library targets opt into C11 privately.
 set(CMAKE_C_EXTENSIONS OFF)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -51,6 +50,7 @@ target_include_directories(zerobus_c
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
+target_compile_features(zerobus_c PRIVATE c_std_11)
 target_link_libraries(zerobus_c PUBLIC Threads::Threads)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
@@ -62,6 +62,7 @@ target_include_directories(zerobus_c_testing
          ${CMAKE_CURRENT_SOURCE_DIR}/src
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/src)
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
+target_compile_features(zerobus_c_testing PRIVATE c_std_11)
 target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads)
 
 if(ZEROBUS_SANITIZE)

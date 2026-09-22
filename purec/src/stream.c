@@ -1,9 +1,12 @@
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 
 #include "error.h"
 #include "internal/log.h"
+#include "sdk.h"
 #include "utils.h"
+#include "zerobus/sdk.h"
 #include "zerobus/stream.h"
 
 /* Record size limit: just under the server's ~10 MiB request cap, leaving
@@ -11,19 +14,19 @@
 #define ZB_MAX_PAYLOAD_BYTES (10u * 1024u * 1024u - 64u * 1024u)
 
 struct zerobus_stream_builder {
-    zerobus_sdk_t *sdk; /* borrowed, must outlive the builder and its streams */
+    zerobus_sdk_t *sdk; /* owned reference */
     char *table;
     char *client_id;
     char *client_secret; /* zeroized on free */
 };
 
 struct zerobus_stream {
-    zerobus_sdk_t *sdk; /* borrowed, must outlive the stream */
+    zerobus_sdk_t *sdk; /* owned reference */
     char *table;
     char *client_id;
     char *client_secret; /* zeroized on free */
 
-    bool closed; /* set by close, rejects ingest once true */
+    atomic_bool closed; /* set by close, rejects ingest once true */
 };
 
 /* ---- builder ----------------------------------------------------------- */
@@ -47,6 +50,7 @@ zerobus_stream_builder_new(zerobus_sdk_t *sdk,
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     b->sdk = sdk;
+    zb_sdk_ref(sdk);
     *out_builder = b;
     ZB_DEBUG("stream builder created");
     return ZEROBUS_STATUS_OK;
@@ -138,7 +142,9 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
         ZB_ERROR("stream allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
+    atomic_init(&s->closed, false);
     s->sdk = builder->sdk;
+    zb_sdk_ref(s->sdk);
     s->table = zb_strdup(builder->table);
     s->client_id = zb_strdup(builder->client_id);
     s->client_secret = zb_strdup(builder->client_secret);
@@ -161,6 +167,7 @@ void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
     free(builder->table);
     free(builder->client_id);
     zb_secure_free_cstr(builder->client_secret);
+    zerobus_sdk_free(builder->sdk);
     free(builder);
     ZB_DEBUG("stream builder freed");
 }
@@ -178,7 +185,7 @@ zerobus_status_t zerobus_stream_ingest_json_record(
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
     }
-    if (stream->closed) {
+    if (atomic_load(&stream->closed)) {
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "stream is closing or closed");
     }
@@ -209,7 +216,7 @@ zerobus_status_t zerobus_stream_flush(zerobus_stream_t *stream,
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
     }
-    if (stream->closed) {
+    if (atomic_load(&stream->closed)) {
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "stream is closing or closed");
     }
@@ -228,12 +235,9 @@ zerobus_status_t zerobus_stream_close(zerobus_stream_t *stream,
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
     }
-    if (stream->closed) {
-        return ZEROBUS_STATUS_OK;
-    }
     /* TODO: flush pending records before teardown, returning any flush error.
      */
-    stream->closed = true;
+    atomic_store(&stream->closed, true);
     ZB_DEBUG("stream closed");
     return ZEROBUS_STATUS_OK;
 }
@@ -247,6 +251,7 @@ void zerobus_stream_free(zerobus_stream_t *stream)
     free(stream->table);
     free(stream->client_id);
     zb_secure_free_cstr(stream->client_secret);
+    zerobus_sdk_free(stream->sdk);
     free(stream);
     ZB_DEBUG("stream freed");
 }
