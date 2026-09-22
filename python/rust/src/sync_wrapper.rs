@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::{PyTraverseError, PyVisit};
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
@@ -11,7 +12,7 @@ use databricks_zerobus_ingest_sdk::{
 
 use crate::arrow;
 use crate::arrow::{ArrowStreamConfigurationOptions, ZerobusArrowStream};
-use crate::auth::HeadersProviderWrapper;
+use crate::auth::{HeadersProviderWrapper, IdpSupplier};
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
@@ -91,11 +92,30 @@ pub struct ZerobusStream {
     inner: Arc<RwLock<RustStream>>,
     runtime: Arc<Runtime>,
     format: RecordFormat,
+    /// For a federated stream, the sole strong reference to the Python IdP
+    /// callback (the native supplier holds only a weak one). Exposed to the
+    /// cyclic GC via `__traverse__`/`__clear__` so an `owner -> stream -> callback
+    /// -> owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    idp_callback: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 #[allow(deprecated)]
 impl ZerobusStream {
+    /// Let the cyclic GC see the strong reference to the IdP callback, so a
+    /// self-referential owner/stream/callback cycle can be collected.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(callback) = &self.idp_callback {
+            visit.call(callback)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference when the GC breaks a cycle (the native supplier's
+    /// weak reference then resolves to `None`; the stream is being torn down).
+    fn __clear__(&mut self) {
+        self.idp_callback = None;
+    }
     /// Ingest a single record and return RecordAcknowledgment (legacy API)
     #[deprecated(
         since = "0.3.0",
@@ -378,6 +398,7 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(stream)),
             runtime: runtime_for_stream,
             format,
+            idp_callback: None,
         })
     }
 
@@ -413,6 +434,52 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(stream)),
             runtime: runtime_for_stream,
             format,
+            idp_callback: None,
+        })
+    }
+
+    /// Create a new stream with external-IdP federation (RFC 8693 token
+    /// exchange). `idp_supplier` is a fresh handle built per `create_stream`; its
+    /// stable cache identity (not its `Arc`) partitions the account-level token
+    /// cache, so reusing one `FederatedToken` shares its cached Databricks token.
+    /// `idp_callback` is the same Python callback the supplier wraps weakly; the
+    /// stream holds the sole strong, GC-visible reference to it so a self-referential
+    /// owner/stream/callback cycle stays collectable. `databricks_client_id` is
+    /// `Some` for workload identity federation and `None` for account-level.
+    #[pyo3(signature = (table_properties, idp_supplier, idp_callback, databricks_client_id = None, options = None))]
+    fn create_stream_federated(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        idp_supplier: PyRef<'_, IdpSupplier>,
+        idp_callback: Py<PyAny>,
+        databricks_client_id: Option<String>,
+        options: Option<StreamConfigurationOptions>,
+    ) -> PyResult<ZerobusStream> {
+        let opts = options.unwrap_or_default();
+        opts.validate()?;
+        let format = table_properties.resolve_format(opts.record_type)?;
+        let supplier = idp_supplier.supplier.clone();
+        let sdk = self.inner.clone();
+        let runtime = self.runtime.clone();
+        let runtime_for_stream = self.runtime.clone();
+
+        let stream = py.detach(|| {
+            runtime.block_on(async move {
+                let sdk_guard = sdk.read().await;
+                let builder = sdk_guard.stream_builder();
+                let builder = builder.federated_auth(supplier, databricks_client_id);
+                let builder = apply_table_and_format(builder, &table_properties);
+                let builder = apply_grpc_options(builder, &opts)?;
+                builder.build().await.map_err(map_error)
+            })
+        })?;
+
+        Ok(ZerobusStream {
+            inner: Arc::new(RwLock::new(stream)),
+            runtime: runtime_for_stream,
+            format,
+            idp_callback: Some(idp_callback),
         })
     }
 
@@ -489,6 +556,9 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(new_stream)),
             runtime: runtime_for_stream,
             format: old_stream.format,
+            // Carry the strong callback reference across recovery, or the native
+            // supplier's weak reference would resolve to None on the new stream.
+            idp_callback: old_stream.idp_callback.as_ref().map(|cb| cb.clone_ref(py)),
         })
     }
 }

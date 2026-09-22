@@ -44,6 +44,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Add authentication classes
     m.add_class::<auth::HeadersProvider>()?;
+    m.add_class::<auth::IdpSupplier>()?;
 
     let sys_modules = py.import("sys")?.getattr("modules")?;
 
