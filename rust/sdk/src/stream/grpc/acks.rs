@@ -13,6 +13,17 @@ use super::ZerobusStream;
 use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
+    /// Once a stream has opened, a later stream-creation failure belongs to a
+    /// recovery attempt. Preserve its status while presenting it through the
+    /// established stream-operation error variant. The raw terminal cause stays
+    /// in `server_error_rx` for mux poisoning and internal diagnostics.
+    fn normalize_wait_error(error: ZerobusError) -> ZerobusError {
+        match error {
+            ZerobusError::CreateStreamError(status) => ZerobusError::StreamClosedError(status),
+            error => error,
+        }
+    }
+
     /// Returns the final server error after this stream becomes terminal.
     /// Multiplexed streams use this to preserve the lane's typed failure when
     /// they discover an asynchronously closed lane.
@@ -71,7 +82,7 @@ impl ZerobusStream {
                     // terminal_token. This path can observe closure before the final
                     // watch value; mux terminal_error() waits on the token before reading it.
                     if let Some(server_error) = error_rx.borrow().clone() {
-                        return Err(server_error);
+                        return Err(Self::normalize_wait_error(server_error));
                     }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                         format!("Stream closed during {}", operation_name.to_lowercase()),
@@ -97,7 +108,7 @@ impl ZerobusStream {
                                         return Ok(());
                                     }
                                 }
-                                return Err(server_error);
+                                return Err(Self::normalize_wait_error(server_error));
                             }
                         }
                     }
@@ -106,7 +117,7 @@ impl ZerobusStream {
 
             if let Some(server_error) = error_rx.borrow().clone() {
                 if self.is_closed.load(Ordering::Relaxed) {
-                    return Err(server_error);
+                    return Err(Self::normalize_wait_error(server_error));
                 }
             }
 

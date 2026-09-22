@@ -18,6 +18,11 @@
 
 ### Bug Fixes
 
+- Restored the established gRPC stream error contract after exhausted recovery:
+  `wait_for_offset()`, `flush()`, and an in-progress `close()` now report the
+  final recovery setup failure as `StreamClosedError` while preserving its gRPC
+  status. Initial stream construction still reports `CreateStreamError`.
+
 - Cancelled gRPC stream construction now cancels and aborts supervisor,
   callback, sender, and receiver tasks before ownership is returned. This
   applies to ordinary and multiplexed stream builds.
