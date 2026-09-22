@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
@@ -2963,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "zerobus-sdk-ts"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
