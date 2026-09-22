@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
+use pyo3::{PyTraverseError, PyVisit};
 use pyo3_async_runtimes::TaskLocals;
 use std::collections::HashMap;
 use std::future::Future;
@@ -31,10 +32,11 @@ fn idp_supplier_misuse(msg: impl Into<String>) -> RustError {
 }
 
 /// Builds an error for the case where the native supplier is invoked but its
-/// weakly-held Python callback has already been collected. The only strong,
-/// GC-visible reference lives on the Python `ZerobusStream`, so this is reachable
-/// only once that stream is unreachable (being torn down) — e.g. a detached
-/// `ingest_record_nowait` task racing GC. Classified retryable so a stray
+/// weakly-held [`IdpCallbackHolder`] (and thus the Python callback) has already
+/// been collected. The strong, GC-visible references live on the Python
+/// `ZerobusStream` and any live `RecordAcknowledgment`, so this is reachable only
+/// once all of those are unreachable (the stream is being torn down) — e.g. a
+/// detached `ingest_record_nowait` task racing GC. Classified retryable so a stray
 /// occurrence degrades gracefully rather than hard-failing.
 fn idp_callback_dropped_error() -> RustError {
     RustError::TokenFetchError(
@@ -161,7 +163,79 @@ enum TokenOutcome {
     Failed(RustError),
 }
 
-/// A short-lived, opaque handle to one constructed [`IdpTokenSupplier`].
+/// GC-visible owner of one federated IdP callback and its captured async context.
+///
+/// The callback and (for the async SDK) the event loop + copied context it must be
+/// driven on live here, on a type we control, rather than inside the native
+/// supplier closure. Strong, GC-visible references to this holder are held by the
+/// [`IdpSupplier`] handle during setup and then by the Python `ZerobusStream` (and
+/// any live `RecordAcknowledgment`) for the stream's lifetime; the native supplier
+/// holds only a *weak* reference to it (see [`make_idp_token_supplier`]).
+///
+/// Because the holder is our own `#[pyclass(weakref)]` — always weakly
+/// referenceable — the native supplier can weakly reference it regardless of
+/// whether the user's callback itself supports weak references. That removes the
+/// old strong-reference fallback for exotic callables, and keeps the async context
+/// out of the closure: neither the callback nor the context is ever pinned by a
+/// Rust-side reference the garbage collector cannot see, so a self-referential
+/// `owner -> stream -> holder -> callback -> owner` cycle stays collectable.
+#[pyclass(weakref)]
+pub struct IdpCallbackHolder {
+    /// The Python IdP-token callback. `None` only after the cyclic GC has cleared
+    /// this holder while breaking a cycle (the stream is being torn down).
+    callback: Option<Py<PyAny>>,
+    /// Async SDK only: the event loop an awaitable returned by the callback is
+    /// driven on. `None` for the sync SDK (an `async def` callback is then rejected
+    /// as misuse). Stored as a raw handle, alongside `context`, so `__traverse__`
+    /// can visit it.
+    event_loop: Option<Py<PyAny>>,
+    /// Async SDK only: the context copied when the loop was captured, restored when
+    /// driving the awaitable. Paired with `event_loop`.
+    context: Option<Py<PyAny>>,
+}
+
+impl IdpCallbackHolder {
+    /// Rebuilds the captured async task-locals (event loop + copied context) if
+    /// this holder carries them (async SDK); `None` for the sync SDK.
+    fn task_locals(&self, py: Python<'_>) -> Option<TaskLocals> {
+        match (&self.event_loop, &self.context) {
+            (Some(event_loop), Some(context)) => Some(
+                TaskLocals::new(event_loop.bind(py).clone()).with_context(context.bind(py).clone()),
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[pymethods]
+impl IdpCallbackHolder {
+    /// Let the cyclic GC see the strong references to the callback and its captured
+    /// async context, so a cycle running through any of them is collectable.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(callback) = &self.callback {
+            visit.call(callback)?;
+        }
+        if let Some(event_loop) = &self.event_loop {
+            visit.call(event_loop)?;
+        }
+        if let Some(context) = &self.context {
+            visit.call(context)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong references when the GC breaks a cycle. Any in-flight native
+    /// mint then sees `callback == None` and fails with `idp_callback_dropped_error`.
+    fn __clear__(&mut self) {
+        self.callback = None;
+        self.event_loop = None;
+        self.context = None;
+    }
+}
+
+/// A short-lived, opaque handle carrying one constructed [`IdpTokenSupplier`] and
+/// the strong reference to its [`IdpCallbackHolder`], handed to
+/// `create_stream_federated`.
 ///
 /// The Python `FederatedToken` rebuilds this per `create_stream`, so it binds to
 /// the SDK creating the stream: `allow_async` matches sync vs async, and an async
@@ -175,6 +249,11 @@ enum TokenOutcome {
 #[pyclass]
 pub struct IdpSupplier {
     pub(crate) supplier: IdpTokenSupplier,
+    /// The strong, GC-visible owner of the callback + async context. Handed to the
+    /// `ZerobusStream` by `create_stream_federated`; the native `supplier` above
+    /// references it only weakly. Held here only transiently (this handle is a
+    /// local dropped once the stream is built), so it never pins a retained cycle.
+    pub(crate) holder: Py<IdpCallbackHolder>,
 }
 
 #[pymethods]
@@ -189,88 +268,71 @@ impl IdpSupplier {
     /// share its cached exchanged token even though the handle (and its `Arc`) is
     /// rebuilt for each stream.
     ///
-    /// The supplier holds the callback only *weakly* (see [`CallbackRef`]); the
-    /// strong, GC-visible reference is passed separately to `create_stream_federated`
-    /// and lives on the `ZerobusStream`, so a self-referential owner/stream/callback
-    /// cycle stays collectable and this handle never pins the callback.
+    /// The callback and async context are stored on a GC-visible
+    /// [`IdpCallbackHolder`], which the native supplier references only *weakly*;
+    /// the strong reference passes to `create_stream_federated` and lives on the
+    /// `ZerobusStream`, so a self-referential owner/stream/callback cycle stays
+    /// collectable and no captured state is pinned by the Rust-side closure.
     #[new]
-    fn new(py_callable: Py<PyAny>, allow_async: bool, cache_identity: String) -> Self {
-        Self {
-            supplier: make_idp_token_supplier(py_callable, allow_async, cache_identity),
-        }
-    }
-}
+    fn new(
+        py: Python<'_>,
+        py_callable: Py<PyAny>,
+        allow_async: bool,
+        cache_identity: String,
+    ) -> PyResult<Self> {
+        // Async (awaitable) callbacks are driven later on a Rust worker thread with
+        // no running event loop, so capture the current loop's task-locals here, up
+        // front on the Python thread — only for the async SDK (`allow_async`). The
+        // sync SDK captures neither, so an async callback is rejected as misuse when
+        // it is invoked (there is no loop to drive it). A sync caller can still be
+        // inside a running loop (a notebook, `asyncio.run`), and capturing it would
+        // schedule the awaitable on a loop `block_on` never drives, an indefinite
+        // hang. The captured handles live on the holder (GC-visible), never inside
+        // the native closure, so a copied context cannot pin a cycle unseen.
+        let (event_loop, context) = if allow_async {
+            match pyo3_async_runtimes::tokio::get_current_locals(py).ok() {
+                Some(locals) => (
+                    Some(locals.event_loop(py).unbind()),
+                    Some(locals.context(py).unbind()),
+                ),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
 
-/// How the native supplier closure holds the Python IdP callback. Weak by
-/// default, so the supplier never keeps the callback (or any object cycle running
-/// through it) alive; the Python `ZerobusStream` holds the sole strong,
-/// GC-visible reference for the stream's lifetime, so the collector can reclaim an
-/// `owner -> stream -> callback -> owner` cycle. A callback that cannot be weakly
-/// referenced (e.g. a builtin function) falls back to a strong reference, which
-/// only preserves today's keep-alive behavior for that exotic case.
-enum CallbackRef {
-    /// A `weakref.ref` object; calling it yields the callback or `None` if dropped.
-    Weak(Py<PyAny>),
-    Strong(Py<PyAny>),
-}
-
-impl CallbackRef {
-    /// Builds a weak reference to `callable`, falling back to strong when the
-    /// object is not weakly referenceable (`weakref.ref` raises `TypeError`).
-    fn new(py: Python<'_>, callable: &Py<PyAny>) -> Self {
-        match py
-            .import("weakref")
-            .and_then(|m| m.call_method1("ref", (callable.bind(py),)))
-        {
-            Ok(wref) => CallbackRef::Weak(wref.unbind()),
-            Err(_) => CallbackRef::Strong(callable.clone_ref(py)),
-        }
-    }
-
-    /// Resolves the live callback under the GIL, or `None` if a weak reference has
-    /// been collected (the owning stream is gone).
-    fn resolve<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
-        match self {
-            CallbackRef::Strong(cb) => Some(cb.bind(py).clone()),
-            CallbackRef::Weak(wref) => match wref.bind(py).call0() {
-                Ok(obj) if !obj.is_none() => Some(obj),
-                _ => None,
+        let holder = Py::new(
+            py,
+            IdpCallbackHolder {
+                callback: Some(py_callable),
+                event_loop,
+                context,
             },
-        }
+        )?;
+
+        // Weakly reference the holder — not the user's callback — from the native
+        // supplier. The holder is always weakly referenceable, so this never falls
+        // back to a strong reference (which for an exotic non-weakly-referenceable
+        // callable would have pinned the cycle from the Rust side).
+        let weak_holder = py
+            .import("weakref")?
+            .call_method1("ref", (holder.bind(py).as_any(),))?
+            .unbind();
+        let supplier = make_idp_token_supplier(weak_holder, cache_identity);
+        Ok(Self { supplier, holder })
     }
 }
 
 /// Bridges a Python IdP-token callback to the Rust SDK's [`IdpTokenSupplier`].
 ///
-/// The callback is invoked only when a fresh Databricks token must be minted
-/// (a cache miss or refresh), and must return the current external IdP token as
-/// a string. Both sync callbacks (return the string directly) and async
-/// callbacks (return an awaitable) are supported. Async callbacks are driven
-/// via the running event loop, so they require the async SDK.
-pub fn make_idp_token_supplier(
-    py_callable: Py<PyAny>,
-    allow_async: bool,
-    cache_identity: String,
-) -> IdpTokenSupplier {
-    // Async (awaitable) callbacks are driven later on a Rust worker thread with
-    // no running event loop, so capture the current loop's task-locals here, up
-    // front on the Python thread. Only for the async SDK (`allow_async`); the
-    // sync SDK leaves it `None` so an async callback is rejected as misuse below.
-    // A sync caller can still be inside a running loop (a notebook, `asyncio.run`),
-    // and capturing it would schedule the awaitable on a loop `block_on` never
-    // drives, an indefinite hang.
-    let task_locals: Option<TaskLocals> = if allow_async {
-        Python::attach(|py| pyo3_async_runtimes::tokio::get_current_locals(py).ok())
-    } else {
-        None
-    };
-
-    // Hold the callback weakly (see `CallbackRef`): the `ZerobusStream` owns the
-    // sole strong, GC-visible reference for the stream's lifetime, so a
-    // self-referential owner -> stream -> callback cycle stays collectable. The
-    // strong `py_callable` is released when this function returns.
-    let callback_ref = Python::attach(|py| CallbackRef::new(py, &py_callable));
-
+/// `weak_holder` is a `weakref.ref` to the [`IdpCallbackHolder`] that owns the
+/// callback and (for async) its task-locals. The callback is invoked only when a
+/// fresh Databricks token must be minted (a cache miss or refresh), and must
+/// return the current external IdP token as a string. Both sync callbacks (return
+/// the string directly) and async callbacks (return an awaitable) are supported.
+/// Async callbacks are driven via the captured event loop, so they require the
+/// async SDK.
+pub fn make_idp_token_supplier(weak_holder: Py<PyAny>, cache_identity: String) -> IdpTokenSupplier {
     let call: IdpTokenCallback = Arc::new(move || {
         // Invoke the callback under the GIL. If it returned an awaitable,
         // convert it to a Rust future here (GIL held) using the captured
@@ -279,12 +341,24 @@ pub fn make_idp_token_supplier(
         // is a retryable token-fetch failure, while a non-string return or an
         // async callback without an event loop is non-retryable misuse.
         let outcome = Python::attach(|py| -> TokenOutcome {
-            // Upgrade the weak reference. `None` means the callback was collected,
-            // which can only happen once the owning stream is unreachable.
-            let callable = match callback_ref.resolve(py) {
-                Some(callable) => callable,
+            // Upgrade the weak reference to the holder. A collected/`None` weakref,
+            // or a holder the GC has already cleared, means every strong owner (the
+            // stream and any live acknowledgment) is gone — the stream is being torn
+            // down — so treat it as a dropped callback.
+            let holder = match weak_holder.bind(py).call0() {
+                Ok(obj) if !obj.is_none() => obj,
+                _ => return TokenOutcome::Failed(idp_callback_dropped_error()),
+            };
+            let holder = match holder.extract::<PyRef<IdpCallbackHolder>>() {
+                Ok(holder) => holder,
+                Err(_) => return TokenOutcome::Failed(idp_callback_dropped_error()),
+            };
+            let callable = match &holder.callback {
+                Some(callback) => callback.bind(py).clone(),
                 None => return TokenOutcome::Failed(idp_callback_dropped_error()),
             };
+            // Rebuild the task-locals captured at construction (async SDK only).
+            let task_locals = holder.task_locals(py);
             let result = match callable.call0() {
                 Ok(result) => result,
                 Err(e) => {

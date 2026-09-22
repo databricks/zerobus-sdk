@@ -22,8 +22,8 @@ class _FakeInner:
     def __init__(self):
         self.calls = []
 
-    def create_stream_federated(self, table_properties, idp_supplier, idp_callback, databricks_client_id, options):
-        self.calls.append(("federated", table_properties, idp_supplier, idp_callback, databricks_client_id, options))
+    def create_stream_federated(self, table_properties, idp_supplier, databricks_client_id, options):
+        self.calls.append(("federated", table_properties, idp_supplier, databricks_client_id, options))
         return object()
 
     def create_stream(self, client_id, client_secret, table_properties, options):
@@ -39,10 +39,8 @@ class _AsyncFakeInner:
     def __init__(self):
         self.calls = []
 
-    async def create_stream_federated(
-        self, table_properties, idp_supplier, idp_callback, databricks_client_id, options
-    ):
-        self.calls.append(("federated", table_properties, idp_supplier, idp_callback, databricks_client_id, options))
+    async def create_stream_federated(self, table_properties, idp_supplier, databricks_client_id, options):
+        self.calls.append(("federated", table_properties, idp_supplier, databricks_client_id, options))
         return object()
 
     async def create_stream(self, client_id, client_secret, table_properties, options):
@@ -111,19 +109,22 @@ def test_federated_token_owner_cycle_is_collectable():
     assert ref() is None, "a FederatedToken must not keep its owner alive (no GC-invisible reference)"
 
 
-def test_native_supplier_holds_callback_weakly():
+def test_native_supplier_releases_callback_when_dropped():
     # The full leak Teodor flagged runs through the stream:
     #     owner.stream = sdk.create_stream(auth=FederatedToken(owner.get_token))
-    # forms owner -> stream -> native supplier -> bound method -> owner. The stream
-    # holds the sole strong, GC-visible reference to the callback (see the
-    # __traverse__/__clear__ on the native ZerobusStream), while the native supplier
-    # must hold it only WEAKLY, or that Rust-side (GC-invisible) strong reference
-    # would pin the cycle and defeat the collector.
+    # forms owner -> stream -> native supplier -> callback -> owner. The callback
+    # (and any async context) lives on a GC-visible IdpCallbackHolder; the native
+    # supplier's closure references that holder only WEAKLY, and the strong,
+    # GC-visible reference is taken by the ZerobusStream (see the
+    # __traverse__/__clear__ on the native ZerobusStream and IdpCallbackHolder), so
+    # the collector can break the cycle. Full cycle collectability requires a live
+    # stream and is covered by the Rust unit tests and the integration soak; this
+    # asserts the supplier-level ownership that underpins it.
     #
-    # This asserts the supplier half directly: a live IdpSupplier must NOT keep its
-    # callback alive on its own. Under the previous strong capture this failed (the
-    # Arc pinned the callback); with the weak reference the callback is collected
-    # once its last real strong referrer is dropped.
+    # The holder is owned strongly by the IdpSupplier handle only transiently (until
+    # the stream takes it), so a live handle DOES retain the callback — but dropping
+    # the handle must release it completely, with no strong reference lingering in
+    # the native closure (which holds the holder weakly).
     import gc
     import weakref
 
@@ -136,15 +137,54 @@ def test_native_supplier_holds_callback_weakly():
     owner = Owner()
     callback = owner.get_token
     ref = weakref.ref(callback)
-    # The supplier is kept alive for the whole test; only it references `callback`
-    # after the del below (weakly, if the fix holds).
-    _supplier = _core.IdpSupplier(callback, False, "cache-id")
+    supplier = _core.IdpSupplier(callback, False, "cache-id")
 
     del callback
     gc.collect()
-    assert ref() is None, "the native IdpSupplier must hold the callback weakly, not pin it"
-    # The supplier is still alive here, proving the callback died despite it.
-    assert _supplier is not None
+    # The GC-visible holder inside the live supplier retains the callback.
+    assert ref() is not None, "the holder must retain the callback while the supplier is alive"
+
+    # Dropping the supplier drops the holder (its only strong owner here) and the
+    # native closure; nothing must keep the callback alive afterwards.
+    del supplier
+    gc.collect()
+    assert ref() is None, "dropping the supplier must release the callback (no lingering native strong ref)"
+
+
+def test_native_supplier_accepts_non_weakly_referenceable_callback():
+    # Regression: a callback that cannot itself be weakly referenced (e.g. an
+    # instance of a __slots__ class without __weakref__) previously forced the
+    # native supplier onto a STRONG reference to the callback, which pinned an
+    # owner/stream/callback cycle from the Rust side the GC could not see. The
+    # supplier now weakly references its own IdpCallbackHolder (always weakly
+    # referenceable) rather than the user's callback, so such a callback is
+    # accepted with no strong fallback, and is released once the supplier is gone.
+    import gc
+    import weakref
+
+    import zerobus._zerobus_core as _core
+
+    class Callback:
+        __slots__ = ()  # no __weakref__ slot -> weakref.ref(instance) raises TypeError
+
+        def __call__(self):
+            return "tok"
+
+    callback = Callback()
+    with pytest.raises(TypeError):
+        weakref.ref(callback)  # confirms the callback is not weakly referenceable
+
+    # Construction must succeed (no strong fallback needed, no error).
+    supplier = _core.IdpSupplier(callback, False, "cache-id")
+    assert supplier is not None
+
+    del supplier
+    gc.collect()
+    # The callback outlives the supplier here only because `callback` is still held
+    # by this frame; the point is that construction did not fail and left no dangling
+    # native state. (Cycle collectability with such a callback is covered end-to-end
+    # by the Rust tests / soak, which exercise a live stream.)
+    assert callback() == "tok"
 
 
 def test_create_stream_routes_auth_to_federated_account_level():
@@ -157,16 +197,15 @@ def test_create_stream_routes_auth_to_federated_account_level():
     sdk.create_stream(table_properties=_props(), auth=auth)
 
     assert len(fake.calls) == 1
-    kind, _tp, passed_supplier, passed_callback, client_id, _opts = fake.calls[0]
+    kind, _tp, passed_supplier, client_id, _opts = fake.calls[0]
     assert kind == "federated"
     # A native supplier handle is passed (not the raw callback). The handle is
-    # built fresh per stream (bound to this SDK's loop), while the FederatedToken
-    # carries the stable cache identity that partitions the account-level cache.
+    # built fresh per stream (bound to this SDK's loop) and carries the GC-visible
+    # callback holder internally, while the FederatedToken carries the stable cache
+    # identity that partitions the account-level cache.
     import zerobus._zerobus_core as _core
 
     assert isinstance(passed_supplier, _core.IdpSupplier)
-    # The raw callback is also passed through, for the stream to hold strongly.
-    assert passed_callback is supplier
     assert isinstance(auth._cache_identity, str) and auth._cache_identity
     assert client_id is None
 
@@ -177,7 +216,7 @@ def test_create_stream_routes_auth_to_federated_workload():
         table_properties=_props(),
         auth=FederatedToken(idp_token_supplier=lambda: "tok", databricks_client_id="sp-uuid"),
     )
-    kind, _tp, _sup, _cb, client_id, _opts = fake.calls[0]
+    kind, _tp, _sup, client_id, _opts = fake.calls[0]
     assert kind == "federated"
     assert client_id == "sp-uuid"
 
@@ -288,7 +327,7 @@ async def test_async_create_stream_routes_to_federated():
         auth=FederatedToken(idp_token_supplier=lambda: "tok", databricks_client_id="sp"),
     )
     assert fake.calls[0][0] == "federated"
-    assert fake.calls[0][4] == "sp"
+    assert fake.calls[0][3] == "sp"
 
 
 @pytest.mark.asyncio

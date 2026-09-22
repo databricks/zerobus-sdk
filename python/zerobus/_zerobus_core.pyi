@@ -430,7 +430,6 @@ class sync:
             self,
             table_properties: TableProperties,
             idp_supplier: IdpSupplier,
-            idp_callback: Callable[[], Union[str, Awaitable[str]]],
             databricks_client_id: Optional[str] = None,
             options: Optional[StreamConfigurationOptions] = None,
         ) -> "ZerobusStream":
@@ -442,11 +441,10 @@ class sync:
                 idp_supplier: Short-lived supplier handle, rebuilt per create_stream
                     (so it binds to this SDK's event loop and sync/async policy); the
                     cache identity carried on the FederatedToken partitions the
-                    account-level token cache
-                idp_callback: The same IdP-token callback the supplier wraps; the
-                    stream holds the sole strong, GC-visible reference to it (the
-                    supplier holds only a weak one) so a self-referential
-                    owner/stream/callback cycle stays collectable
+                    account-level token cache. The supplier carries a GC-visible
+                    holder for the callback (and any async context) that it references
+                    only weakly; the stream takes the sole retained strong reference,
+                    so a self-referential owner/stream/callback cycle stays collectable
                 databricks_client_id: Service principal client_id for workload
                     identity federation, or None for account-level federation
                 options: Optional configuration options
@@ -621,7 +619,6 @@ class aio:
             self,
             table_properties: TableProperties,
             idp_supplier: IdpSupplier,
-            idp_callback: Callable[[], Union[str, Awaitable[str]]],
             databricks_client_id: Optional[str] = None,
             options: Optional[StreamConfigurationOptions] = None,
         ) -> "ZerobusStream":
@@ -633,11 +630,10 @@ class aio:
                 idp_supplier: Short-lived supplier handle, rebuilt per create_stream
                     (so it binds to this SDK's event loop and sync/async policy); the
                     cache identity carried on the FederatedToken partitions the
-                    account-level token cache
-                idp_callback: The same IdP-token callback the supplier wraps; the
-                    stream holds the sole strong, GC-visible reference to it (the
-                    supplier holds only a weak one) so a self-referential
-                    owner/stream/callback cycle stays collectable
+                    account-level token cache. The supplier carries a GC-visible
+                    holder for the callback (and any async context) that it references
+                    only weakly; the stream takes the sole retained strong reference,
+                    so a self-referential owner/stream/callback cycle stays collectable
                 databricks_client_id: Service principal client_id for workload
                     identity federation, or None for account-level federation
                 options: Optional configuration options

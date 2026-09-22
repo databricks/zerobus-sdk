@@ -13,7 +13,7 @@ use databricks_zerobus_ingest_sdk::{
 
 use crate::arrow;
 use crate::arrow::{ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
-use crate::auth::{HeadersProviderWrapper, IdpSupplier};
+use crate::auth::{HeadersProviderWrapper, IdpCallbackHolder, IdpSupplier};
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
@@ -94,21 +94,21 @@ impl PyAckFuture {
 pub struct ZerobusStream {
     pub(crate) inner: Arc<RwLock<RustStream>>,
     format: RecordFormat,
-    /// For a federated stream, the sole strong reference to the Python IdP
-    /// callback (the native supplier holds only a weak one). Exposed to the
-    /// cyclic GC via `__traverse__`/`__clear__` so an `owner -> stream -> callback
-    /// -> owner` cycle is collectable. `None` for OAuth / headers-provider streams.
-    idp_callback: Option<Py<PyAny>>,
+    /// For a federated stream, a strong reference to the IdP callback holder (the
+    /// native supplier holds only a weak one). Exposed to the cyclic GC via
+    /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
+    /// owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    idp_holder: Option<Py<IdpCallbackHolder>>,
 }
 
 #[pymethods]
 #[allow(deprecated)]
 impl ZerobusStream {
-    /// Let the cyclic GC see the strong reference to the IdP callback, so a
+    /// Let the cyclic GC see the strong reference to the IdP callback holder, so a
     /// self-referential owner/stream/callback cycle can be collected.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        if let Some(callback) = &self.idp_callback {
-            visit.call(callback)?;
+        if let Some(holder) = &self.idp_holder {
+            visit.call(holder)?;
         }
         Ok(())
     }
@@ -116,7 +116,7 @@ impl ZerobusStream {
     /// Drop the strong reference when the GC breaks a cycle (the native supplier's
     /// weak reference then resolves to `None`; the stream is being torn down).
     fn __clear__(&mut self) {
-        self.idp_callback = None;
+        self.idp_holder = None;
     }
     /// Ingest a record and return a future that can be awaited for acknowledgment (legacy API)
     #[deprecated(
@@ -130,6 +130,13 @@ impl ZerobusStream {
     ) -> PyResult<Bound<'py, PyAny>> {
         let record_payload = extract_record_payload(payload, self.format)?;
         let stream_clone = self.inner.clone();
+        // For a federated stream, carry a strong reference to the callback holder
+        // through both the enqueue and the returned ack future. Like the native
+        // stream Arc, the returned awaitable outlives this call, and a recovery
+        // driven by `wait_for_offset` may need to mint a fresh token; keeping the
+        // holder alive means the IdP callback stays reachable even if the caller
+        // has released the Python stream before awaiting.
+        let idp_holder = self.idp_holder.as_ref().map(|h| h.clone_ref(py));
 
         // Stage 1: enqueue, get offset. Stage 2: lazy wait_for_offset.
         let outer_future = async move {
@@ -143,6 +150,10 @@ impl ZerobusStream {
 
             let stream_for_ack = stream_clone.clone();
             let wait_future = async move {
+                // Held for the whole ack wait so a recovery-driven mint can still
+                // resolve the (weakly-held) IdP callback; dropped when the ack
+                // future completes.
+                let _idp_holder = idp_holder;
                 let stream_guard = stream_for_ack.read().await;
                 stream_guard
                     .wait_for_offset(offset)
@@ -361,7 +372,7 @@ impl ZerobusSdk {
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
-                idp_callback: None,
+                idp_holder: None,
             })
         })
     }
@@ -391,7 +402,7 @@ impl ZerobusSdk {
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
-                idp_callback: None,
+                idp_holder: None,
             })
         })
     }
@@ -400,17 +411,17 @@ impl ZerobusSdk {
     /// (async). `idp_supplier` is a fresh handle built per `create_stream`; its
     /// stable cache identity (not its `Arc`) partitions the account-level token
     /// cache, so reusing one `FederatedToken` shares its cached Databricks token.
-    /// `idp_callback` is the same Python callback the supplier wraps weakly; the
-    /// stream holds the sole strong, GC-visible reference to it so a self-referential
-    /// owner/stream/callback cycle stays collectable. `databricks_client_id` is
-    /// `Some` for workload identity federation and `None` for account-level.
-    #[pyo3(signature = (table_properties, idp_supplier, idp_callback, databricks_client_id = None, options = None))]
+    /// The stream takes the sole retained strong reference to the supplier's
+    /// GC-visible `IdpCallbackHolder` (the native supplier holds only a weak one),
+    /// so a self-referential owner/stream/callback cycle stays collectable.
+    /// `databricks_client_id` is `Some` for workload identity federation and `None`
+    /// for account-level.
+    #[pyo3(signature = (table_properties, idp_supplier, databricks_client_id = None, options = None))]
     fn create_stream_federated<'py>(
         &self,
         py: Python<'py>,
         table_properties: &TableProperties,
         idp_supplier: PyRef<'_, IdpSupplier>,
-        idp_callback: Py<PyAny>,
         databricks_client_id: Option<String>,
         options: Option<StreamConfigurationOptions>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -420,6 +431,10 @@ impl ZerobusSdk {
         opts.validate()?;
         let format = table_properties.resolve_format(opts.record_type)?;
         let supplier = idp_supplier.supplier.clone();
+        // Take the strong, GC-visible reference to the callback holder from the
+        // supplier handle and move it onto the stream; the native supplier keeps
+        // only its weak reference.
+        let idp_holder = idp_supplier.holder.clone_ref(py);
 
         future_into_py(py, async move {
             let sdk_guard = sdk.read().await;
@@ -431,7 +446,7 @@ impl ZerobusSdk {
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
-                idp_callback: Some(idp_callback),
+                idp_holder: Some(idp_holder),
             })
         })
     }
@@ -496,9 +511,9 @@ impl ZerobusSdk {
         let sdk = self.inner.clone();
         let old_stream_inner = old_stream.inner.clone();
         let format = old_stream.format;
-        // Carry the strong callback reference across recovery, or the native
+        // Carry the strong holder reference across recovery, or the native
         // supplier's weak reference would resolve to None on the new stream.
-        let idp_callback = old_stream.idp_callback.as_ref().map(|cb| cb.clone_ref(py));
+        let idp_holder = old_stream.idp_holder.as_ref().map(|h| h.clone_ref(py));
 
         future_into_py(py, async move {
             let guard = old_stream_inner.read().await;
@@ -511,7 +526,7 @@ impl ZerobusSdk {
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(new_stream)),
                 format,
-                idp_callback,
+                idp_holder,
             })
         })
     }

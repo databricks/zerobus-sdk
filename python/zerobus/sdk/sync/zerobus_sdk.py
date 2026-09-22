@@ -364,11 +364,12 @@ class ZerobusSdk:
             # cannot drive an awaitable, so an async callback is rejected as misuse.
             # Reuse still shares the cache via the stable _cache_identity.
             native_supplier = _core.IdpSupplier(auth.idp_token_supplier, False, auth._cache_identity)
-            # Pass the callback again so the stream holds the sole strong, GC-visible
-            # reference (the native supplier holds only a weak one): this keeps a
+            # The native supplier holds the callback (and any async context) on a
+            # GC-visible holder that it references only weakly; create_stream_federated
+            # moves the sole retained strong reference onto the stream, keeping a
             # self-referential owner/stream/callback cycle collectable.
             rust_stream = self._inner.create_stream_federated(
-                table_properties, native_supplier, auth.idp_token_supplier, auth.databricks_client_id, options
+                table_properties, native_supplier, auth.databricks_client_id, options
             )
         elif headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
