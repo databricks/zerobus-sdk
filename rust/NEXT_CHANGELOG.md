@@ -1,51 +1,19 @@
 # NEXT CHANGELOG
 
-## Release v2.10.0
+## Release v2.11.0
 
 ### Major Changes
 
 ### New Features and Improvements
 
-- Added `StreamBuilder::multiplexed(n)` (Beta) for JSON and protobuf streams, with
-  concurrent construction, a shared in-flight budget, and a separate
-  `multiplexed_ack_callback` for `MessageId` notifications. Existing ordinary
-  `ack_callback` usage is unchanged.
-- Multi-lane multiplexed construction opens sub-streams concurrently with
-  bounded random startup jitter and cleans up successful opens if construction
-  fails or is cancelled. A single lane opens immediately.
-- Multiplexed streams divide the mux-wide `max_inflight_requests` budget evenly
-  across sub-streams.
-
 ### Bug Fixes
-
-- Restored the established gRPC stream error contract after exhausted recovery:
-  `wait_for_offset()`, `flush()`, and an in-progress `close()` now report the
-  final recovery setup failure as `StreamClosedError` while preserving its gRPC
-  status. Initial stream construction still reports `CreateStreamError`.
-
-- Cancelled gRPC stream construction now cancels and aborts supervisor,
-  callback, sender, and receiver tasks before ownership is returned. This
-  applies to ordinary and multiplexed stream builds.
 
 ### Documentation
 
-- Added multiplexed-stream guidance and a complete compiled-protobuf example
-  with queued ingestion, periodic flushing, `MessageId` callbacks, and close.
-
 ### Internal Changes
-
-- Made gRPC graceful-close deadline tests deterministic with a paused clock and
-  acknowledgment barriers, avoiding false failures from Windows scheduling delays.
 
 ### Breaking Changes
 
 ### Deprecations
 
 ### API Changes
-
-- Exported `MultiplexedStream`, `MultiplexedStreamBuilder`, and `MessageId` with
-  default features.
-- Added `StreamBuilder::multiplexed_ack_callback` for `MessageId` callbacks
-  while preserving `ack_callback` for ordinary `OffsetId` callbacks; each
-  terminal mode rejects the other mode's callback.
-- Added `MultiplexedStream::new_record()` for dynamic-protobuf records.
