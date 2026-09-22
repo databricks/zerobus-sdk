@@ -435,7 +435,7 @@ The SDK uses OAuth 2.0 client credentials flow:
 
 OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (currently one hour) that the SDK cannot configure, while a single stream lives at most ~15 minutes. By default the SDK caches the token for each table on the `ZerobusSdk` instance and reuses it across stream creations and recoveries, refreshing it only once it nears the expiry the server reported (so it adapts to whatever lifetime UC returns). This avoids minting a fresh token on every stream and reduces load on the Unity Catalog token endpoint.
 
-Caching applies only to the built-in OAuth path (`.oauth(...)`). Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
+Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
 
 SDK builder options tune connection and token behavior:
 
@@ -615,6 +615,49 @@ let client_secret = "your-client-secret".to_string();
 ```
 
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for more information on how to get these credentials.
+
+#### External-IdP federation (e.g. Entra ID)
+
+To authenticate with an external identity provider instead of a Databricks
+OAuth secret, use the `federated_auth` builder method. You provide an
+[`IdpTokenSupplier`] callback that returns the current external IdP token; the
+SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange) and caches and refreshes it, exactly like the OAuth path.
+
+```rust,ignore
+use std::sync::Arc;
+
+// Account-level federation: no Databricks service principal. The identity is
+// synced into Databricks via Automatic Identity Management (SCIM). Pass `None`
+// for the client_id. The shared token cache is partitioned by the supplier's
+// identity, so if you drive multiple account-level identities from one SDK
+// instance, give each its own supplier (clone one supplier to share its token).
+let supplier =
+    IdpTokenSupplier::new(Arc::new(|| Box::pin(async { get_idp_token().await })));
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated_auth(supplier.clone(), None)
+    .json()
+    .build()
+    .await?;
+
+// Workload identity federation: a Databricks service principal with a client_id
+// and no secret, with a federation policy attached. The cache keys by the
+// service principal client_id.
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated_auth(
+        IdpTokenSupplier::new(Arc::new(|| Box::pin(async { get_idp_token().await }))),
+        Some("<sp-client-id>".to_string()),
+    )
+    .json()
+    .build()
+    .await?;
+```
+
+The existing `.oauth(...)` and `.headers_provider(...)` paths are unchanged.
 
 ### 4. Create a Stream
 
@@ -1025,12 +1068,12 @@ Also accepts `0` or `no`.
 | Method | Default | Description |
 |--------|---------|-------------|
 | `endpoint(...)` | Required | Set the Zerobus API endpoint. |
-| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required when using built-in OAuth authentication. |
+| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required for built-in OAuth or federated authentication (both exchange tokens at this URL). |
 | `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
 | `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
 | `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
-| `token_cache_enabled(bool)` | `true` | Enable or disable OAuth token caching for the built-in OAuth path. |
-| `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth token is refreshed. |
+| `token_cache_enabled(bool)` | `true` | Enable or disable token caching for the built-in OAuth and federated paths. |
+| `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth or federated token is refreshed. |
 
 HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
 workloads over the public internet, packet loss and TCP retransmissions can
