@@ -192,7 +192,8 @@ impl ZerobusSdkBuilder {
     ///
     /// # Arguments
     ///
-    /// * `enabled` - Whether to cache OAuth tokens.
+    /// * `enabled` - Whether to cache tokens for the built-in OAuth and
+    ///   federated authentication paths.
     pub fn token_cache_enabled(mut self, enabled: bool) -> Self {
         self.token_cache_enabled = enabled;
         self
