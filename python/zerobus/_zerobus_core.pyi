@@ -1,6 +1,6 @@
 """Type stubs for _zerobus_core Rust module."""
 
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
 from typing_extensions import Self
 
@@ -24,14 +24,6 @@ class RecordType:
 class TableProperties:
     """Table properties for the stream."""
 
-    # Readable attributes (getters). descriptor_proto is a constructor-only param
-    # (no getter), so it is intentionally not listed here.
-    table_name: str
-    # Avro writer schema (JSON); mutually exclusive with descriptor_proto
-    avro_schema: Optional[str]
-    # Record format this stream will use: "proto", "json", or "avro"
-    record_format: str
-
     def __init__(
         self,
         table_name: str,
@@ -50,6 +42,14 @@ class TableProperties:
             avro_schema: Avro writer schema (JSON string); mutually exclusive with descriptor_proto
         """
         ...
+
+    # Runtime getters. descriptor_proto is a constructor-only param (no getter).
+    @property
+    def table_name(self) -> str: ...
+    @property
+    def avro_schema(self) -> Optional[str]: ...
+    @property
+    def record_format(self) -> Literal["proto", "json", "avro"]: ...
 
     def __repr__(self) -> str: ...
 
