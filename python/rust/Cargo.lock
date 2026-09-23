@@ -79,7 +79,7 @@ dependencies = [
  "ahash",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "chrono",
  "half",
  "hashbrown 0.17.1",
@@ -110,7 +110,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-ord",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "arrow-select",
  "atoi",
  "base64 0.23.1",
@@ -128,7 +128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "723fe4aeed7604e00b9883a465af4ff0a0e6c44c03e41a68c3d1cbc403e0e44d"
 dependencies = [
  "arrow-buffer",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "half",
  "num-integer",
  "num-traits",
@@ -143,7 +143,7 @@ dependencies = [
  "arrow-cast",
  "arrow-data",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "base64 0.23.1",
  "bytes",
  "futures",
@@ -162,7 +162,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "arrow-select",
  "flatbuffers",
  "lz4_flex",
@@ -178,15 +178,21 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "arrow-select",
 ]
 
 [[package]]
 name = "arrow-schema"
-version = "59.2.0"
+version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6fed2ca0d1eade57e811cbe73b98ad50cc08a1183e13b2d2aa43a7df593f40e"
+checksum = "10fab8d4563491417ba801fab29d205104d20d4bdf37bda6cd1cf425cff598cd"
+
+[[package]]
+name = "arrow-schema"
+version = "60.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f85a9a58cd03560526b0066487574aacb9008e413504fa0ee23d61141e96c338"
 
 [[package]]
 name = "arrow-select"
@@ -198,7 +204,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.0",
  "num-traits",
 ]
 
@@ -511,7 +517,7 @@ dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 60.0.0",
  "async-trait",
  "bytes",
  "futures",
@@ -3064,7 +3070,7 @@ version = "1.9.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 60.0.0",
  "async-trait",
  "databricks-zerobus-ingest-sdk",
  "prost",
