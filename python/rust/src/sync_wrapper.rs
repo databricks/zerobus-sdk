@@ -489,8 +489,17 @@ impl ZerobusSdk {
         let supplier = idp_supplier.supplier.clone();
         // Take the strong, GC-visible reference to the callback holder from the
         // supplier handle and move it onto the stream; the native supplier keeps
-        // only its weak reference.
-        let idp_holder = idp_supplier.holder.clone_ref(py);
+        // only its weak reference. `holder` is `Some` for any freshly built handle;
+        // it is `None` only after the cyclic GC has cleared this handle.
+        let idp_holder = idp_supplier
+            .holder
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "federated IdP supplier handle has already been cleared",
+                )
+            })?
+            .clone_ref(py);
         let sdk = self.inner.clone();
         let runtime = self.runtime.clone();
         let runtime_for_stream = self.runtime.clone();

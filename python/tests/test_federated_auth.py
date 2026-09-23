@@ -187,6 +187,48 @@ def test_native_supplier_accepts_non_weakly_referenceable_callback():
     assert callback() == "tok"
 
 
+def test_failed_create_stream_traceback_does_not_leak_owner():
+    # A failed create_stream raises, and the exception's traceback retains the frame
+    # that built the native IdpSupplier handle, so a caller that saves that exception
+    # on the callback's owner keeps the handle alive:
+    #     owner -> exc -> __traceback__ -> frame -> IdpSupplier -> holder
+    #           -> callback (owner's bound method) -> owner
+    # The IdpCallbackHolder being GC-visible is not enough — the collector also needs
+    # to see the IdpSupplier -> holder edge, or the whole cycle leaks. IdpSupplier's
+    # __traverse__/__clear__ expose that edge, so the owner is collectable. (We build
+    # the handle and raise directly here; a real non-string token return would fail the
+    # same way once minting runs, which needs a live stream and is covered by the Rust
+    # tests / soak.)
+    import gc
+    import weakref
+
+    import zerobus._zerobus_core as _core
+
+    class Owner:
+        def get_token(self):
+            return 42  # non-string: the misuse that fails a real create_stream
+
+    def build(owner):
+        # `supplier` is a local of this frame; the raised exception's traceback keeps
+        # the frame — and thus the handle — alive.
+        supplier = _core.IdpSupplier(owner.get_token, False, "cache-id")
+        assert supplier is not None
+        raise RuntimeError("simulated create_stream failure")
+
+    owner = Owner()
+    try:
+        build(owner)
+    except RuntimeError as exc:
+        owner.err = exc  # close the cycle: owner -> exc -> traceback -> supplier -> ...
+
+    # `exc` is auto-cleared at the end of the except block; the exception survives
+    # only through owner.err, which is exactly the retention path under test.
+    ref = weakref.ref(owner)
+    del owner
+    gc.collect()
+    assert ref() is None, "a failed create_stream must not leak the callback owner via the supplier traceback"
+
+
 def test_create_stream_routes_auth_to_federated_account_level():
     sdk, fake = _sync_sdk_with_fake()
 

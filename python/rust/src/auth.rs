@@ -251,13 +251,36 @@ pub struct IdpSupplier {
     pub(crate) supplier: IdpTokenSupplier,
     /// The strong, GC-visible owner of the callback + async context. Handed to the
     /// `ZerobusStream` by `create_stream_federated`; the native `supplier` above
-    /// references it only weakly. Held here only transiently (this handle is a
-    /// local dropped once the stream is built), so it never pins a retained cycle.
-    pub(crate) holder: Py<IdpCallbackHolder>,
+    /// references it only weakly. Normally this handle is a local dropped once the
+    /// stream is built — but a *failed* `create_stream` can pin it: the exception's
+    /// traceback retains the frame, and thus this handle, so if the caller saves that
+    /// exception on the callback's owner the cycle
+    /// `owner -> exc -> traceback -> IdpSupplier -> holder -> callback -> owner` forms.
+    /// It stays collectable only because `__traverse__`/`__clear__` below make this
+    /// strong edge to the holder visible to the cyclic GC. `Option` so `__clear__` can
+    /// drop it when the collector breaks the cycle.
+    pub(crate) holder: Option<Py<IdpCallbackHolder>>,
 }
 
 #[pymethods]
 impl IdpSupplier {
+    /// Let the cyclic GC see the strong reference to the callback holder, so a cycle
+    /// running through this handle (e.g. a saved failed-`create_stream` traceback that
+    /// retains it) is collectable rather than leaking the callback's owner.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(holder) = &self.holder {
+            visit.call(holder)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference to the holder when the GC breaks a cycle. Any live
+    /// stream keeps its own strong reference to the same holder, so this only releases
+    /// the handle's transient copy.
+    fn __clear__(&mut self) {
+        self.holder = None;
+    }
+
     /// `allow_async` must be `true` only for the async SDK. The sync SDK passes
     /// `false` so that an `async def` supplier is rejected as misuse rather than
     /// scheduled on a loop the sync `block_on` will never drive (which would
@@ -319,7 +342,10 @@ impl IdpSupplier {
             .call_method1("ref", (holder.bind(py).as_any(),))?
             .unbind();
         let supplier = make_idp_token_supplier(weak_holder, cache_identity);
-        Ok(Self { supplier, holder })
+        Ok(Self {
+            supplier,
+            holder: Some(holder),
+        })
     }
 }
 
