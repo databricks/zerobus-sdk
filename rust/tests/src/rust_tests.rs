@@ -3474,6 +3474,70 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_exhausted_recovery_is_reported_as_stream_closed(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_before_recovery_failure".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("original stream lost"),
+                            delay_ms: 100,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("first recovery attempt failed"),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("recovery exhausted"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(1)
+                .build()
+                .await?;
+
+            let offset = stream
+                .ingest_record_offset(b"unacknowledged".to_vec())
+                .await?;
+            for result in [stream.wait_for_offset(offset).await, stream.flush().await] {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ZerobusError::StreamClosedError(ref status))
+                            if status.code() == tonic::Code::Unavailable
+                                && status.message() == "recovery exhausted"
+                    ),
+                    "expected exhausted recovery to surface as StreamClosedError, got {result:?}"
+                );
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_recovery_after_server_unresponsiveness(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
