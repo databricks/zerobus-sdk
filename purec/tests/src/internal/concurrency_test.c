@@ -7,16 +7,13 @@
 enum { WORKERS = 4, INCREMENTS = 1000, WAIT_TIMEOUT_MS = 5000 };
 
 /* A failed join must not let a worker outlive its borrowed stack state. */
-static void join_owned(zb_thread_t **thread)
+static void join_owned(zb_thread_t *thread)
 {
-    if (*thread != NULL) {
-        zerobus_status_t status = zb_thread_join(*thread, NULL);
-        if (status != ZEROBUS_STATUS_OK) {
-            fprintf(stderr, "Thread cleanup join failed (status %u).\n",
-                    (unsigned int)status);
-            abort();
-        }
-        *thread = NULL;
+    zerobus_status_t status = zb_thread_join(thread, NULL);
+    if (status != ZEROBUS_STATUS_OK) {
+        fprintf(stderr, "Thread cleanup join failed (status %u).\n",
+                (unsigned int)status);
+        abort();
     }
 }
 
@@ -51,18 +48,19 @@ static void *try_mutex(void *arg)
 static struct try_context try_from_thread(zb_mutex_t *mutex)
 {
     struct try_context context = {mutex, ZEROBUS_STATUS_UNKNOWN, true};
-    zb_thread_t *thread = NULL;
-    zerobus_status_t status = zb_thread_new(try_mutex, &context, &thread);
+    zb_thread_t thread;
+    zerobus_status_t status = zb_thread_create(&thread, try_mutex, &context);
     if (status != ZEROBUS_STATUS_OK) {
         context.status = status;
+    } else {
+        join_owned(&thread);
     }
-    join_owned(&thread);
     return context;
 }
 
 /* The counter is shared only while its mutex is held. */
 struct counter {
-    zb_mutex_t *mutex;
+    zb_mutex_t mutex;
     unsigned int value;
 };
 
@@ -77,12 +75,12 @@ static void *increment_counter(void *arg)
 {
     struct counter_context *context = (struct counter_context *)arg;
     for (unsigned int i = 0; i < INCREMENTS; i++) {
-        context->status = zb_mutex_lock(context->counter->mutex);
+        context->status = zb_mutex_lock(&context->counter->mutex);
         if (context->status != ZEROBUS_STATUS_OK) {
             return NULL;
         }
         context->counter->value++;
-        context->status = zb_mutex_unlock(context->counter->mutex);
+        context->status = zb_mutex_unlock(&context->counter->mutex);
         if (context->status != ZEROBUS_STATUS_OK) {
             return NULL;
         }
@@ -102,9 +100,12 @@ struct wait_context {
 
 /* Own the condition scenario, including partially started workers. */
 struct wait_fixture {
-    zb_mutex_t *mutex;
-    zb_cond_t *changed;
-    zb_cond_t *progress;
+    zb_mutex_t mutex;
+    zb_cond_t changed;
+    zb_cond_t progress;
+    bool mutex_initialized;
+    bool changed_initialized;
+    bool progress_initialized;
     unsigned int ready;
     unsigned int wakeups;
     unsigned int completed;
@@ -113,7 +114,7 @@ struct wait_fixture {
     bool holding;
     unsigned int created;
     struct wait_context contexts[WORKERS];
-    zb_thread_t *threads[WORKERS];
+    zb_thread_t threads[WORKERS];
 };
 
 /* Recheck the predicate after every notification and report progress. */
@@ -128,29 +129,29 @@ static void *wait_for_permission(void *arg)
         deadline = zb_deadline_after_ms(UINT64_MAX - 1);
     }
 
-    context->status = zb_mutex_lock(fixture->mutex);
+    context->status = zb_mutex_lock(&fixture->mutex);
     if (context->status != ZEROBUS_STATUS_OK) {
         return NULL;
     }
     fixture->ready++;
-    context->status = zb_cond_broadcast(fixture->progress);
+    context->status = zb_cond_broadcast(&fixture->progress);
     while (context->status == ZEROBUS_STATUS_OK && !fixture->proceed &&
            !fixture->stop) {
         context->status = context->mode == WAIT_UNTIMED
-                              ? zb_cond_wait(fixture->changed, fixture->mutex)
-                              : zb_cond_wait_until(fixture->changed,
-                                                   fixture->mutex, deadline);
+                              ? zb_cond_wait(&fixture->changed, &fixture->mutex)
+                              : zb_cond_wait_until(&fixture->changed,
+                                                   &fixture->mutex, deadline);
         if (context->status != ZEROBUS_STATUS_OK) {
             break;
         }
         fixture->wakeups++;
-        context->status = zb_cond_broadcast(fixture->progress);
+        context->status = zb_cond_broadcast(&fixture->progress);
     }
     if (context->status == ZEROBUS_STATUS_OK && fixture->proceed &&
         !fixture->stop) {
         fixture->completed++;
     }
-    zerobus_status_t status = zb_mutex_unlock(fixture->mutex);
+    zerobus_status_t status = zb_mutex_unlock(&fixture->mutex);
     if (context->status == ZEROBUS_STATUS_OK) {
         context->status = status;
     }
@@ -161,27 +162,30 @@ static void *wait_for_permission(void *arg)
 static bool start_waiters(struct wait_fixture *fixture, enum wait_mode mode,
                           unsigned int workers)
 {
-    REQUIRE_OK(zb_mutex_new(&fixture->mutex));
-    REQUIRE_OK(zb_cond_new(&fixture->changed));
-    REQUIRE_OK(zb_cond_new(&fixture->progress));
+    REQUIRE_OK(zb_mutex_init(&fixture->mutex));
+    fixture->mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&fixture->changed));
+    fixture->changed_initialized = true;
+    REQUIRE_OK(zb_cond_init(&fixture->progress));
+    fixture->progress_initialized = true;
     for (unsigned int i = 0; i < workers; i++) {
         fixture->contexts[i] =
             (struct wait_context){fixture, mode, ZEROBUS_STATUS_UNKNOWN};
-        REQUIRE_OK(zb_thread_new(wait_for_permission, &fixture->contexts[i],
-                                 &fixture->threads[i]));
+        REQUIRE_OK(zb_thread_create(&fixture->threads[i], wait_for_permission,
+                                    &fixture->contexts[i]));
         fixture->created++;
     }
 
-    REQUIRE_OK(zb_mutex_lock(fixture->mutex));
+    REQUIRE_OK(zb_mutex_lock(&fixture->mutex));
     fixture->holding = true;
     zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
     while (fixture->ready != workers) {
         REQUIRE_OK(
-            zb_cond_wait_until(fixture->progress, fixture->mutex, deadline));
+            zb_cond_wait_until(&fixture->progress, &fixture->mutex, deadline));
     }
     return true;
 
-cleanup:
+zb_cleanup:
     return false;
 }
 
@@ -189,7 +193,7 @@ cleanup:
 static void join_waiters(struct wait_fixture *fixture)
 {
     if (fixture->holding) {
-        CHECK_OK(zb_mutex_unlock(fixture->mutex));
+        CHECK_OK(zb_mutex_unlock(&fixture->mutex));
         fixture->holding = false;
     }
     for (unsigned int i = 0; i < fixture->created; i++) {
@@ -204,7 +208,7 @@ static void destroy_waiters(struct wait_fixture *fixture)
 {
     if (fixture->created > 0) {
         if (!fixture->holding) {
-            zerobus_status_t status = zb_mutex_lock(fixture->mutex);
+            zerobus_status_t status = zb_mutex_lock(&fixture->mutex);
             if (status != ZEROBUS_STATUS_OK) {
                 fprintf(stderr, "Waiter cleanup lock failed (status %u).\n",
                         (unsigned int)status);
@@ -213,12 +217,18 @@ static void destroy_waiters(struct wait_fixture *fixture)
             fixture->holding = true;
         }
         fixture->stop = true;
-        CHECK_OK(zb_cond_broadcast(fixture->changed));
+        CHECK_OK(zb_cond_broadcast(&fixture->changed));
     }
     join_waiters(fixture);
-    CHECK_OK(zb_cond_free(fixture->progress));
-    CHECK_OK(zb_cond_free(fixture->changed));
-    CHECK_OK(zb_mutex_free(fixture->mutex));
+    if (fixture->progress_initialized) {
+        CHECK_OK(zb_cond_destroy(&fixture->progress));
+    }
+    if (fixture->changed_initialized) {
+        CHECK_OK(zb_cond_destroy(&fixture->changed));
+    }
+    if (fixture->mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&fixture->mutex));
+    }
 }
 
 /* Ignore spurious wakeups while waiting for a fixed timeout to expire. */
@@ -236,86 +246,88 @@ static zerobus_status_t wait_for_timeout(zb_cond_t *cond, zb_mutex_t *mutex,
 
 static void test_mutex_arguments(void)
 {
-    zb_mutex_t *mutex = NULL;
+    zb_mutex_t mutex;
+    bool initialized = false;
     bool acquired = true;
 
-    CHECK_EQ_INT(zb_mutex_new(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_mutex_init(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_mutex_lock(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_mutex_unlock(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_mutex_try_lock(NULL, &acquired),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(acquired);
-    CHECK_OK(zb_mutex_free(NULL));
+    CHECK_OK(zb_mutex_destroy(NULL));
 
-    REQUIRE_OK(zb_mutex_new(&mutex));
-    CHECK_EQ_INT(zb_mutex_try_lock(mutex, NULL),
+    REQUIRE_OK(zb_mutex_init(&mutex));
+    initialized = true;
+    CHECK_EQ_INT(zb_mutex_try_lock(&mutex, NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
 
-cleanup:
-    CHECK_OK(zb_mutex_free(mutex));
+zb_cleanup:
+    if (initialized) {
+        CHECK_OK(zb_mutex_destroy(&mutex));
+    }
 }
 
 static void test_condition_arguments(void)
 {
-    zb_mutex_t *mutex = NULL;
-    zb_cond_t *cond = NULL;
+    zb_mutex_t mutex;
+    zb_cond_t cond;
+    bool mutex_initialized = false;
+    bool cond_initialized = false;
     bool holding = false;
 
-    CHECK_EQ_INT(zb_cond_new(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_cond_init(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_cond_wait(NULL, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_cond_wait_until(NULL, NULL, ZB_DEADLINE_IMMEDIATE),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_cond_signal(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_cond_broadcast(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_OK(zb_cond_free(NULL));
+    CHECK_OK(zb_cond_destroy(NULL));
 
-    REQUIRE_OK(zb_mutex_new(&mutex));
-    REQUIRE_OK(zb_cond_new(&cond));
-    CHECK_EQ_INT(zb_cond_wait(cond, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(zb_cond_wait_until(cond, NULL, ZB_DEADLINE_IMMEDIATE),
+    REQUIRE_OK(zb_mutex_init(&mutex));
+    mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&cond));
+    cond_initialized = true;
+    CHECK_EQ_INT(zb_cond_wait(&cond, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_cond_wait_until(&cond, NULL, ZB_DEADLINE_IMMEDIATE),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
 
-    REQUIRE_OK(zb_mutex_lock(mutex));
+    REQUIRE_OK(zb_mutex_lock(&mutex));
     holding = true;
-    CHECK_EQ_INT(zb_cond_wait(NULL, mutex), ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(zb_cond_wait_until(NULL, mutex, ZB_DEADLINE_IMMEDIATE),
+    CHECK_EQ_INT(zb_cond_wait(NULL, &mutex), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_cond_wait_until(NULL, &mutex, ZB_DEADLINE_IMMEDIATE),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     bool acquired = false;
-    CHECK_OK(zb_mutex_try_lock(mutex, &acquired));
+    CHECK_OK(zb_mutex_try_lock(&mutex, &acquired));
     CHECK(!acquired);
 
-cleanup:
+zb_cleanup:
     if (holding) {
-        CHECK_OK(zb_mutex_unlock(mutex));
+        CHECK_OK(zb_mutex_unlock(&mutex));
     }
-    CHECK_OK(zb_cond_free(cond));
-    CHECK_OK(zb_mutex_free(mutex));
+    if (cond_initialized) {
+        CHECK_OK(zb_cond_destroy(&cond));
+    }
+    if (mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&mutex));
+    }
 }
 
 static void test_thread_arguments(void)
 {
-    zb_thread_t *thread = NULL;
+    zb_thread_t thread;
     int value = 0;
     void *result = &value;
 
-    CHECK_EQ_INT(zb_thread_new(set_value, NULL, NULL),
+    CHECK_EQ_INT(zb_thread_create(NULL, set_value, NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(zb_thread_new(NULL, NULL, &thread),
+    CHECK_EQ_INT(zb_thread_create(&thread, NULL, NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK(thread == NULL);
     CHECK_EQ_INT(zb_thread_join(NULL, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_thread_join(NULL, &result),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(result == &value);
-
-    REQUIRE_OK(zb_thread_new(set_value, &value, &thread));
-    zb_thread_t *output = thread;
-    CHECK_EQ_INT(zb_thread_new(NULL, NULL, &output),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK(output == thread);
-
-cleanup:
-    join_owned(&thread);
 }
 
 static void test_millisecond_deadlines(void)
@@ -359,259 +371,279 @@ static void test_second_deadline_saturation(void)
 
 static void test_mutex_try_lock(void)
 {
-    zb_mutex_t *mutex = NULL;
+    zb_mutex_t mutex;
+    bool initialized = false;
     bool acquired = false;
     bool holding = false;
 
-    REQUIRE_OK(zb_mutex_new(&mutex));
-    REQUIRE_OK(zb_mutex_try_lock(mutex, &acquired));
-    CHECK(acquired);
+    REQUIRE_OK(zb_mutex_init(&mutex));
+    initialized = true;
+    REQUIRE_OK(zb_mutex_try_lock(&mutex, &acquired));
     holding = acquired;
-    if (!acquired) {
-        goto cleanup;
-    }
+    REQUIRE(acquired);
 
     /* A normal mutex must not be acquired recursively. */
-    REQUIRE_OK(zb_mutex_try_lock(mutex, &acquired));
+    REQUIRE_OK(zb_mutex_try_lock(&mutex, &acquired));
     CHECK(!acquired);
-    REQUIRE_OK(zb_mutex_unlock(mutex));
+    REQUIRE_OK(zb_mutex_unlock(&mutex));
     holding = false;
-    REQUIRE_OK(zb_mutex_try_lock(mutex, &acquired));
+    REQUIRE_OK(zb_mutex_try_lock(&mutex, &acquired));
     CHECK(acquired);
     holding = acquired;
 
-cleanup:
+zb_cleanup:
     if (holding) {
-        CHECK_OK(zb_mutex_unlock(mutex));
+        CHECK_OK(zb_mutex_unlock(&mutex));
     }
-    CHECK_OK(zb_mutex_free(mutex));
+    if (initialized) {
+        CHECK_OK(zb_mutex_destroy(&mutex));
+    }
 }
 
 static void test_mutex_contention(void)
 {
-    zb_mutex_t *mutex = NULL;
+    zb_mutex_t mutex;
+    bool initialized = false;
     bool holding = false;
 
-    REQUIRE_OK(zb_mutex_new(&mutex));
-    REQUIRE_OK(zb_mutex_lock(mutex));
+    REQUIRE_OK(zb_mutex_init(&mutex));
+    initialized = true;
+    REQUIRE_OK(zb_mutex_lock(&mutex));
     holding = true;
-    struct try_context result = try_from_thread(mutex);
+    struct try_context result = try_from_thread(&mutex);
     CHECK_OK(result.status);
     CHECK(!result.acquired);
 
-cleanup:
+zb_cleanup:
     if (holding) {
-        CHECK_OK(zb_mutex_unlock(mutex));
+        CHECK_OK(zb_mutex_unlock(&mutex));
     }
-    CHECK_OK(zb_mutex_free(mutex));
+    if (initialized) {
+        CHECK_OK(zb_mutex_destroy(&mutex));
+    }
 }
 
 static void test_mutex_exclusion(void)
 {
     struct counter counter = {0};
+    bool initialized = false;
     struct counter_context contexts[WORKERS];
-    zb_thread_t *threads[WORKERS] = {0};
+    zb_thread_t threads[WORKERS];
     unsigned int created = 0;
 
-    REQUIRE_OK(zb_mutex_new(&counter.mutex));
+    REQUIRE_OK(zb_mutex_init(&counter.mutex));
+    initialized = true;
     for (unsigned int i = 0; i < WORKERS; i++) {
         contexts[i] =
             (struct counter_context){&counter, ZEROBUS_STATUS_UNKNOWN};
-        REQUIRE_OK(zb_thread_new(increment_counter, &contexts[i], &threads[i]));
+        REQUIRE_OK(
+            zb_thread_create(&threads[i], increment_counter, &contexts[i]));
         created++;
     }
 
-cleanup:
+zb_cleanup:
     for (unsigned int i = 0; i < created; i++) {
         join_owned(&threads[i]);
         CHECK_OK(contexts[i].status);
     }
     CHECK_EQ_INT(counter.value, created * INCREMENTS);
-    CHECK_OK(zb_mutex_free(counter.mutex));
+    if (initialized) {
+        CHECK_OK(zb_mutex_destroy(&counter.mutex));
+    }
 }
 
 static void test_condition_timeout_and_mutex_reacquisition(void)
 {
-    zb_mutex_t *mutex = NULL;
-    zb_cond_t *cond = NULL;
+    zb_mutex_t mutex;
+    zb_cond_t cond;
+    bool mutex_initialized = false;
+    bool cond_initialized = false;
     bool holding = false;
 
-    REQUIRE_OK(zb_mutex_new(&mutex));
-    REQUIRE_OK(zb_cond_new(&cond));
-    REQUIRE_OK(zb_mutex_lock(mutex));
+    REQUIRE_OK(zb_mutex_init(&mutex));
+    mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&cond));
+    cond_initialized = true;
+    REQUIRE_OK(zb_mutex_lock(&mutex));
     holding = true;
 
-    CHECK_EQ_INT(wait_for_timeout(cond, mutex, ZB_DEADLINE_IMMEDIATE),
+    CHECK_EQ_INT(wait_for_timeout(&cond, &mutex, ZB_DEADLINE_IMMEDIATE),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     zb_deadline_t deadline = zb_deadline_after_ms(20);
-    CHECK_EQ_INT(wait_for_timeout(cond, mutex, deadline),
+    CHECK_EQ_INT(wait_for_timeout(&cond, &mutex, deadline),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     /* A realtime wait would misinterpret this monotonic deadline as past. */
     CHECK(zb_deadline_after_ms(1) > deadline);
-    CHECK_EQ_INT(wait_for_timeout(cond, mutex, deadline),
+    CHECK_EQ_INT(wait_for_timeout(&cond, &mutex, deadline),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
 
-    struct try_context result = try_from_thread(mutex);
+    struct try_context result = try_from_thread(&mutex);
     CHECK_OK(result.status);
     CHECK(!result.acquired);
 
-cleanup:
+zb_cleanup:
     if (holding) {
-        CHECK_OK(zb_mutex_unlock(mutex));
+        CHECK_OK(zb_mutex_unlock(&mutex));
     }
-    CHECK_OK(zb_cond_free(cond));
-    CHECK_OK(zb_mutex_free(mutex));
+    if (cond_initialized) {
+        CHECK_OK(zb_cond_destroy(&cond));
+    }
+    if (mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&mutex));
+    }
 }
 
 static void test_condition_signal(void)
 {
     struct wait_fixture fixture = {0};
-    if (!start_waiters(&fixture, WAIT_FINITE, 1)) {
-        goto cleanup;
-    }
+    REQUIRE(start_waiters(&fixture, WAIT_FINITE, 1));
 
     fixture.proceed = true;
-    REQUIRE_OK(zb_cond_signal(fixture.changed));
+    REQUIRE_OK(zb_cond_signal(&fixture.changed));
     join_waiters(&fixture);
     CHECK_EQ_INT(fixture.completed, 1);
 
-cleanup:
+zb_cleanup:
     destroy_waiters(&fixture);
 }
 
 static void test_condition_broadcast(void)
 {
     struct wait_fixture fixture = {0};
-    if (!start_waiters(&fixture, WAIT_UNTIMED, WORKERS)) {
-        goto cleanup;
-    }
+    REQUIRE(start_waiters(&fixture, WAIT_UNTIMED, WORKERS));
 
     fixture.proceed = true;
-    REQUIRE_OK(zb_cond_broadcast(fixture.changed));
+    REQUIRE_OK(zb_cond_broadcast(&fixture.changed));
     join_waiters(&fixture);
     CHECK_EQ_INT(fixture.completed, WORKERS);
 
-cleanup:
+zb_cleanup:
     destroy_waiters(&fixture);
 }
 
 static void test_condition_signal_without_predicate_change(void)
 {
     struct wait_fixture fixture = {0};
-    if (!start_waiters(&fixture, WAIT_FINITE, 1)) {
-        goto cleanup;
-    }
+    REQUIRE(start_waiters(&fixture, WAIT_FINITE, 1));
 
     unsigned int previous_wakeups = fixture.wakeups;
-    REQUIRE_OK(zb_cond_signal(fixture.changed));
+    REQUIRE_OK(zb_cond_signal(&fixture.changed));
     zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
     while (fixture.wakeups == previous_wakeups) {
         REQUIRE_OK(
-            zb_cond_wait_until(fixture.progress, fixture.mutex, deadline));
+            zb_cond_wait_until(&fixture.progress, &fixture.mutex, deadline));
     }
     CHECK(!fixture.proceed);
     CHECK_EQ_INT(fixture.completed, 0);
 
     fixture.proceed = true;
-    REQUIRE_OK(zb_cond_signal(fixture.changed));
+    REQUIRE_OK(zb_cond_signal(&fixture.changed));
     join_waiters(&fixture);
     CHECK_EQ_INT(fixture.completed, 1);
 
-cleanup:
+zb_cleanup:
     destroy_waiters(&fixture);
 }
 
 static void test_condition_infinite_deadline(void)
 {
     struct wait_fixture fixture = {0};
-    if (!start_waiters(&fixture, WAIT_INFINITE, 1)) {
-        goto cleanup;
-    }
+    REQUIRE(start_waiters(&fixture, WAIT_INFINITE, 1));
 
     fixture.proceed = true;
-    REQUIRE_OK(zb_cond_signal(fixture.changed));
+    REQUIRE_OK(zb_cond_signal(&fixture.changed));
     join_waiters(&fixture);
     CHECK_EQ_INT(fixture.completed, 1);
 
-cleanup:
+zb_cleanup:
     destroy_waiters(&fixture);
 }
 
 static void test_condition_large_deadline(void)
 {
     struct wait_fixture fixture = {0};
-    if (!start_waiters(&fixture, WAIT_LARGE, 1)) {
-        goto cleanup;
-    }
+    REQUIRE(start_waiters(&fixture, WAIT_LARGE, 1));
 
     fixture.proceed = true;
-    REQUIRE_OK(zb_cond_signal(fixture.changed));
+    REQUIRE_OK(zb_cond_signal(&fixture.changed));
     join_waiters(&fixture);
     CHECK_EQ_INT(fixture.completed, 1);
 
-cleanup:
+zb_cleanup:
     destroy_waiters(&fixture);
 }
 
 static void test_thread_completion(void)
 {
-    zb_thread_t *thread = NULL;
+    zb_thread_t thread;
     int value = 0;
 
     for (unsigned int i = 0; i < 32; i++) {
         value = 0;
-        REQUIRE_OK(zb_thread_new(set_value, &value, &thread));
+        REQUIRE_OK(zb_thread_create(&thread, set_value, &value));
         join_owned(&thread);
         CHECK_EQ_INT(value, 42);
     }
 
-cleanup:
-    join_owned(&thread);
+zb_cleanup:
+    return;
 }
 
 static void test_thread_returned_result(void)
 {
-    zb_thread_t *thread = NULL;
+    zb_thread_t thread;
+    bool started = false;
     int value = 0;
     void *result = NULL;
 
-    REQUIRE_OK(zb_thread_new(set_value, &value, &thread));
-    REQUIRE_OK(zb_thread_join(thread, &result));
-    thread = NULL;
+    REQUIRE_OK(zb_thread_create(&thread, set_value, &value));
+    started = true;
+    REQUIRE_OK(zb_thread_join(&thread, &result));
+    started = false;
     CHECK(result == &value);
     CHECK_EQ_INT(value, 42);
 
-cleanup:
-    join_owned(&thread);
+zb_cleanup:
+    if (started) {
+        join_owned(&thread);
+    }
 }
 
 static void test_thread_null_result(void)
 {
-    zb_thread_t *thread = NULL;
+    zb_thread_t thread;
+    bool started = false;
     int sentinel = 0;
     void *result = &sentinel;
 
-    REQUIRE_OK(zb_thread_new(set_value, NULL, &thread));
-    REQUIRE_OK(zb_thread_join(thread, &result));
-    thread = NULL;
+    REQUIRE_OK(zb_thread_create(&thread, set_value, NULL));
+    started = true;
+    REQUIRE_OK(zb_thread_join(&thread, &result));
+    started = false;
     CHECK(result == NULL);
 
-cleanup:
-    join_owned(&thread);
+zb_cleanup:
+    if (started) {
+        join_owned(&thread);
+    }
 }
 
 static void test_thread_ignored_result(void)
 {
-    zb_thread_t *thread = NULL;
+    zb_thread_t thread;
+    bool started = false;
     int value = 0;
 
-    REQUIRE_OK(zb_thread_new(set_value, &value, &thread));
-    REQUIRE_OK(zb_thread_join(thread, NULL));
-    thread = NULL;
+    REQUIRE_OK(zb_thread_create(&thread, set_value, &value));
+    started = true;
+    REQUIRE_OK(zb_thread_join(&thread, NULL));
+    started = false;
     CHECK_EQ_INT(value, 42);
 
-cleanup:
-    join_owned(&thread);
+zb_cleanup:
+    if (started) {
+        join_owned(&thread);
+    }
 }
 
 int main(void)

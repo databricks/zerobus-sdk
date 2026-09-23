@@ -41,8 +41,10 @@ enum { WORKERS = 5, ITERATIONS = 1000 };
 
 /* Hold workers until setup is complete or cleanup releases them. */
 struct start_gate {
-    zb_mutex_t *mutex;
-    zb_cond_t *changed;
+    zb_mutex_t mutex;
+    zb_cond_t changed;
+    bool mutex_initialized;
+    bool changed_initialized;
     bool open;
 };
 
@@ -59,29 +61,32 @@ static void must_sync(zerobus_status_t status)
 /* Wait until the test opens the gate, allowing this worker to proceed. */
 static void await_start(struct start_gate *gate)
 {
-    must_sync(zb_mutex_lock(gate->mutex));
+    must_sync(zb_mutex_lock(&gate->mutex));
     while (!gate->open) {
-        must_sync(zb_cond_wait(gate->changed, gate->mutex));
+        must_sync(zb_cond_wait(&gate->changed, &gate->mutex));
     }
-    must_sync(zb_mutex_unlock(gate->mutex));
+    must_sync(zb_mutex_unlock(&gate->mutex));
 }
 
 /* Release and join all started workers, including partially completed setup. */
-static void finish_workers(struct start_gate *gate, zb_thread_t **threads)
+static void finish_workers(struct start_gate *gate, zb_thread_t *threads,
+                           unsigned int created)
 {
-    if (gate->changed != NULL) {
-        must_sync(zb_mutex_lock(gate->mutex));
+    if (gate->changed_initialized) {
+        must_sync(zb_mutex_lock(&gate->mutex));
         gate->open = true;
-        must_sync(zb_cond_broadcast(gate->changed));
-        must_sync(zb_mutex_unlock(gate->mutex));
+        must_sync(zb_cond_broadcast(&gate->changed));
+        must_sync(zb_mutex_unlock(&gate->mutex));
     }
-    for (unsigned int i = 0; i < WORKERS; i++) {
-        if (threads[i] != NULL) {
-            must_sync(zb_thread_join(threads[i], NULL));
-        }
+    for (unsigned int i = 0; i < created; i++) {
+        must_sync(zb_thread_join(&threads[i], NULL));
     }
-    CHECK_OK(zb_cond_free(gate->changed));
-    CHECK_OK(zb_mutex_free(gate->mutex));
+    if (gate->changed_initialized) {
+        CHECK_OK(zb_cond_destroy(&gate->changed));
+    }
+    if (gate->mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&gate->mutex));
+    }
 }
 
 /* Each worker owns a separate builder retaining the same SDK. */
@@ -400,7 +405,7 @@ static void test_stream_builder_retains_sdk(void)
                  ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK_OK(zerobus_stream_close(second, NULL));
 
-cleanup:
+zb_cleanup:
     zerobus_stream_free(second);
     zerobus_stream_free(first);
     zerobus_stream_builder_free(builder);
@@ -426,11 +431,13 @@ static void test_concurrent_sdk_child_ownership(void)
     zerobus_sdk_t *sdk = make_sdk();
     struct start_gate gate = {0};
     struct ownership_context contexts[WORKERS] = {0};
-    zb_thread_t *threads[WORKERS] = {0};
+    zb_thread_t threads[WORKERS];
     unsigned int created = 0;
 
-    REQUIRE_OK(zb_mutex_new(&gate.mutex));
-    REQUIRE_OK(zb_cond_new(&gate.changed));
+    REQUIRE_OK(zb_mutex_init(&gate.mutex));
+    gate.mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&gate.changed));
+    gate.changed_initialized = true;
     for (unsigned int i = 0; i < WORKERS; i++) {
         contexts[i].gate = &gate;
         REQUIRE_OK(zerobus_stream_builder_new(sdk, &contexts[i].builder, NULL));
@@ -438,15 +445,15 @@ static void test_concurrent_sdk_child_ownership(void)
                                                     sv("c.s.t"), NULL));
         REQUIRE_OK(zerobus_stream_builder_set_oauth(
             contexts[i].builder, sv("id"), sv("secret"), NULL));
-        REQUIRE_OK(
-            zb_thread_new(build_and_free_streams, &contexts[i], &threads[i]));
+        REQUIRE_OK(zb_thread_create(&threads[i], build_and_free_streams,
+                                    &contexts[i]));
         created++;
     }
     zerobus_sdk_free(sdk);
     sdk = NULL;
 
-cleanup:
-    finish_workers(&gate, threads);
+zb_cleanup:
+    finish_workers(&gate, threads, created);
     for (unsigned int i = 0; i < created; i++) {
         CHECK_OK(contexts[i].status);
         CHECK_EQ_INT(contexts[i].completed, ITERATIONS);
@@ -463,27 +470,26 @@ static void test_concurrent_ingest_flush_close(void)
     zerobus_stream_t *stream = make_stream(sdk);
     struct start_gate gate = {0};
     struct stream_context contexts[WORKERS] = {0};
-    zb_thread_t *threads[WORKERS] = {0};
+    zb_thread_t threads[WORKERS];
     unsigned int created = 0;
 
-    CHECK(stream != NULL);
-    if (stream == NULL) {
-        goto cleanup;
-    }
-    REQUIRE_OK(zb_mutex_new(&gate.mutex));
-    REQUIRE_OK(zb_cond_new(&gate.changed));
+    REQUIRE(stream != NULL);
+    REQUIRE_OK(zb_mutex_init(&gate.mutex));
+    gate.mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&gate.changed));
+    gate.changed_initialized = true;
     for (unsigned int i = 0; i < WORKERS; i++) {
         contexts[i].gate = &gate;
         contexts[i].stream = stream;
         contexts[i].operation = i == 0   ? CALL_FLUSH
                                 : i == 1 ? CALL_CLOSE
                                          : CALL_INGEST;
-        REQUIRE_OK(zb_thread_new(call_stream, &contexts[i], &threads[i]));
+        REQUIRE_OK(zb_thread_create(&threads[i], call_stream, &contexts[i]));
         created++;
     }
 
-cleanup:
-    finish_workers(&gate, threads);
+zb_cleanup:
+    finish_workers(&gate, threads, created);
     for (unsigned int i = 0; i < created; i++) {
         CHECK_OK(contexts[i].unexpected_status);
         CHECK_EQ_INT(contexts[i].completed, ITERATIONS);
@@ -582,7 +588,7 @@ static void test_stream_out_handle_untouched_on_failure(void)
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(stream == stream_sentinel);
 
-cleanup:
+zb_cleanup:
     zerobus_error_free(err);
     zerobus_stream_builder_free(stb);
     zerobus_sdk_free(sdk);

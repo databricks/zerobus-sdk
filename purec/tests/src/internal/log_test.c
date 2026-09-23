@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../test_common.h"
 #include "internal/log.h"
+#include "test_common.h"
 
 static void test_write_before_init_is_a_noop(void)
 {

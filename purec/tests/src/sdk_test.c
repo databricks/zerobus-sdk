@@ -222,7 +222,7 @@ static void test_sdk_retained_reference(void)
     CHECK_OK(
         zerobus_stream_builder_set_table(stream_builder, sv("c.s.t"), NULL));
 
-cleanup:
+zb_cleanup:
     zerobus_stream_builder_free(stream_builder);
     zerobus_sdk_free(retained);
     zerobus_sdk_free(sdk);
@@ -301,7 +301,7 @@ static void test_sdk_out_handle_untouched_on_failure(void)
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(sdk == sdk_sentinel);
 
-cleanup:
+zb_cleanup:
     zerobus_error_free(err);
     zerobus_sdk_builder_free(b);
 }
