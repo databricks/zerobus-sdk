@@ -5,10 +5,9 @@
 #ifndef ZB_TEST_COMMON_H
 #define ZB_TEST_COMMON_H
 
-#include <stdio.h> // IWYU pragma: keep (fprintf, used in the CHECK macros below)
-#include <string.h>
+#include <stdio.h> // IWYU pragma: keep (fprintf)
 
-#include "zerobus/zerobus.h"
+#include "zerobus/zerobus.h" // IWYU pragma: keep (zerobus_string_view)
 
 static int zb_test_failures = 0;
 
@@ -30,12 +29,23 @@ static int zb_test_failures = 0;
         }                                                                      \
     } while (0)
 
+/* Fatal counterpart to CHECK: record the failure, then jump to the test's
+ * per-function `zb_cleanup:` label so its resources are still freed. Use it
+ * for preconditions only — a NULL handle, a failed build/alloc — and keep CHECK
+ * for independent value assertions. A test that uses REQUIRE must declare its
+ * owned resources NULL-initialized at the top and end with a single
+ * `zb_cleanup:` label that frees them unconditionally. */
+#define REQUIRE(cond)                                                          \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            fprintf(stderr, "  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);  \
+            zb_test_failures++;                                                \
+            goto zb_cleanup;                                                   \
+        }                                                                      \
+    } while (0)
+
 #define TEST_MAIN_RETURN() return zb_test_failures == 0 ? 0 : 1
 
-/* Build a string view from a NUL-terminated C string. */
-static inline zerobus_string_view_t sv(const char *s)
-{
-    return (zerobus_string_view_t){s, strlen(s)};
-}
+#define sv(s) zerobus_string_view(s)
 
 #endif /* ZB_TEST_COMMON_H */

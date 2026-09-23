@@ -1,9 +1,9 @@
 /*
  * Zerobus Pure C SDK — stream builder, stream handle, and ingestion.
  *
- * Thread-safety: a stream and its builder are not thread-safe. Use one caller
- * thread per stream — do not call ingest/flush/close concurrently on the same
- * stream. (Internal synchronization arrives with the transport core.)
+ * Thread-safety: SDK, builder, and stream operations currently require a single
+ * caller thread across all instances. Concurrent calls are not supported yet,
+ * even on separate streams. Internal logging is synchronized.
  */
 #ifndef ZEROBUS_STREAM_H
 #define ZEROBUS_STREAM_H

@@ -10,3 +10,10 @@ foreach(test ${ZEROBUS_TESTS})
   target_compile_options(${test} PRIVATE ${ZEROBUS_WARN_FLAGS})
   add_test(NAME ${test} COMMAND ${test})
 endforeach()
+
+add_executable(log_test src/internal/log_test.c)
+target_link_libraries(log_test PRIVATE zerobus_c_testing)
+target_compile_options(log_test PRIVATE ${ZEROBUS_WARN_FLAGS})
+add_test(NAME log_test COMMAND log_test)
+set_tests_properties(log_test PROPERTIES ENVIRONMENT
+  "ZEROBUS_LOG_LEVEL=info;ZEROBUS_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/log_test.log")
