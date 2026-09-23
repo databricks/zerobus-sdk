@@ -6,9 +6,14 @@
 
 ### New Features and Improvements
 
+- Added Avro support to `StreamBuilder::multiplexed(n)` (Beta) when the `avro`
+  feature is enabled; every lane shares the configured writer schema.
+
 ### Bug Fixes
 
 ### Documentation
+
+- Added a multiplexed Avro example using loop-then-flush ingestion.
 
 ### Internal Changes
 
