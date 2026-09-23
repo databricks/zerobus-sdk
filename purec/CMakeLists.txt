@@ -1,18 +1,15 @@
 # Zerobus Pure C SDK build: the library, examples, and tests.
-#
-# The SDK needs a C99 compiler, the C standard library, and POSIX threads for
-# logging. The networking core (transport, OAuth, record codec) is not
-# implemented yet; it will add nghttp2 and OpenSSL.
 cmake_minimum_required(VERSION 3.13)
 project(zerobus_c LANGUAGES C VERSION 0.0.1)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-# Reject compiler extensions: build as -std=c99, not -std=gnu99, so a GNU-ism
-# cannot slip in unnoticed against the documented C99 baseline.
+# Keep consumers on strict C99, library targets opt into C11 privately.
 set(CMAKE_C_EXTENSIONS OFF)
-set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -37,6 +34,7 @@ if(ZEROBUS_WERROR)
 endif()
 
 set(ZEROBUS_SOURCES
+  src/internal/concurrency.c
   src/error.c
   src/internal/log.c
   src/utils.c
@@ -52,6 +50,7 @@ target_include_directories(zerobus_c
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
+target_compile_features(zerobus_c PRIVATE c_std_11)
 target_link_libraries(zerobus_c PUBLIC Threads::Threads)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
@@ -60,8 +59,10 @@ add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
 target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
 target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         ${CMAKE_CURRENT_SOURCE_DIR}/src)
+         ${CMAKE_CURRENT_SOURCE_DIR}/src
+         ${CMAKE_CURRENT_SOURCE_DIR}/tests/src)
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
+target_compile_features(zerobus_c_testing PRIVATE c_std_11)
 target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads)
 
 if(ZEROBUS_SANITIZE)

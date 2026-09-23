@@ -11,6 +11,10 @@ extern "C" {
 #endif
 
 /*
+ * An SDK may be shared by threads creating separate stream builders.
+ * Each SDK builder requires exclusive access. Concurrent calls must use
+ * separate output/error slots.
+ *
  * SDK builder. The endpoint setters validate the URL and copy their inputs, so
  * a malformed endpoint is rejected at set time. The builder is not consumed by
  * build and must be freed separately.
@@ -35,8 +39,10 @@ ZEROBUS_API void ZEROBUS_CALL
 zerobus_sdk_builder_free(zerobus_sdk_builder_t *builder);
 
 /*
- * Best-effort cleanup, cannot report failures. The SDK is borrowed by every
- * stream and stream builder created from it, so free those first.
+ * Release the caller's reference. Streams and stream builders keep the SDK
+ * alive until they are freed. Do not use the released reference again or race
+ * this call with its use. Final cleanup is best-effort and cannot report
+ * failures.
  */
 ZEROBUS_API void ZEROBUS_CALL zerobus_sdk_free(zerobus_sdk_t *sdk);
 

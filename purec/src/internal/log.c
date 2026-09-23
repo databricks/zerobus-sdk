@@ -1,21 +1,21 @@
 #include <errno.h>
-#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "concurrency.h"
 #include "log.h"
 
 static struct {
     enum zb_log_level level;
     FILE *output;
-    pthread_once_t init_once;
-    pthread_mutex_t write_mutex;
+    zb_once_t init_once;
+    zb_mutex_t write_mutex;
 } config = {.level = ZB_LOG_OFF,
             .output = NULL,
-            .init_once = PTHREAD_ONCE_INIT,
-            .write_mutex = PTHREAD_MUTEX_INITIALIZER};
+            .init_once = ZB_ONCE_INIT,
+            .write_mutex = ZB_MUTEX_INITIALIZER};
 
 static const char *const level_names[] = {"OFF",  "ERROR", "WARN",
                                           "INFO", "DEBUG", "TRACE"};
@@ -63,7 +63,7 @@ static void zb_log_init(void)
 
 bool zb_log_enabled(enum zb_log_level level)
 {
-    (void)pthread_once(&config.init_once, zb_log_init);
+    (void)zb_once(&config.init_once, zb_log_init);
     return level > ZB_LOG_OFF && level <= ZB_LOG_TRACE && level <= config.level;
 }
 
@@ -74,7 +74,7 @@ void zb_log_write(enum zb_log_level level, const char *function,
         return;
     }
     int saved_errno = errno;
-    (void)pthread_mutex_lock(&config.write_mutex);
+    (void)zb_mutex_lock(&config.write_mutex);
     (void)fprintf(config.output, "[zerobus][%s] %s: ", level_names[level],
                   function);
     va_list ap;
@@ -86,6 +86,6 @@ void zb_log_write(enum zb_log_level level, const char *function,
     }
     (void)fputc('\n', config.output);
     (void)fflush(config.output);
-    (void)pthread_mutex_unlock(&config.write_mutex);
+    (void)zb_mutex_unlock(&config.write_mutex);
     errno = saved_errno;
 }

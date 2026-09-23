@@ -94,7 +94,7 @@ coverage:
 		-DCMAKE_EXE_LINKER_FLAGS="--coverage" $(CMAKE_EXTRA)
 	cmake --build "$(COV_DIR)" -j $(JOBS)
 	cd "$(COV_DIR)" && ctest --output-on-failure
-	cd "$(COV_OBJ_DIR)" && find . -name '*.gcno' -exec $(GCOV) {} +
+	cd "$(COV_OBJ_DIR)" && find . -name '*.gcno' -execdir $(GCOV) {} +
 
 clean:
 	rm -rf build build-*

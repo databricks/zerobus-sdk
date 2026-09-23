@@ -1,9 +1,5 @@
 /*
  * Zerobus Pure C SDK — stream builder, stream handle, and ingestion.
- *
- * Thread-safety: SDK, builder, and stream operations currently require a single
- * caller thread across all instances. Concurrent calls are not supported yet,
- * even on separate streams. Internal logging is synchronized.
  */
 #ifndef ZEROBUS_STREAM_H
 #define ZEROBUS_STREAM_H
@@ -15,12 +11,16 @@ extern "C" {
 #endif
 
 /*
+ * Ingest, flush, and close may run concurrently on the same stream, using
+ * separate output/error slots. Builders require exclusive access. Freeing a
+ * stream must not race any use of it.
+ *
  * Stream builder. Requires a fully qualified catalog.schema.table name and
  * OAuth client credentials. Streams are ephemeral gRPC JSON streams
  * authenticated with Unity Catalog OAuth. Credential copies are zeroed on free.
  *
- * The SDK passed to new() is borrowed and must outlive this builder and every
- * stream built from it.
+ * The builder and each built stream retain their own SDK reference, so the
+ * application may release its SDK reference after new() succeeds.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_new(
     zerobus_sdk_t *sdk, zerobus_stream_builder_t **out_builder,
@@ -87,7 +87,7 @@ zerobus_stream_close(zerobus_stream_t *stream, zerobus_error_t **out_error);
 
 /*
  * Release the handle. If the stream was not closed, tears down best-effort with
- * no durability guarantee. The SDK must still be alive.
+ * no durability guarantee.
  */
 ZEROBUS_API void ZEROBUS_CALL zerobus_stream_free(zerobus_stream_t *stream);
 

@@ -1,8 +1,10 @@
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 
 #include "error.h"
 #include "internal/log.h"
+#include "sdk.h"
 #include "utils.h"
 #include "zerobus/sdk.h"
 
@@ -12,6 +14,7 @@ struct zerobus_sdk_builder {
 };
 
 struct zerobus_sdk {
+    atomic_size_t ref_cnt;
     /* Independent copies of the validated configuration. */
     char *endpoint;
     char *uc_endpoint;
@@ -152,6 +155,7 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
         ZB_ERROR("SDK allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
+    atomic_init(&sdk->ref_cnt, 1);
     sdk->endpoint = zb_strdup(builder->endpoint);
     sdk->uc_endpoint = zb_strdup(builder->uc_endpoint);
     if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL) {
@@ -178,9 +182,17 @@ void zerobus_sdk_builder_free(zerobus_sdk_builder_t *builder)
 
 /* ---- SDK --------------------------------------------------------------- */
 
+void zb_sdk_ref(zerobus_sdk_t *sdk)
+{
+    atomic_fetch_add(&sdk->ref_cnt, 1);
+}
+
 void zerobus_sdk_free(zerobus_sdk_t *sdk)
 {
     if (sdk == NULL) {
+        return;
+    }
+    if (atomic_fetch_sub(&sdk->ref_cnt, 1) != 1) {
         return;
     }
     /* TODO: tear down shared transport/auth resources (best-effort). */
