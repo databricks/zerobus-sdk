@@ -9,6 +9,7 @@ import asyncio
 import unittest
 
 from zerobus import (
+    FederatedToken,
     HeadersProvider,
     NonRetriableException,
     StreamConfigurationOptions,
@@ -74,6 +75,85 @@ class TestNonRetriableMapping(unittest.TestCase):
         sdk = core.sync.ZerobusSdk(HOST, UC)
         self._assert_non_retriable(lambda: sdk.create_arrow_stream("catalog.schema.table", b"not-ipc", "id", "secret"))
 
+    def test_federated_non_string_callback_is_non_retriable(self):
+        # A federated IdP callback that returns a non-string is caller misuse:
+        # retrying cannot fix it, so it must be non-retriable. The supplier fails
+        # during minting, before any network, so no live server is needed.
+        sdk = _sync_sdk()
+        self._assert_non_retriable(
+            lambda: sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=lambda: 123),
+            )
+        )
+
+    def test_federated_non_callable_supplier_is_non_retriable(self):
+        # A supplier that is not callable at all (here a string) is a config
+        # mistake a retry cannot fix, so it must be non-retriable rather than a
+        # retryable token-fetch failure. It fails when minting is attempted,
+        # before any network, so no live server is needed.
+        sdk = _sync_sdk()
+        self._assert_non_retriable(
+            lambda: sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier="not-callable"),
+            )
+        )
+
+    def test_sync_sdk_rejects_async_supplier_under_running_loop(self):
+        # Regression for the notebook hang: even with an asyncio loop already
+        # running, the sync SDK must reject an async (awaitable) supplier as
+        # non-retriable misuse rather than scheduling it on a loop its block_on
+        # never drives (which would hang). Fails during minting, before network.
+        async def supplier():
+            return "tok"
+
+        async def run():
+            sdk = _sync_sdk()
+            sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=supplier),
+            )
+
+        with self.assertRaises(NonRetriableException):
+            asyncio.run(run())
+
+    def test_rejected_async_supplier_closes_its_coroutine(self):
+        # N4: when the sync SDK rejects an async callback, it has already called the
+        # callback and holds the resulting coroutine. It must close() that coroutine
+        # before returning the misuse error, or CPython emits a
+        # "coroutine ... was never awaited" RuntimeWarning when the coroutine is
+        # collected. This asserts no such warning is produced.
+        import gc
+        import warnings
+
+        async def supplier():
+            return "tok"
+
+        async def run():
+            sdk = _sync_sdk()
+            sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=supplier),
+            )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with self.assertRaises(NonRetriableException):
+                asyncio.run(run())
+            gc.collect()  # force collection of any un-awaited coroutine
+
+        never_awaited = [w for w in caught if "never awaited" in str(w.message)]
+        self.assertEqual(
+            never_awaited,
+            [],
+            f"the rejected coroutine must be closed: {[str(w.message) for w in never_awaited]}",
+        )
+
     def test_async_empty_table_name(self):
         sdk = AsyncSdk(HOST, UC)
 
@@ -102,4 +182,53 @@ class TestRetriableMapping(unittest.TestCase):
         sdk = SyncSdk(HOST, LOCAL_REFUSED)
         with self.assertRaises(ZerobusException) as ctx:
             sdk.create_stream("id", "secret", TableProperties("catalog.schema.table"), NO_RECOVERY)
+        self.assertNotIsInstance(ctx.exception, NonRetriableException)
+
+    def test_shared_federated_token_rebinds_across_event_loops(self):
+        # N2 regression: reusing ONE FederatedToken across two asyncio.run() calls.
+        # The native supplier handle must be rebuilt per create_stream, bound to
+        # the CURRENT running loop — not memoized from the first loop, which is
+        # closed by the time the second run executes (an async supplier driven on
+        # a closed loop never runs / hangs). We assert the async supplier is
+        # invoked in BOTH runs. UC points at a refused address so the exchange
+        # fails fast after the supplier runs, and recovery is off (no retry hang).
+        calls = []
+
+        async def supplier():
+            calls.append(1)
+            return "entra-jwt"
+
+        auth = FederatedToken(idp_token_supplier=supplier)
+
+        async def run_once():
+            sdk = AsyncSdk(HOST, LOCAL_REFUSED)
+            with self.assertRaises(ZerobusException):
+                await sdk.create_stream(
+                    table_properties=TableProperties("catalog.schema.table"),
+                    options=NO_RECOVERY,
+                    auth=auth,
+                )
+
+        asyncio.run(run_once())
+        asyncio.run(run_once())
+        self.assertEqual(
+            len(calls),
+            2,
+            "async supplier must run in BOTH event loops (native handle rebuilt per stream)",
+        )
+
+    def test_federated_callback_raises_is_base_zerobus_exception(self):
+        # A federated IdP callback that raises is a transient token-fetch failure
+        # (e.g. the external IdP was briefly unavailable): it must be retriable,
+        # like an OAuth mint error, not a fatal NonRetriableException.
+        def boom():
+            raise RuntimeError("idp temporarily unavailable")
+
+        sdk = _sync_sdk()
+        with self.assertRaises(ZerobusException) as ctx:
+            sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=boom),
+            )
         self.assertNotIsInstance(ctx.exception, NonRetriableException)

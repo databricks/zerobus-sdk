@@ -341,14 +341,16 @@ class ZerobusSdk:
 
     async def create_stream(
         self,
-        client_id: str,
-        client_secret: str,
-        table_properties,
+        client_id: str = None,
+        client_secret: str = None,
+        table_properties=None,
         options=None,
         headers_provider=None,
+        *,
+        auth=None,
     ):
         """
-        Create a stream with OAuth authentication or custom headers provider.
+        Create a stream with OAuth, external-IdP federation, or a custom headers provider.
 
         Args:
             client_id: OAuth client ID
@@ -356,18 +358,51 @@ class ZerobusSdk:
             table_properties: Table configuration
             options: Optional stream configuration
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
+            auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation;
+                when set, client_id/client_secret are not required. Its
+                idp_token_supplier may be a sync or async callable.
         """
+        if auth is not None and (client_id is not None or client_secret is not None):
+            raise ValueError(
+                "client_id/client_secret cannot be combined with auth=; "
+                "pass table_properties as a keyword when using auth=, "
+                "e.g. create_stream(table_properties=..., auth=...)"
+            )
+        if table_properties is None:
+            raise ValueError("table_properties is required")
+
         from zerobus.sdk.shared.avro import make_encoder
 
         avro_encoder = make_encoder(table_properties.avro_schema)
 
-        if headers_provider is not None:
+        if auth is not None:
+            from zerobus.sdk.shared.auth import FederatedToken
+
+            if not isinstance(auth, FederatedToken):
+                raise ValueError("auth= must be a FederatedToken instance")
+            # External-IdP federation (RFC 8693). Build a FRESH native supplier per
+            # stream, here inside the running loop so allow_async=True can capture
+            # the current loop's task-locals to drive an async callback. Not
+            # memoized on the FederatedToken (a cached handle would freeze the first
+            # loop, breaking a later asyncio.run()). Reuse shares via _cache_identity.
+            native_supplier = _core.IdpSupplier(auth.idp_token_supplier, True, auth._cache_identity)
+            # The native supplier holds the callback (and the captured loop/context)
+            # on a GC-visible holder that it references only weakly;
+            # create_stream_federated moves the sole retained strong reference onto
+            # the stream, keeping a self-referential owner/stream/callback cycle
+            # collectable.
+            rust_stream = await self._inner.create_stream_federated(
+                table_properties, native_supplier, auth.databricks_client_id, options
+            )
+        elif headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
             rust_stream = await self._inner.create_stream_with_headers_provider(
                 table_properties, headers_provider, options
             )
         else:
             # Use OAuth authentication
+            if client_id is None or client_secret is None:
+                raise ValueError("client_id and client_secret are required unless auth= or headers_provider= is given")
             rust_stream = await self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream, avro_encoder=avro_encoder)
 

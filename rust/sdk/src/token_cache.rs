@@ -1,4 +1,4 @@
-//! Per-table OAuth token cache for the default OAuth authentication path.
+//! Per-table token cache shared by the OAuth and federated authentication paths.
 //!
 //! Unity Catalog sets each token's lifetime (currently one hour), while a single
 //! stream lives at most ~15 minutes. Without caching, every stream creation (and
@@ -7,11 +7,14 @@
 //! does not assume a fixed lifetime — it serves a token until it nears the
 //! `expires_in` the server reported.
 //!
-//! [`TokenCache`] caches one token per `(client_id, secret, table_name)` key on
-//! the [`ZerobusSdk`](crate::ZerobusSdk) instance and serves it until it nears
-//! expiry, refreshing lazily on access. Tokens are downscoped to a single table
-//! (the authorization details embed the catalog/schema/table), so the table
-//! name is part of the cache key.
+//! [`TokenCache`] lives on the [`ZerobusSdk`](crate::ZerobusSdk) instance and
+//! serves each token until it nears expiry, refreshing lazily on access. A slot
+//! is keyed by [`TokenKey`]: the auth scheme (OAuth vs federated), the token's
+//! identity (OAuth client_id/secret, or the federation identity / service
+//! principal client_id), and the table name. Tokens are downscoped to a single
+//! table (the authorization details embed the catalog/schema/table), so the
+//! table name is part of the cache key, and the scheme + identity keep OAuth and
+//! federated tokens (and distinct identities) in separate slots.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,6 +51,12 @@ const _: () = assert!(
 struct CachedToken {
     value: String,
     expires_at: Instant,
+    /// The token's full lifetime when it was minted (`expires_at - mint_start`).
+    /// Used to scale the proactive-refresh lead time down for short-lived tokens
+    /// (see [`TokenCache::needs_refresh`]), so a token whose whole TTL is shorter
+    /// than the fixed refresh buffer is not treated as due for refresh the instant
+    /// it is cached.
+    original_ttl: Duration,
     /// Instant until which the next proactive refresh is deferred, set by
     /// `arm_refresh_backoff`. Always `<= expires_at`.
     refresh_retry_at: Option<Instant>,
@@ -86,21 +95,49 @@ impl CachedToken {
     }
 }
 
+/// Which authentication path minted a cached token. Part of [`TokenKey`] so the
+/// OAuth and federation paths can never share a cache entry even when their
+/// `client_id` strings coincide — e.g. an OAuth caller passing the literal
+/// `client_id` `"fed-wif:<id>"` with an empty secret must not be served a
+/// federated identity's token (it never went through UC token exchange, and no
+/// secret was checked). The string namespaces on the federation side are
+/// descriptive; this field is the actual guard.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum AuthScheme {
+    Oauth,
+    Federated,
+}
+
 /// Identifies a cache entry. The client secret is keyed by its SHA-256 digest,
 /// not plaintext: the digest is collision-resistant (distinct secrets cannot in
 /// practice share a token) and keeps the raw secret out of the cache map. A
-/// rotated secret yields a different digest, hence a fresh entry.
+/// rotated secret yields a different digest, hence a fresh entry. The
+/// [`scheme`](AuthScheme) keeps the OAuth and federation paths in separate key
+/// spaces even under a colliding `client_id`.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TokenKey {
+    scheme: AuthScheme,
     client_id: String,
     secret_digest: [u8; 32],
     table_name: String,
 }
 
 impl TokenKey {
+    /// OAuth cache key, for tests that assert on cache-entry membership.
+    #[cfg(test)]
     fn new(client_id: &str, client_secret: &str, table_name: &str) -> Self {
+        Self::with_scheme(AuthScheme::Oauth, client_id, client_secret, table_name)
+    }
+
+    fn with_scheme(
+        scheme: AuthScheme,
+        client_id: &str,
+        client_secret: &str,
+        table_name: &str,
+    ) -> Self {
         let secret_digest = Sha256::digest(client_secret.as_bytes()).into();
         Self {
+            scheme,
             client_id: client_id.to_string(),
             secret_digest,
             table_name: table_name.to_string(),
@@ -120,7 +157,7 @@ struct SlotInner {
 
 type Slot = Arc<SlotInner>;
 
-/// Caches OAuth tokens per table for the lifetime of a [`ZerobusSdk`].
+/// Caches OAuth and federated tokens per table for the lifetime of a [`ZerobusSdk`].
 ///
 /// Safe for concurrent use across streams created from the same SDK instance.
 pub(crate) struct TokenCache {
@@ -156,8 +193,40 @@ impl TokenCache {
         F: FnOnce(MintReason) -> Fut,
         Fut: std::future::Future<Output = ZerobusResult<FetchedToken>>,
     {
-        self.get_or_fetch_bounded(client_id, client_secret, table_name, None, fetch)
-            .await
+        self.get_or_fetch_bounded(
+            AuthScheme::Oauth,
+            client_id,
+            client_secret,
+            table_name,
+            None,
+            fetch,
+        )
+        .await
+    }
+
+    /// Federation counterpart of [`get_or_fetch`](Self::get_or_fetch). Keys the
+    /// entry under [`AuthScheme::Federated`] with an empty secret (federation has
+    /// none), so it never shares a slot with an OAuth entry of the same
+    /// `cache_identity`.
+    pub(crate) async fn get_or_fetch_federated<F, Fut>(
+        &self,
+        cache_identity: &str,
+        table_name: &str,
+        fetch: F,
+    ) -> ZerobusResult<(String, u64)>
+    where
+        F: FnOnce(MintReason) -> Fut,
+        Fut: std::future::Future<Output = ZerobusResult<FetchedToken>>,
+    {
+        self.get_or_fetch_bounded(
+            AuthScheme::Federated,
+            cache_identity,
+            "",
+            table_name,
+            None,
+            fetch,
+        )
+        .await
     }
 
     /// Returns a valid token, bounding a proactive refresh at `refresh_timeout` so a
@@ -177,6 +246,7 @@ impl TokenCache {
         Fut: std::future::Future<Output = ZerobusResult<FetchedToken>>,
     {
         self.get_or_fetch_bounded(
+            AuthScheme::Oauth,
             client_id,
             client_secret,
             table_name,
@@ -186,10 +256,37 @@ impl TokenCache {
         .await
     }
 
+    /// Federation counterpart of
+    /// [`get_or_fetch_within`](Self::get_or_fetch_within), keyed under
+    /// [`AuthScheme::Federated`] with an empty secret.
+    pub(crate) async fn get_or_fetch_within_federated<F, Fut>(
+        &self,
+        cache_identity: &str,
+        table_name: &str,
+        refresh_timeout: Duration,
+        fetch: F,
+    ) -> ZerobusResult<(String, u64)>
+    where
+        F: FnOnce(MintReason) -> Fut,
+        Fut: std::future::Future<Output = ZerobusResult<FetchedToken>>,
+    {
+        self.get_or_fetch_bounded(
+            AuthScheme::Federated,
+            cache_identity,
+            "",
+            table_name,
+            Some(refresh_timeout),
+            fetch,
+        )
+        .await
+    }
+
     /// Shared implementation. `refresh_timeout` bounds a proactive-refresh mint
     /// when `Some`; `None` leaves it unbounded.
+    #[allow(clippy::too_many_arguments)]
     async fn get_or_fetch_bounded<F, Fut>(
         &self,
+        scheme: AuthScheme,
         client_id: &str,
         client_secret: &str,
         table_name: &str,
@@ -209,13 +306,13 @@ impl TokenCache {
             if expires_at.is_some_and(|deadline| deadline <= Instant::now()) {
                 // Dead on arrival, with no cached token to fall back to.
                 return Err(ZerobusError::TokenFetchError(
-                    "fetched OAuth token expired before arrival".to_string(),
+                    "fetched token expired before arrival".to_string(),
                 ));
             }
             return Ok((fetched.token, 0));
         }
 
-        let key = TokenKey::new(client_id, client_secret, table_name);
+        let key = TokenKey::with_scheme(scheme, client_id, client_secret, table_name);
 
         let slot = {
             let mut entries = self.entries.lock().await;
@@ -319,11 +416,11 @@ impl TokenCache {
             if let Some((value, generation)) =
                 Self::serve_valid_cached_fallback(&slot, &mut guard, self.refresh_buffer)
             {
-                warn!(table = %table_name, "fetched OAuth token expired on arrival; serving still-valid cached token");
+                warn!(table = %table_name, "fetched token expired on arrival; serving still-valid cached token");
                 return Ok((value, generation));
             }
             return Err(ZerobusError::TokenFetchError(
-                "fetched OAuth token expired before arrival".to_string(),
+                "fetched token expired before arrival".to_string(),
             ));
         }
 
@@ -332,9 +429,15 @@ impl TokenCache {
                 // A fresh token gets the next generation, above any rejection
                 // watermark, so it is never mistaken for a rejected token.
                 let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                // Recover the token's full lifetime from the start-anchored
+                // expiry. `expires_at > fetch_started_at` here (a dead-on-arrival
+                // token was rejected above), so this is the positive TTL used to
+                // scale the refresh lead time.
+                let original_ttl = expires_at.saturating_duration_since(fetch_started_at);
                 *guard = Some(CachedToken {
                     value: fetched.token.clone(),
                     expires_at,
+                    original_ttl,
                     refresh_retry_at: None,
                     generation,
                 });
@@ -369,10 +472,46 @@ impl TokenCache {
         table_name: &str,
         rejected_generation: u64,
     ) {
+        self.invalidate_scheme(
+            AuthScheme::Oauth,
+            client_id,
+            client_secret,
+            table_name,
+            rejected_generation,
+        )
+        .await
+    }
+
+    /// Federation counterpart of [`invalidate`](Self::invalidate), keyed under
+    /// [`AuthScheme::Federated`] with an empty secret.
+    pub(crate) async fn invalidate_federated(
+        &self,
+        cache_identity: &str,
+        table_name: &str,
+        rejected_generation: u64,
+    ) {
+        self.invalidate_scheme(
+            AuthScheme::Federated,
+            cache_identity,
+            "",
+            table_name,
+            rejected_generation,
+        )
+        .await
+    }
+
+    async fn invalidate_scheme(
+        &self,
+        scheme: AuthScheme,
+        client_id: &str,
+        client_secret: &str,
+        table_name: &str,
+        rejected_generation: u64,
+    ) {
         if !self.enabled {
             return;
         }
-        let key = TokenKey::new(client_id, client_secret, table_name);
+        let key = TokenKey::with_scheme(scheme, client_id, client_secret, table_name);
         if let Some(slot) = self.entries.lock().await.get(&key) {
             let previous = slot
                 .rejected_generation
@@ -386,17 +525,35 @@ impl TokenCache {
     }
 
     fn needs_refresh(&self, cached: &CachedToken) -> bool {
+        // An expired token always needs a refresh, independent of the refresh
+        // window below. That comparison is `remaining < effective_buffer`, and for
+        // an already-expired token `remaining` saturates to zero; with a zero (or
+        // near-zero) refresh buffer `effective_buffer` is also zero, so `0 < 0` is
+        // false and the expired token would be served indefinitely. This checks
+        // expiry directly so it can never happen — restoring the pre-refactor
+        // behavior for callers that set `token_refresh_buffer(Duration::ZERO)`
+        // (which disables *proactive* refresh but must still re-mint on expiry).
+        // (`arm_refresh_backoff` keeps `refresh_retry_at <= expires_at`, so an
+        // expired token is never inside a backoff window; the ordering is safe.)
+        if cached.is_expired() {
+            return true;
+        }
         // Within a post-fallback backoff window, don't refresh yet (see
         // `arm_refresh_backoff`).
         if cached.in_backoff_window() {
             return false;
         }
-        // `checked_add` avoids a panic on an absurd refresh buffer (e.g.
-        // `Duration::MAX`); an overflowing deadline means "always refresh".
-        match Instant::now().checked_add(self.refresh_buffer) {
-            Some(deadline) => deadline >= cached.expires_at,
-            None => true,
-        }
+        // Scale the refresh lead time down for short-lived tokens: refresh once
+        // less than `min(refresh_buffer, original_ttl / 2)` remains. For a normal
+        // token (lifetime >= 2x the buffer, e.g. OAuth or a ~60min subject) `min`
+        // is the buffer, i.e. the prior behavior. A federated token capped to a
+        // short subject JWT would otherwise be due for refresh the instant it is
+        // cached (born stale, re-minting on every use); the `original_ttl / 2` arm
+        // keeps it usable for the first half of its life. Saturating math also
+        // avoids overflow on an extreme buffer.
+        let effective_buffer = self.refresh_buffer.min(cached.original_ttl / 2);
+        let remaining = cached.expires_at.saturating_duration_since(Instant::now());
+        remaining < effective_buffer
     }
 
     /// If a still-valid, non-rejected token is cached, arm its backoff and return it
@@ -454,6 +611,41 @@ mod tests {
         }
     }
 
+    /// Positions the (already seeded) OAuth token for a key inside its proactive-
+    /// refresh window, with no real time passing, so a refresh-path test's next
+    /// access refreshes. After the scaled-refresh change a freshly minted token is
+    /// never immediately due for refresh (its whole life lies ahead), so tests that
+    /// exercise the refresh path use this to leave `remaining` of a long original
+    /// lifetime. The original lifetime is set long on purpose, so the effective
+    /// refresh buffer is the full configured buffer — reproducing the pre-change
+    /// "within-buffer token" precondition without depending on a short TTL. The
+    /// token's generation is preserved, so a captured `seeded_generation` stays
+    /// valid.
+    async fn make_due_for_refresh(
+        cache: &TokenCache,
+        client_id: &str,
+        client_secret: &str,
+        table_name: &str,
+        remaining: Duration,
+    ) {
+        let entries = cache.entries.lock().await;
+        let slot = entries
+            .get(&TokenKey::with_scheme(
+                AuthScheme::Oauth,
+                client_id,
+                client_secret,
+                table_name,
+            ))
+            .expect("token must be seeded before it can be made due for refresh");
+        let mut guard = slot.token.lock().await;
+        let cached = guard
+            .as_mut()
+            .expect("seeded slot must hold a token to make due for refresh");
+        cached.expires_at = Instant::now() + remaining;
+        cached.original_ttl = Duration::from_secs(3600);
+        cached.refresh_retry_at = None;
+    }
+
     #[tokio::test]
     async fn caches_token_across_calls() {
         let cache = TokenCache::new(true, Duration::from_secs(60));
@@ -483,21 +675,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_and_federated_never_share_a_slot_under_colliding_client_id() {
+        // The account-level federation cache identity is a string an OAuth caller
+        // could pass verbatim as its client_id with an empty secret. The
+        // AuthScheme in the key must keep the two in separate slots: the OAuth
+        // caller must mint its own token (via UC, with its secret) rather than be
+        // handed the federated identity's token, which never went through token
+        // exchange and had no secret checked.
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+
+        // Seed a federated account-level token under identity "fed-wif:sp".
+        let (fed_tok, _) = cache
+            .get_or_fetch_federated("fed-wif:sp", "c.s.t", |_reason| async {
+                Ok(fetched("federated-token", Some(3600)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(fed_tok, "federated-token");
+
+        // OAuth with the SAME client_id string and an empty secret must NOT be
+        // served that slot — it mints its own token instead.
+        let oauth_mints = AtomicUsize::new(0);
+        let (oauth_tok, _) = cache
+            .get_or_fetch("fed-wif:sp", "", "c.s.t", |_reason| async {
+                oauth_mints.fetch_add(1, Ordering::SeqCst);
+                Ok(fetched("oauth-token", Some(3600)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            oauth_tok, "oauth-token",
+            "OAuth must not be served the federated identity's token"
+        );
+        assert_eq!(
+            oauth_mints.load(Ordering::SeqCst),
+            1,
+            "OAuth must mint its own token, not hit the federated slot"
+        );
+    }
+
+    #[tokio::test]
     async fn refetches_when_within_refresh_buffer() {
-        // TTL (1s) is smaller than the refresh buffer (60s), so the token is
-        // always considered due for refresh and every call mints anew.
+        // A token whose remaining life is within the refresh buffer is refreshed
+        // on the next access. The first call cold-mints; positioning it inside the
+        // refresh window then makes the second call refresh rather than hit.
         let cache = TokenCache::new(true, Duration::from_secs(60));
         let calls = AtomicUsize::new(0);
 
         let make = |_reason| async {
             let n = calls.fetch_add(1, Ordering::SeqCst);
-            Ok(fetched(&format!("tok{n}"), Some(1)))
+            Ok(fetched(&format!("tok{n}"), Some(3600)))
         };
 
         let (a, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", make)
             .await
             .unwrap();
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
         let (b, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", make)
             .await
@@ -512,22 +746,22 @@ mod tests {
     async fn refresh_installs_new_expiry() {
         // A proactive refresh must re-stabilize the cache: once it returns a
         // token with a healthy TTL, the following call should hit rather than
-        // refresh again. The first mint uses a within-buffer TTL (30s < 60s
-        // buffer) to force one refresh; later mints return a healthy TTL.
+        // refresh again. The first mint is positioned within the refresh window to
+        // force one refresh; later mints return a healthy TTL.
         let cache = TokenCache::new(true, Duration::from_secs(60));
         let calls = AtomicUsize::new(0);
 
         let make = |_reason| async {
             let n = calls.fetch_add(1, Ordering::SeqCst);
-            let ttl = if n == 0 { 30 } else { 3600 };
-            Ok(fetched(&format!("tok{n}"), Some(ttl)))
+            Ok(fetched(&format!("tok{n}"), Some(3600)))
         };
 
-        // Call 1 mints tok0 (within-buffer, immediately due for refresh).
+        // Call 1 mints tok0; positioning it within the buffer makes it due for refresh.
         let (a, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", make)
             .await
             .unwrap();
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
         // Call 2 refreshes to tok1 with a healthy TTL.
         let (b, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", make)
@@ -547,6 +781,106 @@ mod tests {
             2,
             "refresh should install a new expiry so the third call hits cache"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn short_lived_token_is_not_born_stale() {
+        // C4: a token whose whole lifetime is shorter than twice the refresh buffer
+        // (as happens when a federated token's cached TTL is capped to a short-lived
+        // subject JWT) must NOT be treated as due for refresh the instant it is
+        // cached. The refresh lead time scales to min(refresh_buffer,
+        // original_ttl / 2), so the token is served through the first half of its
+        // life and refreshed after. Under the old fixed buffer it would re-mint on
+        // every use (born stale, immediate churn).
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+        let mints = AtomicUsize::new(0);
+        // 40s TTL < 2 * 60s buffer, so the effective buffer is min(60s, 20s) = 20s.
+        let make = |_reason| async {
+            let n = mints.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched(&format!("tok{n}"), Some(40)))
+        };
+
+        // Cold mint.
+        let (a, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(a, "tok0");
+
+        // 10s in (30s remaining > 20s effective buffer): still served, not refreshed.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let (b, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(b, "tok0", "a short-lived token must not be born stale");
+        assert_eq!(
+            mints.load(Ordering::SeqCst),
+            1,
+            "no refresh while past the first half of the token's life remains"
+        );
+
+        // 25s in (15s remaining < 20s effective buffer): now due, refreshes to tok1.
+        tokio::time::advance(Duration::from_secs(15)).await;
+        let (c, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(
+            c, "tok1",
+            "once inside the scaled window the token refreshes"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_refresh_buffer_still_remints_expired_token() {
+        // Regression: a zero refresh buffer disables *proactive* refresh (serve a
+        // still-valid token right up to expiry) but must NOT serve a token past
+        // expiry. The refresh window is `remaining < effective_buffer`, and with a
+        // zero buffer `effective_buffer` is zero while an expired token's
+        // `remaining` saturates to zero, so `0 < 0` never fires; only the direct
+        // expiry check in `needs_refresh` re-mints. This guards existing OAuth
+        // callers that set `token_refresh_buffer(Duration::ZERO)`, not just the
+        // federated path.
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let mints = AtomicUsize::new(0);
+        let make = |_reason| async {
+            let n = mints.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched(&format!("tok{n}"), Some(10)))
+        };
+
+        // Cold mint.
+        let (a, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(a, "tok0");
+
+        // 5s in (still valid): a zero buffer means no proactive refresh, so the
+        // still-valid token is served from cache without re-minting.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let (b, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(
+            b, "tok0",
+            "a still-valid token must be served under a zero buffer"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 1);
+
+        // 11s in (past the 10s TTL): the expired token must be re-minted, never served.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let (c, _) = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        assert_eq!(
+            c, "tok1",
+            "an expired token must be re-minted even with a zero buffer"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -743,11 +1077,11 @@ mod tests {
         let cache = TokenCache::new(true, Duration::from_secs(60));
         let calls = AtomicUsize::new(0);
 
-        // tok0 has a within-buffer TTL so the next call refreshes it to tok1.
+        // tok0 is positioned within the refresh window so the next call refreshes
+        // it to tok1.
         let make = |_reason| async {
             let n = calls.fetch_add(1, Ordering::SeqCst);
-            let ttl = if n == 0 { 30 } else { 3600 };
-            Ok(fetched(&format!("tok{n}"), Some(ttl)))
+            Ok(fetched(&format!("tok{n}"), Some(3600)))
         };
 
         let (old, old_generation) = cache
@@ -755,6 +1089,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(old, "tok0");
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
         let (refreshed, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", make)
             .await
@@ -850,6 +1185,7 @@ mod tests {
             })
             .await
             .unwrap();
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         let gate = Arc::new(tokio::sync::Notify::new());
         let minting = Arc::new(tokio::sync::Notify::new());
@@ -898,6 +1234,7 @@ mod tests {
             })
             .await
             .unwrap();
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         let gate = Arc::new(tokio::sync::Notify::new());
         let minting = Arc::new(tokio::sync::Notify::new());
@@ -1028,6 +1365,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         // Count attempts to prove each failing refresh actually ran (not suppressed).
         let refresh_attempts = AtomicUsize::new(0);
@@ -1114,6 +1452,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         let (served, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
@@ -1184,6 +1523,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         let (served, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
@@ -1221,6 +1561,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        // Leave 3s of life so the backoff math (remaining/2) is what the assertions
+        // below exercise, independent of the scaled-refresh effective buffer.
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(3)).await;
 
         let (served, _) = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
@@ -1269,6 +1612,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         let (served, _) = cache
             .get_or_fetch_within(
@@ -1297,6 +1641,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded, "valid");
+        // Leave 3s of life (less than the 5s budget) so bounding is skipped.
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(3)).await;
 
         let (minted, _) = cache
             .get_or_fetch_within(
@@ -1325,6 +1671,7 @@ mod tests {
             })
             .await
             .unwrap();
+        make_due_for_refresh(&cache, "id", "secret", "c.s.t", Duration::from_secs(30)).await;
 
         // A refresh returns a token with no TTL: the caller gets the fresh token,
         // but the cached valid token must not be discarded.

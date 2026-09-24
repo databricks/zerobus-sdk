@@ -513,6 +513,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "hyper-http-proxy",

@@ -74,7 +74,10 @@ pub use dynamic_proto::{
 pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
+pub use headers_provider::{
+    FederatedTokenProvider, HeadersProvider, IdpTokenCallback, IdpTokenSupplier,
+    OAuthHeadersProvider,
+};
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};

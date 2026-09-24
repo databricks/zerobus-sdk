@@ -1,6 +1,6 @@
 """Type stubs for _zerobus_core Rust module."""
 
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, List, Optional, Tuple, Union
 
 from typing_extensions import Self
 
@@ -211,6 +211,33 @@ class HeadersProvider:
         """
         ...
 
+    def invalidate(self) -> None:
+        """Optional hook to drop cached auth state after the server rejects a token.
+
+        The default is a no-op. Override it in a subclass that caches credentials
+        so a rejected token is re-fetched on the next get_headers() call.
+        """
+        ...
+
+class IdpSupplier:
+    """
+    Opaque, short-lived handle wrapping one external-IdP token supplier.
+
+    Rebuilt per create_stream from a FederatedToken's idp_token_supplier callback
+    and bound to that SDK's event loop and sync/async policy (via allow_async).
+    Cross-stream cache sharing is preserved by cache_identity, the owning
+    FederatedToken's stable per-instance id, which partitions the account-level
+    token cache. Managed internally by the SDK; not constructed directly by user
+    code.
+    """
+
+    def __init__(
+        self,
+        idp_token_supplier: Callable[[], Union[str, Awaitable[str]]],
+        allow_async: bool,
+        cache_identity: str,
+    ) -> None: ...
+
 # =============================================================================
 # SYNC SDK
 # =============================================================================
@@ -399,6 +426,34 @@ class sync:
             """
             ...
 
+        def create_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_supplier: IdpSupplier,
+            databricks_client_id: Optional[str] = None,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream with external-IdP federation (RFC 8693 token exchange).
+
+            Args:
+                table_properties: Table properties
+                idp_supplier: Short-lived supplier handle, rebuilt per create_stream
+                    (so it binds to this SDK's event loop and sync/async policy); the
+                    cache identity carried on the FederatedToken partitions the
+                    account-level token cache. The supplier carries a GC-visible
+                    holder for the callback (and any async context) that it references
+                    only weakly; the stream takes the sole retained strong reference,
+                    so a self-referential owner/stream/callback cycle stays collectable
+                databricks_client_id: Service principal client_id for workload
+                    identity federation, or None for account-level federation
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
         def recreate_stream(self, old_stream: "ZerobusStream") -> "ZerobusStream":
             """
             Recreate a closed stream with the same configuration.
@@ -553,6 +608,34 @@ class aio:
             Args:
                 table_properties: Table properties
                 headers_provider: Custom headers provider
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
+        async def create_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_supplier: IdpSupplier,
+            databricks_client_id: Optional[str] = None,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream with external-IdP federation (RFC 8693 token exchange).
+
+            Args:
+                table_properties: Table properties
+                idp_supplier: Short-lived supplier handle, rebuilt per create_stream
+                    (so it binds to this SDK's event loop and sync/async policy); the
+                    cache identity carried on the FederatedToken partitions the
+                    account-level token cache. The supplier carries a GC-visible
+                    holder for the callback (and any async context) that it references
+                    only weakly; the stream takes the sole retained strong reference,
+                    so a self-referential owner/stream/callback cycle stays collectable
+                databricks_client_id: Service principal client_id for workload
+                    identity federation, or None for account-level federation
                 options: Optional configuration options
 
             Returns:
