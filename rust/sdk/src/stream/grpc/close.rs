@@ -205,6 +205,7 @@ mod tests {
         let (error_tx, error_rx) = watch::channel(None);
         let stream = ZerobusStream {
             stream_id: Some("cancelled-close".into()),
+            last_committed_offset: None,
             stream_type: StreamType::Ephemeral,
             headers_provider: Arc::new(NoAuthHeadersProvider),
             options: crate::StreamConfigurationOptions {
