@@ -525,3 +525,62 @@ fn shared_setters_write_to_arrow_config() {
         Some(5_000)
     );
 }
+
+#[cfg(feature = "arrow-flight")]
+#[tokio::test]
+async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
+    let sdk = test_sdk();
+    let builder = || {
+        sdk.stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .arrow(Arc::new(arrow_schema::Schema::empty()))
+    };
+    for (lanes, capacity, valid) in [
+        (0, 100, false),
+        (65, 100, false),
+        (2, 0, false),
+        (2, 1, false),
+        (1, 1, true),
+        (2, 5, true),
+        (64, 64, true),
+    ] {
+        // A gRPC-specific bound has no effect on an Arrow mux.
+        let mux = builder()
+            .max_inflight_requests(0)
+            .max_inflight_batches(capacity)
+            .multiplexed(lanes);
+        assert_eq!(mux.validate().is_ok(), valid);
+        if valid {
+            assert_eq!(
+                mux.max_inflight_batches_per_stream(),
+                Some(capacity / lanes)
+            );
+        } else {
+            assert!(matches!(
+                mux.build_arrow().await,
+                Err(ZerobusError::InvalidArgument(_))
+            ));
+        }
+    }
+    assert!(
+        matches!(builder().multiplexed(2).build().await, Err(ZerobusError::InvalidArgument(msg)) if msg.contains("build_arrow"))
+    );
+    assert!(
+        matches!(sdk.stream_builder().table("t").oauth("a", "b").json().multiplexed(2).build_arrow().await,
+        Err(ZerobusError::InvalidArgument(msg)) if msg.contains(".build()"))
+    );
+    for mux in [
+        builder()
+            .ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed(2),
+        builder()
+            .multiplexed_ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed(2),
+    ] {
+        assert!(mux.validate().is_err());
+        assert!(
+            matches!(mux.build_arrow().await, Err(ZerobusError::InvalidArgument(msg)) if msg.contains("not supported for Arrow"))
+        );
+    }
+}
