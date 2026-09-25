@@ -78,6 +78,8 @@ pub use headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenCallback, IdpTokenSupplier,
     OAuthHeadersProvider,
 };
+#[cfg(feature = "arrow-flight")]
+pub use multiplexed_stream::MultiplexedArrowStream;
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};

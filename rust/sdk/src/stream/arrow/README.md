@@ -63,6 +63,31 @@ rotation, recovery, and terminal finalization.
 - `c_data.rs`, when enabled internally, imports canonical Arrow C Data into a
   Rust-owned `RecordBatch`.
 
+## Multiplexed Arrow streams
+
+`MultiplexedArrowStream` wraps homogeneous Arrow lanes through the private
+`MuxCore<S>` and MSRV-compatible `MuxLane` contract in `multiplexed_stream/`.
+The builder divides `max_inflight_batches` by the lane count using integer
+division, opens all lanes concurrently, and returns a mux only after every open
+succeeds. Construction cancellation drops completed lanes and pending opens.
+
+The core selects a lane round-robin and acquires an owned capacity reservation
+before taking that lane's `ingest_mutex`. Arrow's admitted-enqueue hook checks
+the mux under this mutex before assigning an offset or retaining the batch.
+Dropping an unused reservation returns its permit. Admission rejects closure
+without waiting for finalization, preserving ordinary Arrow ingest behavior. The
+core recognizes terminal admission and awaits the finalized typed cause through
+`terminal_error` before returning an error and poisoning ingestion. Retryable
+recovery does not close admission and remains entirely lane-local.
+
+Arrow close skips the gRPC pre-flush barrier. Each lane's supervisor owns its
+original close target/deadline, recovery interruption, and suffix retention.
+The shared core closes lanes concurrently and preserves an existing mux failure
+or records the first observed close error before callback draining. Cancellation
+retains that error; additional close errors are logged. Recovery snapshots are
+aggregated in lane order.
+Stats exporters are shared without remapping lane-local offsets to `MessageId`.
+
 ## Logical offsets and wire offsets
 
 The SDK has two intentionally different offset domains.

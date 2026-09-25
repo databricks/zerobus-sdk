@@ -49,7 +49,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
-- **Multiplexed Streams** *(Beta)* - Raise aggregate gRPC throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
+- **Multiplexed Streams** *(Beta)* - Raise aggregate ingestion throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
 - **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.85 (via `apache-avro`); default builds are unaffected. Feature in development.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
@@ -780,8 +780,8 @@ stream.close().await?;
 ```
 
 The stream count must be between 1 and 64. JSON, compiled protobuf, dynamic
-protobuf, and Avro (with the `avro` feature) are supported. Arrow Flight is not
-multiplexed. For maximum protobuf encoding throughput,
+protobuf, and Avro (with the `avro` feature) are supported by `build()`.
+Arrow Flight uses `build_arrow()` as shown below. For maximum protobuf encoding throughput,
 prefer compiled protobuf—multiplexing addresses stream/network bottlenecks,
 not the reflection cost of constructing dynamic records.
 
@@ -809,6 +809,52 @@ shared across the sub-stream callback workers, which may invoke it concurrently
 and without global ordering.
 
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
+
+#### Multiplexed Arrow Flight Stream
+
+With the `arrow-flight` feature, configure Arrow before selecting mux mode:
+
+```rust,ignore
+let mut stream = sdk.stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .arrow(schema)
+    .max_inflight_batches(100) // Mux-wide: 25 pending batches per lane.
+    .multiplexed(4)
+    .build_arrow()
+    .await?;
+
+for batch in batches {
+    stream.ingest_batch(batch).await?;
+}
+stream.flush().await?;
+stream.close().await?;
+```
+
+`MultiplexedArrowStream` routes whole `RecordBatch` values round-robin. It also
+accepts one batch encoded as Arrow IPC via `ingest_ipc_batch()`. Both return a
+`MessageId` containing the lane and its local batch offset. There is no global
+ordering. A selected lane waits up to 30 seconds for capacity; a capacity timeout
+leaves the mux usable. `max_inflight_batches / stream_count` bounds pending
+batches on each lane, with any remainder unused. The budget must cover all lanes.
+
+Retryable failures recover within the affected lane. An observed terminal lane
+failure poisons new ingestion, while `wait_for_message_id()` remains lane-specific
+and `flush()` still waits for every lane's flush attempt. A stored terminal error
+takes precedence. `close()` closes lanes concurrently using Arrow's existing
+supervisor, preserving each lane's flush deadline and interrupting active recovery.
+A cancelled close can be resumed. An existing mux failure takes precedence;
+otherwise the first observed lane-close error is returned and later errors are logged.
+`get_unacked_batches()` closes first and returns
+an idempotent snapshot, slicing partially acknowledged batches to their remaining
+rows. Results are grouped by lane, without global submission order.
+
+Construction opens all lanes concurrently with the same bounded startup jitter
+and atomic cleanup as the gRPC mux. Arrow mux streams reject both callback
+setters. All lanes share the configured `stats_exporter`; its events remain
+lane-local, carry no lane identifier, and may have overlapping offsets. This API
+is Rust-only. See the runnable [`arrow_multiplexed`](examples/arrow/multiplexed.rs)
+example.
 
 #### Avro Stream (Beta, opt-in)
 
@@ -1476,8 +1522,9 @@ Only call after stream failure.
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
 
 Calling `multiplexed(stream_count)` consumes the ordinary builder and returns a
-`MultiplexedStreamBuilder`, which exposes only `validate()` and `build()`.
-Configure ordinary streams with `ack_callback`; configure mux streams with
+`MultiplexedStreamBuilder`, which exposes `validate()`, `build()`, and (with
+`arrow-flight`) `build_arrow()`.
+Configure ordinary gRPC streams with `ack_callback`; configure gRPC mux streams with
 `multiplexed_ack_callback`. Each terminal build rejects the other callback type.
 
 ### `MultiplexedStream`
@@ -1485,6 +1532,13 @@ Configure ordinary streams with `ack_callback`; configure mux streams with
 A managed group of 1–64 homogeneous gRPC sub-streams. Its `ingest_record()`
 and `ingest_records()` methods return `MessageId`s, while `flush()`, `close()`,
 and unacknowledged-record retrieval operate across all sub-streams.
+
+### `MultiplexedArrowStream`
+
+Available with `arrow-flight`. `ingest_batch()` and `ingest_ipc_batch()` return
+`MessageId`s. `wait_for_message_id()` waits on the owning lane; `flush()`,
+`close()`, and `get_unacked_batches()` operate across all lanes. Arrow callbacks
+are unsupported.
 
 ### `AckCallback`
 

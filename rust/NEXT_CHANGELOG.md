@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Added Rust-only multiplexed Arrow Flight streams via
+  `.arrow(schema).multiplexed(n).build_arrow()`. Whole batches route round-robin
+  with a mux-wide `max_inflight_batches` budget, lane-local recovery, and the
+  existing mux poisoning and message-ID semantics.
+
 - Added Avro support to `StreamBuilder::multiplexed(n)` (Beta) when the `avro`
   feature is enabled; every lane shares the configured writer schema.
 - Added first-class external-IdP token federation (`FederatedTokenProvider`,
@@ -31,7 +36,13 @@
 
 ### Bug Fixes
 
+- Arrow `ingest_batch` calls blocked on `max_inflight_batches` now fail as soon as
+  `close()` starts instead of waiting for close to finish.
+
 ### Documentation
+
+- Documented Arrow mux lifecycle, capacity, partial-ack recovery, and shared
+  lane-local telemetry; added the `arrow_multiplexed` example.
 
 - Added a multiplexed Avro example using loop-then-flush ingestion.
 
@@ -41,11 +52,15 @@
   resume-watermark reconciliation after a lost acknowledgment, and validation
   for setup responses, acknowledgment bounds, and offset overflow.
 
-- Extracted a private transport-generic mux core and lane contract, preserving
-  existing gRPC multiplexed-stream behavior and construction guarantees.
+- Extracted a private transport-generic mux core while retaining Arrow's
+  supervisor-owned close and recovery paths.
 
 ### Breaking Changes
 
 ### Deprecations
 
 ### API Changes
+
+- Added `MultiplexedArrowStream` and `MultiplexedStreamBuilder::build_arrow()`
+  behind the `arrow-flight` feature, with batch and IPC ingestion, message waits,
+  flush, close, and unacknowledged-batch retrieval.

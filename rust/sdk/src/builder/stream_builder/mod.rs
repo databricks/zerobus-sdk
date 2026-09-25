@@ -496,6 +496,8 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the maximum number of in-flight Arrow batches (Arrow streams only).
+    /// For a mux, each lane receives `n / stream_count` slots; any remainder is
+    /// unused. The budget must be at least the lane count.
     #[cfg(feature = "arrow-flight")]
     pub fn max_inflight_batches(mut self, n: usize) -> Self {
         self.arrow_config.max_inflight_batches = n;
@@ -516,7 +518,7 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Select a multiplexed gRPC stream composed of `stream_count` homogeneous
+    /// Select a multiplexed stream composed of `stream_count` homogeneous
     /// sub-streams.
     ///
     /// This is a terminal mode selection: configure table, authentication,
@@ -539,10 +541,13 @@ impl<'a> StreamBuilder<'a> {
     /// Multiplexed streams are a Beta API.
     ///
     /// `stream_count` must be in `1..=64` and cannot exceed the configured
-    /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
+    /// `max_inflight_requests` (gRPC) or `max_inflight_batches` (Arrow). The
+    /// mux-wide in-flight budget is divided evenly
     /// across sub-streams using integer division. JSON, compiled protobuf,
     /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
-    /// Arrow Flight is not.
+    /// Arrow Flight uses `.arrow(schema).multiplexed(n).build_arrow()` with the
+    /// `arrow-flight` feature. Arrow batches remain whole and callbacks are
+    /// unsupported. All lanes share the stats exporter; events retain local IDs.
     pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
         MultiplexedStreamBuilder::new(self, stream_count)
     }
@@ -701,7 +706,34 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
         self.validate_common()?;
+        let schema = self.validate_arrow()?;
+        self.warn_arrow_ignored_options();
 
+        let headers_provider = self.resolve_headers_provider()?;
+
+        let table_properties = ArrowTableProperties {
+            table_name: self.table_name,
+            schema,
+        };
+
+        let table_name = table_properties.table_name.clone();
+        let stream = ZerobusArrowStream::new(
+            &self.sdk.zerobus_endpoint,
+            Arc::clone(&self.sdk.tls_config),
+            self.sdk.connector_factory.clone(),
+            table_properties,
+            headers_provider,
+            self.arrow_config,
+            Arc::clone(&self.sdk.sdk_identifier),
+            self.stats_exporter,
+        )
+        .await?;
+        crate::client_warnings::record_stream_creation(&table_name);
+        Ok(stream)
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    fn validate_arrow(&self) -> ZerobusResult<Arc<ArrowSchema>> {
         let schema = match self.format.as_ref() {
             Some(FormatConfig::Arrow(schema)) => Arc::clone(schema),
             Some(_) => {
@@ -731,6 +763,11 @@ impl<'a> StreamBuilder<'a> {
             ));
         }
 
+        Ok(schema)
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    fn warn_arrow_ignored_options(&self) {
         // `max_ingest_payload_bytes` only applies to JSON and Protocol Buffer streams; warn if the
         // user changed it from the default before building an Arrow stream.
         if self.grpc_config.max_ingest_payload_bytes
@@ -738,28 +775,6 @@ impl<'a> StreamBuilder<'a> {
         {
             crate::client_warnings::warn_payload_limit_ignored_for_arrow();
         }
-
-        let headers_provider = self.resolve_headers_provider()?;
-
-        let table_properties = ArrowTableProperties {
-            table_name: self.table_name,
-            schema,
-        };
-
-        let table_name = table_properties.table_name.clone();
-        let stream = ZerobusArrowStream::new(
-            &self.sdk.zerobus_endpoint,
-            Arc::clone(&self.sdk.tls_config),
-            self.sdk.connector_factory.clone(),
-            table_properties,
-            headers_provider,
-            self.arrow_config,
-            Arc::clone(&self.sdk.sdk_identifier),
-            self.stats_exporter,
-        )
-        .await?;
-        crate::client_warnings::record_stream_creation(&table_name);
-        Ok(stream)
     }
 }
 

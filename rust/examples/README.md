@@ -298,3 +298,7 @@ if let Some(offset) = stream.ingest_records_offset(records).await? {
 - [Main SDK Documentation](../README.md)
 - [Schema Generation Tool](../tools/generate_files/README.md)
 - [Databricks Unity Catalog Documentation](https://docs.databricks.com/unity-catalog/index.html)
+
+The Arrow directory also includes [`arrow_multiplexed`](arrow/multiplexed.rs): run
+`cargo run -p example_arrow --example arrow_multiplexed` to queue whole batches
+across managed Flight lanes with a mux-wide capacity budget and one final flush.

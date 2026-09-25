@@ -20,8 +20,12 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "arrow-flight")]
+mod arrow;
 mod core;
 pub(crate) mod lane;
+#[cfg(feature = "arrow-flight")]
+pub use arrow::MultiplexedArrowStream;
 use core::MuxCore;
 
 use crate::{
@@ -35,11 +39,13 @@ const STREAM_BITS: u32 = 6;
 pub(crate) const MAX_STREAMS: usize = 1 << STREAM_BITS;
 const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 
-/// Opaque identifier returned by ingest methods on MultiplexedStream.
+/// Opaque identifier returned by ingest methods on gRPC and Arrow mux streams.
 /// Encodes the sub-stream index and sub-stream offset in a single i64.
 ///
 /// Unlike a `ZerobusStream` offset, `MessageId` values are not ordered — pass
-/// them to [`MultiplexedStream::wait_for_message_id`] to await acknowledgment.
+/// them to the originating mux's `wait_for_message_id` to await acknowledgment.
+/// An Arrow ID identifies an entire batch and completes once all its rows are
+/// acknowledged. IDs must only be used with the mux that produced them.
 ///
 /// # Beta
 ///
