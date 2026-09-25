@@ -22,6 +22,11 @@
   (`CreateStreamWithHeadersProviderAsync`) creation paths. Tracks the FFI
   signature change to `zerobus_sdk_create_stream_with_headers_provider` and
   `zerobus_sdk_create_stream_with_headers_provider_async`. No public API change.
+- Every stream factory now throws `ObjectDisposedException` once the
+  `ZerobusSdk` has been disposed. `CreateJsonStream`, `CreateProtoStream`, their
+  `Async` variants, and the synchronous `CreateJsonStreamWithHeadersProvider` and
+  `CreateProtoStreamWithHeadersProvider` skipped the check and instead reached the
+  native layer, failing with `ZerobusException: SDK pointer is null`.
 
 ### Documentation
 
