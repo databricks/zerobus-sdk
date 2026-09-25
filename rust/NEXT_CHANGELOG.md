@@ -41,6 +41,9 @@
   resume-watermark reconciliation after a lost acknowledgment, and validation
   for setup responses, acknowledgment bounds, and offset overflow.
 
+- Extracted a private transport-generic mux core and lane contract, preserving
+  existing gRPC multiplexed-stream behavior and construction guarantees.
+
 ### Breaking Changes
 
 ### Deprecations
