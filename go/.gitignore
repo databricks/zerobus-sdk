@@ -2,17 +2,21 @@
 zerobus-ffi/target/
 libzerobus_ffi.a
 !lib/**/libzerobus_ffi.a
+lib/**/.zerobus_ffi_features
 *.dylib
 *.so
 
 # Release artifacts
 releases/
 
-# Example binaries
+# Example binaries and generated files
 examples/json/single/json-single
 examples/json/batch/json-batch
 examples/proto/single/proto-single
 examples/proto/batch/proto-batch
+examples/avro/avro
+examples/arrow/arrow
+examples/*/go.sum
 
 # OS files
 .DS_Store

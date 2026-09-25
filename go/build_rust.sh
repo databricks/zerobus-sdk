@@ -30,9 +30,8 @@ esac
 TARGET_LIB_DIR="$OUTPUT_DIR/lib/${GOOS}_${GOARCH}"
 TARGET_LIB_PATH="$TARGET_LIB_DIR/libzerobus_ffi.a"
 
-# Skip rebuild if library already exists and is newer than source
+# Skip rebuild only if the library exists and no Rust source is newer than it.
 if [ -f "$TARGET_LIB_PATH" ]; then
-    # Check if any Rust source file is newer than the library
     NEEDS_REBUILD=0
     while IFS= read -r -d '' file; do
         if [ "$file" -nt "$TARGET_LIB_PATH" ]; then
@@ -47,21 +46,24 @@ if [ -f "$TARGET_LIB_PATH" ]; then
     fi
 fi
 
-echo "Building Rust FFI library for ${GOOS}_${GOARCH}..."
+echo "Building Rust FFI library for ${GOOS}_${GOARCH} (with --all-features)..."
 
 cd "$FFI_DIR"
+
+# Always build with all features; Go gate (//go:build avro) controls code exposure
+CARGO_FEATURES="--all-features"
 
 # Determine Rust target for Windows MinGW compatibility
 if [[ "$GOOS" == "windows" ]]; then
     echo "Detected Windows environment - building for GNU target..."
     TARGET="x86_64-pc-windows-gnu"
-    cargo build --release --target "$TARGET"
+    cargo build --release --target "$TARGET" $CARGO_FEATURES
 elif command -v cargo-zigbuild &> /dev/null; then
     echo "Using cargo-zigbuild for optimized build..."
-    cargo zigbuild --release
+    cargo zigbuild --release $CARGO_FEATURES
 else
     echo "Using cargo (install cargo-zigbuild for better cross-compilation)"
-    cargo build --release
+    cargo build --release $CARGO_FEATURES
 fi
 
 mkdir -p "$TARGET_LIB_DIR"
