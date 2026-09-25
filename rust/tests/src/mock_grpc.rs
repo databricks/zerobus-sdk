@@ -1,16 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ephemeral_stream_response::Payload as ResponsePayload,
+    persistent_stream_request::Payload as PersistentRequestPayload,
+    persistent_stream_response::Payload as PersistentResponsePayload,
+    resume_ingest_stream_request::Identifier as ResumeIdentifier,
     zerobus_server::{Zerobus, ZerobusServer},
     CloseStreamSignal, CreateIngestStreamRequest, CreateIngestStreamResponse,
     EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordRequest, IngestRecordResponse,
-    PersistentStreamRequest, PersistentStreamResponse, RetireStreamRequest, RetireStreamResponse,
+    PersistentStreamRequest, PersistentStreamResponse, ResumeIngestStreamResponse,
+    RetireStreamRequest, RetireStreamResponse,
 };
 use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
@@ -51,6 +56,7 @@ impl MockResponseGate {
 
 /// Mock response that can be injected into the mock server
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MockResponse {
     /// Successful create stream response
     CreateStream { stream_id: String, delay_ms: u64 },
@@ -83,6 +89,19 @@ pub enum MockResponse {
     },
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+enum PersistentOpenFault {
+    MissingStreamId,
+    UnexpectedResponse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistentStreamConfig {
+    record_type: Option<i32>,
+    descriptor_proto: Option<Vec<u8>>,
+}
+
 /// Mock gRPC server for testing the Rust SDK
 pub struct MockZerobusServer {
     /// Responses to inject for each stream
@@ -103,6 +122,14 @@ pub struct MockZerobusServer {
     create_requests: Arc<Mutex<Vec<CreateIngestStreamRequest>>>,
     /// Single-record ingest requests received across logical streams.
     ingest_record_requests: Arc<Mutex<Vec<IngestRecordRequest>>>,
+    /// Durable offset retained across persistent-stream connections.
+    persistent_offsets: Arc<Mutex<HashMap<String, Option<i64>>>>,
+    /// Record configuration retained and validated when a stream resumes.
+    persistent_configs: Arc<Mutex<HashMap<String, PersistentStreamConfig>>>,
+    /// One-shot malformed response returned while opening a persistent stream.
+    persistent_open_fault: Arc<Mutex<Option<PersistentOpenFault>>>,
+    /// One-shot disconnect after committing a persistent write but before ACKing it.
+    fail_persistent_ack_once: Arc<AtomicBool>,
 }
 
 impl MockZerobusServer {
@@ -117,6 +144,10 @@ impl MockZerobusServer {
             connection_addresses: Arc::new(Mutex::new(HashSet::new())),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             ingest_record_requests: Arc::new(Mutex::new(Vec::new())),
+            persistent_offsets: Arc::new(Mutex::new(HashMap::new())),
+            persistent_configs: Arc::new(Mutex::new(HashMap::new())),
+            persistent_open_fault: Arc::new(Mutex::new(None)),
+            fail_persistent_ack_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -128,6 +159,7 @@ impl MockZerobusServer {
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)
+    #[allow(dead_code)]
     pub async fn inject_responses(&self, table_name: &str, responses: Vec<MockResponse>) {
         let mut response_map = self.responses.lock().await;
         response_map.insert(table_name.to_string(), responses);
@@ -166,6 +198,31 @@ impl MockZerobusServer {
         self.ingest_record_requests.lock().await.clone()
     }
 
+    #[allow(dead_code)]
+    pub async fn persistent_committed_offset(&self, stream_id: &str) -> Option<i64> {
+        self.persistent_offsets
+            .lock()
+            .await
+            .get(stream_id)
+            .copied()
+            .flatten()
+    }
+
+    #[allow(dead_code)]
+    pub async fn omit_next_persistent_stream_id(&self) {
+        *self.persistent_open_fault.lock().await = Some(PersistentOpenFault::MissingStreamId);
+    }
+
+    #[allow(dead_code)]
+    pub async fn send_unexpected_next_persistent_open_response(&self) {
+        *self.persistent_open_fault.lock().await = Some(PersistentOpenFault::UnexpectedResponse);
+    }
+
+    #[allow(dead_code)]
+    pub fn fail_next_persistent_ack_after_commit(&self) {
+        self.fail_persistent_ack_once.store(true, Ordering::SeqCst);
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -179,6 +236,10 @@ impl MockZerobusServer {
         self.connection_addresses.lock().await.clear();
         self.create_requests.lock().await.clear();
         self.ingest_record_requests.lock().await.clear();
+        self.persistent_offsets.lock().await.clear();
+        self.persistent_configs.lock().await.clear();
+        *self.persistent_open_fault.lock().await = None;
+        self.fail_persistent_ack_once.store(false, Ordering::SeqCst);
     }
 }
 
@@ -186,27 +247,6 @@ impl MockZerobusServer {
 impl Zerobus for MockZerobusServer {
     type EphemeralStreamStream =
         Pin<Box<dyn Stream<Item = Result<EphemeralStreamResponse, Status>> + Send>>;
-    type PersistentStreamStream =
-        Pin<Box<dyn Stream<Item = Result<PersistentStreamResponse, Status>> + Send>>;
-
-    async fn persistent_stream(
-        &self,
-        _request: Request<Streaming<PersistentStreamRequest>>,
-    ) -> Result<Response<Self::PersistentStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "persistent streams are not supported by this mock",
-        ))
-    }
-
-    async fn retire_stream(
-        &self,
-        _request: Request<RetireStreamRequest>,
-    ) -> Result<Response<RetireStreamResponse>, Status> {
-        Err(Status::unimplemented(
-            "retiring streams is not supported by this mock",
-        ))
-    }
-
     async fn ephemeral_stream(
         &self,
         request: Request<Streaming<EphemeralStreamRequest>>,
@@ -482,6 +522,174 @@ impl Zerobus for MockZerobusServer {
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(output_stream)))
     }
+
+    type PersistentStreamStream =
+        Pin<Box<dyn Stream<Item = Result<PersistentStreamResponse, Status>> + Send>>;
+
+    async fn persistent_stream(
+        &self,
+        request: Request<Streaming<PersistentStreamRequest>>,
+    ) -> Result<Response<Self::PersistentStreamStream>, Status> {
+        let mut inbound = request.into_inner();
+        let (tx, rx) = mpsc::channel(100);
+        let offsets = Arc::clone(&self.persistent_offsets);
+        let configs = Arc::clone(&self.persistent_configs);
+        let counter = Arc::clone(&self.stream_counter);
+        let write_count = Arc::clone(&self.write_count);
+        let open_fault = Arc::clone(&self.persistent_open_fault);
+        let fail_ack_once = Arc::clone(&self.fail_persistent_ack_once);
+
+        tokio::spawn(async move {
+            let first = match inbound.message().await {
+                Ok(Some(message)) => message.payload,
+                Ok(None) => return,
+                Err(status) => {
+                    let _ = tx.send(Err(status)).await;
+                    return;
+                }
+            };
+
+            let stream_id = match first {
+                Some(PersistentRequestPayload::CreateStream(create)) => {
+                    let id = {
+                        let mut counter = counter.lock().await;
+                        *counter += 1;
+                        format!("persistent_stream_{}", *counter)
+                    };
+                    offsets.lock().await.insert(id.clone(), None);
+                    let create = create.create_stream.unwrap_or_default();
+                    configs.lock().await.insert(
+                        id.clone(),
+                        PersistentStreamConfig {
+                            record_type: create.record_type,
+                            descriptor_proto: create.descriptor_proto,
+                        },
+                    );
+                    let payload = match open_fault.lock().await.take() {
+                        Some(PersistentOpenFault::MissingStreamId) => {
+                            PersistentResponsePayload::CreateStreamResponse(
+                                CreateIngestStreamResponse { stream_id: None },
+                            )
+                        }
+                        Some(PersistentOpenFault::UnexpectedResponse) => {
+                            PersistentResponsePayload::IngestRecordResponse(IngestRecordResponse {
+                                durability_ack_up_to_offset: Some(0),
+                            })
+                        }
+                        None => PersistentResponsePayload::CreateStreamResponse(
+                            CreateIngestStreamResponse {
+                                stream_id: Some(id.clone()),
+                            },
+                        ),
+                    };
+                    let response = PersistentStreamResponse {
+                        payload: Some(payload),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                    id
+                }
+                Some(PersistentRequestPayload::ResumeStream(resume)) => {
+                    let Some(ResumeIdentifier::StreamId(id)) = resume.identifier else {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument("missing stream_id")))
+                            .await;
+                        return;
+                    };
+                    let committed = match offsets.lock().await.get(&id).copied() {
+                        Some(offset) => offset,
+                        None => {
+                            let _ = tx.send(Err(Status::not_found("unknown stream_id"))).await;
+                            return;
+                        }
+                    };
+                    let resume_config = PersistentStreamConfig {
+                        record_type: resume.record_type,
+                        descriptor_proto: resume.descriptor_proto,
+                    };
+                    if configs.lock().await.get(&id) != Some(&resume_config) {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(
+                                "record configuration does not match persistent stream",
+                            )))
+                            .await;
+                        return;
+                    }
+                    let response = PersistentStreamResponse {
+                        payload: Some(PersistentResponsePayload::ResumeStreamResponse(
+                            ResumeIngestStreamResponse {
+                                last_committed_offset: committed,
+                            },
+                        )),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                    id
+                }
+                _ => {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument(
+                            "first persistent message must create or resume",
+                        )))
+                        .await;
+                    return;
+                }
+            };
+
+            while let Ok(Some(message)) = inbound.message().await {
+                let (offset, records) = match message.payload {
+                    Some(PersistentRequestPayload::IngestRecord(record)) => (record.offset_id, 1),
+                    Some(PersistentRequestPayload::IngestRecordBatch(batch)) => {
+                        let records = batch.batch.as_ref().map_or(0, |batch| match batch {
+                            databricks::zerobus::ingest_record_batch_request::Batch::ProtoEncodedBatch(batch) => batch.records.len(),
+                            databricks::zerobus::ingest_record_batch_request::Batch::JsonBatch(batch) => batch.records.len(),
+                            databricks::zerobus::ingest_record_batch_request::Batch::AvroBatch(batch) => batch.records.len(),
+                        });
+                        (batch.offset_id, records)
+                    }
+                    _ => continue,
+                };
+                if let Some(offset) = offset {
+                    offsets.lock().await.insert(stream_id.clone(), Some(offset));
+                    *write_count.lock().await += records as u64;
+                    if fail_ack_once.swap(false, Ordering::SeqCst) {
+                        let _ = tx
+                            .send(Err(Status::unavailable(
+                                "injected disconnect after persistent commit",
+                            )))
+                            .await;
+                        return;
+                    }
+                    let response = PersistentStreamResponse {
+                        payload: Some(PersistentResponsePayload::IngestRecordResponse(
+                            IngestRecordResponse {
+                                durability_ack_up_to_offset: Some(offset),
+                            },
+                        )),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    /// Not exercised by the existing tests; returns `Unimplemented`.
+    async fn retire_stream(
+        &self,
+        _request: Request<RetireStreamRequest>,
+    ) -> Result<Response<RetireStreamResponse>, Status> {
+        Err(Status::unimplemented(
+            "RetireStream is not implemented in the mock server",
+        ))
+    }
 }
 
 /// Helper function to create a mock server and return its address
@@ -520,6 +728,10 @@ async fn start_mock_server_inner(
         connection_addresses: Arc::clone(&mock_server.connection_addresses),
         create_requests: Arc::clone(&mock_server.create_requests),
         ingest_record_requests: Arc::clone(&mock_server.ingest_record_requests),
+        persistent_offsets: Arc::clone(&mock_server.persistent_offsets),
+        persistent_configs: Arc::clone(&mock_server.persistent_configs),
+        persistent_open_fault: Arc::clone(&mock_server.persistent_open_fault),
+        fail_persistent_ack_once: Arc::clone(&mock_server.fail_persistent_ack_once),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
