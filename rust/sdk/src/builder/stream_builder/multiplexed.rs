@@ -176,48 +176,162 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             },
         );
 
-        // `join_all` polls every open concurrently and preserves input order,
-        // so completion timing cannot change the assigned stream indices.
-        let results = join_all(opens).await;
-        let mut indexed_streams = Vec::with_capacity(self.stream_count);
-        let mut first_error = None;
-        for (stream_index, result) in results.into_iter().enumerate() {
-            match result {
-                Ok(stream) => indexed_streams.push((stream_index, stream)),
-                Err(err) => {
-                    error!(stream_index, error = %err, "Failed to create multiplexed sub-stream");
-                    first_error.get_or_insert(err);
-                }
-            }
-        }
-
-        if let Some(first_error) = first_error {
-            let cleanup_results = join_all(indexed_streams.into_iter().map(
-                |(successful_stream_index, mut stream)| async move {
-                    (successful_stream_index, stream.close().await)
-                },
-            ))
-            .await;
-            for (successful_stream_index, result) in cleanup_results {
-                if let Err(err) = result {
-                    warn!(
-                        stream_index = successful_stream_index,
-                        error = %err,
-                        "Failed to clean up multiplexed sub-stream after construction failure"
-                    );
-                }
-            }
-            return Err(first_error);
-        }
-
-        let streams: Vec<_> = indexed_streams
-            .into_iter()
-            .map(|(_stream_index, stream)| stream)
-            .collect();
+        let streams = collect_opened(opens, |mut stream: ZerobusStream| async move {
+            stream.close().await
+        })
+        .await?;
         debug_assert_eq!(streams.len(), self.stream_count);
         // This is one user-initiated logical stream creation. Counting each
         // internal lane would make the churn warning flag intentional muxes.
         crate::client_warnings::record_stream_creation(&table_properties.table_name);
         Ok(MultiplexedStream::from_streams(streams))
+    }
+}
+
+/// Preserves preassigned indices, waits for every open, and closes all successes
+/// before returning the lowest-index construction error. Cancelling this future
+/// drops pending opens and successfully constructed lanes together.
+async fn collect_opened<S, O, C, F>(
+    opens: impl IntoIterator<Item = O>,
+    close: C,
+) -> ZerobusResult<Vec<S>>
+where
+    O: std::future::Future<Output = ZerobusResult<S>>,
+    C: Fn(S) -> F,
+    F: std::future::Future<Output = ZerobusResult<()>>,
+{
+    // `join_all` polls every open concurrently and preserves input order,
+    // so completion timing cannot change the assigned stream indices.
+    let results = join_all(opens).await;
+    let mut indexed_streams = Vec::new();
+    let mut first_error = None;
+    for (stream_index, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(stream) => indexed_streams.push((stream_index, stream)),
+            Err(err) => {
+                error!(stream_index, error = %err, "Failed to create multiplexed sub-stream");
+                first_error.get_or_insert(err);
+            }
+        }
+    }
+
+    if let Some(first_error) = first_error {
+        let cleanup_results = join_all(indexed_streams.into_iter().map(
+            |(successful_stream_index, stream)| {
+                let close = &close;
+                async move { (successful_stream_index, close(stream).await) }
+            },
+        ))
+        .await;
+        for (successful_stream_index, result) in cleanup_results {
+            if let Err(err) = result {
+                warn!(
+                    stream_index = successful_stream_index,
+                    error = %err,
+                    "Failed to clean up multiplexed sub-stream after construction failure"
+                );
+            }
+        }
+        return Err(first_error);
+    }
+
+    let streams: Vec<_> = indexed_streams
+        .into_iter()
+        .map(|(_stream_index, stream)| stream)
+        .collect();
+    Ok(streams)
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct Opened(usize, Arc<AtomicUsize>);
+    impl Drop for Opened {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_order_does_not_change_lane_indices() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let opens = (0..3).map(|i| {
+            let dropped = dropped.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis((3 - i) as u64 * 100)).await;
+                Ok(Opened(i, dropped))
+            }
+        });
+        let lanes = collect_opened(opens, |_| async { Ok(()) }).await.unwrap();
+        assert_eq!(lanes.iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(lanes);
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lowest_index_failure_wins_after_all_opens_and_cleanup_settle() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let opens = (0..4).map(|i| {
+            let dropped = dropped.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis((4 - i) as u64 * 100)).await;
+                if i % 2 == 0 {
+                    Ok(Opened(i, dropped))
+                } else {
+                    Err(ZerobusError::InvalidArgument(format!("lane-{i}")))
+                }
+            }
+        });
+        let result = collect_opened(opens, |lane| {
+            let cleaned = cleaned.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                cleaned.fetch_add(1, Ordering::SeqCst);
+                drop(lane);
+                Err(ZerobusError::InvalidArgument("cleanup error".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(msg)) if msg == "lane-1"));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_completed_and_in_progress_opens() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reached = Arc::new(Notify::new());
+        let task = {
+            let dropped = dropped.clone();
+            let reached = reached.clone();
+            tokio::spawn(async move {
+                let opens = (0..3).map(|i| {
+                    let dropped = dropped.clone();
+                    let reached = reached.clone();
+                    async move {
+                        let lane = Opened(i, dropped);
+                        if i == 1 {
+                            reached.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                        if i == 2 {
+                            tokio::time::sleep(Duration::from_secs(3600)).await;
+                        }
+                        Ok(lane)
+                    }
+                });
+                collect_opened(opens, |_| async { Ok(()) }).await
+            })
+        };
+        reached.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
     }
 }

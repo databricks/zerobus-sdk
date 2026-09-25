@@ -24,14 +24,6 @@ impl ZerobusStream {
         }
     }
 
-    /// Returns the final server error after this stream becomes terminal.
-    /// Multiplexed streams use this to preserve the lane's typed failure when
-    /// they discover an asynchronously closed lane.
-    pub(crate) async fn terminal_error(&self) -> Option<ZerobusError> {
-        self.terminal_token.cancelled().await;
-        self.server_error_rx.borrow().clone()
-    }
-
     /// Internal method to wait for a specific offset to be acknowledged.
     /// Used by both `flush()` and `wait_for_offset()`.
     async fn wait_for_offset_internal(
@@ -80,7 +72,7 @@ impl ZerobusStream {
                     }
                     // fail_stream sets is_closed, publishes the error, then cancels
                     // terminal_token. This path can observe closure before the final
-                    // watch value; mux terminal_error() waits on the token before reading it.
+                    // watch value; the mux terminal-cause hook waits on the token before reading it.
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(Self::normalize_wait_error(server_error));
                     }
