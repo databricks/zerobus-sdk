@@ -1,5 +1,5 @@
 //! Shared mux routing and lifecycle. Transport-specific invariants stay in `MuxLane`.
-use super::lane::MuxLane;
+use super::lane::{CapacityContext, MuxLane};
 use super::{MessageId, STREAM_BITS};
 use crate::{ZerobusError, ZerobusResult};
 use futures::future::join_all;
@@ -64,11 +64,11 @@ impl<S: MuxLane> MuxCore<S> {
     }
 
     fn first_closed_stream(&self) -> Option<usize> {
-        self.streams.iter().position(MuxLane::is_closed)
+        self.streams.iter().position(MuxLane::is_terminal)
     }
 
     async fn lane_terminal_error(&self, idx: usize, fallback: ZerobusError) -> ZerobusError {
-        self.streams[idx].terminal_error().await.unwrap_or(fallback)
+        self.streams[idx].terminal_cause().await.unwrap_or(fallback)
     }
 
     fn shutdown_on_failure(&self, trigger_index: usize, cause: &ZerobusError) {
@@ -94,13 +94,16 @@ impl<S: MuxLane> MuxCore<S> {
     async fn reserve_capacity(&self, stream: &S, idx: usize) -> ZerobusResult<S::Reservation> {
         let started_at = tokio::time::Instant::now();
         let timeout_ms = CAPACITY_WAIT_TIMEOUT.as_millis();
-        let table_name = stream.table_name();
-        let (capacity_option, capacity) = stream.capacity();
+        let CapacityContext {
+            table_name,
+            capacity_option,
+            capacity,
+        } = stream.capacity_context();
 
         self.check_closed()?;
 
         let wait_for_reservation = async {
-            let reservation = stream.reserve_capacity();
+            let reservation = stream.reserve_slot();
             tokio::pin!(reservation);
 
             if let Ok(result) = tokio::time::timeout(Duration::from_secs(1), &mut reservation).await
@@ -148,7 +151,7 @@ impl<S: MuxLane> MuxCore<S> {
             Ok(Err(e)) => Err(self.handle_lane_error(idx, e).await),
             Err(_) => {
                 self.check_closed()?;
-                if stream.is_closed() {
+                if stream.is_terminal() {
                     return Err(self
                         .handle_lane_error(
                             idx,
@@ -189,7 +192,7 @@ impl<S: MuxLane> MuxCore<S> {
         let encoded_batch = prepare(stream)?;
         let reservation = self.reserve_capacity(stream, idx).await?;
         let enqueue_result = stream
-            .enqueue_reserved_admitted(encoded_batch, reservation, || self.check_closed())
+            .enqueue_admitted(encoded_batch, reservation, || self.check_closed())
             .await;
 
         match enqueue_result {
@@ -201,7 +204,7 @@ impl<S: MuxLane> MuxCore<S> {
     // Payload errors and wait timeouts leave the lane alive; only terminal
     // lane errors poison the mux.
     async fn handle_lane_error(&self, idx: usize, e: ZerobusError) -> ZerobusError {
-        if self.streams[idx].is_closed() {
+        if self.streams[idx].is_terminal() {
             let cause = self.lane_terminal_error(idx, e).await;
             self.shutdown_on_failure(idx, &cause);
             cause
@@ -229,12 +232,12 @@ impl<S: MuxLane> MuxCore<S> {
             }
         }
 
-        let results = join_all(self.streams.iter().map(MuxLane::flush)).await;
+        let results = join_all(self.streams.iter().map(MuxLane::flush_lane)).await;
         let mut first_error: Option<ZerobusError> = None;
         let mut first_terminal: Option<(usize, ZerobusError)> = None;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
-                if self.streams[i].is_closed() && first_terminal.is_none() {
+                if self.streams[i].is_terminal() && first_terminal.is_none() {
                     let terminal_error = self.lane_terminal_error(i, e.clone()).await;
                     first_terminal = Some((i, terminal_error));
                 }
@@ -270,7 +273,7 @@ impl<S: MuxLane> MuxCore<S> {
             )));
         }
         match self.streams[idx]
-            .wait_for_offset(message_id.sub_offset())
+            .wait_for_local_offset(message_id.sub_offset())
             .await
         {
             Ok(()) => Ok(()),
@@ -287,7 +290,7 @@ impl<S: MuxLane> MuxCore<S> {
         if self.close_flush_result.is_none() {
             if self.failure.get().is_none() {
                 if let Some(idx) = self.first_closed_stream() {
-                    if let Some(error) = self.streams[idx].terminal_error().await {
+                    if let Some(error) = self.streams[idx].terminal_cause().await {
                         let _ = self.failure.set(error);
                     }
                 }
@@ -298,8 +301,8 @@ impl<S: MuxLane> MuxCore<S> {
             let results = join_all(self.streams.iter().map(MuxLane::flush_before_close)).await;
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(error) = result {
-                    if self.failure.get().is_none() && self.streams[i].is_closed() {
-                        if let Some(cause) = self.streams[i].terminal_error().await {
+                    if self.failure.get().is_none() && self.streams[i].is_terminal() {
+                        if let Some(cause) = self.streams[i].terminal_cause().await {
                             let _ = self.failure.set(cause);
                         }
                     }
@@ -322,7 +325,7 @@ impl<S: MuxLane> MuxCore<S> {
                     warn!(stream_index = i, error = %error, "Additional terminal lane error during close");
                 }
             }
-            stream.shutdown_callbacks().await;
+            stream.drain_callbacks().await;
         }))
         .await;
 
@@ -344,7 +347,7 @@ impl<S: MuxLane> MuxCore<S> {
         let _ = self.close().await;
         let mut all_batches = Vec::new();
         for stream in &self.streams {
-            all_batches.extend(stream.get_unacked_batches().await?);
+            all_batches.extend(stream.unacked_batches().await?);
         }
         Ok(all_batches)
     }

@@ -297,33 +297,4 @@ impl ZerobusStream {
             }
         }
     }
-
-    pub(crate) async fn enqueue_reserved_admitted<F>(
-        &self,
-        encoded_batch: EncodedBatch,
-        reservation: crate::landing_zone::CapacityReservation,
-        admit: F,
-    ) -> ZerobusResult<OffsetId>
-    where
-        F: FnOnce() -> ZerobusResult<()>,
-    {
-        let _guard = self.sync_mutex.lock().await;
-        admit()?;
-        self.check_open()?;
-
-        let offset_id = self.logical_offset_id_generator.next();
-        debug!(
-            offset_id,
-            record_count = encoded_batch.get_record_count(),
-            "Ingesting record(s)"
-        );
-        self.landing_zone.enqueue_reserved(
-            Box::new(IngestRequest {
-                payload: encoded_batch,
-                offset_id,
-            }),
-            reservation,
-        );
-        Ok(offset_id)
-    }
 }
