@@ -9,6 +9,7 @@ every other Zerobus SDK.
 - **Exceptions** — every failure throws `zerobus::ZerobusException`, which
   carries a message and an `is_retryable()` flag.
 - **Proto and JSON** ingestion, single and batched.
+- **Avro** ingestion (Beta, requires `-DZEROBUS_ENABLE_AVRO`, ephemeral-only).
 - **Dynamic protobuf** — build a descriptor and encode records straight from
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
 - **Arrow Flight** ingestion — streaming of Arrow record batches with optional
@@ -128,10 +129,9 @@ However you link it, include the umbrella header:
 
 ## Choosing an ingestion format
 
-A record-oriented `Stream` accepts two wire formats (proto and JSON), and there
-are three ways to get your data onto one. They differ only in how the record
-schema is handled — the streaming, auth, and recovery machinery is identical.
-For columnar data, use a separate [Arrow Flight
+A record-oriented `Stream` accepts three wire formats (proto, JSON, and Avro),
+and they differ only in how records are encoded — the streaming, auth, and
+recovery machinery is identical. For columnar data, use a separate [Arrow Flight
 stream](#arrow-flight-ingestion).
 
 | Path | Format | Schema source | Extra build deps | Best for |
@@ -139,11 +139,11 @@ stream](#arrow-flight-ingestion).
 | **JSON** | JSON | none — server maps fields to columns by name | none | getting started, flexible schemas |
 | **Dynamic proto** | protobuf | fetched from Unity Catalog at runtime (`ProtoSchema`) | none | production proto without a `.proto` file |
 | **Static proto** | protobuf | a checked-in `.proto` compiled by `protoc` | `protoc` + libprotobuf | offline builds, compile-time typing |
+| **Avro (Beta)** | Avro | stream's writer schema | none | schema validation, requires `-DZEROBUS_ENABLE_AVRO` |
 
-**If in doubt, start with JSON or dynamic proto** — neither needs a protobuf
-toolchain in your build. Static proto trades that convenience for compile-time
-type safety and no runtime schema fetch, at the cost of a hand-maintained
-`.proto` that must be kept in sync with the table.
+**If in doubt, start with JSON** — it needs nothing beyond the SDK. Avro adds
+schema validation (Beta, requires build flag). Proto is for production workloads
+that need compile-time typing or offline builds.
 
 ## The cardinal performance rule
 
@@ -228,6 +228,33 @@ batch.push_back(schema.encode_json(R"({"id": 1, "payload": "hi"})"));
 stream.ingest_proto_records(batch);
 stream.flush();
 ```
+
+### Avro ingestion (Beta)
+
+Encode records as JSON objects; the Rust core encodes them against the table's
+Avro writer schema. Requires building the SDK with `-DZEROBUS_ENABLE_AVRO=ON`.
+
+```cpp
+zerobus::TableProperties table;
+table.table_name = "main.analytics.events";
+
+zerobus::StreamOptions options;
+options.record_type = zerobus::RecordType::Avro;
+
+zerobus::Stream stream =
+    sdk.create_stream(table, client_id, client_secret, options);
+
+// JSON record objects (schema validation happens at the server).
+std::vector<std::string> batch = {
+    R"({"id": 1, "payload": "hi"})",
+    R"({"id": 2, "payload": "there"})",
+};
+stream.ingest_avro_records(batch);   // queue the batch — no per-record wait
+stream.flush();                      // wait once for all acks
+stream.close();
+```
+
+Avro examples are in [`cpp/examples/avro/`](examples/avro).
 
 ### Arrow Flight ingestion
 
