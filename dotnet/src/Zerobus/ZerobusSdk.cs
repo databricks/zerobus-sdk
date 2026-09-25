@@ -125,6 +125,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="clientSecret">OAuth 2.0 client secret.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public JsonZerobusStream CreateJsonStream(
         string tableName,
         string clientId,
@@ -147,6 +148,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a JSON-only stream asynchronously.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public async Task<JsonZerobusStream> CreateJsonStreamAsync(
         string tableName,
         string clientId,
@@ -179,6 +181,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="clientSecret">OAuth 2.0 client secret.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public ProtoZerobusStream CreateProtoStream(
         string tableName,
         byte[] descriptorProto,
@@ -203,6 +206,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a protobuf-only stream asynchronously.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public async Task<ProtoZerobusStream> CreateProtoStreamAsync(
         string tableName,
         byte[] descriptorProto,
@@ -231,6 +235,7 @@ public sealed class ZerobusSdk : IDisposable
         string clientSecret,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -252,6 +257,7 @@ public sealed class ZerobusSdk : IDisposable
         string clientSecret,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -324,6 +330,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="headersProvider">Custom authentication headers provider.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public JsonZerobusStream CreateJsonStreamWithHeadersProvider(
         string tableName,
         IHeadersProvider headersProvider,
@@ -368,6 +375,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="headersProvider">Custom authentication headers provider.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public ProtoZerobusStream CreateProtoStreamWithHeadersProvider(
         string tableName,
         byte[] descriptorProto,
@@ -413,6 +421,7 @@ public sealed class ZerobusSdk : IDisposable
         IHeadersProvider headersProvider,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -461,6 +470,7 @@ public sealed class ZerobusSdk : IDisposable
         IHeadersProvider headersProvider,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
