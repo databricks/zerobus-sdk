@@ -146,7 +146,7 @@ impl ZerobusStream {
         match prepared {
             PreparedInput::Ready(record) => Ok(record),
             #[cfg(feature = "avro")]
-            PreparedInput::AvroObject(value) => {
+            PreparedInput::AvroObject(mut value) => {
                 if self.options.record_type != crate::databricks::zerobus::RecordType::Avro {
                     return Err(ZerobusError::InvalidArgument(
                         "AvroRecord requires stream record type to be Avro".to_string(),
@@ -157,6 +157,9 @@ impl ZerobusStream {
                         "Avro schema required but not provided in stream configuration".to_string(),
                     )
                 })?;
+                // `resolve` rejects `Value::Uuid` against a `Schema::Fixed(16)`, so
+                // rewrite those to `Value::Fixed` first (see `avro_uuid`).
+                crate::avro_uuid::normalize_fixed_uuid(&mut value, &schema.parsed);
                 let datum = value
                     .resolve(&schema.parsed)
                     .and_then(|resolved| apache_avro::to_avro_datum(&schema.parsed, resolved))

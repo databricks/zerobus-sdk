@@ -109,9 +109,19 @@ impl FormatConfig {
             }
             #[cfg(feature = "avro")]
             Self::Avro(json) => {
-                let parsed = apache_avro::Schema::parse_str(&json).map_err(|e| {
+                // Strip `logicalType: "uuid"` from fixed nodes so they parse as
+                // `Schema::Fixed(16)` and encode as 16 raw bytes (see `avro_uuid`).
+                // The original `json` still goes to the server, logical type intact.
+                let mut stripped: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
                     ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
                 })?;
+                crate::avro_uuid::strip_fixed_uuid_logical_type(&mut stripped);
+                let parsed =
+                    apache_avro::Schema::parse_str(&stripped.to_string()).map_err(|e| {
+                        ZerobusError::AvroSchemaParseError(format!(
+                            "Failed to parse Avro schema: {e}"
+                        ))
+                    })?;
                 return Ok(GrpcFormat {
                     record_type: RecordType::Avro,
                     descriptor_proto: None,

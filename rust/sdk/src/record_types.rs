@@ -188,6 +188,9 @@ impl<T: serde::Serialize> From<JsonValue<T>> for EncodedRecord {
 /// can represent any Avro type, including unions, `fixed`, `decimal`, and logical types.
 /// For data you have already encoded, use [`AvroBytes`](crate::AvroBytes).
 ///
+/// `AvroValue::Uuid` works for both `string` and `fixed(16)` UUID columns; with
+/// [`AvroBytes`](crate::AvroBytes) you must pre-encode a `fixed(16)` UUID as 16 raw bytes.
+///
 /// # Examples
 ///
 /// ```no_run

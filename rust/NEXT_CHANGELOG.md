@@ -31,6 +31,14 @@
 
 ### Bug Fixes
 
+- Fixed Avro (`avro` feature, Beta) encoding of `fixed(16)` + `logicalType:
+  "uuid"` columns. apache-avro collapses fixed-backed and string-backed UUIDs
+  into one type and always encodes the 37-byte hyphenated string, which a server
+  expecting a 16-byte `fixed(16)` cannot decode. The SDK now encodes fixed-backed
+  UUID columns as 16 raw bytes while still declaring the logical type to the
+  server, and `string` + `uuid` columns are unchanged. `AvroValue::Uuid` works
+  for both; the writer schema JSON sent to the server is untouched.
+
 ### Documentation
 
 - Added a multiplexed Avro example using loop-then-flush ingestion.

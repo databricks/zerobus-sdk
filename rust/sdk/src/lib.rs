@@ -40,6 +40,8 @@ pub mod databricks {
     }
 }
 
+#[cfg(feature = "avro")]
+mod avro_uuid;
 mod builder;
 mod callbacks;
 mod client_warnings;
