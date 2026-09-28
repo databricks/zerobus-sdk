@@ -11,15 +11,15 @@ function(zerobus_add_test test_path)
 endfunction()
 
 zerobus_add_test(error_test)
-zerobus_add_test(utils_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
-zerobus_add_test(internal/concurrency_test)
-zerobus_add_test(internal/log_test)
+zerobus_add_test(internal/common/utils_test)
+zerobus_add_test(internal/platform/concurrency_test)
+zerobus_add_test(internal/platform/log_test)
 
-set_tests_properties(internal_log_test PROPERTIES ENVIRONMENT
+set_tests_properties(internal_platform_log_test PROPERTIES ENVIRONMENT
   "ZEROBUS_LOG_LEVEL=info;ZEROBUS_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/log_test.log")
 
 # A synchronization regression must fail instead of hanging the test suite.
-set_tests_properties(sdk_test stream_test internal_concurrency_test
+set_tests_properties(sdk_test stream_test internal_platform_concurrency_test
                      PROPERTIES TIMEOUT 30)

@@ -34,10 +34,10 @@ if(ZEROBUS_WERROR)
 endif()
 
 set(ZEROBUS_SOURCES
-  src/internal/concurrency.c
+  src/internal/common/utils.c
+  src/internal/platform/concurrency.c
+  src/internal/platform/log.c
   src/error.c
-  src/internal/log.c
-  src/utils.c
   src/sdk.c
   src/stream.c
 )
