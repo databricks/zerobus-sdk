@@ -43,6 +43,10 @@
 
 ### Internal Changes
 
+- The `tools/generate_files` crate now resolves `protoc` on its own (`PROTOC`
+  env var first, then the vendored binary), so its tests no longer require a
+  system protoc on PATH.
+
 - Added the feature-gated persistent gRPC transport, durable wire offsets,
   resume-watermark reconciliation after a lost acknowledgment, and validation
   for setup responses, acknowledgment bounds, and offset overflow.

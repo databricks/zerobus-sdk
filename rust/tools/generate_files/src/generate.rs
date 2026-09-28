@@ -236,6 +236,8 @@ pub fn generate_rust_and_descriptor(
 ) -> Result<()> {
     use std::path::Path;
 
+    super::protoc::resolve_protoc()?;
+
     let proto_file = Path::new(proto_path);
     let proto_dir = proto_file.parent().context("no parent dir")?;
 
