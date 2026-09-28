@@ -65,7 +65,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 ## Feature flags
 
 - `arrow-flight` — Arrow Flight support. Opt-in.
-- `avro` — Avro record format (Beta). Off by default; requires Rust 1.85 (via `apache-avro`). Select with `.avro(schema)`, then ingest `AvroRecord` (encoded against the writer schema) or pre-encoded `AvroBytes`. Ephemeral streams only; feature in development.
+- `avro` — Avro record format (Beta). Off by default; requires Rust 1.88 (via `apache-avro` 0.22). Select with `.avro(schema)`, then ingest `AvroRecord` (encoded against the writer schema) or pre-encoded `AvroBytes`. Ephemeral streams only; feature in development.
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.
