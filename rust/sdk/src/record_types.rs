@@ -654,8 +654,33 @@ mod tests {
             ]);
 
             let resolved = value.resolve(&schema).unwrap();
-            let datum = apache_avro::to_avro_datum(&schema, resolved).unwrap();
+            let datum = apache_avro::writer::datum::GenericDatumWriter::builder(&schema)
+                .build()
+                .unwrap()
+                .write_value_to_vec(resolved)
+                .unwrap();
             assert!(!datum.is_empty());
+        }
+
+        #[test]
+        fn avro_fixed_uuid_encodes_as_16_raw_bytes() {
+            // Regression for the fixed(16)+uuid encoding bug: apache-avro <= 0.21 collapsed
+            // fixed(16)+uuid into a string and emitted 37 bytes. 0.22 preserves the fixed
+            // backing, so `AvroValue::Uuid` encodes as 16 raw bytes.
+            let schema_str = r#"{"type":"fixed","size":16,"name":"U","logicalType":"uuid"}"#;
+            let schema = apache_avro::Schema::parse_str(schema_str).unwrap();
+            let uuid =
+                apache_avro::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+            let value = apache_avro::types::Value::Uuid(uuid);
+
+            let resolved = value.resolve(&schema).unwrap();
+            let datum = apache_avro::writer::datum::GenericDatumWriter::builder(&schema)
+                .build()
+                .unwrap()
+                .write_value_to_vec(resolved)
+                .unwrap();
+            assert_eq!(datum, uuid.into_bytes().to_vec());
+            assert_eq!(datum.len(), 16);
         }
 
         #[test]

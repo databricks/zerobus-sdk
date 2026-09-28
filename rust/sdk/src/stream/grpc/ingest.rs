@@ -159,7 +159,11 @@ impl ZerobusStream {
                 })?;
                 let datum = value
                     .resolve(&schema.parsed)
-                    .and_then(|resolved| apache_avro::to_avro_datum(&schema.parsed, resolved))
+                    .and_then(|resolved| {
+                        apache_avro::writer::datum::GenericDatumWriter::builder(&schema.parsed)
+                            .build()?
+                            .write_value_to_vec(resolved)
+                    })
                     .map_err(|e| ZerobusError::AvroEncodingError(e.to_string()))?;
                 Ok(EncodedRecord::Avro(datum))
             }

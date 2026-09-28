@@ -5,7 +5,7 @@
 
 use std::error::Error;
 
-use apache_avro::{to_avro_datum, Schema};
+use apache_avro::{writer::datum::GenericDatumWriter, Schema};
 use databricks_zerobus_ingest_sdk::{AvroBytes, AvroRecord, AvroValue, ZerobusSdk};
 
 // Change constants to match your data.
@@ -62,7 +62,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let schema = Schema::parse_str(AVRO_SCHEMA)?;
     let mut pre_encoded_batch: Vec<AvroBytes> = Vec::new();
     for value in [order(3, "Carol"), order(4, "Dan")] {
-        let datum = to_avro_datum(&schema, value.resolve(&schema)?)?;
+        let datum = GenericDatumWriter::builder(&schema)
+            .build()?
+            .write_value_to_vec(value.resolve(&schema)?)?;
         pre_encoded_batch.push(AvroBytes(datum));
     }
     if let Some(offset_id) = stream.ingest_records_offset(pre_encoded_batch).await? {

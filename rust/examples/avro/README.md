@@ -30,7 +30,7 @@ Avro is a third record format option alongside JSON and Protocol Buffers: a comp
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 - **`multiplexed.rs`** - Route Avro records across managed sub-streams when one stream is the bottleneck
 
-> **Beta / feature flag.** Avro is behind the `avro` Cargo feature (the examples' `Cargo.toml` enables it for you). It is **Beta**: ephemeral streams only, and the feature is in development. The `avro` feature requires Rust 1.85 (via `apache-avro`).
+> **Beta / feature flag.** Avro is behind the `avro` Cargo feature (the examples' `Cargo.toml` enables it for you). It is **Beta**: ephemeral streams only, and the feature is in development. The `avro` feature requires Rust 1.88 (via `apache-avro`).
 
 ## Two Ways to Pass Data
 
