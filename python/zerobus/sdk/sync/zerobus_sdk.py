@@ -49,15 +49,25 @@ class ZerobusStream:
     Python wrapper around Rust ZerobusStream.
 
     Wraps the Rust implementation to provide iterator-based APIs for better
-    compatibility with the old Python SDK.
+    compatibility with the old Python SDK. Handles Avro encoding transparently.
     """
 
-    def __init__(self, rust_stream: _RustZerobusStream):
+    def __init__(self, rust_stream: _RustZerobusStream, avro_encoder=None):
         self._inner = rust_stream
+        self._avro = avro_encoder  # AvroEncoder for an Avro stream, else None
+
+    def _encode_payload(self, payload):
+        """Encode payload to Avro bytes on an Avro stream; else pass through."""
+        return payload if self._avro is None else self._avro.encode(payload)
+
+    def _encode_payloads(self, payloads):
+        """Encode a batch on an Avro stream; else pass through."""
+        return payloads if self._avro is None else self._avro.encode_batch(payloads)
 
     # Forward all methods to Rust, converting iterables as needed
     def ingest_record(self, payload):
         """Ingest a record and return a RecordAcknowledgment (deprecated - use ingest_record_offset)."""
+        payload = self._encode_payload(payload)
         return self._inner.ingest_record(payload)
 
     def ingest_record_offset(self, payload):
@@ -67,6 +77,7 @@ class ZerobusStream:
         acknowledgment in the background. The idiomatic flow is to ingest in a loop
         and call ``flush()`` once to confirm durability (or use an ``AckCallback``).
         """
+        payload = self._encode_payload(payload)
         return self._inner.ingest_record_offset(payload)
 
     def ingest_record_nowait(self, payload):
@@ -76,10 +87,12 @@ class ZerobusStream:
         before the task allocates an offset, so this is not a safe durability path.
         Prefer ``ingest_record_offset()`` or ``ingest_records_offset()``.
         """
+        payload = self._encode_payload(payload)
         return self._inner.ingest_record_nowait(payload)
 
     def ingest_records_offset(self, payloads):
         """Submit batch of records and return final offset."""
+        payloads = self._encode_payloads(payloads)
         return self._inner.ingest_records_offset(payloads)
 
     def ingest_records_nowait(self, payloads):
@@ -88,6 +101,7 @@ class ZerobusStream:
         Same detached-task caveats as ``ingest_record_nowait()``. Prefer
         ``ingest_records_offset()``.
         """
+        payloads = self._encode_payloads(payloads)
         return self._inner.ingest_records_nowait(payloads)
 
     def wait_for_offset(self, offset: int):
@@ -222,7 +236,13 @@ class ZerobusArrowStream:
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that provides unified create_stream API."""
 
-    def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+    def __init__(
+        self,
+        host: str,
+        unity_catalog_url: str,
+        application_name: Optional[str] = None,
+        connection_per_stream: bool = True,
+    ):
         """
         Create a Zerobus SDK instance.
 
@@ -233,8 +253,11 @@ class ZerobusSdk:
             application_name: Optional caller identifier (conventionally
                 "<product>/<version>") appended to the HTTP user-agent header on
                 gRPC requests toward the Zerobus server.
+            connection_per_stream: Whether each JSON/protobuf stream gets a
+                dedicated gRPC connection. Defaults to True. Set to False to
+                share one connection across streams.
         """
-        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name)
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name, connection_per_stream)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None
@@ -297,14 +320,16 @@ class ZerobusSdk:
 
     def create_stream(
         self,
-        client_id: str,
-        client_secret: str,
-        table_properties,
+        client_id: str = None,
+        client_secret: str = None,
+        table_properties=None,
         options=None,
         headers_provider=None,
+        *,
+        auth=None,
     ):
         """
-        Create a stream with OAuth authentication or custom headers provider.
+        Create a stream with OAuth, external-IdP federation, or a custom headers provider.
 
         Args:
             client_id: OAuth client ID
@@ -312,19 +337,54 @@ class ZerobusSdk:
             table_properties: Table configuration
             options: Optional stream configuration
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
+            auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation;
+                when set, client_id/client_secret are not required.
         """
-        if headers_provider is not None:
+        if auth is not None and (client_id is not None or client_secret is not None):
+            raise ValueError(
+                "client_id/client_secret cannot be combined with auth=; "
+                "pass table_properties as a keyword when using auth=, "
+                "e.g. create_stream(table_properties=..., auth=...)"
+            )
+        if table_properties is None:
+            raise ValueError("table_properties is required")
+
+        from zerobus.sdk.shared.avro import make_encoder
+
+        avro_encoder = make_encoder(table_properties.avro_schema)
+
+        if auth is not None:
+            from zerobus.sdk.shared.auth import FederatedToken
+
+            if not isinstance(auth, FederatedToken):
+                raise ValueError("auth= must be a FederatedToken instance")
+            # External-IdP federation (RFC 8693). Build a FRESH native supplier per
+            # stream (not memoized on the FederatedToken, which would freeze the
+            # first loop's task-locals and policy). allow_async=False: the sync SDK
+            # cannot drive an awaitable, so an async callback is rejected as misuse.
+            # Reuse still shares the cache via the stable _cache_identity.
+            native_supplier = _core.IdpSupplier(auth.idp_token_supplier, False, auth._cache_identity)
+            # The native supplier holds the callback (and any async context) on a
+            # GC-visible holder that it references only weakly; create_stream_federated
+            # moves the sole retained strong reference onto the stream, keeping a
+            # self-referential owner/stream/callback cycle collectable.
+            rust_stream = self._inner.create_stream_federated(
+                table_properties, native_supplier, auth.databricks_client_id, options
+            )
+        elif headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
             rust_stream = self._inner.create_stream_with_headers_provider(table_properties, headers_provider, options)
         else:
             # Use OAuth authentication
+            if client_id is None or client_secret is None:
+                raise ValueError("client_id and client_secret are required unless auth= or headers_provider= is given")
             rust_stream = self._inner.create_stream(client_id, client_secret, table_properties, options)
-        return ZerobusStream(rust_stream)
+        return ZerobusStream(rust_stream, avro_encoder=avro_encoder)
 
     def recreate_stream(self, old_stream: ZerobusStream):
-        """Recreate a stream from an old stream."""
+        """Recreate a stream from an old stream, preserving the Avro encoder if set."""
         rust_stream = self._inner.recreate_stream(old_stream._inner)
-        return ZerobusStream(rust_stream)
+        return ZerobusStream(rust_stream, avro_encoder=old_stream._avro)
 
 
 # Direct re-exports

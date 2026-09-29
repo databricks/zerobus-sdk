@@ -31,6 +31,9 @@
 //!
 //! See the `examples/` directory for complete working examples.
 
+#[cfg(feature = "avro")]
+use std::sync::Arc;
+
 pub mod databricks {
     pub mod zerobus {
         include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
@@ -45,20 +48,23 @@ mod dynamic_proto;
 mod errors;
 mod headers_provider;
 mod landing_zone;
-#[cfg(feature = "testing")]
 mod multiplexed_stream;
 mod offset_generator;
 mod proxy;
 mod record_types;
 pub mod schema;
 mod sdk;
+#[cfg(feature = "arrow-flight")]
+mod stats;
 mod stream;
 mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
 mod token_cache;
 
-pub use builder::{StreamBuilder, ZerobusSdkBuilder};
+#[cfg(feature = "avro")]
+pub use apache_avro::types::Value as AvroValue;
+pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use dynamic_proto::{
@@ -68,16 +74,26 @@ pub use dynamic_proto::{
 pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
-#[cfg(feature = "testing")]
+pub use headers_provider::{
+    FederatedTokenProvider, HeadersProvider, IdpTokenCallback, IdpTokenSupplier,
+    OAuthHeadersProvider,
+};
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
+#[doc(hidden)]
+pub use record_types::PreparedInput;
+#[cfg(feature = "avro")]
+pub use record_types::{AvroBytes, AvroEncodedRecord, AvroRecord};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+#[cfg(feature = "arrow-flight")]
+pub use stats::{
+    channel_exporter, BatchStats, ChannelExporter, ReconnectReason, StatsExporter, StreamStat,
+};
 #[cfg(feature = "testing")]
 pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
@@ -110,6 +126,16 @@ pub enum StreamType {
     Persistent,
 }
 
+/// The Avro writer schema in the two forms the SDK needs: the raw JSON sent to the server
+/// on stream creation, and the parsed schema used to encode records at ingest. Held
+/// together so the two always coexist.
+#[cfg(feature = "avro")]
+#[derive(Debug)]
+pub(crate) struct AvroSchema {
+    pub(crate) json: String,
+    pub(crate) parsed: apache_avro::Schema,
+}
+
 /// The properties of the table to ingest to.
 ///
 /// Configure the table via the builder API:
@@ -124,6 +150,8 @@ pub(crate) struct TableProperties {
     pub(crate) table_name: String,
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
     pub(crate) message_descriptor: Option<MessageDescriptor>,
+    #[cfg(feature = "avro")]
+    pub(crate) avro_schema: Option<Arc<AvroSchema>>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;

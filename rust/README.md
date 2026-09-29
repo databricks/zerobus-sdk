@@ -49,7 +49,9 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
+- **Multiplexed Streams** *(Beta)* - Raise aggregate gRPC throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
+- **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.88 (via `apache-avro`); default builds are unaffected. Feature in development.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -92,11 +94,12 @@ tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-JSON and Protocol Buffers share one stream API, with two ingestion methods. Arrow Flight is a separate columnar API.
+JSON and Protocol Buffers share one stream API, with two ingestion methods. Avro *(Beta, opt-in)* rides the same stream API. Arrow Flight is a separate columnar API.
 
 **Serialization:**
 - **JSON** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
 - **Protocol Buffers** (Recommended for production): Type-safe approach with schema validation at compile time
+- **Avro** *(Beta, opt-in)*: Row-oriented encoding against a writer schema. Enable with `features = ["avro"]`; feature in development
 
 **Ingestion Methods:**
 - **Single-record** (`ingest_record_offset`): Ingest records one at a time with per-record acknowledgment
@@ -208,10 +211,15 @@ zerobus_rust_sdk/
 │   │   ├── single.rs                   # Protocol Buffers single-record example
 │   │   ├── batch.rs                    # Protocol Buffers batch ingestion example
 │   │   └── output/                     # Generated schema files (shared)
-│   └── arrow/                          # Arrow Flight example (feature: arrow-flight)
+│   ├── arrow/                          # Arrow Flight example (feature: arrow-flight)
+│   │   ├── README.md
+│   │   ├── Cargo.toml
+│   │   └── src/main.rs                 # Arrow `RecordBatch` ingestion example
+│   └── avro/                           # Avro examples (excluded crate, feature: avro; Beta)
 │       ├── README.md
 │       ├── Cargo.toml
-│       └── src/main.rs                 # Arrow `RecordBatch` ingestion example
+│       ├── single.rs                   # Avro single-record example
+│       └── batch.rs                    # Avro batch ingestion example
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
@@ -249,8 +257,9 @@ zerobus_rust_sdk/
 
 ### JSON / Protocol Buffers Architecture Overview
 
-The following diagram describes the JSON / Protocol Buffers stream. Arrow Flight uses a
-separate Flight request/response exchange and lifecycle state machine.
+The following diagram describes the JSON / Protocol Buffers stream (Avro, when enabled,
+uses this same stream). Arrow Flight uses a separate Flight request/response exchange and
+lifecycle state machine.
 
 ```
 +-----------------+
@@ -321,6 +330,94 @@ Recovery reconnects and replays only unacknowledged batch suffixes. After a fail
 `close()`, call `get_unacked_batches()` to inspect the retained work; the returned
 set can be empty when every record was already durable.
 
+#### Telemetry *(Beta)*
+
+Arrow Flight streams do not support `ack_callback`, but you can register a
+`StatsExporter` to receive per-batch telemetry:
+
+```rust,ignore
+use std::num::NonZeroUsize;
+use databricks_zerobus_ingest_sdk::{channel_exporter, StreamStat};
+
+let (exporter, mut stats_rx) = channel_exporter(NonZeroUsize::new(1024).unwrap());
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth("client-id", "client-secret")
+    .arrow(schema)
+    .stats_exporter(exporter)
+    .build_arrow()
+    .await?;
+
+// Drain concurrently: the bounded channel drops events when full. recv() ends
+// after all exporter clones are dropped and the queued events are consumed.
+let telemetry = tokio::spawn(async move {
+    while let Some(stat) = stats_rx.recv().await {
+        if let StreamStat::BatchSent { offset, attempt, stats } = stat {
+            // stats.approximate_wire_bytes: FlightData payload after IPC compression
+            //   (excludes transport overhead and schema; does not measure socket writes)
+            // stats.uncompressed_bytes: emitted IPC buffer bytes before compression
+            // stats.records: rows in this transmission; offset: the batch's ingest offset
+            // attempt: 0 = first send, >0 = retransmit of the unacked suffix after reconnect
+            let _ = (offset, attempt, stats);
+        }
+    }
+});
+
+// Ingest in a loop, then flush() once — never wait per batch.
+for batch in batches {
+    stream.ingest_batch(batch).await?;
+}
+stream.flush().await?;
+stream.close().await?;
+
+// Release the stream's exporter. Drop any retained exporter clones too.
+drop(stream);
+telemetry.await?;
+```
+
+`StreamStat` events:
+- `BatchSent { offset, attempt, stats }` — a batch was encoded and yielded to the transport.
+  This does not confirm network delivery. `stats` is a `BatchStats`
+  with `records`, `approximate_wire_bytes`, and `uncompressed_bytes`. Emitted with the **final data
+  frame**, including on retransmission, even if the batch is never acknowledged. Later cancellation
+  or drop preserves the event; a transmission canceled before its final frame emits none. `attempt`
+  is `0` on the first send and `> 0` on a retransmit after a reconnect. Batches buffered
+  during recovery still use `0` on their first send; a replay canceled before its first
+  data frame does not advance the count.
+- `BatchAcked { offset }` — a batch was durably acknowledged. Pure durability signal;
+  byte sizes are on `BatchSent`.
+- `Reconnected { reason }` — an automatic reconnect completed setup, queued replay, and
+  published its sender. Replay events may precede it. `reason` is
+  `ReconnectReason::TransientFailure(err)` (the failure that triggered the successful attempt,
+  including an authentication rejection recovered by refreshing credentials) or
+  `ReconnectReason::ServerRotation` (a routine server-requested rotation).
+
+Each reported retry counts every frame it emits: the whole batch if no rows were
+acknowledged, otherwise only the unacknowledged suffix. Summing `BatchSent` events
+gives payload totals for reported completed transmissions. Incomplete transmissions
+emit no event. If IPC statistics cannot be read, the SDK logs a warning and omits
+that transmission's event; ingestion and attempt counting continue. The first event
+can therefore have `attempt > 0`; filtering for `attempt == 0` can miss the batch entirely.
+These events do not guarantee an original-batch size sample for every offset.
+
+The [runnable Arrow example](examples/arrow/README.md#telemetry) prints telemetry
+concurrently with ingestion and drains remaining events during shutdown.
+
+Implement `StatsExporter` directly for custom routing. Its `record` runs inline on the
+stream's IO tasks, which may call it concurrently; keep it lightweight. Unwinding panics
+are caught and logged. `channel_exporter` counts events dropped when its channel is full
+or closed; `flush()` does not wait for the consumer to process queued telemetry.
+
+Offsets and attempts are scoped to one stream instance; events carry no stream identifier.
+`recreate_arrow_stream` shares the exporter but starts offsets and attempts over, without
+emitting `Reconnected`. Build with separate exporters if you need to distinguish streams.
+
+`uncompressed_bytes` counts the emitted IPC buffers before compression, including
+dictionary buffers when sent. It follows the encoder's treatment of slices and
+shared buffers and excludes IPC metadata, alignment padding, and compression
+length prefixes. It measures encoded payload, not retained heap memory.
+
 For state ownership, replay, rotation, and concurrency invariants, see the
 [Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
 
@@ -338,7 +435,7 @@ The SDK uses OAuth 2.0 client credentials flow:
 
 OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (currently one hour) that the SDK cannot configure, while a single stream lives at most ~15 minutes. By default the SDK caches the token for each table on the `ZerobusSdk` instance and reuses it across stream creations and recoveries, refreshing it only once it nears the expiry the server reported (so it adapts to whatever lifetime UC returns). This avoids minting a fresh token on every stream and reduces load on the Unity Catalog token endpoint.
 
-Caching applies only to the built-in OAuth path (`.oauth(...)`). Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
+Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
 
 SDK builder options tune connection and token behavior:
 
@@ -400,10 +497,11 @@ async fn example(sdk: ZerobusSdk) -> ZerobusResult<()> {
 
 ## Usage Guide
 
-The SDK supports two approaches for data serialization:
+The SDK supports these approaches for data serialization:
 
 1. **JSON** - Simpler approach that uses JSON strings. No schema generation required, making it ideal for quick prototyping. See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for a complete example.
 2. **Protocol Buffers** - Type-safe approach with schema validation at compile time. Recommended for production use cases. This guide focuses on the Protocol Buffers approach.
+3. **Avro** *(Beta, opt-in)* - Encode against a writer schema declared with `.avro(schema_json)`. Enable with `features = ["avro"]`; feature in development. See [Avro Stream](#avro-stream-beta-opt-in).
 
 For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record_offset()`.
 
@@ -518,6 +616,49 @@ let client_secret = "your-client-secret".to_string();
 
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for more information on how to get these credentials.
 
+#### External-IdP federation (e.g. Entra ID)
+
+To authenticate with an external identity provider instead of a Databricks
+OAuth secret, use the `federated_auth` builder method. You provide an
+[`IdpTokenSupplier`] callback that returns the current external IdP token; the
+SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange) and caches and refreshes it, exactly like the OAuth path.
+
+```rust,ignore
+use std::sync::Arc;
+
+// Account-level federation: no Databricks service principal. The identity is
+// synced into Databricks via Automatic Identity Management (SCIM). Pass `None`
+// for the client_id. The shared token cache is partitioned by the supplier's
+// identity, so if you drive multiple account-level identities from one SDK
+// instance, give each its own supplier (clone one supplier to share its token).
+let supplier =
+    IdpTokenSupplier::new(Arc::new(|| Box::pin(async { get_idp_token().await })));
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated_auth(supplier.clone(), None)
+    .json()
+    .build()
+    .await?;
+
+// Workload identity federation: a Databricks service principal with a client_id
+// and no secret, with a federation policy attached. The cache keys by the
+// service principal client_id.
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated_auth(
+        IdpTokenSupplier::new(Arc::new(|| Box::pin(async { get_idp_token().await }))),
+        Some("<sp-client-id>".to_string()),
+    )
+    .json()
+    .build()
+    .await?;
+```
+
+The existing `.oauth(...)` and `.headers_provider(...)` paths are unchanged.
+
 ### 4. Create a Stream
 
 Use the `stream_builder()` API to create a stream:
@@ -610,7 +751,96 @@ stream.flush().await?; // wait once for all pending acknowledgments
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
+#### Multiplexed gRPC Stream
+
+When you need more throughput than one gRPC stream can provide and do not
+require global ordering, select multiplexed mode after configuring an ordinary
+builder. The SDK opens all requested sub-streams, routes records round-robin,
+and manages recovery, flush, and close:
+
+> **JSON streams:** First migrate to compiled Protocol Buffers and measure
+> throughput again before considering multiplexing.
+
+```rust
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+for record in records {
+    let _message_id = stream.ingest_record(record).await?;
+}
+stream.flush().await?;
+stream.close().await?;
+```
+
+The stream count must be between 1 and 64. JSON, compiled protobuf, dynamic
+protobuf, and Avro (with the `avro` feature) are supported. Arrow Flight is not
+multiplexed. For maximum protobuf encoding throughput,
+prefer compiled protobuf—multiplexing addresses stream/network bottlenecks,
+not the reflection cost of constructing dynamic records.
+
+`max_inflight_requests` is a mux-wide memory and backpressure budget, not a
+per-sub-stream limit. Each sub-stream receives
+`max_inflight_requests / stream_count` capacity using integer division, and any
+remainder is unused. The budget must be at least the stream count.
+
+Each ingest returns a `MessageId` containing the selected sub-stream index and
+its local offset. Per-sub-stream ordering is preserved, but records,
+`MessageId`s, acknowledgments, and recovered unacknowledged records have no
+global order. A `MessageId` must only be used with the mux that created it.
+
+Retryable failures follow each sub-stream's configured recovery policy. If one
+sub-stream reaches a terminal failure observed by a mux operation, the mux is
+poisoned and stops accepting records. Healthy lanes remain active until
+explicit close or drop. `flush()` waits for every lane's flush attempt;
+`close()` flushes once and then closes all lanes concurrently. `get_unacked_records()`
+and `get_unacked_batches()` aggregate recoverable records across streams but
+do not reconstruct submission order. There is no multiplexed recreation API.
+
+Use `multiplexed_ack_callback` with `AckCallback<MessageId>` for mux
+acknowledgments; ordinary `ack_callback` is rejected. One callback object is
+shared across the sub-stream callback workers, which may invoke it concurrently
+and without global ordering.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
+
+#### Avro Stream (Beta, opt-in)
+
+*(Requires `features = ["avro"]`; ephemeral streams only, feature in development.)*
+
+Declare the Avro writer schema (JSON) with `.avro(schema)`, then ingest either an
+`AvroRecord` the stream encodes against that schema, or a pre-encoded `AvroBytes`:
+
+```rust,ignore
+use databricks_zerobus_ingest_sdk::{AvroRecord, AvroValue};
+
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .avro(schema_json)
+    .build()
+    .await?;
+
+let record = AvroValue::Record(vec![
+    ("id".to_string(), AvroValue::Long(1)),
+    ("customer_name".to_string(), AvroValue::String("Alice".to_string())),
+]);
+stream.ingest_record_offset(AvroRecord(record)).await?; // queue only — do NOT wait here
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+`AvroValue` is `apache_avro`'s value type (re-exported), so it can represent any Avro
+type — unions, `fixed`, `decimal`, and logical types included. See
+[`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro).
+Avro can also be multiplexed by calling `.multiplexed(n)` after `.avro(schema)`;
+all managed sub-streams use the same writer schema. See the
+[`avro_multiplexed`](examples/avro/multiplexed.rs) example.
 
 ### 5. Ingest Data
 
@@ -625,6 +855,8 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
+| `AvroRecord` | Avro | Object: pass an `AvroValue`, SDK encodes it against the writer schema (feature: `avro`, Beta) |
+| `AvroBytes` | Avro | Pre-encoded: pass a raw Avro datum with explicit wrapper (feature: `avro`, Beta) |
 
 > **How acknowledgment works:** `ingest_record_offset()` returns as soon as the record is **queued**; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it returns once everything queued so far is acknowledged. The returned `OffsetId` is a handle you can also wait on individually with `wait_for_offset()` when a specific record must be confirmed before continuing. Avoid calling `wait_for_offset()` after *every* record in a loop, though: that waits out a full round-trip before sending the next record and limits throughput to one record per round-trip.
 
@@ -812,6 +1044,11 @@ match stream.close().await {
 }
 ```
 
+Multiplexed streams use `multiplexed_ack_callback` with
+`AckCallback<MessageId>`. Different sub-stream workers may call it concurrently,
+so implementations must be thread-safe and must not rely on global ordering. See the complete
+[`proto_compiled_multiplexed`](examples/proto/compiled/multiplexed.rs) example.
+
 ## Client-side warnings
 
 The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern. The warning fires again if the rate drops below the threshold and later surges again.
@@ -831,12 +1068,12 @@ Also accepts `0` or `no`.
 | Method | Default | Description |
 |--------|---------|-------------|
 | `endpoint(...)` | Required | Set the Zerobus API endpoint. |
-| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required when using built-in OAuth authentication. |
+| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required for built-in OAuth or federated authentication (both exchange tokens at this URL). |
 | `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
 | `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
 | `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
-| `token_cache_enabled(bool)` | `true` | Enable or disable OAuth token caching for the built-in OAuth path. |
-| `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth token is refreshed. |
+| `token_cache_enabled(bool)` | `true` | Enable or disable token caching for the built-in OAuth and federated paths. |
+| `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth or federated token is refreshed. |
 
 HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
 workloads over the public internet, packet loss and TCP retransmissions can
@@ -849,7 +1086,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
+| `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight. For a mux, this is divided evenly across sub-streams using integer division. |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
@@ -858,8 +1095,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments during graceful close (`None` = server grace remaining after reserving transport cleanup time, `Some(0)` = skip the ACK wait, `Some(x)` = the smaller of `x` and that remaining grace). A bounded request/response drain still runs after the ACK wait. |
-| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | JSON and Protocol Buffer streams only. Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
-| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | JSON and Protocol Buffer streams only. Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **Ordinary JSON and Protocol Buffer gRPC streams only.** Optional callback for acknowledgment notifications. Multiplexed streams use the builder's `multiplexed_ack_callback` method; Arrow Flight does not support acknowledgment callbacks. |
+| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **JSON and Protocol Buffer gRPC streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
 ### ArrowStreamConfigurationOptions
 
@@ -903,9 +1140,9 @@ within the timeout.
 Arrow stream construction rejects `recovery_timeout_ms` and
 `server_lack_of_ack_timeout_ms` values whose deadlines cannot be represented by
 the platform monotonic clock. Server-advertised graceful-rotation periods are
-capped at one year. If `ack_callback` was configured on the builder,
-`build_arrow()` returns `ZerobusError::InvalidArgument` instead of silently
-ignoring the callback.
+capped at one year. If `ack_callback` or `multiplexed_ack_callback` was
+configured on the builder, `build_arrow()` returns
+`ZerobusError::InvalidArgument` instead of silently ignoring the callback.
 
 For internal lifecycle, offset, recovery, and concurrency details, see the
 [Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
@@ -1090,7 +1327,11 @@ The `examples/` directory contains working examples covering different serializa
 | `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
+| `avro/single.rs` | Avro (Beta) | Single-record | `cd examples/avro && cargo run --example avro_single` |
+| `avro/batch.rs` | Avro (Beta) | Batch | `cd examples/avro && cargo run --example avro_batch` |
+| `avro/multiplexed.rs` | Avro (Beta) | Multiplexed | `cd examples/avro && cargo run --example avro_multiplexed` |
 
+> The Avro examples live in an excluded crate (`examples/avro`), so they run with `cd examples/avro` rather than `-p`.
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
 
@@ -1148,6 +1389,7 @@ cargo test -p tests -- --nocapture
 9. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
 10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 11. **Test Recovery** - Simulate failures to verify your error handling logic
+12. **Use Multiplexing for Stream Bottlenecks** - When you need more throughput than one gRPC stream can provide and do not require global ordering, select `.multiplexed(n)`
 
 ## API Reference
 
@@ -1187,18 +1429,18 @@ Represents an active ingestion stream.
 ```rust
 pub async fn ingest_record_offset(
     &self,
-    payload: impl Into<EncodedRecord>
+    payload: impl Into<PreparedInput>
 ) -> ZerobusResult<OffsetId>
 ```
-Ingests a single encoded record (Protocol Buffers or JSON). The await queues the record for sending and returns the logical offset ID directly. Use `wait_for_offset()` to explicitly wait for server acknowledgment of this offset.
+Ingests a single record — any record wrapper or raw payload matching the stream's format (see [Ingest Data](#5-ingest-data)). The await queues the record for sending and returns the logical offset ID directly. Use `wait_for_offset()` to explicitly wait for server acknowledgment of this offset.
 
 ```rust
 pub async fn ingest_records_offset(
     &self,
-    payloads: Vec<impl Into<EncodedRecord>>
+    payloads: Vec<impl Into<PreparedInput>>
 ) -> ZerobusResult<Option<OffsetId>>
 ```
-Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
+Ingests multiple records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
 
 ```rust
 pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
@@ -1233,15 +1475,26 @@ Only call after stream failure.
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
 
+Calling `multiplexed(stream_count)` consumes the ordinary builder and returns a
+`MultiplexedStreamBuilder`, which exposes only `validate()` and `build()`.
+Configure ordinary streams with `ack_callback`; configure mux streams with
+`multiplexed_ack_callback`. Each terminal build rejects the other callback type.
+
+### `MultiplexedStream`
+
+A managed group of 1–64 homogeneous gRPC sub-streams. Its `ingest_record()`
+and `ingest_records()` methods return `MessageId`s, while `flush()`, `close()`,
+and unacknowledged-record retrieval operate across all sub-streams.
+
 ### `AckCallback`
 
 Trait for receiving acknowledgment notifications.
 
 **Methods:**
 ```rust
-pub trait AckCallback: Send + Sync {
-    fn on_ack(&self, offset_id: OffsetId);
-    fn on_error(&self, offset_id: OffsetId, error_message: &str);
+pub trait AckCallback<Id = OffsetId>: Send + Sync {
+    fn on_ack(&self, id: Id);
+    fn on_error(&self, id: Id, error_message: &str);
 }
 ```
 
@@ -1363,6 +1616,10 @@ cargo run -p rust-examples-proto --example proto_compiled_batch
 # Build and run Protocol Buffers dynamic-schema examples
 cargo run -p rust-examples-proto --example proto_dynamic_single
 cargo run -p rust-examples-proto --example proto_dynamic_batch
+
+# Build and run Avro examples (Beta; excluded crate, enables the avro feature)
+(cd examples/avro && cargo run --example avro_single)
+(cd examples/avro && cargo run --example avro_batch)
 ```
 
 ## Community and Contributing

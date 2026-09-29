@@ -1,5 +1,30 @@
 # Version changelog
 
+## Release v1.4.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Set `connectionPerStream: false` in `ZerobusSdkOptions` to share one HTTP/2
+  connection across streams.
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 2.9.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.9.0.
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v1.3.0
 
 ### Major Changes

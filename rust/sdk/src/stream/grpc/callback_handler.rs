@@ -117,8 +117,9 @@ impl CallbackHandlerHarness {
     /// has stopped, so `user_data` is safe to release.
     pub async fn teardown(&mut self, callback_max_wait_time_ms: Option<u64>) {
         self.cancellation_token.cancel();
-        if let Some(task) = self.task.take() {
+        if let Some(task) = self.task.as_mut() {
             ZerobusStream::shutdown_callback_task(task, callback_max_wait_time_ms).await;
+            self.task.take();
         }
     }
 }

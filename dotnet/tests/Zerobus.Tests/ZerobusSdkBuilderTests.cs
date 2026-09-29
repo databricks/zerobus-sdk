@@ -72,6 +72,18 @@ public class ZerobusSdkBuilderTests
         Assert.That(returned, Is.SameAs(builder));
     }
 
+    [Test]
+    public void ConnectionPerStream_Build_Succeeds()
+    {
+        var builder = ZerobusSdk.CreateBuilder()
+            .Endpoint("https://zerobus.databricks.com")
+            .UnityCatalogUrl("https://workspace.databricks.com")
+            .ConnectionPerStream(false);
+
+        using var sdk = builder.Build();
+        Assert.That(sdk, Is.Not.Null);
+    }
+
     // -------------------------------------------------------------------------
     // Null argument guards
     // -------------------------------------------------------------------------
@@ -155,6 +167,15 @@ public class ZerobusSdkBuilderTests
         builder.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => builder.DisableTls());
+    }
+
+    [Test]
+    public void ConnectionPerStream_AfterDispose_ThrowsObjectDisposedException()
+    {
+        var builder = ZerobusSdk.CreateBuilder();
+        builder.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => builder.ConnectionPerStream(false));
     }
 
     [Test]

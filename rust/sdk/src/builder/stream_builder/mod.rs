@@ -21,15 +21,29 @@
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::time::Duration;
+
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
-use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
-use crate::stream_configuration::StreamConfigurationOptions;
-use crate::{
-    MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+use crate::headers_provider::{
+    FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
 };
+use crate::stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "avro")]
+use crate::AvroSchema;
+use crate::{
+    MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
+    ZerobusStream,
+};
+
+mod multiplexed;
+
+pub use multiplexed::MultiplexedStreamBuilder;
+#[cfg(test)]
+use multiplexed::MAX_MULTIPLEXED_JITTER_MS;
 
 #[cfg(feature = "arrow-flight")]
 use crate::stream::{
@@ -41,6 +55,17 @@ enum AuthConfig {
     OAuth {
         client_id: String,
         client_secret: String,
+    },
+    /// External-IdP federation via RFC 8693 token exchange. `client_id` is
+    /// `Some` for workload identity federation and `None` for account-level
+    /// federation. The shared token cache is partitioned by the identity the
+    /// caller already holds — the service principal `client_id` for workload,
+    /// or the `idp_token_supplier`'s own stable identity (not a reusable pointer)
+    /// for account-level — so distinct identities never collide, without the
+    /// caller passing a partition key.
+    FederatedAuth {
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: Option<String>,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
     #[cfg(feature = "testing")]
@@ -54,6 +79,56 @@ enum FormatConfig {
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
+    #[cfg(feature = "avro")]
+    Avro(String),
+}
+
+struct GrpcFormat {
+    record_type: RecordType,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    message_descriptor: Option<MessageDescriptor>,
+    #[cfg(feature = "avro")]
+    avro_schema: Option<Arc<AvroSchema>>,
+}
+
+impl FormatConfig {
+    fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
+        let (record_type, descriptor_proto, message_descriptor) = match self {
+            Self::Json => (RecordType::Json, None, None),
+            Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
+            Self::DynamicProto(descriptor) => (
+                RecordType::Proto,
+                Some(descriptor.descriptor_proto().clone()),
+                Some(descriptor),
+            ),
+            #[cfg(feature = "arrow-flight")]
+            Self::Arrow(_) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Arrow format requires .build_arrow() instead of .build()".into(),
+                ));
+            }
+            #[cfg(feature = "avro")]
+            Self::Avro(json) => {
+                let parsed = apache_avro::Schema::parse_str(&json).map_err(|e| {
+                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
+                })?;
+                return Ok(GrpcFormat {
+                    record_type: RecordType::Avro,
+                    descriptor_proto: None,
+                    message_descriptor: None,
+                    avro_schema: Some(Arc::new(AvroSchema { json, parsed })),
+                });
+            }
+        };
+
+        Ok(GrpcFormat {
+            record_type,
+            descriptor_proto,
+            message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema: None,
+        })
+    }
 }
 
 /// A fluent builder for creating Zerobus ingestion streams.
@@ -101,14 +176,18 @@ pub struct StreamBuilder<'a> {
     auth: Option<AuthConfig>,
     format: Option<FormatConfig>,
     grpc_config: StreamConfigurationOptions,
+    multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
+    #[cfg(feature = "arrow-flight")]
+    stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
 }
 
 impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_kind = match &self.auth {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
+            Some(AuthConfig::FederatedAuth { .. }) => "FederatedAuth",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
@@ -120,12 +199,19 @@ impl fmt::Debug for StreamBuilder<'_> {
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(_)) => "Avro",
             None => "None",
         };
         f.debug_struct("StreamBuilder")
             .field("table_name", &self.table_name)
             .field("auth", &auth_kind)
             .field("format", &format_kind)
+            .field("ack_callback", &self.grpc_config.ack_callback.is_some())
+            .field(
+                "multiplexed_ack_callback",
+                &self.multiplexed_callback.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -133,11 +219,11 @@ impl fmt::Debug for StreamBuilder<'_> {
 const fn missing_auth_error() -> &'static str {
     #[cfg(feature = "testing")]
     {
-        "authentication is required: call .oauth(), .headers_provider(), or .no_auth()"
+        "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
     }
     #[cfg(not(feature = "testing"))]
     {
-        "authentication is required: call .oauth() or .headers_provider()"
+        "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
     }
 }
 
@@ -150,8 +236,11 @@ impl<'a> StreamBuilder<'a> {
             auth: None,
             format: None,
             grpc_config: StreamConfigurationOptions::default(),
+            multiplexed_callback: None,
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "arrow-flight")]
+            stats_exporter: None,
         }
     }
 
@@ -166,6 +255,29 @@ impl<'a> StreamBuilder<'a> {
         self.auth = Some(AuthConfig::OAuth {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
+        });
+        self
+    }
+
+    /// Authenticate with external-IdP federation (RFC 8693).
+    ///
+    /// `client_id`: `None` for account-level federation; a Databricks service
+    /// principal id for workload identity federation (accepts `None`, a
+    /// `String`, or `Some(..)`).
+    ///
+    /// The shared token cache is partitioned automatically so distinct
+    /// identities used from one SDK instance never serve each other's token:
+    /// workload keys by `client_id`, and account-level keys by the
+    /// `idp_token_supplier`'s stable identity. Clone one supplier across streams
+    /// to share its cached token; pass a distinct supplier to isolate.
+    pub fn federated_auth(
+        mut self,
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: impl Into<Option<String>>,
+    ) -> Self {
+        self.auth = Some(AuthConfig::FederatedAuth {
+            idp_token_supplier,
+            client_id: client_id.into(),
         });
         self
     }
@@ -217,6 +329,17 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
         self.format = Some(FormatConfig::Arrow(schema));
+        self
+    }
+
+    /// Select Avro record format with the writer schema as JSON (Beta).
+    ///
+    /// Records are then ingested either as objects the stream encodes against this
+    /// schema ([`AvroRecord`](crate::AvroRecord)) or as pre-encoded datums
+    /// ([`AvroBytes`](crate::AvroBytes)).
+    #[cfg(feature = "avro")]
+    pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
+        self.format = Some(FormatConfig::Avro(schema_json.into()));
         self
     }
 
@@ -286,6 +409,10 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the maximum number of in-flight requests (JSON and Protocol Buffer streams only).
+    ///
+    /// For a multiplexed stream, this is a mux-wide budget. Each sub-stream
+    /// receives `n / stream_count` capacity; any remainder is unused. The
+    /// budget must be at least the number of sub-streams.
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
         self.grpc_config.max_inflight_requests = n;
         self
@@ -300,7 +427,7 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Defaults to slightly below the 10 MiB server limit.
     ///
-    /// Note: this setting only applies to streams built with [`build()`](Self::build).
+    /// This setting applies to gRPC streams, including multiplexed streams.
     /// Arrow Flight streams (built with `build_arrow()`) do not read this value
     /// and have no client-side payload-size enforcement.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
@@ -318,19 +445,53 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the acknowledgment callback (JSON and Protocol Buffer streams only).
+    /// Set the acknowledgment callback for an ordinary JSON or Protocol Buffer gRPC stream.
     ///
-    /// `build_arrow()` rejects this option with
-    /// [`ZerobusError::InvalidArgument`] because Arrow Flight streams do not
-    /// support acknowledgment callbacks.
+    /// Calling this setter again replaces the previous ordinary callback.
+    /// [`MultiplexedStreamBuilder::validate`] and `build_arrow()` reject it.
     pub fn ack_callback(mut self, callback: Arc<dyn AckCallback>) -> Self {
         self.grpc_config.ack_callback = Some(callback);
         self
     }
 
-    /// Set the maximum wait time for callbacks after stream close (JSON and Protocol Buffer streams only).
+    /// Set the acknowledgment callback for a multiplexed gRPC stream.
+    ///
+    /// The callback receives the [`MessageId`] returned by multiplexed ingest
+    /// methods. Calling this setter again replaces the previous multiplexed
+    /// callback. Ordinary `build()` and `build_arrow()` reject it.
+    pub fn multiplexed_ack_callback(mut self, callback: Arc<dyn AckCallback<MessageId>>) -> Self {
+        self.multiplexed_callback = Some(callback);
+        self
+    }
+
+    /// Set the maximum wait time for callbacks after stream close
+    /// (JSON and Protocol Buffer gRPC streams only).
     pub fn callback_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
         self.grpc_config.callback_max_wait_time_ms = ms;
+        self
+    }
+
+    /// Register a telemetry exporter (Arrow streams only).
+    ///
+    /// The exporter receives [`StreamStat`](crate::StreamStat) events (batch
+    /// sends with byte sizes, acknowledgements, reconnects). Its `record` runs
+    /// inline on the stream's IO tasks, so keep it lightweight — use
+    /// [`channel_exporter`](crate::channel_exporter) to offload heavier work.
+    ///
+    /// Takes the exporter by value (`.stats_exporter(MyExporter)`); the SDK wraps
+    /// it in an `Arc` internally to share across its IO tasks. The `'static` bound
+    /// is required because those tasks outlive this call. Pass an `Arc` clone when
+    /// you need to keep a handle (e.g. the [`channel_exporter`](crate::channel_exporter) pair).
+    ///
+    /// Supported only by Arrow Flight streams: configuring it and then calling
+    /// [`build`](Self::build) (a non-Arrow stream) is rejected. Use
+    /// [`build_arrow`](Self::build_arrow).
+    #[cfg(feature = "arrow-flight")]
+    pub fn stats_exporter<E>(mut self, exporter: E) -> Self
+    where
+        E: crate::stats::StatsExporter + 'static,
+    {
+        self.stats_exporter = Some(Arc::new(exporter));
         self
     }
 
@@ -355,12 +516,43 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Select a multiplexed gRPC stream composed of `stream_count` homogeneous
+    /// sub-streams.
+    ///
+    /// This is a terminal mode selection: configure table, authentication,
+    /// format, stream options, and an optional
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) before
+    /// calling it. The returned builder only supports validation and
+    /// construction.
+    ///
+    /// Use multiplexing when one gRPC stream is the throughput bottleneck
+    /// and global ordering is not required. Records retain ordering within
+    /// each sub-stream, but there is no global record, message-ID, or callback
+    /// order. Different sub-stream callback workers may invoke the shared
+    /// callback concurrently.
+    ///
+    /// For a JSON stream, first migrate to compiled Protocol Buffers and
+    /// measure throughput again before considering multiplexing.
+    ///
+    /// # Beta
+    ///
+    /// Multiplexed streams are a Beta API.
+    ///
+    /// `stream_count` must be in `1..=64` and cannot exceed the configured
+    /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
+    /// across sub-streams using integer division. JSON, compiled protobuf,
+    /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
+    /// Arrow Flight is not.
+    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
+        MultiplexedStreamBuilder::new(self, stream_count)
+    }
+
     /// Validate that the builder has all required fields configured.
     ///
-    /// Returns `Ok(())` if table name, authentication, and format are all set.
-    /// This performs the same checks as `build()` without actually opening
-    /// a stream — useful for fail-fast validation during startup or config
-    /// parsing.
+    /// Returns `Ok(())` if table name, authentication, and format are all set — useful
+    /// for fail-fast validation during startup or config parsing. This is a required-fields
+    /// check, not a guarantee that `build()` succeeds: the Avro writer schema is parsed in
+    /// `build()` (before any connection), so a malformed schema surfaces there, not here.
     ///
     /// # Examples
     ///
@@ -376,6 +568,16 @@ impl<'a> StreamBuilder<'a> {
     /// let stream = builder.build().await?;
     /// ```
     pub fn validate(&self) -> ZerobusResult<()> {
+        self.validate_common()?;
+        if self.multiplexed_callback.is_some() {
+            return Err(ZerobusError::InvalidArgument(
+                "multiplexed_ack_callback is only valid with .multiplexed(...)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> ZerobusResult<()> {
         if self.table_name.is_empty() {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
@@ -386,7 +588,13 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .avro(), or .arrow()".into(),
+            ));
+        }
+        #[cfg(feature = "arrow-flight")]
+        if self.stats_exporter.is_some() && !matches!(self.format, Some(FormatConfig::Arrow(_))) {
+            return Err(ZerobusError::InvalidArgument(
+                "stats_exporter is only supported for Arrow Flight streams; use .arrow()".into(),
             ));
         }
         Ok(())
@@ -418,6 +626,25 @@ impl<'a> StreamBuilder<'a> {
                     Some(refresh_timeout),
                 )))
             }
+            Some(AuthConfig::FederatedAuth {
+                idp_token_supplier,
+                client_id,
+            }) => {
+                // Federation mirrors OAuth's proactive-refresh bound so a stalled
+                // token exchange falls back to the cached token before the setup
+                // deadline, keeping client-credentials and token-exchange at parity.
+                let refresh_timeout =
+                    std::time::Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
+                Ok(Arc::new(FederatedTokenProvider::with_cache(
+                    client_id.clone(),
+                    idp_token_supplier.clone(),
+                    self.table_name.clone(),
+                    self.sdk.workspace_id.clone(),
+                    self.sdk.unity_catalog_url.clone(),
+                    Arc::clone(&self.sdk.token_cache),
+                    Some(refresh_timeout),
+                )))
+            }
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
@@ -425,42 +652,31 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open a JSON or Protocol Buffer stream.
+    /// Build and open the configured stream (any record format except Arrow Flight).
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
+        // `validate()` already rejects `stats_exporter` on a non-Arrow format, and the
+        // format match below rejects an Arrow format outright.
         self.validate()?;
+
+        // Avro schemas are parsed here, before any connection is opened. The raw JSON and
+        // parsed schema remain together in TableProperties for stream creation and ingest.
+        let format = self
+            .format
+            .take()
+            .expect("format was validated")
+            .into_grpc()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto, message_descriptor) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
-            Some(FormatConfig::DynamicProto(md)) => {
-                // The wire descriptor is recovered from the already-resolved
-                // MessageDescriptor the caller supplied.
-                let desc = md.descriptor_proto().clone();
-                (RecordType::Proto, Some(desc), Some(md))
-            }
-            #[cfg(feature = "arrow-flight")]
-            Some(FormatConfig::Arrow(_)) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Arrow format requires .build_arrow() instead of .build()".into(),
-                ));
-            }
-            None => {
-                return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
-                        .into(),
-                ));
-            }
-        };
-
-        self.grpc_config.record_type = record_type;
+        self.grpc_config.record_type = format.record_type;
         let table_properties = TableProperties {
             table_name: self.table_name,
-            descriptor_proto,
-            message_descriptor,
+            descriptor_proto: format.descriptor_proto,
+            message_descriptor: format.message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema: format.avro_schema,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
@@ -479,11 +695,12 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// if a non-Arrow format was selected (use `build()` instead), or if
-    /// [`ack_callback`](Self::ack_callback) was configured (callbacks are
-    /// unsupported for Arrow Flight streams).
+    /// [`ack_callback`](Self::ack_callback) or
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) was
+    /// configured (callbacks are unsupported for Arrow Flight streams).
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
-        self.validate()?;
+        self.validate_common()?;
 
         let schema = match self.format.as_ref() {
             Some(FormatConfig::Arrow(schema)) => Arc::clone(schema),
@@ -499,9 +716,10 @@ impl<'a> StreamBuilder<'a> {
             }
         };
 
-        if self.grpc_config.ack_callback.is_some() {
+        if self.grpc_config.ack_callback.is_some() || self.multiplexed_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
-                "ack_callback is not supported for Arrow Flight streams".into(),
+                "ack_callback and multiplexed_ack_callback are not supported for Arrow Flight streams"
+                    .into(),
             ));
         }
 
@@ -537,6 +755,7 @@ impl<'a> StreamBuilder<'a> {
             headers_provider,
             self.arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
+            self.stats_exporter,
         )
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
@@ -545,377 +764,4 @@ impl<'a> StreamBuilder<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[cfg(feature = "arrow-flight")]
-    struct NoopAckCallback;
-
-    #[cfg(feature = "arrow-flight")]
-    impl AckCallback for NoopAckCallback {
-        fn on_ack(&self, _offset_id: crate::offset_generator::OffsetId) {}
-
-        fn on_error(&self, _offset_id: crate::offset_generator::OffsetId, _error_message: &str) {}
-    }
-
-    fn test_sdk() -> ZerobusSdk {
-        ZerobusSdk::new_with_config(
-            "http://localhost:1234".to_string(),
-            "http://localhost:5678".to_string(),
-            "test-workspace".to_string(),
-            Arc::new(crate::tls_config::SecureTlsConfig::new()),
-            None,
-            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
-            true,
-            crate::token_cache::DEFAULT_REFRESH_BUFFER,
-            true,
-        )
-    }
-
-    #[test]
-    fn json_oauth_builder() {
-        let sdk = test_sdk();
-        let _builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .oauth("cid", "csec")
-            .json()
-            .max_inflight_requests(100);
-    }
-
-    #[test]
-    fn compiled_proto_headers_provider() {
-        struct StubProvider;
-        #[async_trait::async_trait]
-        impl HeadersProvider for StubProvider {
-            async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
-                Ok(HashMap::new())
-            }
-        }
-
-        let sdk = test_sdk();
-        let provider: Arc<dyn HeadersProvider> = Arc::new(StubProvider);
-        let _builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .headers_provider(provider)
-            .compiled_proto(prost_types::DescriptorProto::default());
-    }
-
-    #[test]
-    fn dynamic_proto_sets_format_and_validates() {
-        let sdk = test_sdk();
-        let md = crate::message_descriptor(&prost_types::DescriptorProto {
-            name: Some("T".to_string()),
-            ..Default::default()
-        })
-        .unwrap();
-        let builder = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .dynamic_proto(md);
-        assert!(format!("{builder:?}").contains("DynamicProto"));
-        builder.validate().expect("validation should succeed");
-    }
-
-    #[test]
-    fn any_order_format_before_auth() {
-        let sdk = test_sdk();
-        let _builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .json()
-            .oauth("cid", "csec")
-            .max_inflight_requests(100);
-    }
-
-    #[test]
-    fn any_order_config_before_format() {
-        let sdk = test_sdk();
-        let _builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .max_inflight_requests(100)
-            .recovery(false)
-            .oauth("cid", "csec")
-            .json();
-    }
-
-    #[test]
-    fn config_setters_chain() {
-        let sdk = test_sdk();
-        let _builder = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .json()
-            .recovery(false)
-            .recovery_timeout_ms(10_000)
-            .recovery_backoff_ms(1_000)
-            .recovery_retries(3)
-            .server_lack_of_ack_timeout_ms(30_000)
-            .flush_timeout_ms(60_000)
-            .max_inflight_requests(500)
-            .stream_paused_max_wait_time_ms(Some(5_000))
-            .callback_max_wait_time_ms(None);
-    }
-
-    #[test]
-    fn default_config_without_setters() {
-        let sdk = test_sdk();
-        let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
-        assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
-        assert!(builder.grpc_config.recovery);
-        assert_eq!(
-            builder.grpc_config.max_ingest_payload_bytes,
-            crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
-        );
-        assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
-    }
-
-    #[test]
-    fn max_ingest_payload_bytes_override() {
-        let sdk = test_sdk();
-        let builder = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .json()
-            .max_ingest_payload_bytes(5 * 1024 * 1024);
-        assert_eq!(
-            builder.grpc_config.max_ingest_payload_bytes,
-            5 * 1024 * 1024
-        );
-    }
-
-    #[tokio::test]
-    async fn build_without_auth_returns_error() {
-        let sdk = test_sdk();
-        let result = sdk.stream_builder().table("t").json().build().await;
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert!(msg.contains("authentication is required"));
-            }
-            _ => panic!("expected InvalidArgument error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn build_without_table_returns_error() {
-        let sdk = test_sdk();
-        let result = sdk.stream_builder().oauth("a", "b").json().build().await;
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert!(msg.contains("table name is required"));
-            }
-            _ => panic!("expected InvalidArgument error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn build_without_format_returns_error() {
-        let sdk = test_sdk();
-        let result = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .build()
-            .await;
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert!(msg.contains("record format is required"));
-            }
-            _ => panic!("expected InvalidArgument error"),
-        }
-    }
-
-    #[test]
-    fn debug_impl_works() {
-        let sdk = test_sdk();
-        let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
-        let debug_str = format!("{:?}", builder);
-        assert!(debug_str.contains("StreamBuilder"));
-        assert!(debug_str.contains("OAuth"));
-        assert!(debug_str.contains("Json"));
-    }
-
-    #[tokio::test]
-    async fn resolve_headers_provider_with_custom_provider() {
-        struct TestProvider;
-
-        #[async_trait::async_trait]
-        impl HeadersProvider for TestProvider {
-            async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
-                let mut h = HashMap::new();
-                h.insert("x-test", "value".to_string());
-                Ok(h)
-            }
-        }
-
-        let sdk = test_sdk();
-        let builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .headers_provider(Arc::new(TestProvider))
-            .json();
-
-        let provider = builder.resolve_headers_provider().unwrap();
-        let headers = provider.get_headers().await.unwrap();
-        assert_eq!(headers.get("x-test").unwrap(), "value");
-    }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test]
-    async fn no_auth_resolves_to_no_auth_provider() {
-        let sdk = test_sdk();
-        let builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .no_auth()
-            .json();
-        let provider = builder.resolve_headers_provider().unwrap();
-        let headers = provider.get_headers().await.unwrap();
-        assert!(headers.is_empty());
-    }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test]
-    async fn no_auth_plus_no_tls_chain() {
-        let sdk = crate::ZerobusSdkBuilder::new()
-            .endpoint("http://localhost:1234")
-            .no_tls()
-            .build()
-            .expect("sdk should build with no_tls");
-        let builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .no_auth()
-            .json();
-        builder.validate().expect("validation should succeed");
-        let provider = builder.resolve_headers_provider().unwrap();
-        let headers = provider.get_headers().await.unwrap();
-        assert!(headers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resolve_headers_provider_with_oauth() {
-        let sdk = test_sdk();
-        let builder = sdk
-            .stream_builder()
-            .table("catalog.schema.table")
-            .oauth("my-client-id", "my-secret")
-            .json();
-
-        let _provider = builder.resolve_headers_provider().unwrap();
-    }
-
-    #[cfg(feature = "arrow-flight")]
-    #[test]
-    fn arrow_builder() {
-        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-
-        let sdk = test_sdk();
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]));
-        let _builder = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .arrow(schema)
-            .max_inflight_batches(500)
-            .connection_timeout_ms(10_000);
-    }
-
-    #[cfg(feature = "arrow-flight")]
-    #[tokio::test]
-    async fn arrow_builder_rejects_ack_callback() {
-        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-
-        let sdk = test_sdk();
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]));
-        let result = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .arrow(schema)
-            .ack_callback(Arc::new(NoopAckCallback))
-            .build_arrow()
-            .await;
-
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert!(msg.contains("ack_callback"));
-                assert!(msg.contains("Arrow Flight"));
-            }
-            _ => panic!("expected InvalidArgument error"),
-        }
-    }
-
-    #[cfg(feature = "arrow-flight")]
-    #[tokio::test]
-    async fn arrow_builder_reports_format_error_before_ack_callback_error() {
-        let sdk = test_sdk();
-        let result = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .json()
-            .ack_callback(Arc::new(NoopAckCallback))
-            .build_arrow()
-            .await;
-
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert_eq!(
-                    msg,
-                    "non-Arrow format requires .build() instead of .build_arrow()"
-                );
-            }
-            _ => panic!("expected non-Arrow format InvalidArgument error"),
-        }
-    }
-
-    #[cfg(feature = "arrow-flight")]
-    #[test]
-    fn shared_setters_write_to_arrow_config() {
-        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-
-        let sdk = test_sdk();
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]));
-        let builder = sdk
-            .stream_builder()
-            .table("t")
-            .oauth("a", "b")
-            .arrow(schema)
-            .recovery(false)
-            .recovery_timeout_ms(5_000)
-            .recovery_backoff_ms(500)
-            .recovery_retries(2)
-            .server_lack_of_ack_timeout_ms(10_000)
-            .flush_timeout_ms(20_000)
-            .stream_paused_max_wait_time_ms(Some(5_000));
-        assert!(!builder.arrow_config.recovery);
-        assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
-        assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
-        assert_eq!(builder.arrow_config.recovery_retries, 2);
-        assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
-        assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
-        assert_eq!(
-            builder.arrow_config.stream_paused_max_wait_time_ms,
-            Some(5_000)
-        );
-    }
-}
+mod tests;

@@ -1,0 +1,32 @@
+[package]
+name = "example_avro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[example]]
+name = "avro_single"
+path = "single.rs"
+
+[[example]]
+name = "avro_batch"
+path = "batch.rs"
+
+[[example]]
+name = "avro_multiplexed"
+path = "multiplexed.rs"
+
+[dependencies]
+databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["avro"] }
+# Same apache-avro version as the SDK, so `AvroValue` (re-exported by the SDK) and the
+# `Schema` / `GenericDatumWriter` used here to pre-encode the `AvroBytes` datums are the same types.
+apache-avro = "0.22"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["testing"] }
+prost-types = "0.14"
+rcgen = "0.13"
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", features = ["tls-native-roots", "transport"] }
+tracing = "0.1"

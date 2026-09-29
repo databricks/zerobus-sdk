@@ -68,9 +68,11 @@ impl ZerobusSdkBuilder {
 
     /// Sets the Unity Catalog endpoint URL.
     ///
-    /// This is only required when using OAuth authentication via `StreamBuilder::oauth()`.
-    /// When using `StreamBuilder::headers_provider()` with a custom headers
-    /// provider, this can be omitted.
+    /// This is required when using OAuth authentication via `StreamBuilder::oauth()`
+    /// or federated authentication via `StreamBuilder::federated_auth()` (the
+    /// RFC 8693 token exchange runs against this same URL). When using
+    /// `StreamBuilder::headers_provider()` with a custom headers provider, this
+    /// can be omitted.
     ///
     /// # Arguments
     ///
@@ -171,15 +173,18 @@ impl ZerobusSdkBuilder {
         self
     }
 
-    /// Enables or disables caching of OAuth tokens for the default OAuth path.
+    /// Enables or disables token caching for the built-in OAuth and federated
+    /// authentication paths.
     ///
-    /// When enabled (the default), tokens obtained via `.oauth(...)` are cached
-    /// per table on the SDK instance and reused across stream creations and
-    /// recoveries until they near expiry, instead of minting a fresh token on
-    /// every stream. This reduces load on the Unity Catalog token endpoint for
-    /// clients that churn through many short-lived streams.
+    /// When enabled (the default), tokens obtained via `.oauth(...)` or
+    /// `.federated_auth(...)` are cached per table on the SDK instance and reused
+    /// across stream creations and recoveries until they near expiry, instead of
+    /// minting a fresh token on every stream. This reduces load on the Unity
+    /// Catalog token endpoint for clients that churn through many short-lived
+    /// streams.
     ///
-    /// Caching only applies to the built-in OAuth path. Custom
+    /// Caching applies to the built-in OAuth and federated paths, which share the
+    /// same per-table cache. Custom
     /// [`HeadersProvider`](crate::HeadersProvider) implementations are
     /// responsible for their own caching. Tokens are shared only across streams
     /// created from the same `ZerobusSdk` instance, so reuse the SDK rather than
@@ -187,18 +192,19 @@ impl ZerobusSdkBuilder {
     ///
     /// # Arguments
     ///
-    /// * `enabled` - Whether to cache OAuth tokens.
+    /// * `enabled` - Whether to cache tokens for the built-in OAuth and
+    ///   federated authentication paths.
     pub fn token_cache_enabled(mut self, enabled: bool) -> Self {
         self.token_cache_enabled = enabled;
         self
     }
 
-    /// Sets how long before a cached OAuth token's expiry it is refreshed.
+    /// Sets how long before a cached token's expiry it is refreshed.
     ///
-    /// A cached token is re-minted on the next stream creation once it is within
-    /// this buffer of its expiry, providing headroom against clock skew and
-    /// token propagation delays. Defaults to 5 minutes. Has no effect when token
-    /// caching is disabled.
+    /// Applies to both the OAuth and federated paths. A cached token is re-minted
+    /// on the next stream creation once it is within this buffer of its expiry,
+    /// providing headroom against clock skew and token propagation delays.
+    /// Defaults to 5 minutes. Has no effect when token caching is disabled.
     ///
     /// # Arguments
     ///

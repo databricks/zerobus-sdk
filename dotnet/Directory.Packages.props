@@ -8,7 +8,7 @@
 
     <ItemGroup>
         <!-- SDK Libraries -->
-        <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.103" />
+        <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.111" />
 
         <!-- Testing -->
         <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

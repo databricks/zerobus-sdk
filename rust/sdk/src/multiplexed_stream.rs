@@ -12,9 +12,9 @@
 //! [`wait_for_message_id`](MultiplexedStream::wait_for_message_id) without
 //! needing to know which sub-stream handled the record.
 //!
-//! The mux is poisoned on the first unrecoverable sub-stream error: remaining
-//! sub-streams are flushed and further ingest calls fail. Any records still
-//! buffered can be recovered via
+//! After a mux operation observes an unrecoverable sub-stream error, the mux
+//! stops accepting new records. Healthy sub-streams remain alive until the mux
+//! is closed or dropped, and any records still buffered can be recovered via
 //! [`get_unacked_records`](MultiplexedStream::get_unacked_records) or
 //! [`get_unacked_batches`](MultiplexedStream::get_unacked_batches).
 
@@ -25,65 +25,17 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::stream::StreamShutdownHandle;
 use crate::{
-    AckCallback, EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
+    AckCallback, DynamicRecord, EncodedBatch, EncodedRecord, MessageDescriptor, OffsetId,
+    PreparedInput, ZerobusError, ZerobusResult, ZerobusStream,
 };
 
 const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Ensures a cancelled poison future still shuts sub-stream tasks down, but
-/// only after all ingests admitted before poison have left the admission
-/// section. Normal completion disarms the fallback after signaling directly.
-struct PoisonCleanupGuard {
-    admission: Arc<tokio::sync::RwLock<()>>,
-    shutdown_handles: Option<Vec<StreamShutdownHandle>>,
-    runtime: tokio::runtime::Handle,
-}
-
-impl PoisonCleanupGuard {
-    fn new(
-        admission: Arc<tokio::sync::RwLock<()>>,
-        shutdown_handles: Vec<StreamShutdownHandle>,
-    ) -> Self {
-        Self {
-            admission,
-            shutdown_handles: Some(shutdown_handles),
-            runtime: tokio::runtime::Handle::current(),
-        }
-    }
-
-    fn finish(mut self) {
-        for handle in self.shutdown_handles.take().unwrap_or_default() {
-            handle.signal();
-        }
-    }
-}
-
-impl Drop for PoisonCleanupGuard {
-    fn drop(&mut self) {
-        let Some(shutdown_handles) = self.shutdown_handles.take() else {
-            return;
-        };
-
-        warn!("Mux poison cleanup was cancelled; finishing sub-stream shutdown in background");
-        let admission = Arc::clone(&self.admission);
-        drop(self.runtime.spawn(async move {
-            // This is a barrier only. Readers that were already admitted have
-            // no further await between their final checks and enqueue.
-            {
-                let _admission = admission.write().await;
-            }
-            for handle in shutdown_handles {
-                handle.signal();
-            }
-        }));
-    }
-}
-
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
 const STREAM_BITS: u32 = 6;
+pub(crate) const MAX_STREAMS: usize = 1 << STREAM_BITS;
 const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 
 /// Opaque identifier returned by ingest methods on MultiplexedStream.
@@ -91,6 +43,10 @@ const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 ///
 /// Unlike a `ZerobusStream` offset, `MessageId` values are not ordered — pass
 /// them to [`MultiplexedStream::wait_for_message_id`] to await acknowledgment.
+///
+/// # Beta
+///
+/// Multiplexed streams are a Beta API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(i64);
 
@@ -158,7 +114,6 @@ impl AckCallback for MultiplexedAckCallbackAdapter {
 ///
 /// The adapter captures the sub-stream index and converts each stream-local
 /// [`OffsetId`] into the [`MessageId`] exposed by [`MultiplexedStream`].
-#[allow(dead_code)]
 pub(crate) fn multiplexed_ack_callback(
     stream_index: usize,
     callback: Arc<dyn AckCallback<MessageId>>,
@@ -176,15 +131,29 @@ pub(crate) fn multiplexed_ack_callback(
 
 /// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
 ///
-/// See the [module-level documentation](self) for routing, `MessageId`, and
-/// poisoning semantics.
+/// A selected sub-stream that is at capacity waits for room rather than
+/// rerouting, preserving ordering within each lane. There is no global record,
+/// [`MessageId`], acknowledgment, callback, or recovery order across lanes.
+///
+/// After a mux operation observes a terminal lane failure, the mux rejects new
+/// ingestion and preserves that lane's typed error. Healthy lanes remain alive
+/// to process already-accepted records until [`close`](Self::close) or drop.
+/// [`flush`](Self::flush) waits for every lane's flush attempt, and unacknowledged
+/// records can be recovered with [`get_unacked_records`](Self::get_unacked_records)
+/// or [`get_unacked_batches`](Self::get_unacked_batches).
+///
+/// # Beta
+///
+/// This API is in Beta.
 pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
     is_closed: AtomicBool,
     closed_token: CancellationToken,
-    failure_context: OnceLock<String>,
-    admission: Arc<tokio::sync::RwLock<()>>,
+    failure: OnceLock<ZerobusError>,
+    /// Completed close-time flush result; retries resume teardown without
+    /// flushing a transport whose supervisor may already have stopped.
+    close_flush_result: Option<ZerobusResult<()>>,
 }
 
 impl MultiplexedStream {
@@ -195,7 +164,12 @@ impl MultiplexedStream {
     /// # Panics
     ///
     /// Panics if `streams` is empty or holds more than 64 sub-streams.
+    #[cfg(feature = "testing")]
     pub fn new(streams: Vec<ZerobusStream>) -> Self {
+        Self::from_streams(streams)
+    }
+
+    pub(crate) fn from_streams(streams: Vec<ZerobusStream>) -> Self {
         assert!(
             !streams.is_empty(),
             "MultiplexedStream requires at least one sub-stream"
@@ -210,32 +184,56 @@ impl MultiplexedStream {
             round_robin_counter: AtomicUsize::new(0),
             is_closed: AtomicBool::new(false),
             closed_token: CancellationToken::new(),
-            failure_context: OnceLock::new(),
-            admission: Arc::new(tokio::sync::RwLock::new(())),
+            failure: OnceLock::new(),
+            close_flush_result: None,
         }
+    }
+
+    /// Returns the schema descriptor configured with [`crate::StreamBuilder::dynamic_proto`].
+    /// Returns an error if this is not a dynamic-protobuf stream.
+    pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
+        self.streams[0].message_descriptor()
+    }
+
+    /// Creates an empty record using this mux's dynamic-protobuf schema.
+    pub fn new_record(&self) -> ZerobusResult<DynamicRecord> {
+        self.streams[0].new_record()
     }
 
     #[allow(clippy::result_large_err)]
     fn check_closed(&self) -> ZerobusResult<()> {
+        if let Some(error) = self.failure.get() {
+            return Err(error.clone());
+        }
         if self.is_closed_fast() {
-            return Err(ZerobusError::InvalidStateError(
-                "MultiplexedStream is closed".to_string(),
-            ));
+            return Err(self.closed_error());
         }
         Ok(())
+    }
+
+    fn closed_error(&self) -> ZerobusError {
+        self.failure.get().cloned().unwrap_or_else(|| {
+            ZerobusError::InvalidStateError("MultiplexedStream is closed".to_string())
+        })
     }
 
     fn is_closed_fast(&self) -> bool {
         self.is_closed.load(Ordering::Relaxed)
     }
 
-    async fn shutdown_on_failure(&self, trigger_index: usize, cause: &ZerobusError) {
-        if self.is_closed.swap(true, Ordering::Relaxed) {
+    fn first_closed_stream(&self) -> Option<usize> {
+        self.streams.iter().position(ZerobusStream::is_closed)
+    }
+
+    async fn lane_terminal_error(&self, idx: usize, fallback: ZerobusError) -> ZerobusError {
+        self.streams[idx].terminal_error().await.unwrap_or(fallback)
+    }
+
+    fn shutdown_on_failure(&self, trigger_index: usize, cause: &ZerobusError) {
+        if self.is_closed_fast() || self.failure.set(cause.clone()).is_err() {
             return;
         }
-        let _ = self
-            .failure_context
-            .set(format!("sub-stream {trigger_index} failed: {cause}"));
+        self.is_closed.store(true, Ordering::Relaxed);
         self.closed_token.cancel();
 
         error!(
@@ -244,33 +242,6 @@ impl MultiplexedStream {
             num_streams = self.streams.len(),
             "MultiplexedStream poisoned due to sub-stream failure"
         );
-
-        let cleanup = PoisonCleanupGuard::new(
-            Arc::clone(&self.admission),
-            self.streams
-                .iter()
-                .map(ZerobusStream::shutdown_handle)
-                .collect(),
-        );
-
-        // Drain any readers already admitted before `is_closed` was set. The
-        // write lock is only a barrier: readers arriving after it is released
-        // will observe the closed state and reject the ingest.
-        {
-            let _admission = self.admission.write().await;
-        }
-
-        let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
-        for (i, result) in flush_results.into_iter().enumerate() {
-            if let Err(e) = result {
-                warn!(stream_index = i, error = %e, "Failed to flush sub-stream during shutdown");
-            }
-        }
-
-        // Signal each sub-stream to tear down its background tasks (gRPC
-        // connection, supervisor, callback handler). Full join/abort of the
-        // task handles happens later in `close` or `Drop`.
-        cleanup.finish();
     }
 
     // TODO: if the picked sub-stream is at capacity, try the next one before
@@ -295,21 +266,19 @@ impl MultiplexedStream {
             let reservation = stream.reserve_capacity();
             tokio::pin!(reservation);
 
-            match tokio::time::timeout(Duration::from_secs(1), &mut reservation).await {
-                Ok(result) => return result,
-                Err(_) => {
-                    let waited_ms = started_at.elapsed().as_millis();
-                    warn!(
-                        stream_index = idx,
-                        table_name,
-                        waited_ms,
-                        timeout_ms,
-                        max_inflight_requests,
-                        "Backpressure: sub-stream at capacity, waiting for drain"
-                    );
-                }
+            if let Ok(result) = tokio::time::timeout(Duration::from_secs(1), &mut reservation).await
+            {
+                return result;
             }
-
+            let waited_ms = started_at.elapsed().as_millis();
+            warn!(
+                stream_index = idx,
+                table_name,
+                waited_ms,
+                timeout_ms,
+                max_inflight_requests,
+                "Backpressure: sub-stream at capacity, waiting for drain"
+            );
             reservation.await
         };
 
@@ -317,21 +286,19 @@ impl MultiplexedStream {
             result = tokio::time::timeout(CAPACITY_WAIT_TIMEOUT, wait_for_reservation) => result,
             _ = self.closed_token.cancelled() => {
                 let waited_ms = started_at.elapsed().as_millis();
-                let cause = self.failure_context.get().map_or(
-                    "mux closed without a recorded sub-stream failure",
-                    String::as_str,
-                );
+                if let Some(failure) = self.failure.get() {
+                    return Err(failure.clone());
+                }
                 warn!(
                     stream_index = idx,
                     table_name,
                     waited_ms,
                     max_inflight_requests,
-                    cause,
                     "Multiplexed capacity wait cancelled by shutdown"
                 );
                 return Err(ZerobusError::InvalidStateError(
                     format!(
-                        "MultiplexedStream closed after {waited_ms} ms while waiting for capacity on sub-stream {idx} for table {table_name} (max_inflight_requests: {max_inflight_requests}; cause: {cause})"
+                        "MultiplexedStream closed after {waited_ms} ms while waiting for capacity on sub-stream {idx} for table {table_name} (max_inflight_requests: {max_inflight_requests})"
                     ),
                 ));
             }
@@ -339,8 +306,19 @@ impl MultiplexedStream {
 
         match result {
             Ok(Ok(reservation)) => Ok(reservation),
-            Ok(Err(e)) => Err(self.handle_ingest_error(e, stream, idx).await),
+            Ok(Err(e)) => Err(self.handle_lane_error(idx, e).await),
             Err(_) => {
+                self.check_closed()?;
+                if stream.is_closed() {
+                    return Err(self
+                        .handle_lane_error(
+                            idx,
+                            ZerobusError::ConnectionTimeout(format!(
+                                "Timed out waiting for capacity on multiplexed sub-stream {idx}"
+                            )),
+                        )
+                        .await);
+                }
                 let waited_ms = started_at.elapsed().as_millis();
                 warn!(
                     stream_index = idx,
@@ -365,37 +343,26 @@ impl MultiplexedStream {
     ) -> ZerobusResult<MessageId> {
         let reservation = self.reserve_capacity(stream, idx).await?;
         let enqueue_result = stream
-            .enqueue_reserved_admitted(encoded_batch, reservation, || async {
-                let admission = self.admission.read().await;
-                self.check_closed()?;
-                Ok(admission)
-            })
+            .enqueue_reserved_admitted(encoded_batch, reservation, || self.check_closed())
             .await;
 
         match enqueue_result {
             Ok(off) => Ok(MessageId::new(idx, off)),
-            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
+            Err(e) => Err(self.handle_lane_error(idx, e).await),
         }
     }
 
-    // Only poison the mux when the sub-stream itself has reached a terminal
-    // state (`is_closed`): recovery is exhausted or a non-retryable server
-    // error fired, so its offsets/pending records are unrecoverable. Other
-    // ingest errors (e.g. `InvalidArgument` on a record-type mismatch) leave
-    // the sub-stream healthy and would be wrong to escalate — one bad payload
-    // shouldn't kill the other sub-streams.
-    async fn handle_ingest_error(
-        &self,
-        e: ZerobusError,
-        stream: &ZerobusStream,
-        idx: usize,
-    ) -> ZerobusError {
-        if stream.is_closed() {
-            self.shutdown_on_failure(idx, &e).await;
+    // Payload errors and wait timeouts leave the lane alive; only terminal
+    // lane errors poison the mux.
+    async fn handle_lane_error(&self, idx: usize, e: ZerobusError) -> ZerobusError {
+        if self.streams[idx].is_closed() {
+            let cause = self.lane_terminal_error(idx, e).await;
+            self.shutdown_on_failure(idx, &cause);
+            cause
         } else {
-            warn!(stream_index = idx, error = %e, "Ingest errored but sub-stream still alive");
+            warn!(stream_index = idx, error = %e, "Sub-stream operation errored but lane remains alive");
+            e
         }
-        e
     }
 
     /// Ingests a single record into the next sub-stream (round-robin).
@@ -406,28 +373,28 @@ impl MultiplexedStream {
     /// this waits for it to drain rather than rerouting.
     pub async fn ingest_record(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl Into<PreparedInput>,
     ) -> ZerobusResult<MessageId> {
         self.check_closed()?;
-        let record = payload.into();
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        let encoded_batch = stream.prepare_record(record)?;
+        let encoded_batch = stream.prepare_record(payload)?;
         self.enqueue_reserved(stream, idx, encoded_batch).await
     }
 
     /// Ingests a batch of records into a single sub-stream (round-robin).
     ///
     /// The whole batch lands on one sub-stream so a single returned id covers
-    /// it. Returns `None` for an empty batch.
+    /// it. Returns `None` for an empty batch unless the mux is already closed
+    /// or poisoned, in which case it returns an error.
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
     pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: Into<PreparedInput>,
     {
         self.check_closed()?;
-        let records: Vec<EncodedRecord> = payload.into_iter().map(Into::into).collect();
+        let records: Vec<T> = payload.into_iter().collect();
         if records.is_empty() {
             return Ok(None);
         }
@@ -443,17 +410,36 @@ impl MultiplexedStream {
     /// acknowledged by the server.
     ///
     /// If a sub-stream flush fails because that sub-stream reached a terminal
-    /// state, the mux is poisoned. The first flush error is returned;
-    /// additional ones are logged.
+    /// state, the mux is poisoned after every healthy lane has completed its
+    /// flush attempt. A stored terminal mux failure takes precedence;
+    /// otherwise the first flush error is returned. Additional errors are
+    /// logged.
     pub async fn flush(&self) -> ZerobusResult<()> {
-        self.check_closed()?;
-        let results = join_all(self.streams.iter().map(|s| s.flush())).await;
+        if self.is_closed_fast() && self.failure.get().is_none() {
+            return Err(self.closed_error());
+        }
+        if self.failure.get().is_none() {
+            if let Some(idx) = self.first_closed_stream() {
+                let error = self
+                    .lane_terminal_error(
+                        idx,
+                        ZerobusError::InvalidStateError(format!(
+                            "MultiplexedStream sub-stream {idx} is closed"
+                        )),
+                    )
+                    .await;
+                self.shutdown_on_failure(idx, &error);
+            }
+        }
+
+        let results = join_all(self.streams.iter().map(ZerobusStream::flush)).await;
         let mut first_error: Option<ZerobusError> = None;
-        let mut first_closed: Option<(usize, ZerobusError)> = None;
+        let mut first_terminal: Option<(usize, ZerobusError)> = None;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
-                if self.streams[i].is_closed() && first_closed.is_none() {
-                    first_closed = Some((i, e.clone()));
+                if self.streams[i].is_closed() && first_terminal.is_none() {
+                    let terminal_error = self.lane_terminal_error(i, e.clone()).await;
+                    first_terminal = Some((i, terminal_error));
                 }
                 if first_error.is_none() {
                     first_error = Some(e);
@@ -461,27 +447,29 @@ impl MultiplexedStream {
                     warn!(
                         stream_index = i,
                         error = %e,
-                        "Additional sub-stream flush error (first error will be returned)"
+                        "Additional sub-stream flush error"
                     );
                 }
             }
         }
-        match first_error {
-            Some(e) => {
-                if let Some((closed_idx, closed_err)) = first_closed {
-                    self.shutdown_on_failure(closed_idx, &closed_err).await;
-                } else {
-                    warn!(error = %e, "flush errored but sub-streams still alive");
-                }
-                Err(e)
-            }
-            None => Ok(()),
+        if let Some((i, error)) = first_terminal {
+            self.shutdown_on_failure(i, &error);
+        } else if let Some(error) = &first_error {
+            warn!(error = %error, "flush errored but sub-streams still alive");
         }
+        self.failure
+            .get()
+            .cloned()
+            .or(first_error)
+            .map_or(Ok(()), Err)
     }
 
     /// Waits for server acknowledgment of the record or batch behind a
     /// [`MessageId`] returned from [`ingest_record`](Self::ingest_record) or
     /// [`ingest_records`](Self::ingest_records).
+    ///
+    /// Only the lane that owns this message can complete or fail the wait; a
+    /// failure on another lane does not make an acknowledged record retryable.
     pub async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
         let idx = message_id.stream_index();
         if idx >= self.streams.len() {
@@ -495,75 +483,80 @@ impl MultiplexedStream {
             .await
         {
             Ok(()) => Ok(()),
-            Err(e) => {
-                if self.streams[idx].is_closed() {
-                    self.shutdown_on_failure(idx, &e).await;
-                } else {
-                    warn!(
-                        stream_index = idx,
-                        error = %e,
-                        "wait_for_offset errored but sub-stream still alive"
-                    );
-                }
-                Err(e)
-            }
+            Err(e) => Err(self.handle_lane_error(idx, e).await),
         }
     }
 
     /// Flushes and closes all sub-streams, releasing their resources.
     ///
-    /// The first flush/close error is returned (additional ones are logged);
-    /// on error, use [`get_unacked_records`](Self::get_unacked_records) to
+    /// A stored or detected terminal lane failure takes precedence; otherwise
+    /// the first flush error is returned and additional ones are logged.
+    /// On error, use [`get_unacked_records`](Self::get_unacked_records) to
     /// recover records that were never acknowledged.
+    /// Retrying a cancelled close resumes teardown once its flush attempt has
+    /// completed, retaining both the flush result and terminal lane failures.
     pub async fn close(&mut self) -> ZerobusResult<()> {
         info!("Closing MultiplexedStream");
+
         self.is_closed.store(true, Ordering::Relaxed);
         self.closed_token.cancel();
 
-        let mut first_error: Option<ZerobusError> = None;
-
-        // Flush all sub-streams in parallel first; the per-stream `close`
-        // below flushes again, but by then each stream is already drained so
-        // the sequential pass is cheap.
-        let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
-        for (i, result) in flush_results.into_iter().enumerate() {
-            if let Err(e) = result {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                } else {
-                    warn!(
-                        stream_index = i,
-                        error = %e,
-                        "Additional sub-stream flush error during close"
-                    );
+        if self.close_flush_result.is_none() {
+            if self.failure.get().is_none() {
+                if let Some(idx) = self.first_closed_stream() {
+                    if let Some(error) = self.streams[idx].terminal_error().await {
+                        let _ = self.failure.set(error);
+                    }
                 }
             }
-        }
-
-        for (i, stream) in self.streams.iter_mut().enumerate() {
-            if let Err(e) = stream.close().await {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                } else {
-                    warn!(
-                        stream_index = i,
-                        error = %e,
-                        "Additional sub-stream close error"
-                    );
+            let mut first_error = None;
+            // All lanes stay live through this flush attempt. Cache its result
+            // before any supervisor is stopped or callback drain can be cancelled.
+            let results = join_all(self.streams.iter().map(ZerobusStream::flush)).await;
+            for (i, result) in results.into_iter().enumerate() {
+                if let Err(error) = result {
+                    if self.failure.get().is_none() && self.streams[i].is_closed() {
+                        if let Some(cause) = self.streams[i].terminal_error().await {
+                            let _ = self.failure.set(cause);
+                        }
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    } else {
+                        warn!(stream_index = i, error = %error, "Additional sub-stream flush error during close");
+                    }
                 }
             }
+            self.close_flush_result = Some(first_error.map_or(Ok(()), Err));
         }
 
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(()),
+        let failure = &self.failure;
+        join_all(self.streams.iter_mut().enumerate().map(|(i, stream)| async move {
+            if let Some(error) = stream.close_after_flush().await {
+                // Publish immediately, not after join_all: another lane's
+                // callbacks may still be draining when this close is cancelled.
+                if let Err(error) = failure.set(error) {
+                    warn!(stream_index = i, error = %error, "Additional terminal lane error during close");
+                }
+            }
+            stream.shutdown_callbacks().await;
+        }))
+        .await;
+
+        if let Some(error) = self.failure.get() {
+            Err(error.clone())
+        } else {
+            self.close_flush_result
+                .as_ref()
+                .expect("close flush completed")
+                .clone()
         }
     }
 
     /// Returns whether the mux is closed — either via [`close`](Self::close)
-    /// or because a sub-stream failure poisoned it.
+    /// or because a mux operation observed a sub-stream failure.
     pub fn is_closed(&self) -> bool {
-        self.is_closed_fast() || self.streams.iter().any(ZerobusStream::is_closed)
+        self.is_closed_fast()
     }
 
     /// Returns records that were ingested but not acknowledged.
@@ -574,12 +567,7 @@ impl MultiplexedStream {
     pub async fn get_unacked_records(
         &mut self,
     ) -> ZerobusResult<impl Iterator<Item = EncodedRecord>> {
-        let _ = self.close().await;
-        let mut all_records = Vec::new();
-        for stream in &self.streams {
-            all_records.extend(stream.get_unacked_records().await?);
-        }
-        Ok(all_records.into_iter())
+        Ok(self.get_unacked_batches().await?.into_iter().flatten())
     }
 
     /// Returns batches that were ingested but not acknowledged.
@@ -638,7 +626,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "MultiplexedStream requires at least one sub-stream")]
     fn test_constructor_panics_on_empty_streams() {
-        MultiplexedStream::new(vec![]);
+        MultiplexedStream::from_streams(vec![]);
     }
 
     #[test]
@@ -694,33 +682,5 @@ mod tests {
     fn test_multiplexed_ack_callback_rejects_invalid_stream_index() {
         let callback = Arc::new(RecordingMultiplexedCallback::default());
         multiplexed_ack_callback(64, callback);
-    }
-
-    #[tokio::test]
-    async fn poison_cleanup_survives_cancellation_and_waits_for_admission() {
-        let admission = Arc::new(tokio::sync::RwLock::new(()));
-        let admitted_ingest = admission.read().await;
-        let is_closed = Arc::new(AtomicBool::new(false));
-        let terminal_token = CancellationToken::new();
-        let cancellation_token = CancellationToken::new();
-        let shutdown_handle = StreamShutdownHandle::new(
-            Arc::clone(&is_closed),
-            terminal_token.clone(),
-            cancellation_token.clone(),
-        );
-
-        let cleanup = PoisonCleanupGuard::new(Arc::clone(&admission), vec![shutdown_handle]);
-        drop(cleanup);
-        tokio::task::yield_now().await;
-
-        assert!(!is_closed.load(Ordering::Relaxed));
-        assert!(!terminal_token.is_cancelled());
-        assert!(!cancellation_token.is_cancelled());
-
-        drop(admitted_ingest);
-        terminal_token.cancelled().await;
-
-        assert!(is_closed.load(Ordering::Relaxed));
-        assert!(cancellation_token.is_cancelled());
     }
 }

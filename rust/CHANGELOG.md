@@ -1,5 +1,190 @@
 # Version changelog
 
+## Release v2.11.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Added Avro support to `StreamBuilder::multiplexed(n)` (Beta) when the `avro`
+  feature is enabled; every lane shares the configured writer schema.
+- Added first-class external-IdP token federation (`FederatedTokenProvider`,
+  `IdpTokenSupplier`) alongside the existing OAuth client-credentials path. It
+  exchanges an external IdP token (for example an Entra ID token) for a
+  Zerobus-scoped Databricks token via the RFC 8693 token-exchange grant, caches
+  and refreshes it through the existing `TokenCache`, and supports both
+  account-level federation (no `client_id`, identity synced via Automatic
+  Identity Management) and workload identity federation (a service principal
+  `client_id` with no secret). Opt in via `StreamBuilder::federated_auth(supplier,
+  client_id)`, where `client_id` is `None` for account-level federation or the
+  service principal id for workload identity. The client-credentials and
+  token-exchange grants now share one request-shaping path, keeping them at
+  parity. The cached lifetime of an exchanged token is additionally capped at the
+  subject JWT's remaining life (`min(expires_in, exp - now)`), so it is never
+  served past the point its subject token expired. The shared token cache is
+  partitioned by identity so entries never collide — workload keys by its service
+  principal `client_id`, account-level by the supplier's own identity — so two
+  distinct identities driven from one SDK instance never serve each other's token
+  on the same table, without the caller passing a partition key (clone one
+  supplier across streams to share its cached token; pass a distinct supplier to
+  isolate). Existing `oauth(...)` and `headers_provider(...)` paths are unchanged.
+
+### Bug Fixes
+
+- Fixed Avro (`avro` feature, Beta) encoding of `fixed(16)` + `logicalType:
+  "uuid"` columns. Bumped `apache-avro` to 0.22, which preserves the `fixed(16)`
+  backing (`Schema::Uuid(UuidSchema::Fixed)`) and encodes `AvroValue::Uuid` as 16
+  raw bytes instead of the 37-byte hyphenated string a `fixed(16)` server column
+  could not decode. `string` + `uuid` columns are unchanged.
+
+### Documentation
+
+- Added a multiplexed Avro example using loop-then-flush ingestion.
+
+### Internal Changes
+
+- Added the feature-gated persistent gRPC transport, durable wire offsets,
+  resume-watermark reconciliation after a lost acknowledgment, and validation
+  for setup responses, acknowledgment bounds, and offset overflow.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+## Release v2.10.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Added `StreamBuilder::multiplexed(n)` (Beta) for JSON and protobuf streams, with
+  concurrent construction, a shared in-flight budget, and a separate
+  `multiplexed_ack_callback` for `MessageId` notifications. Existing ordinary
+  `ack_callback` usage is unchanged.
+- Multi-lane multiplexed construction opens sub-streams concurrently with
+  bounded random startup jitter and cleans up successful opens if construction
+  fails or is cancelled. A single lane opens immediately.
+- Multiplexed streams divide the mux-wide `max_inflight_requests` budget evenly
+  across sub-streams.
+
+### Bug Fixes
+
+- Restored the established gRPC stream error contract after exhausted recovery:
+  `wait_for_offset()`, `flush()`, and an in-progress `close()` now report the
+  final recovery setup failure as `StreamClosedError` while preserving its gRPC
+  status. Initial stream construction still reports `CreateStreamError`.
+
+- Cancelled gRPC stream construction now cancels and aborts supervisor,
+  callback, sender, and receiver tasks before ownership is returned. This
+  applies to ordinary and multiplexed stream builds.
+
+### Documentation
+
+- Added multiplexed-stream guidance and a complete compiled-protobuf example
+  with queued ingestion, periodic flushing, `MessageId` callbacks, and close.
+
+### Internal Changes
+
+- Made gRPC graceful-close deadline tests deterministic with a paused clock and
+  acknowledgment barriers, avoiding false failures from Windows scheduling delays.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+- Exported `MultiplexedStream`, `MultiplexedStreamBuilder`, and `MessageId` with
+  default features.
+- Added `StreamBuilder::multiplexed_ack_callback` for `MessageId` callbacks
+  while preserving `ack_callback` for ordinary `OffsetId` callbacks; each
+  terminal mode rejects the other mode's callback.
+- Added `MultiplexedStream::new_record()` for dynamic-protobuf records.
+
+## Release v2.9.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Add Avro record format (Beta), behind the off-by-default `avro` feature. Select it with
+  `StreamBuilder::avro(schema_json)`, then ingest an `AvroRecord(AvroValue)` the stream
+  encodes against the writer schema, or a pre-encoded `AvroBytes`. Ephemeral streams only;
+  requires Rust 1.85 (via `apache-avro`); feature in development.
+
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
+  shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.
+- Added pluggable Arrow Flight telemetry (Beta) for batch sizes, send attempts,
+  acknowledgments, and reconnect reasons, via `StatsExporter` and `channel_exporter`.
+
+### Bug Fixes
+
+- Bounded the post-abort supervisor wait during gRPC stream close, including
+  when a synchronous credentials callback is blocked.
+
+### Documentation
+
+### Internal Changes
+
+- Updated multiplexed-stream failure handling to reject new ingestion after a
+  mux operation observes a failed lane, preserve typed lane errors, wait for
+  healthy lanes during flush, and close lanes concurrently. Healthy lanes stay
+  active until explicit close or drop. Message acknowledgment waits remain
+  scoped to their own lane.
+- Fixed interrupted mux close so retrying finishes callback draining and lane
+  finalization without repeating a completed flush attempt or losing the
+  terminal error, preserving access to unacknowledged records.
+
+### Breaking Changes
+
+- **Adding the Avro record type extends the publicly re-exported gRPC types, which
+  can break compilation for some downstream crates.** The additions
+  (`RecordType::AVRO`, `CreateIngestStreamRequest.avro_schema_json`,
+  `IngestRecordRequest.avro_encoded_record`, `IngestRecordBatchRequest.avro_batch`, and
+  the new `AvroRecordBatch`) are wire-compatible — no runtime or behavior change. But
+  because the crate re-exports the prost-generated types
+  (`databricks_zerobus_ingest_sdk::databricks::zerobus`), code that matches or builds
+  them exhaustively will no longer compile. The builder API (`.json()`,
+  `.compiled_proto()`, `.dynamic_proto()`) and the other-language SDKs are unaffected.
+  The long-term fix (hiding these generated types) is tracked in
+  [#822](https://github.com/databricks/zerobus-sdk/issues/822).
+
+  Migration — every fix is additive:
+  - Exhaustive `match` on `RecordType` with no `_` arm → add `_ => { … }` (or a
+    `RecordType::Avro` arm). (E0004)
+  - Exhaustive `match` on the `ingest_record_request::Record` or
+    `ingest_record_batch_request::Batch` oneof → add a `_ => { … }` arm. (E0004)
+  - Full-field struct literal of `CreateIngestStreamRequest` → add
+    `..Default::default()`. (E0063)
+  - Full-field struct pattern/destructuring of `CreateIngestStreamRequest`
+    (e.g. `let CreateIngestStreamRequest { table_name, descriptor_proto, record_type } = req`)
+    → add `..`. (E0027)
+  - **Only in crates that enable the `avro` feature:** the SDK's own `EncodedRecord` /
+    `EncodedBatch` enums (not `#[non_exhaustive]`) gain an `Avro` variant. Exhaustive
+    `match` on either with no `_` arm → add an `EncodedRecord::Avro(..)` /
+    `EncodedBatch::Avro(..)` arm (or `_ => { … }`). (E0004)
+
+  Unaffected: `x == RecordType::Json`, any `match` that already has a `_` arm, and
+  struct literals/patterns that already use `..`.
+
+### Deprecations
+
+### API Changes
+
+- Added the Avro wire surface to the generated gRPC types (`RecordType::AVRO`,
+  `CreateIngestStreamRequest.avro_schema_json`, `IngestRecordRequest.avro_encoded_record`,
+  `IngestRecordBatchRequest.avro_batch`, `AvroRecordBatch`). See **Breaking Changes** for
+  the downstream-compilation impact and migration.
+
+- `ZerobusStream::ingest_record_offset` / `ingest_records_offset` (and the `testing`-only
+  multiplexed equivalents) now accept `impl Into<PreparedInput>` instead of
+  `impl Into<EncodedRecord>`. A blanket `From<T: Into<EncodedRecord>>` keeps every existing
+  caller compiling unchanged; the wider bound is what lets an Avro record object
+  (`AvroRecord`) be ingested. `PreparedInput` is `#[doc(hidden)]`.
+
 ## Release v2.8.0
 
 ### Major Changes

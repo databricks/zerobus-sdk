@@ -37,6 +37,7 @@ arrow = [
     "pyarrow>=14.0.0,<22.0; python_version < '3.14'",
     "pyarrow>=22.0.0,<26.0; python_version >= '3.14'",
 ]
+avro = ["fastavro>=1.9,<2"]
 dev = [
     # Build tools
     "wheel",
@@ -55,6 +56,7 @@ dev = [
     "pytest-asyncio>=0.21,<1.0",
     "pyarrow>=14.0.0,<22.0; python_version < '3.14'",
     "pyarrow>=22.0.0,<26.0; python_version >= '3.14'",
+    "fastavro>=1.9,<2",
 ]
 
 [tool.maturin]

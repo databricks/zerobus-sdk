@@ -42,6 +42,8 @@ pub enum RecordType {
     Json = 0,
     /// Protocol Buffers encoding - records are binary protobuf messages
     Proto = 1,
+    /// Avro encoding - records are raw Avro binary datums (Beta)
+    Avro = 2,
 }
 
 /// Configuration options for the Zerobus stream.
@@ -840,6 +842,9 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
 pub struct ZerobusSdkOptions {
     /// Identifier appended to the `user-agent` header
     pub application_name: Option<String>,
+    /// Whether every JSON/protobuf stream gets a dedicated gRPC connection.
+    /// Defaults to true.
+    pub connection_per_stream: Option<bool>,
 }
 
 /// The main SDK for interacting with the Databricks Zerobus service.
@@ -881,7 +886,8 @@ impl ZerobusSdk {
     /// * `unity_catalog_url` - The Unity Catalog endpoint URL
     ///   (e.g., "https://workspace.cloud.databricks.com")
     /// * `options` - Optional SDK configuration (see `ZerobusSdkOptions`),
-    ///   including `applicationName` for server-side attribution.
+    ///   including `applicationName` for server-side attribution and
+    ///   `connectionPerStream` for connection ownership.
     ///
     /// # Errors
     ///
@@ -910,6 +916,10 @@ impl ZerobusSdk {
             .endpoint(&zerobus_endpoint)
             .unity_catalog_url(&unity_catalog_url)
             .sdk_identifier(TS_SDK_USER_AGENT);
+        let builder = match options.connection_per_stream {
+            Some(enabled) => builder.connection_per_stream(enabled),
+            None => builder,
+        };
         let builder = match options.application_name {
             Some(name) => builder.application_name(name),
             None => builder,
@@ -1018,6 +1028,7 @@ impl ZerobusSdk {
         let record_type = match opts.record_type {
             Some(0) => RustRecordType::Json,
             Some(1) => RustRecordType::Proto,
+            Some(2) => RustRecordType::Avro,
             _ => RustRecordType::Proto,
         };
 
@@ -1086,6 +1097,11 @@ impl ZerobusSdk {
 
                 let builder = match record_type {
                     RustRecordType::Json => builder.json(),
+                    RustRecordType::Avro => {
+                        return Err(napi::Error::from_reason(
+                            "Avro record type is not supported",
+                        ))
+                    }
                     RustRecordType::Proto | RustRecordType::Unspecified => {
                         let desc = descriptor_proto.ok_or_else(|| {
                             napi::Error::from_reason(

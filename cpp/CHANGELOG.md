@@ -5,6 +5,29 @@ All notable changes to the Zerobus C++ SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## Release v0.4.0
+
+### New Features and Improvements
+
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Set `Sdk::builder().connection_per_stream(false)` to share one HTTP/2
+  connection across streams.
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 2.9.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.9.0.
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v0.3.0
 
 ### New Features and Improvements

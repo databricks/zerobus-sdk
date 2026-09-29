@@ -101,26 +101,31 @@ Pick the record format that matches your data.
 
 - JSON: schema-free ingestion. Pass a JSON string or a native object (dict, map, and so on) and the SDK serializes it. No compilation step. Good for getting started or dynamic schemas.
 - Protocol Buffers: strongly-typed, schema-validated ingestion. More compact on the wire than JSON. A typical choice for production workloads that are not already producing Arrow.
+- Avro (beta): row-oriented binary encoding against a declared writer schema. Pass a record object or pre-encoded Avro bytes. Currently available in the Rust and Python SDKs; support in the other SDKs is in development.
 - Arrow Flight: Apache Arrow `RecordBatch` data over the Arrow Flight protocol. Best when the workload is columnar or batched, or the application already produces Arrow (pyarrow, [arrow-rs](https://github.com/apache/arrow-rs), DataFusion, Polars).
 
-JSON and Protocol Buffers share one stream API, available in every SDK. Arrow Flight is a separate columnar API, available in the SDKs listed below.
+JSON, Protocol Buffers, and Avro use one row-based stream API; Arrow Flight is a separate columnar API. Availability per SDK is below — Avro is beta and still rolling out.
 
-| SDK | JSON / Protobuf | Arrow Flight |
-| --- | --- | --- |
-| Rust | Available | Available since 2.8.0 |
-| Python | Available | Available since 1.8.0 |
-| Go (cgo) | Available | Available since 1.6.0 |
-| Pure Go | Available | Not available |
-| TypeScript | Available | Available since 1.3.0 |
-| Java | Available | Available since 1.6.0 |
-| C++ | Available | Available since 0.3.0 |
-| .NET (C#) | Available | Not available |
+| SDK | JSON / Protobuf | Avro (beta) | Arrow Flight |
+| --- | --- | --- | --- |
+| Rust | Available | Beta | Available since 2.8.0 |
+| Python | Available | Beta | Available since 1.8.0 |
+| Go (cgo) | Available | In development | Available since 1.6.0 |
+| Pure Go | Available | In development | Not available |
+| TypeScript | Available | In development | Available since 1.3.0 |
+| Java | Available | In development | Available since 1.6.0 |
+| C++ | Available | In development | Available since 0.3.0 |
+| .NET (C#) | Available | In development | Not available |
 
 ### JSON and Protocol Buffers ingestion
 
 Records are sent as JSON or Protocol Buffers on the same stream API.
 
 For Protocol Buffers, use `proto2` syntax with `optional` fields so nullable Delta table columns are represented correctly. Instead of writing `.proto` files by hand, each SDK ships a tool that generates a protobuf schema from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
+
+### Avro ingestion (beta)
+
+Send records encoded against a declared Avro writer schema on the same row-based stream API — pass a record object the SDK encodes against the schema, or pre-encoded Avro bytes. Currently available in the Rust and Python SDKs; support in the other SDKs is in development. See each SDK's README for language-specific usage.
 
 ### Arrow Flight ingestion
 

@@ -1,7 +1,7 @@
 # Zerobus SDK Examples
 
 This directory contains runnable synchronous and asynchronous examples for Protobuf,
-JSON, and Arrow Flight ingestion with the Zerobus Ingest SDK for Python.
+JSON, Avro, and Arrow Flight ingestion with the Zerobus Ingest SDK for Python.
 
 For complete SDK documentation including installation, API reference, and configuration details, see the [main README](../README.md).
 
@@ -17,9 +17,10 @@ cd zerobus-sdk/python
 ### 2. Install Dependencies
 
 ```bash
-pip install -e ".[arrow]"
+pip install -e ".[arrow,avro]"
 ```
 
+The `avro` extra installs `fastavro`, which the Avro examples use to encode dict records.
 The examples use a pre-generated protobuf file (`record_pb2.py`) based on the included `record.proto` schema.
 
 ### 3. Configure Credentials
@@ -44,11 +45,13 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 # Synchronous examples (blocking I/O)
 python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
+python examples/sync_example_avro.py      # Avro
 python examples/sync_example_arrow.py     # Arrow Flight
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
+python examples/async_example_avro.py     # Avro
 python examples/async_example_arrow.py    # Arrow Flight
 ```
 
@@ -65,8 +68,8 @@ are not shown because they spawn detached tasks and are not safely synchronized 
 
 ### Serialization Formats
 
-The row-oriented examples cover two serialization formats. The Arrow Flight
-examples use `pyarrow.RecordBatch` data instead.
+The row-oriented examples cover three serialization formats (Protobuf, JSON, Avro). The
+Arrow Flight examples use `pyarrow.RecordBatch` data instead.
 
 #### Protocol Buffers
 **Files:** `sync_example_proto.py`, `async_example_proto.py`
@@ -114,6 +117,23 @@ stream.flush()
 
 # Option 2: Pass pre-serialized JSON string (client controls serialization)
 # offset = stream.ingest_record_offset(json.dumps(record_dict))
+```
+
+#### Avro (beta)
+**Files:** `sync_example_avro.py`, `async_example_avro.py`
+
+Row-oriented binary encoding against a declared writer schema. You can pass either:
+- **dict** (encoded with `fastavro`; install the `avro` extra)
+- **Pre-encoded Avro bytes** (client controls encoding; no extra needed)
+
+```python
+import json
+
+table_properties = TableProperties(TABLE_NAME, avro_schema=json.dumps(schema))
+
+# Recommended: ingest_record_offset() then flush() once
+offset = stream.ingest_record_offset({"device_name": "sensor-1", "temp": 25})
+stream.flush()
 ```
 
 ### Synchronous vs Asynchronous APIs
@@ -179,6 +199,7 @@ The nowait APIs spawn detached tasks and are not safely synchronized with `flush
 |--------|-------------|---------------|
 | **Protobuf** | `Message` object or `bytes` | `TableProperties(table_name, descriptor_proto=descriptor)` |
 | **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` |
+| **Avro** (beta) | `dict` or pre-encoded `bytes` | `TableProperties(table_name, avro_schema=json_schema)` |
 
 ## Authentication
 

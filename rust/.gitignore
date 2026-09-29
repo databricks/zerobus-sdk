@@ -1,2 +1,5 @@
 target/
 .cargo/
+# examples/avro is temporarily excluded from the workspace (see rust/Cargo.toml), so its
+# standalone lockfile is not tracked; it goes away once the crate rejoins `members`.
+examples/avro/Cargo.lock
