@@ -65,6 +65,7 @@ endif()
 # ---------------------------------------------------------------------------
 set(ZEROBUS_SOURCES
   src/internal/common/utils.c
+  src/internal/common/queue.c
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
   src/internal/proto/zerobus_service.c
