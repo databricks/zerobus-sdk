@@ -12,8 +12,38 @@ use async_trait::async_trait;
 /// Diagnostic context for a selected lane's capacity wait.
 pub(crate) struct CapacityContext<'a> {
     pub(crate) table_name: &'a str,
-    pub(crate) capacity_option: &'static str,
-    pub(crate) capacity: usize,
+    pub(crate) limit: CapacityLimit,
+}
+
+/// Capacity setting whose native structured-log field must be retained.
+#[derive(Clone, Copy)]
+pub(crate) enum CapacityLimit {
+    MaxInflightRequests(usize),
+    // The Arrow lane is introduced by the next PR in this stack.
+    #[allow(dead_code)]
+    MaxInflightBatches(usize),
+}
+
+impl CapacityLimit {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::MaxInflightRequests(_) => "max_inflight_requests",
+            Self::MaxInflightBatches(_) => "max_inflight_batches",
+        }
+    }
+
+    pub(crate) fn value(self) -> usize {
+        match self {
+            Self::MaxInflightRequests(value) | Self::MaxInflightBatches(value) => value,
+        }
+    }
+
+    pub(crate) fn log_fields(self) -> (Option<usize>, Option<usize>) {
+        match self {
+            Self::MaxInflightRequests(value) => (Some(value), None),
+            Self::MaxInflightBatches(value) => (None, Some(value)),
+        }
+    }
 }
 
 #[async_trait]

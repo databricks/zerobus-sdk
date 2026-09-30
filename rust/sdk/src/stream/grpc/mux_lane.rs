@@ -2,7 +2,7 @@
 use std::sync::atomic::Ordering;
 
 use super::ZerobusStream;
-use crate::multiplexed_stream::lane::{CapacityContext, MuxLane};
+use crate::multiplexed_stream::lane::{CapacityContext, CapacityLimit, MuxLane};
 use crate::{EncodedBatch, OffsetId, ZerobusError, ZerobusResult};
 use async_trait::async_trait;
 
@@ -16,8 +16,7 @@ impl MuxLane for ZerobusStream {
     fn capacity_context(&self) -> CapacityContext<'_> {
         CapacityContext {
             table_name: &self.table_properties.table_name,
-            capacity_option: "max_inflight_requests",
-            capacity: self.options.max_inflight_requests,
+            limit: CapacityLimit::MaxInflightRequests(self.options.max_inflight_requests),
         }
     }
 

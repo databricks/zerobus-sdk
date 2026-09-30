@@ -99,16 +99,10 @@ impl<S: MuxLane> MuxCore<S> {
     async fn reserve_capacity(&self, stream: &S, idx: usize) -> ZerobusResult<S::Reservation> {
         let started_at = tokio::time::Instant::now();
         let timeout_ms = CAPACITY_WAIT_TIMEOUT.as_millis();
-        let CapacityContext {
-            table_name,
-            capacity_option,
-            capacity,
-        } = stream.capacity_context();
-        // `Option<usize>` records the original numeric field for gRPC and no
-        // field for Arrow. Keep the generic fields for transport-neutral logs.
-        let max_inflight_requests =
-            (capacity_option == "max_inflight_requests").then_some(capacity);
-        let max_inflight_batches = (capacity_option == "max_inflight_batches").then_some(capacity);
+        let CapacityContext { table_name, limit } = stream.capacity_context();
+        let capacity_option = limit.name();
+        let capacity = limit.value();
+        let (max_inflight_requests, max_inflight_batches) = limit.log_fields();
 
         self.check_closed()?;
 
@@ -126,8 +120,6 @@ impl<S: MuxLane> MuxCore<S> {
                 table_name,
                 waited_ms,
                 timeout_ms,
-                capacity,
-                capacity_option,
                 max_inflight_requests,
                 max_inflight_batches,
                 "Backpressure: sub-stream at capacity, waiting for drain"
@@ -146,8 +138,6 @@ impl<S: MuxLane> MuxCore<S> {
                     stream_index = idx,
                     table_name,
                     waited_ms,
-                    capacity,
-                    capacity_option,
                     max_inflight_requests,
                     max_inflight_batches,
                     "Multiplexed capacity wait cancelled by shutdown"
@@ -182,8 +172,6 @@ impl<S: MuxLane> MuxCore<S> {
                     table_name,
                     waited_ms,
                     timeout_ms,
-                    capacity,
-                    capacity_option,
                     max_inflight_requests,
                     max_inflight_batches,
                     "Timed out waiting for multiplexed sub-stream capacity"

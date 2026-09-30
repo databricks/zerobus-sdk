@@ -203,7 +203,7 @@ where
     // `join_all` polls every open concurrently and preserves input order,
     // so completion timing cannot change the assigned stream indices.
     let results = join_all(opens).await;
-    let mut indexed_streams = Vec::new();
+    let mut indexed_streams = Vec::with_capacity(results.len());
     let mut first_error = None;
     for (stream_index, result) in results.into_iter().enumerate() {
         match result {
