@@ -1,7 +1,4 @@
 /* Unit tests for the bounded MPMC queue (queue.c). */
-/* Keep sched_yield declared without changing the project's C baseline. */
-#define _POSIX_C_SOURCE 200809L
-
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>

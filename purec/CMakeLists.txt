@@ -57,7 +57,8 @@ target_link_libraries(zerobus_c PUBLIC Threads::Threads)
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
 add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
-target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
+target_compile_definitions(zerobus_c_testing
+  PUBLIC ZB_TESTING _POSIX_C_SOURCE=200809L)
 target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          ${CMAKE_CURRENT_SOURCE_DIR}/src
