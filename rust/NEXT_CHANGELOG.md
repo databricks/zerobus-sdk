@@ -12,6 +12,9 @@
 
 ### Internal Changes
 
+- Extracted a private transport-generic mux core and lane contract, preserving
+  existing gRPC multiplexed-stream behavior and construction guarantees.
+
 ### Breaking Changes
 
 ### Deprecations
