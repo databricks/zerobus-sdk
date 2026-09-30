@@ -11,6 +11,7 @@
 //! |-----------------------|----------------------------------------------------|--------------------|
 //! | `types.rs`            | Internal types (`IngestRequest`, channel messages) | Transport-agnostic |
 //! | `ingest.rs`           | Public `ingest_*` methods                          | Transport-agnostic |
+//! | `mux_lane.rs`         | Private mux lane hooks and gRPC adapter            | gRPC-specific      |
 //! | `acks.rs`             | `flush`, `wait_for_offset`, unacked queries        | Transport-agnostic |
 //! | `close.rs`            | `close`, `is_closed`, task shutdown                | Transport-agnostic |
 //! | `callback_handler.rs` | User-callback dispatch task                        | Transport-agnostic |
@@ -41,6 +42,7 @@ mod callback_handler;
 mod close;
 mod connection;
 mod ingest;
+mod mux_lane;
 mod receiver;
 mod sender;
 mod supervisor;

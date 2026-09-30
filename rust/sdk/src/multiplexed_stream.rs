@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 mod core;
-mod lane;
+pub(crate) mod lane;
 use core::MuxCore;
 
 use crate::{
