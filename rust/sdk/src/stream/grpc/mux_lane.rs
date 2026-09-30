@@ -1,16 +1,15 @@
 //! gRPC implementation of the private multiplexed-lane contract.
 use std::sync::atomic::Ordering;
 
-use async_trait::async_trait;
-use tracing::debug;
-
-use super::types::IngestRequest;
 use super::ZerobusStream;
 use crate::multiplexed_stream::lane::{CapacityContext, MuxLane};
 use crate::{EncodedBatch, OffsetId, ZerobusError, ZerobusResult};
+use async_trait::async_trait;
 
 #[async_trait]
 impl MuxLane for ZerobusStream {
+    const STREAM_NAME: &'static str = "MultiplexedStream";
+
     type Batch = EncodedBatch;
     type Reservation = crate::landing_zone::CapacityReservation;
 
@@ -50,24 +49,7 @@ impl MuxLane for ZerobusStream {
     where
         F: FnOnce() -> ZerobusResult<()> + Send,
     {
-        let _guard = self.sync_mutex.lock().await;
-        admit()?;
-        self.check_open()?;
-
-        let offset_id = self.logical_offset_id_generator.next();
-        debug!(
-            offset_id,
-            record_count = batch.get_record_count(),
-            "Ingesting record(s)"
-        );
-        self.landing_zone.enqueue_reserved(
-            Box::new(IngestRequest {
-                payload: batch,
-                offset_id,
-            }),
-            reservation,
-        );
-        Ok(offset_id)
+        ZerobusStream::enqueue_reserved_admitted(self, batch, reservation, admit).await
     }
 
     async fn flush_lane(&self) -> ZerobusResult<()> {

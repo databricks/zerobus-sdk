@@ -25,11 +25,13 @@ impl<S: MuxLane> MuxCore<S> {
     pub(super) fn from_streams(streams: Vec<S>) -> Self {
         assert!(
             !streams.is_empty(),
-            "MultiplexedStream requires at least one sub-stream"
+            "{} requires at least one sub-stream",
+            S::STREAM_NAME
         );
         assert!(
             streams.len() <= (1 << STREAM_BITS),
-            "MultiplexedStream supports at most {} sub-streams",
+            "{} supports at most {} sub-streams",
+            S::STREAM_NAME,
             1 << STREAM_BITS
         );
         Self {
@@ -55,7 +57,7 @@ impl<S: MuxLane> MuxCore<S> {
 
     fn closed_error(&self) -> ZerobusError {
         self.failure.get().cloned().unwrap_or_else(|| {
-            ZerobusError::InvalidStateError("MultiplexedStream is closed".to_string())
+            ZerobusError::InvalidStateError(format!("{} is closed", S::STREAM_NAME))
         })
     }
 
@@ -68,6 +70,7 @@ impl<S: MuxLane> MuxCore<S> {
     }
 
     async fn lane_terminal_error(&self, idx: usize, fallback: ZerobusError) -> ZerobusError {
+        debug_assert!(self.streams[idx].is_terminal());
         self.streams[idx].terminal_cause().await.unwrap_or(fallback)
     }
 
@@ -82,11 +85,13 @@ impl<S: MuxLane> MuxCore<S> {
             trigger_stream_index = trigger_index,
             cause = %cause,
             num_streams = self.streams.len(),
-            "MultiplexedStream poisoned due to sub-stream failure"
+            "{} poisoned due to sub-stream failure",
+            S::STREAM_NAME
         );
     }
 
-    // Keep the selected lane through backpressure; do not reroute.
+    // TODO: if the picked sub-stream is at capacity, try the next one before
+    // falling back to waiting.
     fn pick_substream(&self) -> usize {
         self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
     }
@@ -99,6 +104,11 @@ impl<S: MuxLane> MuxCore<S> {
             capacity_option,
             capacity,
         } = stream.capacity_context();
+        // `Option<usize>` records the original numeric field for gRPC and no
+        // field for Arrow. Keep the generic fields for transport-neutral logs.
+        let max_inflight_requests =
+            (capacity_option == "max_inflight_requests").then_some(capacity);
+        let max_inflight_batches = (capacity_option == "max_inflight_batches").then_some(capacity);
 
         self.check_closed()?;
 
@@ -118,6 +128,8 @@ impl<S: MuxLane> MuxCore<S> {
                 timeout_ms,
                 capacity,
                 capacity_option,
+                max_inflight_requests,
+                max_inflight_batches,
                 "Backpressure: sub-stream at capacity, waiting for drain"
             );
             reservation.await
@@ -136,11 +148,14 @@ impl<S: MuxLane> MuxCore<S> {
                     waited_ms,
                     capacity,
                     capacity_option,
+                    max_inflight_requests,
+                    max_inflight_batches,
                     "Multiplexed capacity wait cancelled by shutdown"
                 );
                 return Err(ZerobusError::InvalidStateError(
                     format!(
-                        "MultiplexedStream closed after {waited_ms} ms while waiting for capacity on sub-stream {idx} for table {table_name} ({capacity_option}: {capacity})"
+                        "{} closed after {waited_ms} ms while waiting for capacity on sub-stream {idx} for table {table_name} ({capacity_option}: {capacity})",
+                        S::STREAM_NAME
                     ),
                 ));
             }
@@ -169,6 +184,8 @@ impl<S: MuxLane> MuxCore<S> {
                     timeout_ms,
                     capacity,
                     capacity_option,
+                    max_inflight_requests,
+                    max_inflight_batches,
                     "Timed out waiting for multiplexed sub-stream capacity"
                 );
                 Err(ZerobusError::ConnectionTimeout(format!(
@@ -214,7 +231,7 @@ impl<S: MuxLane> MuxCore<S> {
         }
     }
 
-    pub async fn flush(&self) -> ZerobusResult<()> {
+    pub(super) async fn flush(&self) -> ZerobusResult<()> {
         if self.is_closed_fast() && self.failure.get().is_none() {
             return Err(self.closed_error());
         }
@@ -224,7 +241,8 @@ impl<S: MuxLane> MuxCore<S> {
                     .lane_terminal_error(
                         idx,
                         ZerobusError::InvalidStateError(format!(
-                            "MultiplexedStream sub-stream {idx} is closed"
+                            "{} sub-stream {idx} is closed",
+                            S::STREAM_NAME
                         )),
                     )
                     .await;
@@ -264,7 +282,7 @@ impl<S: MuxLane> MuxCore<S> {
             .map_or(Ok(()), Err)
     }
 
-    pub async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
+    pub(super) async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
         let idx = message_id.stream_index();
         if idx >= self.streams.len() {
             return Err(ZerobusError::InvalidArgument(format!(
@@ -281,8 +299,8 @@ impl<S: MuxLane> MuxCore<S> {
         }
     }
 
-    pub async fn close(&mut self) -> ZerobusResult<()> {
-        info!("Closing MultiplexedStream");
+    pub(super) async fn close(&mut self) -> ZerobusResult<()> {
+        info!("Closing {}", S::STREAM_NAME);
 
         self.is_closed.store(true, Ordering::Relaxed);
         self.closed_token.cancel();
@@ -339,7 +357,7 @@ impl<S: MuxLane> MuxCore<S> {
         }
     }
 
-    pub fn is_closed(&self) -> bool {
+    pub(super) fn is_closed(&self) -> bool {
         self.is_closed_fast()
     }
 

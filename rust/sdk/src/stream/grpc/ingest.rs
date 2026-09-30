@@ -202,45 +202,30 @@ impl ZerobusStream {
         encoded_batch: EncodedBatch,
     ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
         let reservation = self.reserve_capacity().await?;
-
-        let _guard = self.sync_mutex.lock().await;
-        self.check_open()?;
-
-        let offset_id = self.logical_offset_id_generator.next();
-        debug!(
-            offset_id = offset_id,
-            record_count = encoded_batch.get_record_count(),
-            "Ingesting record(s)"
-        );
-
-        if let Some(stream_id) = self.stream_id.as_ref() {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            {
-                let mut map = self.oneshot_map.lock().await;
-                map.insert(offset_id, tx);
-            }
-            self.landing_zone.enqueue_reserved(
-                Box::new(IngestRequest {
-                    payload: encoded_batch,
-                    offset_id,
-                }),
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (_, stream_id) = self
+            .enqueue_reserved_with(
+                encoded_batch,
                 reservation,
-            );
-            let stream_id = stream_id.to_string();
-            Ok(async move {
-                rx.await.map_err(|err| {
-                    error!(stream_id = %stream_id, "Failed to receive ack: {}", err);
-                    ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Failed to receive ack",
-                    ))
-                })?
-            })
-        } else {
-            error!("Stream ID is None");
-            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream ID is None",
-            )))
-        }
+                || Ok(()),
+                |offset_id| async move {
+                    let Some(stream_id) = self.stream_id.as_ref() else {
+                        error!("Stream ID is None");
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            "Stream ID is None",
+                        )));
+                    };
+                    self.oneshot_map.lock().await.insert(offset_id, tx);
+                    Ok(stream_id.clone())
+                },
+            )
+            .await?;
+        Ok(async move {
+            rx.await.map_err(|err| {
+                error!(stream_id = %stream_id, "Failed to receive ack: {}", err);
+                ZerobusError::StreamClosedError(tonic::Status::internal("Failed to receive ack"))
+            })?
+        })
     }
 
     /// Internal unified method for ingesting records and batches.
@@ -249,8 +234,42 @@ impl ZerobusStream {
     /// Used by the public `ingest_*_offset` methods.
     async fn enqueue_prepared_batch(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
         let reservation = self.reserve_capacity().await?;
+        self.enqueue_reserved_admitted(encoded_batch, reservation, || Ok(()))
+            .await
+    }
 
+    /// Assign and enqueue under the lifecycle lock after checking mux admission.
+    pub(crate) async fn enqueue_reserved_admitted<F>(
+        &self,
+        encoded_batch: EncodedBatch,
+        reservation: crate::landing_zone::CapacityReservation,
+        admit: F,
+    ) -> ZerobusResult<OffsetId>
+    where
+        F: FnOnce() -> ZerobusResult<()>,
+    {
+        let (offset_id, ()) = self
+            .enqueue_reserved_with(encoded_batch, reservation, admit, |_| async { Ok(()) })
+            .await?;
+        Ok(offset_id)
+    }
+
+    /// The offset hook runs before enqueue while the lifecycle lock is held.
+    /// `ingest_internal` uses it to register its acknowledgment waiter.
+    async fn enqueue_reserved_with<F, H, Fut, R>(
+        &self,
+        encoded_batch: EncodedBatch,
+        reservation: crate::landing_zone::CapacityReservation,
+        admit: F,
+        on_offset: H,
+    ) -> ZerobusResult<(OffsetId, R)>
+    where
+        F: FnOnce() -> ZerobusResult<()>,
+        H: FnOnce(OffsetId) -> Fut,
+        Fut: Future<Output = ZerobusResult<R>>,
+    {
         let _guard = self.sync_mutex.lock().await;
+        admit()?;
         self.check_open()?;
 
         let offset_id = self.logical_offset_id_generator.next();
@@ -259,6 +278,7 @@ impl ZerobusStream {
             record_count = encoded_batch.get_record_count(),
             "Ingesting record(s)"
         );
+        let hook_result = on_offset(offset_id).await?;
         self.landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
                 payload: encoded_batch,
@@ -266,7 +286,7 @@ impl ZerobusStream {
             }),
             reservation,
         );
-        Ok(offset_id)
+        Ok((offset_id, hook_result))
     }
 
     pub(crate) async fn reserve_capacity(
