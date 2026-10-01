@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "internal/concurrency.h"
+#include "internal/platform/concurrency.h"
 #include "test_common.h"
 
 /* ---- helpers ----------------------------------------------------------- */

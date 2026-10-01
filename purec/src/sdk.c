@@ -3,9 +3,9 @@
 #include <stdlib.h>
 
 #include "error.h"
-#include "internal/log.h"
+#include "internal/common/utils.h"
+#include "internal/platform/log.h"
 #include "sdk.h"
-#include "utils.h"
 #include "zerobus/sdk.h"
 
 struct zerobus_sdk_builder {
