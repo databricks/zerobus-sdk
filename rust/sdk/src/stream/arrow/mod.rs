@@ -500,6 +500,11 @@ impl ZerobusArrowStream {
             )));
         }
 
+        Self::validate_nonempty_batch(batch)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate_nonempty_batch(batch: &RecordBatch) -> ZerobusResult<()> {
         // Reject empty batches: the Flight encoder emits no data message for a zero-row
         // RecordBatch, so it would enter pending_batches but never be sent or acknowledged,
         // hanging flush()/wait_for_offset() until they time out.
@@ -521,6 +526,9 @@ impl ZerobusArrowStream {
             return Err(Self::stream_closing_or_closed_error());
         }
         tokio::select! {
+            // An available permit wins without polling the close watcher. Admission
+            // is checked again under `ingest_mutex` if close starts concurrently.
+            biased;
             permit = Arc::clone(&self.inflight).acquire_owned() => {
                 permit.map_err(|_| Self::stream_closing_or_closed_error())
             }
@@ -675,7 +683,7 @@ impl ZerobusArrowStream {
     /// Ingests a single Arrow RecordBatch supplied as raw Arrow IPC stream bytes.
     ///
     /// Convenience wrapper for callers that already hold IPC-serialised bytes.
-    /// Deserialises the bytes to a [`RecordBatch`] and delegates to `ingest_batch`.
+    /// Deserialises the bytes to a [`RecordBatch`] and queues it.
     /// Prefer `ingest_batch` directly when you already have a [`RecordBatch`].
     ///
     /// The `ipc_bytes` must be a valid Arrow IPC *stream* containing exactly one
@@ -690,7 +698,9 @@ impl ZerobusArrowStream {
         }
 
         let batch = self.prepare_ipc_batch(&ipc_bytes)?;
-        self.ingest_batch(batch).await
+        let permit = self.reserve_capacity().await?;
+        self.enqueue_reserved_admitted(batch, permit, || Ok(()))
+            .await
     }
 
     #[allow(clippy::result_large_err)]
@@ -704,7 +714,7 @@ impl ZerobusArrowStream {
                 batch.schema()
             )));
         }
-        self.validate_batch(&batch)?;
+        Self::validate_nonempty_batch(&batch)?;
         Ok(batch)
     }
 

@@ -733,20 +733,22 @@ impl<'a> StreamBuilder<'a> {
     }
 
     #[cfg(feature = "arrow-flight")]
+    #[allow(clippy::result_large_err)]
+    fn arrow_schema(&self) -> ZerobusResult<&Arc<ArrowSchema>> {
+        match self.format.as_ref() {
+            Some(FormatConfig::Arrow(schema)) => Ok(schema),
+            Some(_) => Err(ZerobusError::InvalidArgument(
+                "non-Arrow format requires .build() instead of .build_arrow()".into(),
+            )),
+            None => Err(ZerobusError::InvalidArgument(
+                "record format is required: call .arrow() before .build_arrow()".into(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "arrow-flight")]
     fn validate_arrow(&self) -> ZerobusResult<Arc<ArrowSchema>> {
-        let schema = match self.format.as_ref() {
-            Some(FormatConfig::Arrow(schema)) => Arc::clone(schema),
-            Some(_) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "non-Arrow format requires .build() instead of .build_arrow()".into(),
-                ));
-            }
-            None => {
-                return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .arrow() before .build_arrow()".into(),
-                ));
-            }
-        };
+        let schema = Arc::clone(self.arrow_schema()?);
 
         if self.grpc_config.ack_callback.is_some() || self.multiplexed_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(

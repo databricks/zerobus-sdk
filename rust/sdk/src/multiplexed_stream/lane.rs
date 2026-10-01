@@ -20,7 +20,7 @@ pub(crate) struct CapacityContext<'a> {
 pub(crate) enum CapacityLimit {
     MaxInflightRequests(usize),
     // Constructed only when the optional Arrow lane is built.
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
     MaxInflightBatches(usize),
 }
 

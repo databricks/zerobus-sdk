@@ -570,6 +570,18 @@ async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
         matches!(sdk.stream_builder().table("t").oauth("a", "b").json().multiplexed(2).build_arrow().await,
         Err(ZerobusError::InvalidArgument(msg)) if msg.contains(".build()"))
     );
+    assert!(matches!(
+        sdk.stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .max_inflight_requests(1)
+            .multiplexed(2)
+            .build_arrow()
+            .await,
+        Err(ZerobusError::InvalidArgument(msg))
+            if msg == "non-Arrow format requires .build() instead of .build_arrow()"
+    ));
     for mux in [
         builder()
             .ack_callback(Arc::new(NoopAckCallback))
