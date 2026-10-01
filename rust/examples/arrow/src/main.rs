@@ -95,6 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (stats_exporter, mut stats_rx) =
         channel_exporter(std::num::NonZeroUsize::new(1024).unwrap());
 
+    // For managed fan-out across Flight streams, see ../multiplexed.rs.
     // Optional IPC compression. Trades client CPU for fewer bytes on the wire —
     // enable only when network bandwidth limits throughput. `LZ4_FRAME` is fast
     // with a modest ratio; `ZSTD` compresses more at higher CPU cost.

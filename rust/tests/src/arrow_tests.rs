@@ -6912,3 +6912,5 @@ mod arrow_flight_tests {
         }
     }
 }
+
+mod multiplexed_arrow_tests;
