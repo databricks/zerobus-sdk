@@ -242,6 +242,53 @@ static zerobus_status_t wait_for_timeout(zb_cond_t *cond, zb_mutex_t *mutex,
     return status;
 }
 
+struct sem_fixture {
+    zb_sem_t available;
+    zb_mutex_t mutex;
+    zb_cond_t progress;
+    unsigned int ready;
+    unsigned int completed;
+};
+
+struct sem_context {
+    struct sem_fixture *fixture;
+    zerobus_status_t status;
+};
+
+static void *wait_for_permit(void *arg)
+{
+    struct sem_context *context = (struct sem_context *)arg;
+    struct sem_fixture *fixture = context->fixture;
+    context->status = zb_mutex_lock(&fixture->mutex);
+    if (context->status != ZEROBUS_STATUS_OK) {
+        return NULL;
+    }
+    fixture->ready++;
+    context->status = zb_cond_signal(&fixture->progress);
+    zerobus_status_t status = zb_mutex_unlock(&fixture->mutex);
+    if (context->status == ZEROBUS_STATUS_OK) {
+        context->status = status;
+    }
+    if (context->status == ZEROBUS_STATUS_OK) {
+        context->status =
+            zb_sem_wait(&fixture->available, ZB_DEADLINE_INFINITE);
+    }
+    if (context->status != ZEROBUS_STATUS_OK) {
+        return NULL;
+    }
+    context->status = zb_mutex_lock(&fixture->mutex);
+    if (context->status != ZEROBUS_STATUS_OK) {
+        return NULL;
+    }
+    fixture->completed++;
+    context->status = zb_cond_signal(&fixture->progress);
+    status = zb_mutex_unlock(&fixture->mutex);
+    if (context->status == ZEROBUS_STATUS_OK) {
+        context->status = status;
+    }
+    return NULL;
+}
+
 /* ------------------------------- Tests -------------------------------- */
 
 static void test_mutex_arguments(void)
@@ -573,6 +620,166 @@ zb_cleanup:
     destroy_waiters(&fixture);
 }
 
+static void test_semaphore_arguments(void)
+{
+    zb_sem_t sem;
+
+    CHECK_EQ_INT(zb_sem_init(NULL, 0), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_sem_post(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_sem_wait(NULL, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_sem_wait(NULL, ZB_DEADLINE_INFINITE),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_sem_wait(NULL, zb_deadline_after_ms(1)),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_OK(zb_sem_destroy(NULL));
+    CHECK_EQ_INT(zb_sem_init(&sem, (unsigned int)ZB_SEM_VALUE_MAX + 1u),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+}
+
+static void test_semaphore_counting(void)
+{
+    zb_sem_t sem;
+    bool initialized = false;
+
+    REQUIRE_OK(zb_sem_init(&sem, 2));
+    initialized = true;
+    CHECK_OK(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE));
+    CHECK_OK(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE));
+    CHECK_EQ_INT(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+    CHECK_OK(zb_sem_post(&sem));
+    CHECK_OK(zb_sem_post(&sem));
+    CHECK_OK(zb_sem_wait(&sem, ZB_DEADLINE_INFINITE));
+    CHECK_OK(zb_sem_wait(&sem, zb_deadline_after_ms(WAIT_TIMEOUT_MS)));
+    CHECK_EQ_INT(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    if (initialized) {
+        CHECK_OK(zb_sem_destroy(&sem));
+    }
+}
+
+static void test_semaphore_timeout(void)
+{
+    zb_sem_t sem;
+    bool initialized = false;
+
+    REQUIRE_OK(zb_sem_init(&sem, 0));
+    initialized = true;
+    CHECK_EQ_INT(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+    zb_deadline_t deadline = zb_deadline_after_ms(20);
+    CHECK_EQ_INT(zb_sem_wait(&sem, deadline), ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+    /* A realtime wait would misinterpret this monotonic deadline as past. */
+    CHECK(zb_deadline_after_ms(1) > deadline);
+    CHECK_EQ_INT(zb_sem_wait(&sem, deadline), ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+    /* Even an expired deadline can take an available permit. */
+    CHECK_OK(zb_sem_post(&sem));
+    CHECK_OK(zb_sem_wait(&sem, deadline));
+    CHECK_EQ_INT(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    if (initialized) {
+        CHECK_OK(zb_sem_destroy(&sem));
+    }
+}
+
+static void test_semaphore_overflow_preserves_count(void)
+{
+    zb_sem_t sem;
+    bool initialized = false;
+
+    REQUIRE_OK(zb_sem_init(&sem, ZB_SEM_VALUE_MAX));
+    initialized = true;
+    CHECK_EQ_INT(zb_sem_post(&sem), ZEROBUS_STATUS_INTERNAL);
+    CHECK_OK(zb_sem_wait(&sem, ZB_DEADLINE_IMMEDIATE));
+    CHECK_OK(zb_sem_post(&sem));
+    CHECK_EQ_INT(zb_sem_post(&sem), ZEROBUS_STATUS_INTERNAL);
+
+zb_cleanup:
+    if (initialized) {
+        CHECK_OK(zb_sem_destroy(&sem));
+    }
+}
+
+static void test_semaphore_wakes_waiters(void)
+{
+    struct sem_fixture fixture = {0};
+    struct sem_context contexts[WORKERS] = {0};
+    zb_thread_t threads[WORKERS];
+    unsigned int created = 0;
+    bool available_initialized = false;
+    bool mutex_initialized = false;
+    bool progress_initialized = false;
+    bool holding = false;
+
+    REQUIRE_OK(zb_sem_init(&fixture.available, 0));
+    available_initialized = true;
+    REQUIRE_OK(zb_mutex_init(&fixture.mutex));
+    mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&fixture.progress));
+    progress_initialized = true;
+    for (unsigned int i = 0; i < WORKERS; i++) {
+        contexts[i] = (struct sem_context){&fixture, ZEROBUS_STATUS_UNKNOWN};
+        REQUIRE_OK(
+            zb_thread_create(&threads[i], wait_for_permit, &contexts[i]));
+        created++;
+    }
+    REQUIRE_OK(zb_mutex_lock(&fixture.mutex));
+    holding = true;
+    zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
+    while (fixture.ready != WORKERS) {
+        REQUIRE_OK(
+            zb_cond_wait_until(&fixture.progress, &fixture.mutex, deadline));
+    }
+    CHECK_EQ_INT(fixture.completed, 0);
+
+    for (unsigned int i = 0; i < WORKERS; i++) {
+        REQUIRE_OK(zb_sem_post(&fixture.available));
+        while (fixture.completed < i + 1) {
+            REQUIRE_OK(zb_cond_wait_until(&fixture.progress, &fixture.mutex,
+                                          deadline));
+        }
+        CHECK_EQ_INT(fixture.completed, i + 1);
+    }
+    REQUIRE_OK(zb_mutex_unlock(&fixture.mutex));
+    holding = false;
+    for (unsigned int i = 0; i < created; i++) {
+        join_owned(&threads[i]);
+        CHECK_OK(contexts[i].status);
+    }
+    created = 0;
+    CHECK_EQ_INT(zb_sem_wait(&fixture.available, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    /* Release and join partially started workers before destroying storage. */
+    if (holding) {
+        CHECK_OK(zb_mutex_unlock(&fixture.mutex));
+    }
+    for (unsigned int i = 0; i < created; i++) {
+        CHECK_OK(zb_sem_post(&fixture.available));
+    }
+    for (unsigned int i = 0; i < created; i++) {
+        join_owned(&threads[i]);
+        CHECK_OK(contexts[i].status);
+    }
+    if (progress_initialized) {
+        CHECK_OK(zb_cond_destroy(&fixture.progress));
+    }
+    if (mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&fixture.mutex));
+    }
+    if (available_initialized) {
+        CHECK_OK(zb_sem_destroy(&fixture.available));
+    }
+}
+
 static void test_thread_completion(void)
 {
     zb_thread_t thread;
@@ -666,6 +873,12 @@ int main(void)
     test_condition_signal_without_predicate_change();
     test_condition_infinite_deadline();
     test_condition_large_deadline();
+
+    test_semaphore_arguments();
+    test_semaphore_counting();
+    test_semaphore_timeout();
+    test_semaphore_overflow_preserves_count();
+    test_semaphore_wakes_waiters();
 
     test_thread_completion();
     test_thread_returned_result();

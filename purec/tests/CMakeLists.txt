@@ -7,6 +7,10 @@ function(zerobus_add_test test_path)
   add_executable(${test} src/${test_path}.c)
   target_link_libraries(${test} PRIVATE zerobus_c_testing)
   target_compile_options(${test} PRIVATE ${ZEROBUS_WARN_FLAGS})
+  # Internal headers may use C11, like the library they belong to.
+  if(test_path MATCHES "^internal/")
+    target_compile_features(${test} PRIVATE c_std_11)
+  endif()
   add_test(NAME ${test} COMMAND ${test})
 endfunction()
 
@@ -14,6 +18,9 @@ zerobus_add_test(error_test)
 zerobus_add_test(utils_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
+zerobus_add_test(internal/common/landing_zone_test)
+zerobus_add_test(internal/common/queue_test)
+zerobus_add_test(internal/common/record_test)
 zerobus_add_test(internal/concurrency_test)
 zerobus_add_test(internal/log_test)
 
@@ -22,4 +29,5 @@ set_tests_properties(internal_log_test PROPERTIES ENVIRONMENT
 
 # A synchronization regression must fail instead of hanging the test suite.
 set_tests_properties(sdk_test stream_test internal_concurrency_test
+                     internal_common_queue_test internal_common_landing_zone_test
                      PROPERTIES TIMEOUT 30)
