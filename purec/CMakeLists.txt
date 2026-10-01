@@ -34,6 +34,7 @@ if(ZEROBUS_WERROR)
 endif()
 
 set(ZEROBUS_SOURCES
+  src/internal/common/landing_zone.c
   src/internal/common/queue.c
   src/internal/concurrency.c
   src/error.c

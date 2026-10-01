@@ -1,5 +1,4 @@
 /* Unit tests for the bounded MPMC queue (queue.c). */
-#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -62,7 +61,7 @@ static void *run_worker(void *arg)
             if (status == ZEROBUS_STATUS_OK) {
                 pushed++;
             } else if (status == ZEROBUS_STATUS_RESOURCE_EXHAUSTED) {
-                (void)sched_yield();
+                zb_thread_yield();
             } else {
                 worker->status = status;
                 return NULL;
@@ -78,7 +77,7 @@ static void *run_worker(void *arg)
                          ? zb_queue_advance(stress->queue, &position)
                          : zb_queue_pop(stress->queue, &position);
         if (item == NULL) {
-            (void)sched_yield();
+            zb_thread_yield();
             continue;
         }
         worker->got[worker->count] = *(const unsigned int *)item;
