@@ -19,7 +19,9 @@ zerobus_add_test(error_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
 zerobus_add_test(internal/common/utils_test)
+zerobus_add_test(internal/common/landing_zone_test)
 zerobus_add_test(internal/common/queue_test)
+zerobus_add_test(internal/common/record_test)
 zerobus_add_test(internal/platform/concurrency_test)
 zerobus_add_test(internal/platform/log_test)
 zerobus_add_test(internal/proto/zerobus_service_test)
@@ -32,4 +34,5 @@ set_tests_properties(internal_platform_log_test PROPERTIES ENVIRONMENT
 
 # A synchronization regression must fail instead of hanging the test suite.
 set_tests_properties(sdk_test stream_test internal_platform_concurrency_test
-                     internal_common_queue_test PROPERTIES TIMEOUT 30)
+                     internal_common_queue_test internal_common_landing_zone_test
+                     PROPERTIES TIMEOUT 30)

@@ -4,6 +4,7 @@
 #include <errno.h> // IWYU pragma: keep
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <time.h>
 
 #include "concurrency.h"
@@ -300,4 +301,9 @@ zerobus_status_t zb_once(zb_once_t *once, void (*init)(void))
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     return backend_status(pthread_once(once, init));
+}
+
+void zb_thread_yield(void)
+{
+    (void)sched_yield();
 }

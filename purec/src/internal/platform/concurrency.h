@@ -94,4 +94,7 @@ zerobus_status_t zb_thread_join(zb_thread_t *thread, void **out_result);
  */
 zerobus_status_t zb_once(zb_once_t *once, void (*init)(void));
 
+/* Scheduling hint, does not guarantee another thread runs. */
+void zb_thread_yield(void);
+
 #endif /* ZB_CONCURRENCY_H */
