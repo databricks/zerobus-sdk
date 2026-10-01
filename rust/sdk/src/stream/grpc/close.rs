@@ -71,32 +71,10 @@ impl ZerobusStream {
         flush_result
     }
 
-    /// Stops a mux lane after its flush attempt. Cache the outcome and close
-    /// the lane before the caller starts cancellable callback draining.
-    pub(crate) async fn close_after_flush(&mut self) -> Option<ZerobusError> {
-        if let Some(result) = &self.supervisor_shutdown_result {
-            return result.as_ref().err().cloned();
-        }
-        let task_error = self.shutdown_supervisor().await;
-        // The supervisor publishes the final error before cancelling this
-        // token. A clean shutdown's transient watch error must not be promoted
-        // to a terminal cause.
-        let lane_error = if self.terminal_token.is_cancelled() {
-            self.server_error_rx.borrow().clone()
-        } else {
-            None
-        };
-        let result = lane_error.or(task_error).map_or(Ok(()), Err);
-        self.supervisor_shutdown_result = Some(result.clone());
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.terminal_token.cancel();
-        result.err()
-    }
-
     /// Waits up to one second for cooperative shutdown, then at most 100ms
     /// after abort. Synchronous user code may outlive that budget; the retained
     /// handle is aborted and the timeout outcome is cached for retries.
-    async fn shutdown_supervisor(&mut self) -> Option<ZerobusError> {
+    pub(super) async fn shutdown_supervisor(&mut self) -> Option<ZerobusError> {
         if let Some(result) = &self.supervisor_shutdown_result {
             return result.as_ref().err().cloned();
         }
@@ -167,17 +145,6 @@ impl ZerobusStream {
             debug!("Callback max wait time is not set, waiting indefinitely");
             let _ = task.await;
         }
-    }
-
-    // Signal the stream to stop accepting work and tear down its background
-    // tasks. Unlike `close`, this only needs `&self` — it relies on the
-    // cancellation token and `is_closed` flag, both of which are already
-    // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
-    // `close` or `Drop`.
-    pub(crate) fn signal_shutdown(&self) {
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.terminal_token.cancel();
-        self.cancellation_token.cancel();
     }
 }
 
