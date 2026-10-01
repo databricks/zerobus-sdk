@@ -187,3 +187,31 @@ let batch = RecordBatch::try_new(
 > **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK
 > validates the schema when the stream is created. A mismatch fails fast with a
 > descriptive error.
+
+## Multiplexed Arrow Flight
+
+When a single Flight stream is the bottleneck and global ordering is unnecessary,
+run the [`arrow_multiplexed`](multiplexed.rs) example:
+
+```bash
+cargo run -p example_arrow --example arrow_multiplexed
+```
+
+Set its credentials and table constants first. The table needs nullable `id BIGINT`
+and `customer_name STRING` columns. The example queues 100 batches of 1,000 rows
+across four lanes, then calls `flush()` once and closes all lanes.
+
+Construction uses `.arrow(schema).max_inflight_batches(100).multiplexed(4).build_arrow()`.
+The budget is mux-wide: each lane can retain 25 pending batches. Whole batches route
+round-robin and return `MessageId`s; the selected lane waits for capacity without
+rerouting. There is no global batch or message-ID ordering.
+
+A terminal lane failure observed by a mux operation rejects new ingestion across
+the mux. Healthy message waits stay lane-specific; `flush()` attempts every lane.
+`close()` uses each Arrow lane's existing lifecycle and interrupts active recovery.
+After close, `get_unacked_batches()` returns only unacknowledged rows, including
+suffixes of partially acknowledged batches. Results are grouped by lane.
+
+Arrow mux streams do not support acknowledgment callbacks. A configured stats
+exporter is shared by all lanes; events carry lane-local offsets without lane
+identifiers and can be ambiguous. The API is Rust-only and requires `arrow-flight`.
