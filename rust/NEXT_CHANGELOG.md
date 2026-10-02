@@ -13,6 +13,9 @@
 
 ### Documentation
 
+- Added a persistent JSON example demonstrating durable stream creation,
+  pipelined ingestion followed by one `flush()`, and resume by `stream_id`.
+
 ### Internal Changes
 
 - Extracted a private transport-generic mux core and lane contract. The gRPC
