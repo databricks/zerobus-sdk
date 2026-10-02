@@ -89,6 +89,12 @@ testing = []
 # unless enabled; never enabled by FFI/production builds.
 test-hooks = ["arrow-flight"]
 
+[lints.clippy]
+# `async-trait` stamps `#[must_use]` on methods that already return a `#[must_use]`
+# boxed future; clippy >= 1.99's `double_must_use` flags that redundant tag in
+# generated and async-trait code we don't control. Allow it crate-wide.
+double_must_use = "allow"
+
 [[test]]
 name = "zeroparser_e2e"
 path = "src/zeroparser/tests/e2e.rs"
