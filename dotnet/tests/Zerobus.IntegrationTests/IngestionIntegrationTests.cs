@@ -335,6 +335,36 @@ public class IngestionIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task IngestBatchWithNullRecord_IsRejected_StreamStaysUsable()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_null_record_batch"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+
+        byte[][] rejected = ["record 1"u8.ToArray(), null!];
+
+        Assert.Throws<ArgumentNullException>(() => stream.IngestRecords(rejected));
+        Assert.Throws<ArgumentNullException>(() => _ = stream.IngestRecordsAsync(rejected));
+
+        byte[][] batch = ["record 1"u8.ToArray(), "record 2"u8.ToArray()];
+        var offsetId = await stream.IngestRecordsAsync(batch);
+        await stream.FlushAsync();
+
+        Assert.That(offsetId, Is.EqualTo(0));
+        Assert.That(fixture.MockServer.GetWriteCount(), Is.EqualTo((ulong)batch.Length));
+    }
+
+    [Test]
     public async Task IngestRecordsAfterClose()
     {
         await using var fixture = await MockServerFixture.StartAsync();
