@@ -18,6 +18,8 @@
 - Extracted a private transport-generic mux core and lane contract. The gRPC
   mux keeps its existing behavior, while each lane owns its close and recovery
   paths.
+- Added a stateful persistent-stream mock and integration coverage for create,
+  flush, resume offset continuity, and unknown stream IDs.
 
 ### Breaking Changes
 
