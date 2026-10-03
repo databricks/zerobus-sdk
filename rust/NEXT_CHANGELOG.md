@@ -6,6 +6,8 @@
 
 ### New Features and Improvements
 
+- On platforms where vendored `protoc` is not available, fallback to trying `protoc` on `PATH` or `PROTOC` environment variable override.
+
 ### Bug Fixes
 
 ### Documentation
