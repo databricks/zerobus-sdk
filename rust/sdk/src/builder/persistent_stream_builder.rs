@@ -35,6 +35,7 @@
 
 use std::sync::Arc;
 
+use crate::builder::stream_builder::GrpcStreamParts;
 use crate::builder::StreamBuilder;
 use crate::callbacks::AckCallback;
 use crate::headers_provider::HeadersProvider;
@@ -191,8 +192,12 @@ impl<'a> PersistentStreamBuilder<'a> {
     }
 
     async fn open(self, resume_stream_id: Option<String>) -> ZerobusResult<PersistentStream> {
-        let (channel, table_properties, headers_provider, config) =
-            self.inner.prepare_grpc().await?;
+        let GrpcStreamParts {
+            channel,
+            table_properties,
+            headers_provider,
+            config,
+        } = self.inner.prepare_grpc().await?;
         let stream = ZerobusStream::new_persistent_stream(
             channel,
             table_properties,
