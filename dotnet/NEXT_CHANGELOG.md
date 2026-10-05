@@ -22,6 +22,13 @@
   (`CreateStreamWithHeadersProviderAsync`) creation paths. Tracks the FFI
   signature change to `zerobus_sdk_create_stream_with_headers_provider` and
   `zerobus_sdk_create_stream_with_headers_provider_async`. No public API change.
+- Fixed a leak in `IngestRecordsAsync(string[])` and `IngestRecordsAsync(byte[][])`:
+  a batch containing a `null` record left the native completion callback rooted
+  by a `GCHandle` for the rest of the process. Both the synchronous and
+  asynchronous batch overloads now reject such a batch with an
+  `ArgumentNullException` for `records` that names the record's index, instead of
+  a `NullReferenceException` (protobuf) or an `ArgumentNullException` for an
+  internal `chars` parameter (JSON).
 
 ### Documentation
 

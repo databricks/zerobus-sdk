@@ -135,6 +135,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <returns>The offset representing the entire batch, or -1 if the batch is empty.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    /// <exception cref="ArgumentNullException">Thrown if <paramref name="records"/> or any record in it is null.</exception>
     /// <example>
     /// <code>
     /// string[] records =
@@ -170,6 +171,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <returns>The offset representing the entire batch, or -1 if the batch is empty.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    /// <exception cref="ArgumentNullException">Thrown if <paramref name="records"/> or any record in it is null.</exception>
     public long IngestRecords(byte[][] records)
     {
         ArgumentNullException.ThrowIfNull(records);
