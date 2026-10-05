@@ -46,6 +46,9 @@ impl CapacityLimit {
     }
 }
 
+// `async_trait` emits `#[must_use]` on boxed futures, which Clippy 1.99
+// considers redundant. Keep this scoped to the private lane contract.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait MuxLane: Send + Sync {
     /// Name used in mux errors and lifecycle logs.

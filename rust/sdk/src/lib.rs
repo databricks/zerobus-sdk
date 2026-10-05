@@ -35,6 +35,9 @@
 use std::sync::Arc;
 
 pub mod databricks {
+    // Generated tonic services use `async_trait`, whose boxed futures trigger
+    // Rust 1.99's double_must_use lint. Keep the allowance on generated code.
+    #[allow(clippy::double_must_use)]
     pub mod zerobus {
         include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
     }
