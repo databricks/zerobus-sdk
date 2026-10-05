@@ -11,10 +11,56 @@ use tracing::{error, warn};
 #[cfg(feature = "arrow-flight")]
 use super::FormatConfig;
 use super::StreamBuilder;
+use crate::callbacks::AckCallback;
 use crate::headers_provider::HeadersProvider;
-use crate::{MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusStream};
+use crate::{
+    MessageId, MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusStream,
+};
 
 pub(super) const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
+
+impl<'a> StreamBuilder<'a> {
+    /// Set the acknowledgment callback for a multiplexed gRPC stream.
+    ///
+    /// The callback receives the [`MessageId`] returned by multiplexed ingest
+    /// methods. Calling this setter again replaces the previous multiplexed
+    /// callback. Ordinary `build()` and `build_arrow()` reject it.
+    pub fn multiplexed_ack_callback(mut self, callback: Arc<dyn AckCallback<MessageId>>) -> Self {
+        self.multiplexed_callback = Some(callback);
+        self
+    }
+
+    /// Select a multiplexed gRPC stream composed of `stream_count` homogeneous
+    /// sub-streams.
+    ///
+    /// This is a terminal mode selection: configure table, authentication,
+    /// format, stream options, and an optional
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) before
+    /// calling it. The returned builder only supports validation and
+    /// construction.
+    ///
+    /// Use multiplexing when one gRPC stream is the throughput bottleneck
+    /// and global ordering is not required. Records retain ordering within
+    /// each sub-stream, but there is no global record, message-ID, or callback
+    /// order. Different sub-stream callback workers may invoke the shared
+    /// callback concurrently.
+    ///
+    /// For a JSON stream, first migrate to compiled Protocol Buffers and
+    /// measure throughput again before considering multiplexing.
+    ///
+    /// # Beta
+    ///
+    /// Multiplexed streams are a Beta API.
+    ///
+    /// `stream_count` must be in `1..=64` and cannot exceed the configured
+    /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
+    /// across sub-streams using integer division. JSON, compiled protobuf,
+    /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
+    /// Arrow Flight is not.
+    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
+        MultiplexedStreamBuilder::new(self, stream_count)
+    }
+}
 
 /// Terminal builder for a [`MultiplexedStream`].
 ///
