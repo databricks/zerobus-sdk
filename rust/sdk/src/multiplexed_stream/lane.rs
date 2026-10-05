@@ -19,7 +19,7 @@ pub(crate) struct CapacityContext<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum CapacityLimit {
     MaxInflightRequests(usize),
-    // The Arrow lane is introduced by the next PR in this stack.
+    // Constructed only when the optional Arrow lane is built.
     #[allow(dead_code)]
     MaxInflightBatches(usize),
 }
@@ -88,4 +88,64 @@ pub(crate) trait MuxLane: Send + Sync {
     async fn drain_callbacks(&mut self);
     /// Return the lane's unacknowledged payloads after close.
     async fn unacked_batches(&self) -> ZerobusResult<Vec<Self::Batch>>;
+}
+
+#[cfg(feature = "arrow-flight")]
+#[async_trait]
+impl MuxLane for crate::ZerobusArrowStream {
+    const STREAM_NAME: &'static str = "MultiplexedArrowStream";
+
+    type Batch = arrow_array::RecordBatch;
+    type Reservation = tokio::sync::OwnedSemaphorePermit;
+
+    fn capacity_context(&self) -> CapacityContext<'_> {
+        CapacityContext {
+            table_name: crate::ZerobusArrowStream::table_name(self),
+            limit: CapacityLimit::MaxInflightBatches(self.options.max_inflight_batches),
+        }
+    }
+    fn is_terminal(&self) -> bool {
+        // Terminal admission precedes retained-batch finalization. Recognize it
+        // here, then await the final cause in `terminal_cause` before poisoning.
+        self.is_ingest_admission_closed()
+    }
+    fn signal_shutdown(&self) {
+        // Arrow's own Drop cancels its supervisor and request body.
+    }
+    async fn terminal_cause(&self) -> Option<ZerobusError> {
+        crate::ZerobusArrowStream::terminal_error(self).await
+    }
+    async fn reserve_slot(&self) -> ZerobusResult<Self::Reservation> {
+        crate::ZerobusArrowStream::reserve_capacity(self).await
+    }
+    async fn enqueue_admitted<F>(
+        &self,
+        batch: Self::Batch,
+        reservation: Self::Reservation,
+        admit: F,
+    ) -> ZerobusResult<OffsetId>
+    where
+        F: FnOnce() -> ZerobusResult<()> + Send,
+    {
+        crate::ZerobusArrowStream::enqueue_reserved_admitted(self, batch, reservation, admit).await
+    }
+    async fn flush_lane(&self) -> ZerobusResult<()> {
+        crate::ZerobusArrowStream::flush(self).await
+    }
+    async fn wait_for_local_offset(&self, offset: OffsetId) -> ZerobusResult<()> {
+        crate::ZerobusArrowStream::wait_for_offset(self, offset).await
+    }
+    async fn flush_before_close(&self) -> ZerobusResult<()> {
+        // Arrow flushes inside its supervisor-owned close operation.
+        Ok(())
+    }
+    async fn close_after_flush(&mut self) -> Option<ZerobusError> {
+        crate::ZerobusArrowStream::close(self).await.err()
+    }
+    async fn drain_callbacks(&mut self) {
+        // Arrow has no acknowledgment callbacks.
+    }
+    async fn unacked_batches(&self) -> ZerobusResult<Vec<Self::Batch>> {
+        crate::ZerobusArrowStream::get_unacked_batches(self).await
+    }
 }
