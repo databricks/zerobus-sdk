@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Grpc.Core;
 using NUnit.Framework;
 
@@ -98,6 +99,39 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
 
         Assert.That(writeCount, Is.EqualTo(1));
         Assert.That(maxOffset, Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task AsyncDispose_WithPendingFlush_DoesNotBlockCaller()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_dispose_pending_flush"),
+            MockResponses.RecordAckResponse(0, delayMs: 2000),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await stream.IngestRecordAsync("test record data"u8.ToArray());
+        var flush = stream.FlushAsync();
+
+        var stopwatch = Stopwatch.StartNew();
+        var dispose = stream.DisposeAsync();
+        var callDuration = stopwatch.Elapsed;
+
+        Assert.That(callDuration, Is.LessThan(TimeSpan.FromSeconds(1)),
+            "DisposeAsync must not block the caller while the flush is pending");
+        Assert.That(dispose.IsCompleted, Is.False);
+
+        await dispose;
+
+        Assert.That(flush.IsCompletedSuccessfully, Is.True,
+            "DisposeAsync must wait for the pending flush before closing the stream");
     }
 
     [Test]
