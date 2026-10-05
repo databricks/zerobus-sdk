@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -210,9 +211,17 @@ type echoServer struct {
 	noReady  bool
 	creates  chan *zerobuspb.CreateIngestStreamRequest
 	ingests  chan *zerobuspb.EphemeralStreamRequest
+	peers    chan string
 }
 
 func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
+	if s.peers != nil {
+		p, ok := peer.FromContext(stream.Context())
+		if !ok {
+			return errors.New("missing gRPC peer")
+		}
+		s.peers <- p.Addr.String()
+	}
 	req, err := stream.Recv()
 	if err != nil {
 		return err
@@ -269,6 +278,87 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		}); err != nil {
 			return err
 		}
+	}
+}
+
+func TestConnectionPerStreamModes(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		opts            []zerobus.Option
+		wantConnections int
+	}{
+		{name: "default dedicated", wantConnections: 4},
+		{name: "explicit dedicated", opts: []zerobus.Option{zerobus.WithConnectionPerStream(true)}, wantConnections: 4},
+		{name: "shared", opts: []zerobus.Option{zerobus.WithConnectionPerStream(false)}, wantConnections: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := &echoServer{streamID: "connection-mode-test", peers: make(chan string, 4)}
+			gsrv := grpc.NewServer()
+			zerobuspb.RegisterZerobusServer(gsrv, server)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if err := gsrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+					t.Errorf("gRPC server: %v", err)
+				}
+			}()
+			t.Cleanup(func() {
+				gsrv.Stop()
+				<-done
+			})
+
+			dial := func() (*transport.Conn, error) {
+				return transport.Dial(lis.Addr().String(),
+					transport.WithGRPCDialOptions(grpc.WithTransportCredentials(insecure.NewCredentials())))
+			}
+			sdk, err := zerobus.NewWithDial(dial, "https://zerobus", "https://uc", tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = sdk.Close() })
+			provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer test"})
+
+			peers := make([]string, 4)
+			streams := make([]*zerobus.Stream, 0, len(peers))
+			for i := range peers {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				st, err := sdk.CreateStreamWithProvider(ctx, "main.sales.orders", provider,
+					zerobus.WithJSON(), zerobus.WithWaitForReady())
+				cancel()
+				if err != nil {
+					t.Fatalf("CreateStreamWithProvider[%d]: %v", i, err)
+				}
+				t.Cleanup(func() { _ = st.Close() })
+				streams = append(streams, st)
+				peers[i] = <-server.peers
+			}
+			seen := make(map[string]struct{})
+			for i, addr := range peers {
+				seen[addr] = struct{}{}
+				if tc.wantConnections == 1 && addr != peers[0] {
+					t.Errorf("stream %d used %q, want shared peer %q", i, addr, peers[0])
+				}
+			}
+			if len(seen) != tc.wantConnections {
+				t.Errorf("used %d TCP connections, want %d", len(seen), tc.wantConnections)
+			}
+			if err := streams[0].Close(); err != nil {
+				t.Fatalf("close first stream: %v", err)
+			}
+			if _, err := streams[1].IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+				t.Fatalf("ingest on surviving stream: %v", err)
+			}
+			if err := streams[1].Flush(); err != nil {
+				t.Fatalf("flush surviving stream: %v", err)
+			}
+			if err := sdk.Close(); err != nil {
+				t.Fatalf("SDK.Close: %v", err)
+			}
+		})
 	}
 }
 

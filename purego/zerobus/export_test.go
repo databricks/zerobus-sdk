@@ -23,6 +23,28 @@ func NewWithConn(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, opts 
 	return newSDK(conn, zerobusEndpoint, ucEndpoint, cfg)
 }
 
+// NewWithDial lets connection-mode tests use a local gRPC server while
+// exercising the SDK and Stream APIs.
+func NewWithDial(dial func() (*transport.Conn, error), zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
+	cfg := defaultSDKConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	var conn *transport.Conn
+	if !cfg.connectionPerStream {
+		var err error
+		conn, err = dial()
+		if err != nil {
+			return nil, err
+		}
+	}
+	sdk := newSDK(conn, zerobusEndpoint, ucEndpoint, cfg)
+	sdk.dialConn = dial
+	return sdk, nil
+}
+
 // OpenStreamCount reports how many streams the SDK still tracks for Close, so
 // tests can assert that Stream.Close deregisters itself.
 func (s *SDK) OpenStreamCount() int {

@@ -17,6 +17,11 @@ type sdkConfig struct {
 	tlsConfig                 *tls.Config
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
+	connectionPerStream       bool
+}
+
+func defaultSDKConfig() sdkConfig {
+	return sdkConfig{connectionPerStream: true}
 }
 
 // WithApplicationName appends a caller-supplied identifier such as "my-app/1.0"
@@ -49,6 +54,13 @@ func WithHTTPClient(client *http.Client) Option {
 			c.httpClient = client
 		}
 	}
+}
+
+// WithConnectionPerStream controls whether each ingestion stream receives a
+// dedicated gRPC connection. This is enabled by default. Pass false to
+// multiplex all streams from the SDK over one shared connection.
+func WithConnectionPerStream(enabled bool) Option {
+	return func(c *sdkConfig) { c.connectionPerStream = enabled }
 }
 
 // RecoverySetting controls whether a stream reconnects after a recoverable

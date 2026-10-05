@@ -48,11 +48,13 @@ func NewStaticHeadersProvider(headers map[string]string) HeadersProvider {
 	return auth.NewStaticHeadersProvider(headers)
 }
 
-// SDK creates streams and owns shared connection state.
+// SDK creates streams and owns their connection state.
 type SDK struct {
-	zerobusEndpoint string
-	ucEndpoint      string
-	conn            *transport.Conn
+	zerobusEndpoint     string
+	ucEndpoint          string
+	conn                *transport.Conn
+	connectionPerStream bool
+	dialConn            func() (*transport.Conn, error)
 	// Shared OAuth token cache across streams.
 	tokenCache                *auth.SharedTokenCache
 	httpClient                *http.Client
@@ -77,6 +79,7 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		zerobusEndpoint:           strings.TrimSpace(zerobusEndpoint),
 		ucEndpoint:                strings.TrimSpace(ucEndpoint),
 		conn:                      conn,
+		connectionPerStream:       cfg.connectionPerStream,
 		tokenCache:                auth.NewSharedTokenCache(),
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
@@ -92,9 +95,10 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 // "https://ws.cloud.databricks.com").
 //
 // TLS uses host root CAs unless overridden by WithTLSConfig.
-// Dialing is lazy and happens on first stream open.
+// Network dialing is lazy and happens on first stream open. By default each
+// stream has a dedicated connection; WithConnectionPerStream(false) shares one.
 func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
-	var cfg sdkConfig
+	cfg := defaultSDKConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
@@ -122,14 +126,22 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 		dialOpts = append(dialOpts, transport.WithTLSConfig(cfg.tlsConfig))
 	}
 
-	conn, err := transport.Dial(target, dialOpts...)
-	if err != nil {
-		return nil, &Error{Op: "New", cause: err, retryable: false}
+	dialConn := func() (*transport.Conn, error) {
+		return transport.Dial(target, dialOpts...)
 	}
-	return newSDK(conn, zerobusEndpoint, ucEndpoint, cfg), nil
+	var conn *transport.Conn
+	if !cfg.connectionPerStream {
+		conn, err = dialConn()
+		if err != nil {
+			return nil, &Error{Op: "New", cause: err, retryable: false}
+		}
+	}
+	sdk := newSDK(conn, zerobusEndpoint, ucEndpoint, cfg)
+	sdk.dialConn = dialConn
+	return sdk, nil
 }
 
-// Close terminates open streams and releases the shared connection.
+// Close terminates open streams and releases their connections.
 // It is idempotent; CreateStream fails after Close.
 func (s *SDK) Close() error {
 	s.mu.Lock()
@@ -142,7 +154,9 @@ func (s *SDK) Close() error {
 	for st := range s.streams {
 		open = append(open, st)
 	}
+	conn := s.conn
 	s.streams = nil
+	s.conn = nil
 	s.mu.Unlock()
 
 	errs := make([]error, len(open)+1)
@@ -155,8 +169,10 @@ func (s *SDK) Close() error {
 		}()
 	}
 	wg.Wait()
-	// Close the connection after stream teardown.
-	errs[len(open)] = s.conn.Close()
+	// Close the shared connection after stream teardown.
+	if conn != nil {
+		errs[len(open)] = conn.Close()
+	}
 	return wrapErr("Close", errors.Join(errs...))
 }
 
@@ -277,8 +293,15 @@ func (s *SDK) createStreamConfigured(
 	if sc.waitReady {
 		openingCtx = ctx
 	}
-	core, err := stream.NewProtoJSONStream(openingCtx, s.conn, params, sc.cfg, sc.callback)
+	conn, dedicated, err := s.connectionForStream()
 	if err != nil {
+		return nil, &Error{Op: op, cause: err, retryable: false}
+	}
+	core, err := stream.NewProtoJSONStream(openingCtx, conn, params, sc.cfg, sc.callback)
+	if err != nil {
+		if dedicated {
+			_ = conn.Close()
+		}
 		return nil, wrapErr(op, err)
 	}
 	st := &Stream{
@@ -288,6 +311,9 @@ func (s *SDK) createStreamConfigured(
 		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
 		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
 	}
+	if dedicated {
+		st.streamConn = conn
+	}
 	if sc.recordType == zerobuspb.RecordType_PROTO {
 		st.jsonConverter, st.jsonConverterErr = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
 		st.conversionGate = make(chan struct{}, 1)
@@ -296,7 +322,7 @@ func (s *SDK) createStreamConfigured(
 	if s.closed {
 		s.mu.Unlock()
 		// Stop the stream created before Close won the race.
-		_ = core.Terminate()
+		_ = st.terminate()
 		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
 	}
 	s.streams[st] = struct{}{}
@@ -310,6 +336,23 @@ func (s *SDK) createStreamConfigured(
 		}
 	}
 	return st, nil
+}
+
+// connectionForStream gives a stream its own connection or the SDK's shared one.
+func (s *SDK) connectionForStream() (*transport.Conn, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, false, fmt.Errorf("SDK is closed")
+	}
+	if !s.connectionPerStream {
+		return s.conn, false, nil
+	}
+	if s.dialConn == nil {
+		return nil, false, fmt.Errorf("connection dialer is unavailable")
+	}
+	conn, err := s.dialConn()
+	return conn, true, err
 }
 
 // validateStreamArgs fails fast on invalid stream arguments.

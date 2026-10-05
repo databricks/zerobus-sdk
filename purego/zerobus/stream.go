@@ -2,9 +2,12 @@ package zerobus
 
 import (
 	"context"
+	"errors"
+	"sync"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
+	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
@@ -18,6 +21,9 @@ type Stream struct {
 	conversionGate          chan struct{}
 	maxBatchRecords         int
 	maxBufferedPayloadBytes int64
+	streamConn              *transport.Conn
+	connCloseOnce           sync.Once
+	connCloseErr            error
 	// sdk is the SDK that created this stream. Close deregisters from it so a
 	// long-lived SDK does not retain streams the caller has already closed.
 	sdk *SDK
@@ -93,7 +99,7 @@ func (s *Stream) GetUnackedBatches() ([][][]byte, error) {
 // Close flushes queued records, tears down the stream, and releases resources.
 // It is idempotent.
 func (s *Stream) Close() error {
-	err := s.core.Close()
+	err := errors.Join(s.core.Close(), s.closeStreamConn())
 	if s.sdk != nil {
 		s.sdk.forget(s)
 	}
@@ -102,7 +108,17 @@ func (s *Stream) Close() error {
 
 // terminate tears down the stream without a final flush (used by SDK.Close).
 func (s *Stream) terminate() error {
-	return wrapErr("Close", s.core.Terminate())
+	return wrapErr("Close", errors.Join(s.core.Terminate(), s.closeStreamConn()))
+}
+
+func (s *Stream) closeStreamConn() error {
+	if s.streamConn == nil {
+		return nil
+	}
+	s.connCloseOnce.Do(func() {
+		s.connCloseErr = s.streamConn.Close()
+	})
+	return s.connCloseErr
 }
 
 // IsClosed reports whether the stream has been closed or has failed terminally.

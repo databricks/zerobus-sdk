@@ -51,6 +51,21 @@ Use per-record `WaitForOffset` only for low-volume strict confirmation flows.
 
 Use `IngestRecordOffsetContext` / `IngestRecordsOffsetContext` to bound admission wait time.
 
+## Multiple streams and connections
+
+Each stream gets its own gRPC connection by default, so concurrent streams do
+not compete for one HTTP/2 connection. To multiplex many smaller, low-throughput
+streams over one shared connection, pass `WithConnectionPerStream(false)`:
+
+```go
+sdk, err := zerobus.New(serverEndpoint, workspaceURL,
+    zerobus.WithConnectionPerStream(false))
+```
+
+Pass `WithConnectionPerStream(true)` to select dedicated connections explicitly.
+A stream keeps its assigned connection through recovery, so ordering within
+that stream is unchanged.
+
 ## Authentication
 
 `CreateStream` uses Unity Catalog OAuth client-credentials.
