@@ -108,6 +108,11 @@ async fn invalid_batches_do_not_poison_or_consume_lane_offsets() {
         mux.ingest_ipc_batch(vec![1, 2, 3].into()).await,
         Err(ZerobusError::InvalidArgument(_))
     ));
+    assert!(matches!(
+        mux.ingest_ipc_batch(record_batch_to_ipc_bytes(&batch(&[])))
+            .await,
+        Err(ZerobusError::InvalidArgument(message)) if message.contains("zero rows")
+    ));
     let wrong = RecordBatch::try_from_iter(vec![(
         "different",
         Arc::new(Int64Array::from(vec![1])) as arrow_array::ArrayRef,

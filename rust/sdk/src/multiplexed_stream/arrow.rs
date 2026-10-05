@@ -48,6 +48,15 @@ impl MultiplexedArrowStream {
     ///
     /// Use `flush()` after queuing batches to await durability. Empty batches and
     /// mismatched schemas return `InvalidArgument` without poisoning the mux.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` if the schema differs or the batch has zero rows.
+    /// * `ConnectionTimeout` if the selected lane has no capacity after 30 seconds.
+    ///   The moved batch was not queued; clone it before this call if you may retry
+    ///   (`RecordBatch::clone()` is cheap).
+    /// * `InvalidStateError` if the mux is closed, or its stored terminal lane
+    ///   error if a lane has poisoned the mux.
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<MessageId> {
         self.core
             .ingest(|stream| {
@@ -59,6 +68,15 @@ impl MultiplexedArrowStream {
 
     /// Decodes an Arrow IPC stream containing exactly one batch and queues it.
     /// Prefer `ingest_batch` when a `RecordBatch` is already available.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` for invalid IPC bytes, a mismatched schema, or zero rows.
+    /// * `ConnectionTimeout` if the selected lane has no capacity after 30 seconds.
+    ///   The decoded batch was not queued; clone `ipc_bytes` before this call if
+    ///   you may retry (`Bytes::clone()` is cheap).
+    /// * `InvalidStateError` if the mux is closed, or its stored terminal lane
+    ///   error if a lane has poisoned the mux.
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<MessageId> {
         self.core
             .ingest(|stream| stream.prepare_ipc_batch(&ipc_bytes))

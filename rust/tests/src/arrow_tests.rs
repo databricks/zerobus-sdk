@@ -691,6 +691,15 @@ mod arrow_flight_tests {
                 "empty-batch rejection is non-retryable, got: {}",
                 err
             );
+            let empty_ipc = record_batch_to_ipc_bytes(&arrow_array::RecordBatch::new_empty(schema));
+            let ipc_err = stream
+                .ingest_ipc_batch(empty_ipc)
+                .await
+                .expect_err("an empty IPC batch must be rejected");
+            assert!(matches!(
+                ipc_err,
+                ZerobusError::InvalidArgument(message) if message.contains("zero rows")
+            ));
 
             Ok(())
         }

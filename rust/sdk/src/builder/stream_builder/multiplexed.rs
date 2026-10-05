@@ -58,9 +58,11 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     /// Validate the common stream configuration, mux-compatible format,
     /// callback selection, and stream count without opening a connection.
     ///
-    /// This is a configuration check, not a guarantee that [`build`](Self::build)
-    /// succeeds: the Avro writer schema is parsed in `build()` (before any
-    /// connection), so a malformed schema surfaces there, not here.
+    /// Checks the configured format against its matching build method:
+    /// `build()` for gRPC formats or `build_arrow()` for Arrow Flight.
+    /// This is not a guarantee that building succeeds: the Avro writer schema
+    /// is parsed in `build()` (before any connection), so a malformed schema
+    /// surfaces there, not here.
     pub fn validate(&self) -> ZerobusResult<()> {
         self.inner.validate_common()?;
         let max_streams = crate::multiplexed_stream::MAX_STREAMS;
@@ -208,6 +210,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     /// Construction is atomic and cancellation-safe, like [`Self::build`].
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<crate::MultiplexedArrowStream> {
+        self.inner.arrow_schema()?;
         self.validate()?;
         let schema = self.inner.validate_arrow()?;
         let headers_providers = self.resolve_headers_providers()?;
