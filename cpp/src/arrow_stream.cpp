@@ -39,8 +39,9 @@ std::int64_t checked_offset(std::int64_t offset) {
 // Frees the FFI-owned array on scope exit, so it is released even if a copy
 // below throws. (Mirrors RecordArrayGuard in stream.cpp.)
 struct BatchArrayGuard {
-  CArrowBatchArray array;
+  CArrowBatchArray array = {};
   ~BatchArrayGuard() { zerobus_arrow_free_batch_array(array); }
+  BatchArrayGuard() = default;
   BatchArrayGuard(const BatchArrayGuard&) = delete;
   BatchArrayGuard& operator=(const BatchArrayGuard&) = delete;
 };
@@ -128,7 +129,8 @@ std::vector<std::vector<std::uint8_t>> ArrowStream::get_unacked_batches() {
       zerobus_arrow_stream_get_unacked_batches(handle_, guard.ptr());
   guard.throw_if_error();
   // Own the array before the copy so it is freed on any exit path.
-  BatchArrayGuard array_guard{array};
+  BatchArrayGuard array_guard;
+  array_guard.array = array;
 
   std::vector<std::vector<std::uint8_t>> out;
   if (array.batches != nullptr && array.count > 0) {

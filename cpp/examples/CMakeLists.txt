@@ -41,6 +41,24 @@ if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
 endif()
 
 # ---------------------------------------------------------------------------
+# Avro examples (Beta)
+# ---------------------------------------------------------------------------
+if(ZEROBUS_ENABLE_AVRO)
+  add_executable(avro_single avro/single.cpp)
+  target_link_libraries(avro_single PRIVATE zerobus::zerobus)
+
+  add_executable(avro_batch avro/batch.cpp)
+  target_link_libraries(avro_batch PRIVATE zerobus::zerobus)
+
+  if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
+    add_dependencies(avro_single ${ZEROBUS_FFI_BUILD_TARGET})
+    add_dependencies(avro_batch ${ZEROBUS_FFI_BUILD_TARGET})
+  endif()
+else()
+  message(STATUS "Zerobus examples: Avro examples skipped (build with -DZEROBUS_ENABLE_AVRO=ON to enable)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Arrow Flight example (arrow_ingest)
 # ---------------------------------------------------------------------------
 # Uses the Apache Arrow C++ library to build RecordBatches and serialize them to
