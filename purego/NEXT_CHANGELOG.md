@@ -4,6 +4,9 @@
 
 ### New Features and Improvements
 
+- Give each PureGo stream a dedicated gRPC connection by default, matching the
+  other SDKs. Pass `WithConnectionPerStream(false)` to keep the previous shared
+  connection behavior for many low-throughput streams.
 - Tear the connection down gracefully when the server requests a stream pause
   (`CloseStreamSignal`), as a clean `Close` already did: the client half-closes
   the request stream and drains remaining acknowledgments before reconnecting,
