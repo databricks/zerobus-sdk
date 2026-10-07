@@ -409,13 +409,14 @@ dependencies = [
 
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.9.0"
+version = "2.11.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "hyper-http-proxy",
