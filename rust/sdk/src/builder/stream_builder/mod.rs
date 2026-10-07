@@ -5,6 +5,14 @@
 //! configured. You can also call `validate()` to check the builder state
 //! without opening a stream.
 //!
+//! This file holds the builder state and the setters that the stream kinds
+//! share. `PersistentStreamBuilder` (behind the `eos` feature) uses only these
+//! shared setters. The ephemeral terminals live in their own files:
+//! `ephemeral.rs` holds `build()`, and `multiplexed.rs` holds `multiplexed()`
+//! and `multiplexed_ack_callback()`. Persistent streams do not support
+//! multiplexing or Arrow Flight. The Arrow Flight setters and `build_arrow()`
+//! are still in this file.
+//!
 //! # Examples
 //!
 //! ```rust,ignore
@@ -24,7 +32,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
+use tonic::transport::Channel;
+
 use crate::callbacks::AckCallback;
+use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
@@ -36,9 +47,9 @@ use crate::stream_configuration::StreamConfigurationOptions;
 use crate::AvroSchema;
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
-    ZerobusStream,
 };
 
+mod ephemeral;
 mod multiplexed;
 
 pub use multiplexed::MultiplexedStreamBuilder;
@@ -181,6 +192,17 @@ pub struct StreamBuilder<'a> {
     arrow_config: ArrowStreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
     stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
+}
+
+/// Resolved inputs shared by the gRPC stream terminals: `StreamBuilder::build`
+/// and `PersistentStreamBuilder::build` / `resume`. Produced by
+/// [`StreamBuilder::prepare_grpc`].
+pub(crate) struct GrpcStreamParts {
+    pub(crate) channel: ZerobusClient<Channel>,
+    pub(crate) table_properties: TableProperties,
+    pub(crate) headers_provider: Arc<dyn HeadersProvider>,
+    /// Stream options with the record type already set from the chosen format.
+    pub(crate) config: StreamConfigurationOptions,
 }
 
 impl fmt::Debug for StreamBuilder<'_> {
@@ -454,16 +476,6 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the acknowledgment callback for a multiplexed gRPC stream.
-    ///
-    /// The callback receives the [`MessageId`] returned by multiplexed ingest
-    /// methods. Calling this setter again replaces the previous multiplexed
-    /// callback. Ordinary `build()` and `build_arrow()` reject it.
-    pub fn multiplexed_ack_callback(mut self, callback: Arc<dyn AckCallback<MessageId>>) -> Self {
-        self.multiplexed_callback = Some(callback);
-        self
-    }
-
     /// Set the maximum wait time for callbacks after stream close
     /// (JSON and Protocol Buffer gRPC streams only).
     pub fn callback_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
@@ -514,37 +526,6 @@ impl<'a> StreamBuilder<'a> {
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
         self.arrow_config.ipc_compression = compression;
         self
-    }
-
-    /// Select a multiplexed gRPC stream composed of `stream_count` homogeneous
-    /// sub-streams.
-    ///
-    /// This is a terminal mode selection: configure table, authentication,
-    /// format, stream options, and an optional
-    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) before
-    /// calling it. The returned builder only supports validation and
-    /// construction.
-    ///
-    /// Use multiplexing when one gRPC stream is the throughput bottleneck
-    /// and global ordering is not required. Records retain ordering within
-    /// each sub-stream, but there is no global record, message-ID, or callback
-    /// order. Different sub-stream callback workers may invoke the shared
-    /// callback concurrently.
-    ///
-    /// For a JSON stream, first migrate to compiled Protocol Buffers and
-    /// measure throughput again before considering multiplexing.
-    ///
-    /// # Beta
-    ///
-    /// Multiplexed streams are a Beta API.
-    ///
-    /// `stream_count` must be in `1..=64` and cannot exceed the configured
-    /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
-    /// across sub-streams using integer division. JSON, compiled protobuf,
-    /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
-    /// Arrow Flight is not.
-    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
-        MultiplexedStreamBuilder::new(self, stream_count)
     }
 
     /// Validate that the builder has all required fields configured.
@@ -652,31 +633,12 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open the configured stream (any record format except Arrow Flight).
-    ///
-    /// Returns an error if table name, authentication, or format has not been set,
-    /// or if an Arrow format was selected (use `build_arrow()` instead).
-    pub async fn build(self) -> ZerobusResult<ZerobusStream> {
-        let (channel, table_properties, headers_provider, config) = self.prepare_grpc().await?;
-        let stream =
-            ZerobusStream::new_stream(channel, table_properties, headers_provider, config).await?;
-        crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
-        Ok(stream)
-    }
-
     /// Validates the builder and resolves the pieces shared by the gRPC
     /// terminals (`build`, and the persistent builder's `build` / `resume`):
     /// the channel, table properties, headers provider, and finalized config
     /// with the record type set. Rejects the Arrow format (which needs
     /// `build_arrow()`).
-    pub(crate) async fn prepare_grpc(
-        mut self,
-    ) -> ZerobusResult<(
-        crate::databricks::zerobus::zerobus_client::ZerobusClient<tonic::transport::Channel>,
-        TableProperties,
-        Arc<dyn HeadersProvider>,
-        StreamConfigurationOptions,
-    )> {
+    pub(crate) async fn prepare_grpc(mut self) -> ZerobusResult<GrpcStreamParts> {
         // `validate()` already rejects `stats_exporter` on a non-Arrow format, and the
         // format match below rejects an Arrow format outright.
         self.validate()?;
@@ -700,12 +662,12 @@ impl<'a> StreamBuilder<'a> {
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
-        Ok((
+        Ok(GrpcStreamParts {
             channel,
             table_properties,
             headers_provider,
-            self.grpc_config,
-        ))
+            config: self.grpc_config,
+        })
     }
 
     /// Build and open an Arrow Flight ingestion stream.
