@@ -103,6 +103,8 @@ pub struct MockZerobusServer {
     create_requests: Arc<Mutex<Vec<CreateIngestStreamRequest>>>,
     /// Single-record ingest requests received across logical streams.
     ingest_record_requests: Arc<Mutex<Vec<IngestRecordRequest>>>,
+    /// Delay before the server acknowledges what it received once the client half-closes.
+    half_close_ack_delay_ms: Arc<Mutex<Option<u64>>>,
 }
 
 impl MockZerobusServer {
@@ -117,6 +119,7 @@ impl MockZerobusServer {
             connection_addresses: Arc::new(Mutex::new(HashSet::new())),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             ingest_record_requests: Arc::new(Mutex::new(Vec::new())),
+            half_close_ack_delay_ms: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -125,6 +128,13 @@ impl MockZerobusServer {
     #[allow(dead_code)]
     pub fn delayed_setup_armed(&self) -> Arc<Notify> {
         Arc::clone(&self.delayed_setup_armed)
+    }
+
+    /// Makes the server acknowledge what it received on a connection `delay_ms` after the
+    /// client half-closes, then end the stream. Off by default.
+    #[allow(dead_code)]
+    pub async fn ack_on_half_close(&self, delay_ms: u64) {
+        *self.half_close_ack_delay_ms.lock().await = Some(delay_ms);
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)
@@ -179,6 +189,7 @@ impl MockZerobusServer {
         self.connection_addresses.lock().await.clear();
         self.create_requests.lock().await.clear();
         self.ingest_record_requests.lock().await.clear();
+        *self.half_close_ack_delay_ms.lock().await = None;
     }
 }
 
@@ -225,9 +236,12 @@ impl Zerobus for MockZerobusServer {
         let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
         let create_requests = Arc::clone(&self.create_requests);
         let ingest_record_requests = Arc::clone(&self.ingest_record_requests);
+        let half_close_ack_delay_ms = Arc::clone(&self.half_close_ack_delay_ms);
 
         tokio::spawn(async move {
             let mut table_name = String::new();
+            // Highest offset received on this connection.
+            let mut last_offset_received: Option<i64> = None;
             let stream_id;
             let mut stream_responses: Vec<MockResponse> = Vec::new();
             let mut response_index = 0;
@@ -369,6 +383,7 @@ impl Zerobus for MockZerobusServer {
 
                                 // Update max offset
                                 if let Some(offset_id) = ingest_request.offset_id {
+                                    last_offset_received = Some(offset_id);
                                     let mut max_offset = max_offset_sent.lock().await;
                                     if offset_id > *max_offset {
                                         *max_offset = offset_id;
@@ -428,6 +443,7 @@ impl Zerobus for MockZerobusServer {
 
                                 // Update max offset
                                 if let Some(offset_id) = batch_request.offset_id {
+                                    last_offset_received = Some(offset_id);
                                     let mut max_offset = max_offset_sent.lock().await;
                                     if offset_id > *max_offset {
                                         *max_offset = offset_id;
@@ -477,6 +493,26 @@ impl Zerobus for MockZerobusServer {
                     }
                 }
             }
+
+            // The client half-closed. Like the real server, ack what it received.
+            let ack_delay_ms = *half_close_ack_delay_ms.lock().await;
+            if let (Some(delay_ms), Some(offset)) = (ack_delay_ms, last_offset_received) {
+                if delay_ms > 0 {
+                    sleep(Duration::from_millis(delay_ms)).await;
+                }
+                info!(
+                    "Sending final RecordAck after client half-close with ack_up_to_offset: {}",
+                    offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(offset),
+                        },
+                    )),
+                };
+                let _ = tx.send(Ok(response)).await;
+            }
         });
 
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -520,6 +556,7 @@ async fn start_mock_server_inner(
         connection_addresses: Arc::clone(&mock_server.connection_addresses),
         create_requests: Arc::clone(&mock_server.create_requests),
         ingest_record_requests: Arc::clone(&mock_server.ingest_record_requests),
+        half_close_ack_delay_ms: Arc::clone(&mock_server.half_close_ack_delay_ms),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

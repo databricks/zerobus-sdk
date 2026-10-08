@@ -33,6 +33,10 @@ impl ZerobusStream {
     /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
     /// These waits are separate from the flush timeout.
     ///
+    /// If records are still unacknowledged after the flush, the SDK also reads late
+    /// acknowledgments from the server for up to 500 ms. This read can remove records from
+    /// `get_unacked_records()`, so `close()` can return the flush error while that list is empty.
+    ///
     /// # Returns
     ///
     /// `Ok(())` if the stream was already closed or flushing succeeded. Task shutdown

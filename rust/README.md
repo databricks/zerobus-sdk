@@ -1094,7 +1094,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
-| `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments during graceful close (`None` = server grace remaining after reserving transport cleanup time, `Some(0)` = skip the ACK wait, `Some(x)` = the smaller of `x` and that remaining grace). A bounded request/response drain still runs after the ACK wait. |
+| `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments after the server signals close (`None` = the full server duration, `Some(0)` = do not wait, `Some(x)` = the smaller of `x` and the server duration). A bounded request/response drain still runs after the ACK wait. |
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **Ordinary JSON and Protocol Buffer gRPC streams only.** Optional callback for acknowledgment notifications. Multiplexed streams use the builder's `multiplexed_ack_callback` method; Arrow Flight does not support acknowledgment callbacks. |
 | `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **JSON and Protocol Buffer gRPC streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
