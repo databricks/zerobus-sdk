@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "internal/common/utils.h"
 #include "test_common.h"
-#include "utils.h"
 
 /* ---- helpers ----------------------------------------------------------- */
 
