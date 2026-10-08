@@ -18,6 +18,14 @@
   with a mux-wide `max_inflight_batches` budget, lane-local recovery, and the
   existing mux poisoning and message-ID semantics.
 
+- Fewer duplicate records after a server close signal and after `close()` on
+  JSON and Protocol Buffer gRPC streams. When records are still unacknowledged
+  after the graceful-close wait, the SDK now half-closes the stream and applies
+  the acknowledgments the server sends for up to 500 ms. With
+  `stream_paused_max_wait_time_ms(Some(0))`, recovery can now take up to 500 ms
+  longer when records are unacknowledged and the server has not ended the
+  stream.
+
 ### Bug Fixes
 
 - Arrow `ingest_batch` calls blocked on `max_inflight_batches` now fail as soon as

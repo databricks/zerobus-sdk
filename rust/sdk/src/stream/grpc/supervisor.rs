@@ -284,6 +284,7 @@ impl ZerobusStream {
                 options.clone(),
                 server_error_tx.clone(),
                 recv_drain_token.clone(),
+                per_stream_token.clone(),
                 callback_tx.clone(),
                 initial_last_acked_offset,
             ));
@@ -320,8 +321,12 @@ impl ZerobusStream {
                 }
                 send_result = &mut send_task => {
                     // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
-                    if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
-                        recv_drain_token.cancel();
+                    // The receiver also cancels `per_stream_token` to half-close. Let it apply the
+                    // final acks before it is aborted and `reset_observe` runs.
+                    if matches!(send_result, Ok(Ok(()))) {
+                        if cancellation_token.is_cancelled() {
+                            recv_drain_token.cancel();
+                        }
                         let _ = tokio::time::timeout(
                             Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
                             &mut recv_task,
