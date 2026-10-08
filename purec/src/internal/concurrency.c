@@ -1,9 +1,10 @@
-/* Keep POSIX declarations local without changing the project's C99 baseline. */
-#define _POSIX_C_SOURCE 200809L
+/* sem_clockwait needs GNU declarations, local to this translation unit. */
+#define _GNU_SOURCE
 
 #include <errno.h> // IWYU pragma: keep
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <time.h>
 
 #include "concurrency.h"
@@ -44,6 +45,18 @@ static zb_deadline_t max_deadline(void)
         return UINT64_MAX - 1;
     }
     return max_seconds * ZB_NS_PER_SECOND + ZB_NS_PER_SECOND - 1;
+}
+
+static struct timespec deadline_timespec(zb_deadline_t deadline)
+{
+    zb_deadline_t limit = max_deadline();
+    if (deadline > limit) {
+        deadline = limit;
+    }
+    return (struct timespec){
+        .tv_sec = (time_t)(deadline / ZB_NS_PER_SECOND),
+        .tv_nsec = (long)(deadline % ZB_NS_PER_SECOND),
+    };
 }
 
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
@@ -179,14 +192,7 @@ zerobus_status_t zb_cond_wait_until(zb_cond_t *cond, zb_mutex_t *mutex,
     if (deadline == ZB_DEADLINE_INFINITE) {
         result = pthread_cond_wait(cond, mutex);
     } else {
-        zb_deadline_t limit = max_deadline();
-        if (deadline > limit) {
-            deadline = limit;
-        }
-        struct timespec until = {
-            .tv_sec = (time_t)(deadline / ZB_NS_PER_SECOND),
-            .tv_nsec = (long)(deadline % ZB_NS_PER_SECOND),
-        };
+        struct timespec until = deadline_timespec(deadline);
         result = pthread_cond_timedwait(cond, mutex, &until);
     }
     if (result == ETIMEDOUT) {
@@ -209,6 +215,59 @@ zerobus_status_t zb_cond_broadcast(zb_cond_t *cond)
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     return backend_status(pthread_cond_broadcast(cond));
+}
+
+zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    return sem_init(sem, 0, value) == 0 ? ZEROBUS_STATUS_OK
+                                        : backend_status(errno);
+}
+
+zerobus_status_t zb_sem_destroy(zb_sem_t *sem)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_OK;
+    }
+    return sem_destroy(sem) == 0 ? ZEROBUS_STATUS_OK : backend_status(errno);
+}
+
+zerobus_status_t zb_sem_post(zb_sem_t *sem)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    return sem_post(sem) == 0 ? ZEROBUS_STATUS_OK : backend_status(errno);
+}
+
+zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    struct timespec until = {0};
+    if (deadline != ZB_DEADLINE_IMMEDIATE && deadline != ZB_DEADLINE_INFINITE) {
+        until = deadline_timespec(deadline);
+    }
+    int result;
+    do {
+        if (deadline == ZB_DEADLINE_IMMEDIATE) {
+            result = sem_trywait(sem);
+        } else if (deadline == ZB_DEADLINE_INFINITE) {
+            result = sem_wait(sem);
+        } else {
+            result = sem_clockwait(sem, CLOCK_MONOTONIC, &until);
+        }
+    } while (result != 0 && errno == EINTR);
+    if (result == 0) {
+        return ZEROBUS_STATUS_OK;
+    }
+    if (errno == EAGAIN || errno == ETIMEDOUT) {
+        return ZEROBUS_STATUS_DEADLINE_EXCEEDED;
+    }
+    return backend_status(errno);
 }
 
 zerobus_status_t zb_thread_create(zb_thread_t *thread, void *(*entry)(void *),
@@ -242,4 +301,9 @@ zerobus_status_t zb_once(zb_once_t *once, void (*init)(void))
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     return backend_status(pthread_once(once, init));
+}
+
+void zb_thread_yield(void)
+{
+    (void)sched_yield();
 }
