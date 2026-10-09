@@ -143,12 +143,6 @@ impl<'a> PersistentStreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum wait time during graceful stream pause.
-    pub fn stream_paused_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
-        self.inner = self.inner.stream_paused_max_wait_time_ms(ms);
-        self
-    }
-
     /// Set the acknowledgment callback.
     pub fn ack_callback(mut self, callback: Arc<dyn AckCallback>) -> Self {
         self.inner = self.inner.ack_callback(callback);
