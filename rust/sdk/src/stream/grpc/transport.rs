@@ -209,6 +209,21 @@ pub(super) enum InboundStream {
 }
 
 impl InboundStream {
+    /// The wait after a close signal. A persistent stream resumes from the server's
+    /// committed offset, so it never waits.
+    pub(super) fn close_wait_ms(&self, configured: Option<u64>) -> Option<u64> {
+        match self {
+            InboundStream::Ephemeral(_) => configured,
+            InboundStream::Persistent(_) => Some(0),
+        }
+    }
+
+    /// Whether to read late acks after the request stream ends. A persistent stream resumes
+    /// from the committed offset instead.
+    pub(super) fn reads_late_acks(&self) -> bool {
+        matches!(self, InboundStream::Ephemeral(_))
+    }
+
     /// Reads the next server message. `Ok(None)` means the server closed the
     /// stream gracefully; `Err` is a transport error.
     pub(super) async fn message(&mut self) -> Result<Option<InboundMessage>, tonic::Status> {
