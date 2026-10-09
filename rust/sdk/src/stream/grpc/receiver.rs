@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, span, Level};
+use tracing::{error, info, instrument, span, warn, Level};
 
 use super::transport::{InboundMessage, InboundStream};
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
@@ -137,7 +137,9 @@ impl ZerobusStream {
                                 .map(|d| d.seconds as u64 * 1000 + d.nanos as u64 / 1_000_000)
                                 .unwrap_or(0);
 
-                            let wait_duration_ms = match options.stream_paused_max_wait_time_ms {
+                            let wait_duration_ms = match inbound
+                                .close_wait_ms(options.stream_paused_max_wait_time_ms)
+                            {
                                 None => server_duration_ms,
                                 Some(0) => {
                                     // Immediate recovery
@@ -205,7 +207,7 @@ impl ZerobusStream {
             }
 
             let drain_window = Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS);
-            if !landing_zone.is_observed_empty() {
+            if inbound.reads_late_acks() && !landing_zone.is_observed_empty() {
                 // Half-close so the server sends its final acks, then apply them before the
                 // supervisor resends the rest. On close the sender has already stopped.
                 half_close_token.cancel();
@@ -279,7 +281,7 @@ async fn drain_applying_acks(
             Ok(Ok(Some(InboundMessage::Ack(IngestRecordResponse {
                 durability_ack_up_to_offset: Some(offset),
             })))) => {
-                if apply_ack(
+                if let Err(error) = apply_ack(
                     landing_zone,
                     oneshot_map,
                     last_received_offset_id_tx,
@@ -288,9 +290,9 @@ async fn drain_applying_acks(
                     offset,
                 )
                 .await
-                .is_err()
                 {
                     // An invalid ack ends the read. The rest is sent again.
+                    warn!("Stopped reading final acks after an invalid ack: {error}");
                     return;
                 }
             }

@@ -108,7 +108,7 @@ pub struct StreamConfigurationOptions {
     ///
     /// Configuration values:
     /// - `None`: Wait for the full server-specified duration (most graceful)
-    /// - `Some(0)`: Do not wait for acknowledgments. The SDK still drains final
+    /// - `Some(0)`: Do not wait for acknowledgments. Standard streams still drain final
     ///   acknowledgments from the connection.
     /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
     ///

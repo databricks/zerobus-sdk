@@ -146,6 +146,9 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Stops the callback handler task. Close cancels it only after the supervisor has shut
+    /// down, so acks applied during that shutdown still reach the callback.
+    callback_cancellation_token: CancellationToken,
     /// Resolved message descriptor for building dynamic-proto records, supplied by
     /// the builder. `None` for JSON and compiled-proto streams.
     dynamic_message_descriptor: Option<MessageDescriptor>,
@@ -276,13 +279,14 @@ impl ZerobusStream {
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
         let terminal_token = CancellationToken::new();
+        let callback_cancellation_token = CancellationToken::new();
         // Create callback channel and spawn callback handler task only if callback is defined
         let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let task = Self::spawn_callback_handler_task(
                 rx,
                 options.ack_callback.clone(),
-                cancellation_token.clone(),
+                callback_cancellation_token.clone(),
             );
             (Some(tx), Some(task))
         } else {
@@ -365,6 +369,7 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            callback_cancellation_token,
             dynamic_message_descriptor,
         };
 

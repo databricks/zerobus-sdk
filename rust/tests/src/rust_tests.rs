@@ -4435,6 +4435,7 @@ mod graceful_close_tests {
             .await;
         mock_server.ack_on_half_close(0).await;
 
+        let callback = Arc::new(utils::TestCallback::new());
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url.clone())
             .unity_catalog_url("https://mock-uc.com")
@@ -4449,6 +4450,7 @@ mod graceful_close_tests {
             .max_inflight_requests(100)
             .recovery(true)
             .flush_timeout_ms(300)
+            .ack_callback(callback.clone())
             .build()
             .await?;
 
@@ -4460,6 +4462,11 @@ mod graceful_close_tests {
         assert!(
             unacked.is_empty(),
             "The ack that arrived after the half-close must remove the record from the unacked set"
+        );
+        assert_eq!(
+            callback.get_acks(),
+            vec![0],
+            "The ack that arrived after the half-close must reach the callback"
         );
         assert_eq!(mock_server.get_write_count().await, 1);
 
