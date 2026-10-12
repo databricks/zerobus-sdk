@@ -25,6 +25,11 @@
 
 ### Breaking Changes
 
+- The declared minimum supported Rust version is now 1.85 (was 1.70). The
+  default build already needed Rust 1.85 through its dependencies, so no build
+  that worked before stops working; `rust-version` now says so, and CI checks
+  it. Optional features can need a newer toolchain (for example `avro`).
+
 ### Deprecations
 
 ### API Changes

@@ -1639,7 +1639,7 @@ This SDK is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for th
 
 ## Requirements
 
-- **Rust** 1.70 or higher (2021 edition)
+- **Rust** 1.85 or higher (2021 edition). Some optional features need a newer toolchain; see [Features](#features).
 - **TLS** - Uses native OS certificate store by default (configurable via `TlsConfig` trait)
 - See [prerequisites](https://github.com/databricks/zerobus-sdk/blob/main/README.md#prerequisites) for Databricks workspace and credential requirements
 
