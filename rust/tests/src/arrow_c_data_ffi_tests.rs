@@ -53,9 +53,11 @@ mod ffi_c_data_lifetime_tests {
 
     unsafe extern "C" fn counting_array_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
-        let state = unsafe { Box::from_raw(array.private_data.cast::<CountingArrayRelease>()) };
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        let state = unsafe { Box::from_raw(array.private_data().cast::<CountingArrayRelease>()) };
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         state.releases.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
@@ -64,9 +66,11 @@ mod ffi_c_data_lifetime_tests {
 
     unsafe extern "C" fn counting_schema_release(schema: *mut FFI_ArrowSchema) {
         let schema = unsafe { &mut *schema };
-        let state = unsafe { Box::from_raw(schema.private_data.cast::<CountingSchemaRelease>()) };
-        schema.release = state.inner_release;
-        schema.private_data = state.inner_private_data;
+        let state = unsafe { Box::from_raw(schema.private_data().cast::<CountingSchemaRelease>()) };
+        unsafe {
+            schema.set_release(state.inner_release);
+            schema.set_private_data(state.inner_private_data);
+        }
         state.releases.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = state.inner_release {
             unsafe { release(schema) };
@@ -81,9 +85,11 @@ mod ffi_c_data_lifetime_tests {
 
     unsafe extern "C" fn timing_array_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
-        let state = unsafe { Box::from_raw(array.private_data.cast::<TimingArrayRelease>()) };
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        let state = unsafe { Box::from_raw(array.private_data().cast::<TimingArrayRelease>()) };
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         state.release_count.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
@@ -100,7 +106,8 @@ mod ffi_c_data_lifetime_tests {
 
     unsafe extern "C" fn lock_checking_array_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
-        let state = unsafe { Box::from_raw(array.private_data.cast::<LockCheckingArrayRelease>()) };
+        let state =
+            unsafe { Box::from_raw(array.private_data().cast::<LockCheckingArrayRelease>()) };
         // This intentionally mirrors the opaque-handle cast in arrow.rs. If that handle
         // gains an outer wrapper, this test hook and the production cast must change together.
         let stream = unsafe { &*(state.stream as *const ZerobusArrowStream) };
@@ -109,8 +116,10 @@ mod ffi_c_data_lifetime_tests {
             Ordering::SeqCst,
         );
         state.release_count.fetch_add(1, Ordering::SeqCst);
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
         }
@@ -126,14 +135,16 @@ mod ffi_c_data_lifetime_tests {
         let struct_array = StructArray::from(batch);
         let mut array = FFI_ArrowArray::new(&struct_array.to_data());
         let array_state = Box::new(LockCheckingArrayRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             stream,
             locks_available,
             release_count,
         });
-        array.release = Some(lock_checking_array_release);
-        array.private_data = Box::into_raw(array_state).cast();
+        unsafe {
+            array.set_release(Some(lock_checking_array_release));
+            array.set_private_data(Box::into_raw(array_state).cast());
+        }
         let schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
         (array, schema)
     }
@@ -149,7 +160,7 @@ mod ffi_c_data_lifetime_tests {
     unsafe extern "C" fn runtime_waiting_array_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
         let state =
-            unsafe { Box::from_raw(array.private_data.cast::<RuntimeWaitingArrayRelease>()) };
+            unsafe { Box::from_raw(array.private_data().cast::<RuntimeWaitingArrayRelease>()) };
         let (completed_tx, completed_rx) = mpsc::sync_channel(1);
         state.runtime.spawn(async move {
             let _ = completed_tx.send(());
@@ -159,8 +170,10 @@ mod ffi_c_data_lifetime_tests {
             Ordering::SeqCst,
         );
         state.release_count.fetch_add(1, Ordering::SeqCst);
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
         }
@@ -176,14 +189,16 @@ mod ffi_c_data_lifetime_tests {
         let struct_array = StructArray::from(batch);
         let mut array = FFI_ArrowArray::new(&struct_array.to_data());
         let array_state = Box::new(RuntimeWaitingArrayRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             runtime,
             runtime_progressed,
             release_count,
         });
-        array.release = Some(runtime_waiting_array_release);
-        array.private_data = Box::into_raw(array_state).cast();
+        unsafe {
+            array.set_release(Some(runtime_waiting_array_release));
+            array.set_private_data(Box::into_raw(array_state).cast());
+        }
         let schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
         (array, schema)
     }
@@ -197,21 +212,25 @@ mod ffi_c_data_lifetime_tests {
         let struct_array = StructArray::from(batch);
         let mut array = FFI_ArrowArray::new(&struct_array.to_data());
         let array_state = Box::new(TimingArrayRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             release_count,
         });
-        array.release = Some(timing_array_release);
-        array.private_data = Box::into_raw(array_state).cast();
+        unsafe {
+            array.set_release(Some(timing_array_release));
+            array.set_private_data(Box::into_raw(array_state).cast());
+        }
 
         let mut schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
         let schema_state = Box::new(CountingSchemaRelease {
-            inner_release: schema.release,
-            inner_private_data: schema.private_data,
+            inner_release: schema.release(),
+            inner_private_data: schema.private_data(),
             releases: schema_releases,
         });
-        schema.release = Some(counting_schema_release);
-        schema.private_data = Box::into_raw(schema_state).cast();
+        unsafe {
+            schema.set_release(Some(counting_schema_release));
+            schema.set_private_data(Box::into_raw(schema_state).cast());
+        }
         (array, schema)
     }
 
@@ -224,21 +243,25 @@ mod ffi_c_data_lifetime_tests {
         let struct_array = StructArray::from(batch);
         let mut array = FFI_ArrowArray::new(&struct_array.to_data());
         let array_state = Box::new(CountingArrayRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             releases: array_releases,
         });
-        array.release = Some(counting_array_release);
-        array.private_data = Box::into_raw(array_state).cast();
+        unsafe {
+            array.set_release(Some(counting_array_release));
+            array.set_private_data(Box::into_raw(array_state).cast());
+        }
 
         let mut schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
         let schema_state = Box::new(CountingSchemaRelease {
-            inner_release: schema.release,
-            inner_private_data: schema.private_data,
+            inner_release: schema.release(),
+            inner_private_data: schema.private_data(),
             releases: schema_releases,
         });
-        schema.release = Some(counting_schema_release);
-        schema.private_data = Box::into_raw(schema_state).cast();
+        unsafe {
+            schema.set_release(Some(counting_schema_release));
+            schema.set_private_data(Box::into_raw(schema_state).cast());
+        }
         (array, schema)
     }
 
@@ -341,8 +364,8 @@ mod ffi_c_data_lifetime_tests {
                 (&mut schema as *mut FFI_ArrowSchema).cast::<CArrowSchema>(),
                 &mut result,
             );
-            assert!(array.release.is_none(), "array ownership must transfer");
-            assert!(schema.release.is_none(), "schema ownership must transfer");
+            assert!(array.release().is_none(), "array ownership must transfer");
+            assert!(schema.release().is_none(), "schema ownership must transfer");
             if result.success {
                 Ok(offset)
             } else {
