@@ -25,6 +25,12 @@
 
 ### Breaking Changes
 
+- `EncodedRecord`, `EncodedBatch`, and `EncodedBatchIter` are now
+  `#[non_exhaustive]`. Their `Avro` variants exist whenever any crate in the
+  build enables the `avro` feature, so an exhaustive `match` could stop
+  compiling because of an unrelated dependency. Add a `_ =>` arm to matches on
+  these types; future record formats can then ship without a major release.
+
 ### Deprecations
 
 ### API Changes

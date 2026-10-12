@@ -298,7 +298,7 @@ impl ZerobusStream {
                 Python::attach(|py| {
                     let out: Vec<Py<PyAny>> = records
                         .map(|record| encoded_record_to_pybytes(py, record))
-                        .collect();
+                        .collect::<PyResult<_>>()?;
                     Ok(out)
                 })
             })
@@ -322,9 +322,9 @@ impl ZerobusStream {
                             batch
                                 .into_iter()
                                 .map(|r| encoded_record_to_pybytes(py, r))
-                                .collect()
+                                .collect::<PyResult<Vec<_>>>()
                         })
-                        .collect();
+                        .collect::<PyResult<_>>()?;
                     Ok(out)
                 })
             })

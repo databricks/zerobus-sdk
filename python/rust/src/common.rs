@@ -628,11 +628,16 @@ pub(crate) fn extract_record_payloads(
     Ok(out)
 }
 
-pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> Py<PyAny> {
+pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> PyResult<Py<PyAny>> {
     match record {
-        EncodedRecord::Proto(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
-        EncodedRecord::Json(json_str) => PyBytes::new(py, json_str.as_bytes()).into_any().unbind(),
-        EncodedRecord::Avro(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
+        EncodedRecord::Proto(bytes) => Ok(PyBytes::new(py, &bytes).into_any().unbind()),
+        EncodedRecord::Json(json_str) => {
+            Ok(PyBytes::new(py, json_str.as_bytes()).into_any().unbind())
+        }
+        EncodedRecord::Avro(bytes) => Ok(PyBytes::new(py, &bytes).into_any().unbind()),
+        _ => Err(PyException::new_err(
+            "Unsupported record type in unacknowledged records",
+        )),
     }
 }
 

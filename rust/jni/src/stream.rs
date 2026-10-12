@@ -491,6 +491,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
         let bytes = match record {
             EncodedRecord::Proto(p) => p,
             EncodedRecord::Json(j) => j.into_bytes(),
+            _ => {
+                throw_zerobus_exception(&mut env, "Unsupported record type in unacked records");
+                return JObject::null();
+            }
         };
 
         let byte_array = match env.byte_array_from_slice(&bytes) {
@@ -575,6 +579,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             EncodedBatch::Proto(records) => (false, records.into_iter().collect()),
             EncodedBatch::Json(records) => {
                 (true, records.into_iter().map(|r| r.into_bytes()).collect())
+            }
+            _ => {
+                throw_zerobus_exception(&mut env, "Unsupported record type in unacked batches");
+                return JObject::null();
             }
         };
 

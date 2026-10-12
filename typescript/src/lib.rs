@@ -651,13 +651,16 @@ impl ZerobusStream {
             .await
             .map_err(|e| Error::from_reason(format!("Failed to get unacked records: {}", e)))?;
 
-        Ok(unacked
+        unacked
             .into_iter()
             .map(|payload| match payload {
-                RustRecordPayload::Proto(vec) => vec.into(),
-                RustRecordPayload::Json(s) => s.into_bytes().into(),
+                RustRecordPayload::Proto(vec) => Ok(vec.into()),
+                RustRecordPayload::Json(s) => Ok(s.into_bytes().into()),
+                _ => Err(Error::from_reason(
+                    "Unsupported record type in unacked records",
+                )),
             })
-            .collect())
+            .collect()
     }
 
     /// Gets unacknowledged records grouped by their original batches.
@@ -697,18 +700,21 @@ impl ZerobusStream {
             .await
             .map_err(|e| Error::from_reason(format!("Failed to get unacked batches: {}", e)))?;
 
-        Ok(unacked_batches
+        unacked_batches
             .into_iter()
             .map(|batch| {
                 batch
                     .into_iter()
                     .map(|record| match record {
-                        RustRecordPayload::Proto(vec) => vec.into(),
-                        RustRecordPayload::Json(s) => s.into_bytes().into(),
+                        RustRecordPayload::Proto(vec) => Ok(vec.into()),
+                        RustRecordPayload::Json(s) => Ok(s.into_bytes().into()),
+                        _ => Err(Error::from_reason(
+                            "Unsupported record type in unacked batches",
+                        )),
                     })
                     .collect()
             })
-            .collect())
+            .collect()
     }
 }
 

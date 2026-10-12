@@ -36,6 +36,7 @@ pub type JsonEncodedRecord = String;
 pub type AvroEncodedRecord = Vec<u8>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum EncodedRecord {
     Json(JsonEncodedRecord),
     Proto(ProtoEncodedRecord),
@@ -213,6 +214,7 @@ pub struct AvroRecord(pub apache_avro::types::Value);
 /// A blanket `From<T: Into<EncodedRecord>>` keeps every existing wrapper working; only
 /// `AvroRecord` maps to the `AvroObject` variant, encoded once the writer schema is known.
 #[doc(hidden)]
+#[non_exhaustive]
 pub enum PreparedInput {
     /// Already encoded; enqueue as-is.
     Ready(EncodedRecord),
@@ -235,6 +237,7 @@ impl From<AvroRecord> for PreparedInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum EncodedBatch {
     Proto(SmallVec<[ProtoEncodedRecord; 1]>),
     Json(SmallVec<[JsonEncodedRecord; 1]>),
@@ -423,6 +426,7 @@ impl IntoIterator for EncodedBatch {
     }
 }
 
+#[non_exhaustive]
 pub enum EncodedBatchIter {
     Proto(smallvec::IntoIter<[ProtoEncodedRecord; 1]>),
     Json(smallvec::IntoIter<[JsonEncodedRecord; 1]>),
