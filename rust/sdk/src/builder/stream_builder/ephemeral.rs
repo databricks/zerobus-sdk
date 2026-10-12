@@ -1,6 +1,7 @@
 //! Ephemeral gRPC stream construction.
 
 use super::{GrpcStreamParts, StreamBuilder};
+use crate::client_warnings::record_stream_creation;
 use crate::{ZerobusResult, ZerobusStream};
 
 impl StreamBuilder<'_> {
@@ -17,7 +18,7 @@ impl StreamBuilder<'_> {
         } = self.prepare_grpc().await?;
         let stream =
             ZerobusStream::new_stream(channel, table_properties, headers_provider, config).await?;
-        crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
+        record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(stream)
     }
 }

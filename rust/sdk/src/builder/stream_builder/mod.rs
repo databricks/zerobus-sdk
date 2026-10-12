@@ -35,6 +35,8 @@ use std::time::Duration;
 use tonic::transport::Channel;
 
 use crate::callbacks::AckCallback;
+#[cfg(feature = "arrow-flight")]
+use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
@@ -706,7 +708,7 @@ impl<'a> StreamBuilder<'a> {
             self.stats_exporter,
         )
         .await?;
-        crate::client_warnings::record_stream_creation(&table_name);
+        record_stream_creation(&table_name);
         Ok(stream)
     }
 
@@ -753,7 +755,7 @@ impl<'a> StreamBuilder<'a> {
         if self.grpc_config.max_ingest_payload_bytes
             != StreamConfigurationOptions::default().max_ingest_payload_bytes
         {
-            crate::client_warnings::warn_payload_limit_ignored_for_arrow();
+            warn_payload_limit_ignored_for_arrow();
         }
     }
 }

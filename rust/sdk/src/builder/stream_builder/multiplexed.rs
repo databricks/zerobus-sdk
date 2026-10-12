@@ -12,6 +12,7 @@ use tracing::{error, warn};
 use super::FormatConfig;
 use super::StreamBuilder;
 use crate::callbacks::AckCallback;
+use crate::client_warnings::record_stream_creation;
 use crate::headers_provider::HeadersProvider;
 use crate::{
     MessageId, MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusStream,
@@ -243,7 +244,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         debug_assert_eq!(streams.len(), self.stream_count);
         // This is one user-initiated logical stream creation. Counting each
         // internal lane would make the churn warning flag intentional muxes.
-        crate::client_warnings::record_stream_creation(&table_properties.table_name);
+        record_stream_creation(&table_properties.table_name);
         Ok(MultiplexedStream::from_streams(streams))
     }
 
@@ -306,7 +307,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             stream.close().await
         })
         .await?;
-        crate::client_warnings::record_stream_creation(&table_properties.table_name);
+        record_stream_creation(&table_properties.table_name);
         Ok(crate::MultiplexedArrowStream::from_streams(streams))
     }
 }
