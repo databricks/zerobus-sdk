@@ -6,7 +6,7 @@
 #include "internal/proto/zerobus_service.h"
 #include "zerobus_service.pb-c.h"
 
-#define MAX_ENCODED_PAYLOAD (SIZE_MAX - 64u)
+#define MAX_ENCODED_PAYLOAD ((size_t)INT32_MAX - 64u)
 
 static bool check_args(zerobus_string_view_t input, uint8_t **out_data,
                        size_t *out_len)
@@ -104,6 +104,23 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
     return status;
 }
 
+static void *unpack_alloc(void *allocator_data, size_t size)
+{
+    /* A NULL result for malloc(0) does not necessarily mean allocation failed.
+     */
+    void *data = malloc(size == 0 ? 1 : size);
+    if (data == NULL) {
+        *(bool *)allocator_data = true;
+    }
+    return data;
+}
+
+static void unpack_free(void *allocator_data, void *data)
+{
+    (void)allocator_data;
+    free(data);
+}
+
 zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,
                                           zb_response_t *out_response)
 {
@@ -117,11 +134,16 @@ zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,
 
     static const uint8_t empty = 0;
     const uint8_t *input = data == NULL ? &empty : data;
+    bool allocation_failed = false;
+    ProtobufCAllocator allocator = {.alloc = unpack_alloc,
+                                    .free = unpack_free,
+                                    .allocator_data = &allocation_failed};
     Databricks__Zerobus__EphemeralStreamResponse *response =
-        databricks__zerobus__ephemeral_stream_response__unpack(NULL, len,
+        databricks__zerobus__ephemeral_stream_response__unpack(&allocator, len,
                                                                input);
     if (response == NULL) {
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+        return allocation_failed ? ZEROBUS_STATUS_OUT_OF_MEMORY
+                                 : ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
 
     zerobus_status_t status = ZEROBUS_STATUS_OK;
@@ -157,7 +179,7 @@ zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,
         break;
     }
     databricks__zerobus__ephemeral_stream_response__free_unpacked(response,
-                                                                  NULL);
+                                                                  &allocator);
     if (status != ZEROBUS_STATUS_OK) {
         zb_response_clear(out_response);
     }

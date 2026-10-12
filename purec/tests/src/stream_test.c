@@ -308,6 +308,30 @@ static void test_ingest_validation(void)
                  ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK(err == NULL);
 
+    /* Valid multibyte UTF-8 and an escaped NUL pass text validation. */
+    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
+                     stream, sv("{\"k\":\"\xe2\x82\xac\"}"), NULL, &err),
+                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK(err == NULL);
+    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
+                     stream, sv("{\"k\":\"\\u0000\"}"), NULL, &err),
+                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK(err == NULL);
+
+    static const char raw_nul[] = {'{', '\0', '}'};
+    static const zerobus_string_view_t invalid[] = {
+        {"{\"k\":\"\xff\"}", 9},
+        {"\xe2\x82", 2},
+        {raw_nul, sizeof(raw_nul)},
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        CHECK_EQ_INT(
+            zerobus_stream_ingest_json_record(stream, invalid[i], NULL, &err),
+            ZEROBUS_STATUS_INVALID_ARGUMENT);
+        zerobus_error_free(err);
+        err = NULL;
+    }
+
     /* A record past the size ceiling is refused by the size gate. */
     size_t big = 11u * 1024u * 1024u;
     buf = (char *)malloc(big);

@@ -51,9 +51,10 @@ zerobus_stream_builder_free(zerobus_stream_builder_t *builder);
 
 /*
  * Ingest one JSON record, sent verbatim (not reshaped to the table schema).
- * The record must be non-empty and no larger than the payload limit. Success
- * means the record was copied and queued locally, not acknowledged by the
- * server, so the caller may reuse the bytes on return.
+ * The record must be non-empty valid UTF-8, without raw NUL bytes, and no
+ * larger than the payload limit. Success means the record was copied and queued
+ * locally, not acknowledged by the server, so the caller may reuse the bytes on
+ * return.
  *
  * On success *out_offset, when non-NULL, receives the record's stream offset —
  * a handle to wait on later.

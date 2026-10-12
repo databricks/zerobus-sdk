@@ -19,6 +19,7 @@
 
 /*
  * Encode EphemeralStreamRequest{create_stream: {table_name, record_type:JSON}}.
+ * Input must be valid UTF-8 without raw NUL bytes; empty input is permitted.
  * On success *out_data is a malloc'd block of *out_len bytes that the caller
  * owns and releases with free().
  */
@@ -27,7 +28,7 @@ zerobus_status_t zb_proto_encode_create_stream(zerobus_string_view_t table_name,
                                                size_t *out_len);
 
 /* Encode EphemeralStreamRequest{ingest_record: {offset_id, json_record}}.
- * Ownership as for zb_proto_encode_create_stream. */
+ * Input and ownership as for zb_proto_encode_create_stream. */
 zerobus_status_t
 zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
                               zerobus_string_view_t json_record,
@@ -62,7 +63,10 @@ typedef struct zb_response {
 /*
  * Decode an EphemeralStreamResponse. Unknown fields with supported wire types
  * are skipped. Returns INVALID_ARGUMENT for malformed or unsupported input
- * and OUT_OF_MEMORY when a copy fails.
+ * and OUT_OF_MEMORY when an allocation fails.
+ * Treats *out_response as uninitialized and overwrites it without releasing
+ * owned fields. Clear a previous result with zb_response_clear before decoding
+ * into the same output again.
  * On failure *out_response is left empty. Release with zb_response_clear.
  */
 zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,

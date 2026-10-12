@@ -128,6 +128,7 @@ zb_cleanup:
 
 static void test_encode_rejects_invalid_arguments(void)
 {
+    static const char sentinel = 'x';
     uint8_t *data = NULL;
     size_t len = 0;
     CHECK_EQ_INT(zb_proto_encode_create_stream(sv("c.s.t"), NULL, &len),
@@ -137,9 +138,11 @@ static void test_encode_rejects_invalid_arguments(void)
     CHECK_EQ_INT(zb_proto_encode_create_stream((zerobus_string_view_t){NULL, 3},
                                                &data, &len),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(zb_proto_encode_create_stream(
-                     (zerobus_string_view_t){"x", SIZE_MAX}, &data, &len),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zb_proto_encode_create_stream(
+            (zerobus_string_view_t){&sentinel, (size_t)INT32_MAX - 63u}, &data,
+            &len),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_proto_encode_ingest_record(0, sv("{}"), NULL, &len),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_proto_encode_ingest_record(0, sv("{}"), &data, NULL),
@@ -147,9 +150,11 @@ static void test_encode_rejects_invalid_arguments(void)
     CHECK_EQ_INT(zb_proto_encode_ingest_record(
                      0, (zerobus_string_view_t){NULL, 3}, &data, &len),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(zb_proto_encode_ingest_record(
-                     0, (zerobus_string_view_t){"x", SIZE_MAX}, &data, &len),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zb_proto_encode_ingest_record(
+            0, (zerobus_string_view_t){&sentinel, (size_t)INT32_MAX - 63u},
+            &data, &len),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(data == NULL);
 }
 
