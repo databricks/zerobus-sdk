@@ -121,6 +121,23 @@
   `databricks_zerobus_ingest_sdk::RecordType` instead. The stream builder API
   and the other-language SDKs are unaffected.
 
+- `EncodedBatch` variants now hold the SDK-owned `BatchRecords<T>` instead of
+  `smallvec::SmallVec<[T; 1]>`, and `EncodedBatchIter` variants hold
+  `BatchRecordsIntoIter<T>` instead of `smallvec::IntoIter<[T; 1]>`, so
+  `smallvec` is no longer part of the public API and a `smallvec` upgrade no
+  longer breaks the SDK API
+  ([#912](https://github.com/databricks/zerobus-sdk/issues/912)). A
+  single-record batch is still stored inline.
+
+  Migration: `BatchRecords` derefs to `[T]`, implements `IntoIterator`,
+  `FromIterator`, `From<Vec<T>>`, `AsRef<[T]>`, `Borrow<[T]>`, and `Hash`, and
+  converts to a `Vec` with `into_vec()` or `Vec::from`. Replace `smallvec![..]`
+  or `SmallVec::from_vec(v)` with `v.into()`, and `as_slice()` with
+  `&records[..]`. `BatchRecords` is read-only, so assigning through an index,
+  `sort()`, `iter_mut()`, and other mutating slice methods no longer compile.
+  To modify records, call `into_vec()`, edit the `Vec`, and convert it back
+  with `.into()`.
+
 ### Deprecations
 
 ### API Changes
@@ -134,3 +151,4 @@
   `UcColumn::with_nullable`, `UcColumn::with_position`, and
   `UcTableSchema::new`.
 - Added `RecordType`.
+- Added `BatchRecords` and `BatchRecordsIntoIter`.
