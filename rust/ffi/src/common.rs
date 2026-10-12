@@ -1,7 +1,6 @@
 //! Shared FFI types and helpers used across the FFI surface modules.
 
 use async_trait::async_trait;
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
     AckCallback, HeadersProvider, OffsetId, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
@@ -180,12 +179,21 @@ pub(crate) unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, &'s
         .map_err(|_| "Invalid UTF-8 string")
 }
 
-pub(crate) fn c_record_type(value: i32) -> RecordType {
+/// Record type selected through the C API's integer `record_type` option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CRecordType {
+    Unspecified,
+    Proto,
+    Json,
+    Avro,
+}
+
+pub(crate) fn c_record_type(value: i32) -> CRecordType {
     match value {
-        1 => RecordType::Proto,
-        2 => RecordType::Json,
-        4 => RecordType::Avro,
-        _ => RecordType::Unspecified,
+        1 => CRecordType::Proto,
+        2 => CRecordType::Json,
+        4 => CRecordType::Avro,
+        _ => CRecordType::Unspecified,
     }
 }
 

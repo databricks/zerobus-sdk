@@ -80,6 +80,9 @@ internal-arrow-c-data = [
     "arrow-array/ffi",
     "arrow-schema/ffi",
 ]
+# Exposes the generated gRPC types to this repository's mock server. Not a supported
+# public Rust SDK feature and not covered by semver.
+internal-proto = []
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 # Persistent streams with exactly-once semantics (EoS); API is in development.

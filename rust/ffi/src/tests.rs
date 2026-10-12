@@ -11,8 +11,8 @@ use crate::{
     zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
     zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
     zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
-    zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CResult, CallbackHeadersProvider,
-    RecordType, ZerobusError,
+    zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CRecordType, CResult,
+    CallbackHeadersProvider, ZerobusError,
 };
 use databricks_zerobus_ingest_sdk::{EncodedRecord, HeadersProvider};
 use std::ffi::{CStr, CString};
@@ -176,11 +176,11 @@ fn test_cresult_error() {
 
 #[test]
 fn test_c_record_type_mapping() {
-    assert_eq!(c_record_type(1), RecordType::Proto);
-    assert_eq!(c_record_type(2), RecordType::Json);
-    assert_eq!(c_record_type(4), RecordType::Avro);
-    assert_eq!(c_record_type(999), RecordType::Unspecified);
-    assert_eq!(c_record_type(0), RecordType::Unspecified);
+    assert_eq!(c_record_type(1), CRecordType::Proto);
+    assert_eq!(c_record_type(2), CRecordType::Json);
+    assert_eq!(c_record_type(4), CRecordType::Avro);
+    assert_eq!(c_record_type(999), CRecordType::Unspecified);
+    assert_eq!(c_record_type(0), CRecordType::Unspecified);
 }
 
 // ========================================================================
@@ -1474,7 +1474,7 @@ extern "C" fn noop_error(
 // JSON config with both ack callbacks set, keyed to this test-only sentinel.
 fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
     let mut config = zerobus_get_default_config();
-    config.record_type = 2; // RecordType::Json
+    config.record_type = 2; // CRecordType::Json
     config.ack_on_ack = Some(noop_ack);
     config.ack_on_error = Some(noop_error);
     config.ack_user_data =
