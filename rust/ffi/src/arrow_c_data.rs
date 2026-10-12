@@ -31,9 +31,11 @@ mod tests {
 
     unsafe extern "C" fn counting_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
-        let state = unsafe { Box::from_raw(array.private_data.cast::<CountingRelease>()) };
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        let state = unsafe { Box::from_raw(array.private_data().cast::<CountingRelease>()) };
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         state.releases.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
@@ -42,12 +44,14 @@ mod tests {
 
     fn count_releases(array: &mut FFI_ArrowArray, releases: Arc<AtomicUsize>) {
         let state = Box::new(CountingRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             releases,
         });
-        array.release = Some(counting_release);
-        array.private_data = Box::into_raw(state).cast();
+        unsafe {
+            array.set_release(Some(counting_release));
+            array.set_private_data(Box::into_raw(state).cast());
+        }
     }
 
     fn export_batch(
@@ -84,8 +88,8 @@ mod tests {
 
         assert_eq!(offset, -1);
         assert!(!result.success);
-        assert!(array.release.is_none());
-        assert!(schema_ffi.release.is_none());
+        assert!(array.release().is_none());
+        assert!(schema_ffi.release().is_none());
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         crate::zerobus_free_error_message(result.error_message);
     }
@@ -112,7 +116,7 @@ mod tests {
 
         assert_eq!(offset, -1);
         assert!(!result.success);
-        assert!(array.release.is_some());
+        assert!(array.release().is_some());
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         drop(array);
         drop(schema_ffi);

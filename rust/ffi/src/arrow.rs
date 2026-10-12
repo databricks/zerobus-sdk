@@ -508,7 +508,7 @@ pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
         let array = unsafe { FFI_ArrowArray::from_raw(array.cast::<FFI_ArrowArray>()) };
         let schema = unsafe { FFI_ArrowSchema::from_raw(schema.cast::<FFI_ArrowSchema>()) };
 
-        if array.is_released() || schema.release.is_none() {
+        if array.is_released() || schema.release().is_none() {
             write_error_result(
                 result,
                 "Arrow C Data input has already been released",

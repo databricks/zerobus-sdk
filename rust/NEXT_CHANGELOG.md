@@ -1,6 +1,6 @@
 # NEXT CHANGELOG
 
-## Release v2.12.0
+## Release v3.0.0
 
 ### Major Changes
 
@@ -24,6 +24,16 @@
   paths.
 
 ### Breaking Changes
+
+- Bumped the Arrow dependencies (`arrow-array`, `arrow-schema`, `arrow-ipc`, and
+  the vendored `arrow-flight` fork) from `59.2` to `60.0`. The vendored
+  `arrow-flight` crate was re-synced to upstream `60.0.0` with the slice-aware
+  batch-split fix (arrow-rs#9388 / #5352) re-applied. Because the SDK re-exports
+  Arrow types through its public API, consumers using the `arrow-flight`
+  feature that exchange those types with the SDK must upgrade their own Arrow
+  dependency to `60.x`; Arrow `59` and `60` types cannot be mixed in the same
+  build. Arrow `60` requires Rust 1.88 or newer. Consumers on the default build
+  (without the `arrow-flight` feature) are unaffected.
 
 ### Deprecations
 
