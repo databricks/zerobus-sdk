@@ -11,22 +11,12 @@
 //! use databricks_zerobus_ingest_sdk::schema::{UcColumn, descriptor_from_uc_columns};
 //!
 //! let columns = vec![
-//!     UcColumn {
-//!         name: "id".into(),
-//!         type_name: "BIGINT".into(),
-//!         type_text: "BIGINT".into(),
-//!         type_json: String::new(),
-//!         nullable: false,
-//!         position: 0,
-//!     },
-//!     UcColumn {
-//!         name: "payload".into(),
-//!         type_name: "STRING".into(),
-//!         type_text: "STRING".into(),
-//!         type_json: String::new(),
-//!         nullable: true,
-//!         position: 1,
-//!     },
+//!     UcColumn::new("id", "BIGINT")
+//!         .with_type_text("BIGINT")
+//!         .with_nullable(false),
+//!     UcColumn::new("payload", "STRING")
+//!         .with_type_text("STRING")
+//!         .with_position(1),
 //! ];
 //! let descriptor = descriptor_from_uc_columns(&columns, "my_table").unwrap();
 //! assert_eq!(descriptor.name(), "my_table");
@@ -91,8 +81,10 @@ use thiserror::Error;
 /// A single column from a Unity Catalog table.
 ///
 /// Field names mirror the Unity Catalog REST API response so the struct can be
-/// deserialized directly from it (see the `Deserialize` impl).
+/// deserialized directly from it (see the `Deserialize` impl). Build one in code
+/// with [`UcColumn::new`] and the `with_*` setters.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct UcColumn {
     pub name: String,
     /// Top-level type name, e.g. `"STRING"`, `"INT"`, `"STRUCT"`, `"ARRAY"`, `"MAP"`.
@@ -118,13 +110,72 @@ fn default_true() -> bool {
     true
 }
 
+impl UcColumn {
+    /// Creates a column with the given name and top-level type name.
+    ///
+    /// The other fields take the same defaults as deserialization: empty
+    /// `type_text` and `type_json`, `nullable = true`, and `position = 0`.
+    pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+            type_text: String::new(),
+            type_json: String::new(),
+            nullable: default_true(),
+            position: 0,
+        }
+    }
+
+    /// Sets the human-readable type text.
+    pub fn with_type_text(mut self, type_text: impl Into<String>) -> Self {
+        self.type_text = type_text.into();
+        self
+    }
+
+    /// Sets the JSON type representation. Required for `STRUCT`, `ARRAY`, and `MAP`.
+    pub fn with_type_json(mut self, type_json: impl Into<String>) -> Self {
+        self.type_json = type_json.into();
+        self
+    }
+
+    /// Sets whether the column is nullable.
+    pub fn with_nullable(mut self, nullable: bool) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    /// Sets the column's 0-based position in the table.
+    pub fn with_position(mut self, position: i32) -> Self {
+        self.position = position;
+        self
+    }
+}
+
 /// A Unity Catalog table schema, as returned by the REST API.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct UcTableSchema {
     pub name: String,
     pub catalog_name: String,
     pub schema_name: String,
     pub columns: Vec<UcColumn>,
+}
+
+impl UcTableSchema {
+    /// Creates a table schema from its three-part name and columns.
+    pub fn new(
+        catalog_name: impl Into<String>,
+        schema_name: impl Into<String>,
+        name: impl Into<String>,
+        columns: Vec<UcColumn>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            catalog_name: catalog_name.into(),
+            schema_name: schema_name.into(),
+            columns,
+        }
+    }
 }
 
 /// Errors produced while converting a UC schema to a protobuf descriptor.
@@ -1779,5 +1830,50 @@ mod tests {
             assert_eq!(s.fields().len(), 1);
             assert_eq!(arrow_field(&s, "id").data_type(), &DataType::Int64);
         }
+    }
+
+    #[test]
+    fn uc_column_new_matches_deserialized_defaults() {
+        let parsed: UcColumn =
+            serde_json::from_str(r#"{"name": "id", "type_name": "BIGINT"}"#).unwrap();
+        let built = UcColumn::new("id", "BIGINT");
+        assert_eq!(
+            (
+                built.name,
+                built.type_name,
+                built.type_text,
+                built.type_json,
+                built.nullable,
+                built.position
+            ),
+            (
+                parsed.name,
+                parsed.type_name,
+                parsed.type_text,
+                parsed.type_json,
+                parsed.nullable,
+                parsed.position
+            ),
+        );
+    }
+
+    #[test]
+    fn uc_column_setters_and_table_schema_new() {
+        let column = UcColumn::new("tags", "ARRAY")
+            .with_type_text("array<string>")
+            .with_type_json(r#"{"type":"array","elementType":"string","containsNull":true}"#)
+            .with_nullable(false)
+            .with_position(3);
+        assert_eq!(column.type_text, "array<string>");
+        assert!(column.type_json.contains("elementType"));
+        assert!(!column.nullable);
+        assert_eq!(column.position, 3);
+
+        let schema = UcTableSchema::new("main", "default", "events", vec![column]);
+        assert_eq!(schema.catalog_name, "main");
+        assert_eq!(schema.schema_name, "default");
+        assert_eq!(schema.name, "events");
+        assert_eq!(schema.columns.len(), 1);
+        descriptor_from_uc_schema(&schema).unwrap();
     }
 }

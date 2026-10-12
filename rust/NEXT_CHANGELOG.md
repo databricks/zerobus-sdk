@@ -25,6 +25,17 @@
 
 ### Breaking Changes
 
+- `schema::UcColumn` and `schema::UcTableSchema` are now `#[non_exhaustive]`,
+  so new Unity Catalog metadata fields can be added without a major release.
+  Build them with `UcColumn::new(name, type_name)` and the `with_type_text`,
+  `with_type_json`, `with_nullable`, and `with_position` setters, or with
+  `UcTableSchema::new(catalog_name, schema_name, name, columns)`, instead of
+  struct literals. `UcColumn::new` uses the same defaults as deserialization.
+  The fields stay public for reading, and deserializing from the Unity Catalog
+  API response is unchanged.
+
 ### Deprecations
 
 ### API Changes
+
+- Added `UcColumn::new`, its `with_*` setters, and `UcTableSchema::new`.
