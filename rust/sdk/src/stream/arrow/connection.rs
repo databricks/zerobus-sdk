@@ -880,7 +880,10 @@ mod tests {
         let (mut request_body, _control) = ZerobusArrowStream::make_request_stream(
             batch_rx,
             &table_properties,
-            &ArrowStreamConfigurationOptions::default(),
+            &ArrowStreamConfigurationOptions {
+                ipc_compression: None,
+                ..ArrowStreamConfigurationOptions::default()
+            },
             Some(exporter as Arc<dyn StatsExporter>),
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),

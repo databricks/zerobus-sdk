@@ -95,9 +95,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (stats_exporter, mut stats_rx) =
         channel_exporter(std::num::NonZeroUsize::new(1024).unwrap());
 
-    // Optional IPC compression. Trades client CPU for fewer bytes on the wire —
-    // enable only when network bandwidth limits throughput. `LZ4_FRAME` is fast
-    // with a modest ratio; `ZSTD` compresses more at higher CPU cost.
+    // IPC compression defaults to `ZSTD`, trading client CPU for fewer bytes on
+    // the wire. `LZ4_FRAME` is faster with a modest ratio; `None` disables it.
     let mut stream = sdk_handle
         .stream_builder()
         .table(TABLE_NAME)

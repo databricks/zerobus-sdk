@@ -1110,7 +1110,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
-| `ipc_compression` | `Option<CompressionType>` | `None` | Optional `LZ4_FRAME` or `ZSTD` Arrow IPC compression |
+| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust

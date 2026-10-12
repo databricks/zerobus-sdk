@@ -128,9 +128,9 @@ See the [SDK telemetry docs](../../README.md#telemetry-beta) for aggregation lim
 
 ## IPC compression
 
-Arrow IPC payloads can be compressed on the wire. Enable compression only when network bandwidth limits throughput — it reduces bytes on the wire at the cost of CPU on the client.
+Arrow streams compress IPC payloads with `ZSTD` by default, which reduces bytes on the wire at the cost of CPU on the client. Use `ipc_compression` on the stream builder to choose a different codec or turn compression off.
 
-The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` enables `ZSTD` compression on the stream builder:
+The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` sets the codec explicitly on the stream builder:
 
 ```rust
 use arrow_ipc::CompressionType;
@@ -140,15 +140,15 @@ let stream = sdk
     .table(TABLE_NAME)
     .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
     .arrow(schema)
-    .ipc_compression(Some(CompressionType::ZSTD))  // or LZ4_FRAME
+    .ipc_compression(Some(CompressionType::ZSTD))  // default; or LZ4_FRAME, or None
     .build_arrow()
     .await?;
 ```
 
+- `ZSTD` (default) — higher compression ratio, more CPU per batch.
 - `LZ4_FRAME` — fast, low CPU overhead, modest compression ratio.
-- `ZSTD` — higher compression ratio, more CPU per batch.
 
-To disable compression, drop the `.ipc_compression(...)` call (default is `None`).
+To disable compression, pass `.ipc_compression(None)`. This can help when client CPU, rather than network bandwidth, limits throughput.
 
 ## Adapting for Your Custom Table
 

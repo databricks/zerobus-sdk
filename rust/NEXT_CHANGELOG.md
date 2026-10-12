@@ -8,6 +8,10 @@
 
 - Added the feature-gated `PersistentStream` API for creating durable ingestion
   streams and resuming them by `stream_id` from the last committed offset.
+- Arrow Flight streams now compress IPC payloads with ZSTD by default.
+  `ArrowStreamConfigurationOptions::ipc_compression` defaults to
+  `Some(CompressionType::ZSTD)` instead of `None`. To keep sending uncompressed
+  payloads, call `.ipc_compression(None)` on the stream builder.
 
 ### Bug Fixes
 
