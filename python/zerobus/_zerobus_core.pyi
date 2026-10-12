@@ -664,13 +664,13 @@ class arrow:
         """Arrow IPC compression codec."""
 
         NONE: "IPCCompression"
-        """No compression (default)."""
+        """No compression."""
 
         LZ4_FRAME: "IPCCompression"
         """LZ4 frame compression."""
 
         ZSTD: "IPCCompression"
-        """Zstandard compression."""
+        """Zstandard compression (default)."""
 
     class ArrowStreamConfigurationOptions:
         """Configuration options for Arrow Flight streams."""
@@ -700,7 +700,7 @@ class arrow:
         """Connection establishment timeout in milliseconds. Default: 30000"""
 
         ipc_compression: "arrow.IPCCompression"
-        """IPC compression codec. Default: IPCCompression.None"""
+        """IPC compression codec. Default: IPCCompression.ZSTD"""
 
         stream_paused_max_wait_time_ms: Optional[int]
         """Maximum ACK-wait cap during server-initiated graceful rotation.
