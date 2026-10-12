@@ -92,8 +92,8 @@ pub use record_types::PreparedInput;
 #[cfg(feature = "avro")]
 pub use record_types::{AvroBytes, AvroEncodedRecord, AvroRecord};
 pub use record_types::{
-    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+    BatchRecords, BatchRecordsIntoIter, EncodedBatch, EncodedBatchIter, EncodedRecord,
+    JsonEncodedRecord, JsonString, JsonValue, ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
 #[cfg(feature = "arrow-flight")]

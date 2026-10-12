@@ -507,8 +507,6 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    use smallvec::smallvec;
-
     use super::super::types::IngestRequest;
     use super::*;
     use crate::landing_zone::LandingZone;
@@ -532,7 +530,7 @@ mod tests {
         let callback_tx = None;
 
         let reservation = landing_zone.reserve_capacity().await;
-        let batch = EncodedBatch::Proto(smallvec![b"admitted".to_vec()]);
+        let batch = EncodedBatch::Proto(vec![b"admitted".to_vec()].into());
 
         // Model an ingest that has entered its ordering section but has not
         // enqueued yet. Polling the failure future explicitly proves that it
@@ -575,7 +573,7 @@ mod tests {
         is_closed.store(false, Ordering::Relaxed);
         let terminal_token = CancellationToken::new();
         let (server_error_tx, _) = tokio::sync::watch::channel(None);
-        let batch = EncodedBatch::Proto(smallvec![b"recoverable".to_vec()]);
+        let batch = EncodedBatch::Proto(vec![b"recoverable".to_vec()].into());
         let reservation = landing_zone.reserve_capacity().await;
         landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
