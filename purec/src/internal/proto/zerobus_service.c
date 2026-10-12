@@ -13,8 +13,7 @@ static bool check_args(zerobus_string_view_t input, uint8_t **out_data,
 {
     if (out_data == NULL || out_len == NULL ||
         (input.data == NULL && input.len > 0) ||
-        input.len > MAX_ENCODED_PAYLOAD ||
-        (input.data != NULL && memchr(input.data, 0, input.len))) {
+        input.len > MAX_ENCODED_PAYLOAD) {
         return false;
     }
     return true;
@@ -71,6 +70,26 @@ zerobus_status_t zb_proto_encode_create_stream(zerobus_string_view_t table_name,
     return status;
 }
 
+static size_t varint_size(uint64_t value)
+{
+    size_t len = 1;
+    while (value >= 0x80) {
+        value >>= 7;
+        len++;
+    }
+    return len;
+}
+
+static uint8_t *write_varint(uint8_t *out, uint64_t value)
+{
+    while (value >= 0x80) {
+        *out++ = (uint8_t)((value & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    *out++ = (uint8_t)value;
+    return out;
+}
+
 zerobus_status_t
 zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
                               zerobus_string_view_t json_record,
@@ -79,29 +98,33 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
     if (!check_args(json_record, out_data, out_len)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    char *record =
-        zb_is_empty(json_record) ? zb_strdup("") : zb_strdup_view(json_record);
-    if (record == NULL) {
+    /* Update the sizes and encoding below whenever these fields change in
+     * rust/sdk/zerobus_service.proto:
+     *   EphemeralStreamRequest.ingest_record
+     *   IngestRecordRequest.offset_id
+     *   IngestRecordRequest.json_record */
+    uint64_t offset = (uint64_t)offset_id;
+    size_t ingest_len = 1 + varint_size(offset) + 1 +
+                        varint_size(json_record.len) + json_record.len;
+    size_t len = 1 + varint_size(ingest_len) + ingest_len;
+    uint8_t *data = (uint8_t *)malloc(len);
+    if (data == NULL) {
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
 
-    Databricks__Zerobus__IngestRecordRequest ingest;
-    databricks__zerobus__ingest_record_request__init(&ingest);
-    ingest.has_offset_id = 1;
-    ingest.offset_id = offset_id;
-    ingest.record_case =
-        DATABRICKS__ZEROBUS__INGEST_RECORD_REQUEST__RECORD_JSON_RECORD;
-    ingest.json_record = record;
-
-    Databricks__Zerobus__EphemeralStreamRequest request;
-    databricks__zerobus__ephemeral_stream_request__init(&request);
-    request.payload_case =
-        DATABRICKS__ZEROBUS__EPHEMERAL_STREAM_REQUEST__PAYLOAD_INGEST_RECORD;
-    request.ingest_record = &ingest;
-
-    zerobus_status_t status = pack_request(&request, out_data, out_len);
-    free(record);
-    return status;
+    uint8_t *p = data;
+    *p++ = 0x12; /* EphemeralStreamRequest.ingest_record: field 2, message. */
+    p = write_varint(p, ingest_len);
+    *p++ = 0x08; /* IngestRecordRequest.offset_id: field 1, int64. */
+    p = write_varint(p, offset);
+    *p++ = 0x1a; /* IngestRecordRequest.json_record: field 3, string. */
+    p = write_varint(p, json_record.len);
+    if (json_record.len > 0) {
+        memcpy(p, json_record.data, json_record.len);
+    }
+    *out_data = data;
+    *out_len = len;
+    return ZEROBUS_STATUS_OK;
 }
 
 static void *unpack_alloc(void *allocator_data, size_t size)

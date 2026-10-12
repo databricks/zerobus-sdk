@@ -19,6 +19,9 @@ zerobus_add_test(internal/platform/concurrency_test)
 zerobus_add_test(internal/platform/log_test)
 zerobus_add_test(internal/proto/zerobus_service_test)
 
+target_include_directories(internal_proto_zerobus_service_test PRIVATE
+  "${GENERATED_DIR}")
+
 set_tests_properties(internal_platform_log_test PROPERTIES ENVIRONMENT
   "ZEROBUS_LOG_LEVEL=info;ZEROBUS_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/log_test.log")
 

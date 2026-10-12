@@ -10,8 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "internal/common/utils.h"
 #include "internal/proto/zerobus_service.h"
 #include "test_common.h"
+#include "zerobus_service.pb-c.h"
 
 /* ---- helpers ----------------------------------------------------------- */
 
@@ -26,6 +28,51 @@ static zerobus_status_t decode(const uint8_t *data, size_t len,
                                zb_response_t *out)
 {
     return zb_proto_decode_response(data, len, out);
+}
+
+/* Reference encoder using generated code, independent of our wire writer. */
+static zerobus_status_t
+encode_ingest_record_generated(zerobus_offset_t offset_id,
+                               zerobus_string_view_t json_record,
+                               uint8_t **out_data, size_t *out_len)
+{
+    char *record =
+        zb_is_empty(json_record) ? zb_strdup("") : zb_strdup_view(json_record);
+    if (record == NULL) {
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+
+    Databricks__Zerobus__IngestRecordRequest ingest;
+    databricks__zerobus__ingest_record_request__init(&ingest);
+    ingest.has_offset_id = 1;
+    ingest.offset_id = offset_id;
+    ingest.record_case =
+        DATABRICKS__ZEROBUS__INGEST_RECORD_REQUEST__RECORD_JSON_RECORD;
+    ingest.json_record = record;
+
+    Databricks__Zerobus__EphemeralStreamRequest request;
+    databricks__zerobus__ephemeral_stream_request__init(&request);
+    request.payload_case =
+        DATABRICKS__ZEROBUS__EPHEMERAL_STREAM_REQUEST__PAYLOAD_INGEST_RECORD;
+    request.ingest_record = &ingest;
+
+    size_t len = databricks__zerobus__ephemeral_stream_request__get_packed_size(
+        &request);
+    uint8_t *data = (uint8_t *)malloc(len);
+    if (data == NULL) {
+        free(record);
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    size_t written =
+        databricks__zerobus__ephemeral_stream_request__pack(&request, data);
+    free(record);
+    if (written != len) {
+        free(data);
+        return ZEROBUS_STATUS_INTERNAL;
+    }
+    *out_data = data;
+    *out_len = len;
+    return ZEROBUS_STATUS_OK;
 }
 
 /* ---- tests ------------------------------------------------------------- */
@@ -81,6 +128,80 @@ static void test_encode_ingest_record(void)
     CHECK_OK(zb_proto_encode_ingest_record(0, (zerobus_string_view_t){NULL, 0},
                                            &data, &len));
     CHECK(bytes_equal(data, len, empty_record, sizeof(empty_record)));
+    free(data);
+}
+
+static void test_encode_ingest_record_matches_generated(void)
+{
+    /* Detect schema changes that leave the manual encoder stale. Compare
+     * empty records, signed offsets, and multibyte lengths with generated code.
+     */
+    char long_record[130];
+    memset(long_record, ' ', sizeof(long_record));
+    long_record[0] = '{';
+    long_record[1] = '}';
+    const struct {
+        zerobus_offset_t offset;
+        zerobus_string_view_t record;
+    } cases[] = {
+        {0, {NULL, 0}},
+        {0, sv("{\"id\":1}")},
+        {300, sv("{\"id\":1}")},
+        {-1, sv("{}")},
+        {INT64_MIN, sv("{}")},
+        {INT64_MAX, {long_record, sizeof(long_record)}},
+    };
+    uint8_t *expected = NULL;
+    uint8_t *data = NULL;
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t expected_len = 0;
+        size_t len = 0;
+        REQUIRE_OK(encode_ingest_record_generated(
+            cases[i].offset, cases[i].record, &expected, &expected_len));
+        REQUIRE_OK(zb_proto_encode_ingest_record(cases[i].offset,
+                                                 cases[i].record, &data, &len));
+        CHECK(bytes_equal(data, len, expected, expected_len));
+        free(data);
+        data = NULL;
+        free(expected);
+        expected = NULL;
+    }
+
+zb_cleanup:
+    free(data);
+    free(expected);
+}
+
+static void test_encode_record_uses_view_length(void)
+{
+    /* The view contains "{}", without a terminator. The trailing 'x' is
+     * outside the view and must not appear in the encoded record. */
+    static const char record[] = {'{', '}', 'x'};
+    static const uint8_t expected[] = {0x12, 0x06, 0x08, 0x00,
+                                       0x1a, 0x02, '{',  '}'};
+    uint8_t *data = NULL;
+    size_t len = 0;
+
+    CHECK_OK(zb_proto_encode_ingest_record(
+        0, (zerobus_string_view_t){record, 2}, &data, &len));
+    CHECK(bytes_equal(data, len, expected, sizeof(expected)));
+    free(data);
+}
+
+static void test_encode_record_preserves_embedded_nul(void)
+{
+    /* Encoding copies the full view, including NULs. Public ingest rejects
+     * raw NULs before records reach this internal encoder. */
+    static const char record[] = {'a', '\0', 'b'};
+    static const uint8_t expected[] = {0x12, 0x07, 0x08, 0x00, 0x1a,
+                                       0x03, 'a',  0x00, 'b'};
+    uint8_t *data = NULL;
+    size_t len = 0;
+
+    CHECK_OK(zb_proto_encode_ingest_record(
+        0, (zerobus_string_view_t){record, sizeof(record)}, &data, &len));
+    CHECK(bytes_equal(data, len, expected, sizeof(expected)));
     free(data);
 }
 
@@ -487,30 +608,22 @@ static void test_compat_repeated_duration_loses_earlier_fields(void)
     zb_response_clear(&response);
 }
 
-static void test_compat_encode_record_with_embedded_nul_is_rejected(void)
+static void test_compat_embedded_nul_truncates_table_name(void)
 {
-    /*
-     * Attempt to encode one EphemeralStreamRequest whose ingest_record has
-     * offset_id 0 and json_record containing three bytes: 'a', NUL, 'b'.
-     * The string view includes all three bytes.
-     *
-     * Google encodes all three bytes in the protobuf string. Protobuf-c
-     * measures strings with strlen and would encode only "a". Our check_args
-     * rejects the input before packing and returns INVALID_ARGUMENT.
-     *
-     * A raw NUL is invalid JSON. Inside a JSON string it must be escaped as
-     * \u0000; those six ASCII bytes contain no NUL and pass this check.
-     */
-    static const char record[] = {'a', '\0', 'b'};
+    /* Encode create_stream with table_name containing 'a', NUL, 'b'.
+     * Google preserves all three bytes. Protobuf-c uses strlen and encodes
+     * only "a". Public table-name validation rejects raw NULs before encoding.
+     * The expected bytes come from protoc for the truncated result:
+     * create_stream { table_name: "a" record_type: JSON } */
+    static const char table_name[] = {'a', '\0', 'b'};
+    static const uint8_t expected[] = {0x0a, 0x05, 0x0a, 0x01,
+                                       0x61, 0x20, 0x02};
     uint8_t *data = NULL;
     size_t len = 0;
 
-    CHECK_EQ_INT(
-        zb_proto_encode_ingest_record(
-            0, (zerobus_string_view_t){record, sizeof(record)}, &data, &len),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK(data == NULL);
-    CHECK_EQ_INT(len, 0);
+    CHECK_OK(zb_proto_encode_create_stream(
+        (zerobus_string_view_t){table_name, sizeof(table_name)}, &data, &len));
+    CHECK(bytes_equal(data, len, expected, sizeof(expected)));
     free(data);
 }
 
@@ -584,6 +697,9 @@ int main(void)
 {
     test_encode_create_stream();
     test_encode_ingest_record();
+    test_encode_ingest_record_matches_generated();
+    test_encode_record_uses_view_length();
+    test_encode_record_preserves_embedded_nul();
     test_encode_record_preserves_invalid_utf8();
     test_encode_long_record();
     test_encode_rejects_invalid_arguments();
@@ -601,7 +717,7 @@ int main(void)
 
     test_compat_repeated_oneof_message_replaces_previous();
     test_compat_repeated_duration_loses_earlier_fields();
-    test_compat_encode_record_with_embedded_nul_is_rejected();
+    test_compat_embedded_nul_truncates_table_name();
     test_compat_embedded_nul_truncates_stream_id();
     test_compat_unknown_group_is_rejected();
     test_compat_known_field_with_other_wire_type_is_rejected();
