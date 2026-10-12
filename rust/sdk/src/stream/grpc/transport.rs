@@ -26,9 +26,9 @@ use crate::databricks::zerobus::ephemeral_stream_response::Payload as EphemeralR
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordResponse, RecordType,
+    IngestRecordResponse,
 };
-use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, ZerobusError, ZerobusResult};
+use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, RecordType, ZerobusError, ZerobusResult};
 
 use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
 use crate::databricks::zerobus::persistent_stream_response::Payload as PersistentResponsePayload;
@@ -83,7 +83,7 @@ impl StreamOpenParams {
         CreateIngestStreamRequest {
             table_name: Some(self.table_name),
             descriptor_proto: self.descriptor_proto,
-            record_type: Some(self.record_type.into()),
+            record_type: Some(self.record_type.to_wire().into()),
             avro_schema_json: self.avro_schema_json,
         }
     }
@@ -129,7 +129,7 @@ impl OutboundSink {
                         PersistentRequestPayload::ResumeStream(ResumeIngestStreamRequest {
                             identifier: Some(ResumeIdentifier::StreamId(stream_id.clone())),
                             descriptor_proto: params.descriptor_proto,
-                            record_type: Some(params.record_type.into()),
+                            record_type: Some(params.record_type.to_wire().into()),
                         })
                     }
                 };
@@ -429,5 +429,55 @@ mod tests {
         };
         assert_eq!(sink.next_wire_offset(40), 40);
         assert_eq!(sink.next_wire_offset(41), 41);
+    }
+
+    fn open_params(record_type: RecordType) -> StreamOpenParams {
+        StreamOpenParams {
+            table_name: "catalog.schema.table".to_string(),
+            descriptor_proto: None,
+            record_type,
+            avro_schema_json: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn open_requests_carry_wire_record_type() {
+        use crate::databricks::zerobus::RecordType as Wire;
+
+        let cases = [
+            (RecordType::Proto, Wire::Proto),
+            (RecordType::Json, Wire::Json),
+        ]
+        .into_iter();
+        #[cfg(feature = "avro")]
+        let cases = cases.chain([(RecordType::Avro, Wire::Avro)]);
+
+        for (record_type, wire) in cases {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+            let sink = OutboundSink::Ephemeral {
+                tx,
+                wire_offsets: OffsetIdGenerator::default(),
+            };
+            sink.send_open(open_params(record_type)).await.unwrap();
+            match rx.recv().await.unwrap().payload {
+                Some(EphemeralRequestPayload::CreateStream(create)) => {
+                    assert_eq!(create.record_type, Some(wire as i32))
+                }
+                other => panic!("expected a create-stream request, got {other:?}"),
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+            let sink = OutboundSink::Persistent {
+                tx,
+                resume_stream_id: Some("stream-id".to_string()),
+            };
+            sink.send_open(open_params(record_type)).await.unwrap();
+            match rx.recv().await.unwrap().payload {
+                Some(PersistentRequestPayload::ResumeStream(resume)) => {
+                    assert_eq!(resume.record_type, Some(wire as i32))
+                }
+                other => panic!("expected a resume-stream request, got {other:?}"),
+            }
+        }
     }
 }

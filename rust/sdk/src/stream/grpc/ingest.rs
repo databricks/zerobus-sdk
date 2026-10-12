@@ -147,7 +147,7 @@ impl ZerobusStream {
             PreparedInput::Ready(record) => Ok(record),
             #[cfg(feature = "avro")]
             PreparedInput::AvroObject(value) => {
-                if self.options.record_type != crate::databricks::zerobus::RecordType::Avro {
+                if self.options.record_type != crate::RecordType::Avro {
                     return Err(ZerobusError::InvalidArgument(
                         "AvroRecord requires stream record type to be Avro".to_string(),
                     ));

@@ -34,7 +34,7 @@ test-helpers = []
 
 [dev-dependencies]
 arrow-flight.workspace = true
-databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight", "testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight", "internal-proto", "testing"] }
 futures.workspace = true
 rcgen = "0.13"
 serde.workspace = true
