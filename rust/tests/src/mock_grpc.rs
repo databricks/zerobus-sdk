@@ -14,11 +14,14 @@ use databricks::zerobus::{
 };
 use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
-use rcgen::{generate_simple_self_signed, CertifiedKey};
+use rcgen::{
+    generate_simple_self_signed, BasicConstraints, CertificateParams, CertifiedKey,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+};
 use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 use tokio::time::sleep;
 use tokio_stream::Stream;
-use tonic::transport::{Identity, ServerTlsConfig};
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -501,6 +504,52 @@ pub async fn start_mock_tls_server(
     let tls = ServerTlsConfig::new().identity(identity);
     let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
     Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+/// PEM-encoded client certificate and private key.
+#[allow(dead_code)]
+pub type ClientIdentityPem = (Vec<u8>, Vec<u8>);
+
+/// Starts the mock server with TLS that requires a client certificate signed by the
+/// returned CA. Also returns a client identity the server accepts.
+#[allow(dead_code)]
+pub async fn start_mock_mtls_server(
+) -> Result<(MockZerobusServer, String, Vec<u8>, ClientIdentityPem), Box<dyn std::error::Error>> {
+    let ca_key = KeyPair::generate()?;
+    let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca_cert = ca_params.self_signed(&ca_key)?;
+
+    let server_key = KeyPair::generate()?;
+    let mut server_params = CertificateParams::new(vec!["localhost".to_string()])?;
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
+
+    let client_key = KeyPair::generate()?;
+    let mut client_params = CertificateParams::new(vec!["zerobus-test-client".to_string()])?;
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client_params.signed_by(&client_key, &ca_cert, &ca_key)?;
+
+    let tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(
+            server_cert.pem(),
+            server_key.serialize_pem(),
+        ))
+        .client_ca_root(Certificate::from_pem(ca_cert.pem()));
+    let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((
+        server,
+        server_url,
+        ca_cert.pem().into_bytes(),
+        (
+            client_cert.pem().into_bytes(),
+            client_key.serialize_pem().into_bytes(),
+        ),
+    ))
 }
 
 async fn start_mock_server_inner(

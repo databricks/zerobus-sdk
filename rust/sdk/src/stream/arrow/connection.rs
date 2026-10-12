@@ -36,6 +36,7 @@ use crate::proxy::{self, ConnectorFactory};
 use crate::stats::{BatchStats, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+use crate::{GrpcCode, GrpcStatus};
 
 /// The batch currently being encoded: its offset and row count plus uncompressed
 /// buffer bytes and wire bytes accumulated across its FlightData frames.
@@ -369,7 +370,8 @@ impl ZerobusArrowStream {
         })
         .await
         .map_err(|_| {
-            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+            ZerobusError::CreateStreamError(GrpcStatus::new(
+                GrpcCode::DeadlineExceeded,
                 "Stream creation timed out",
             ))
         })?;
@@ -414,7 +416,7 @@ impl ZerobusArrowStream {
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
 
-        let configured_endpoint = tls_config.configure_endpoint(base_endpoint)?;
+        let configured_endpoint = tls_config.tls_settings()?.apply(base_endpoint)?;
         let host = configured_endpoint.uri().host().unwrap_or_default();
         let channel = match proxy::resolve_connector(host, connector_factory)? {
             Some(proxy_connector) => {
@@ -604,7 +606,7 @@ impl ZerobusArrowStream {
             .await
             // `.into()` preserves the inner gRPC code; `Status::from_error` would
             // flatten it to `Unknown` and break auth/retry classification.
-            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
+            .map_err(|e| ZerobusError::CreateStreamError(GrpcStatus::from_tonic(e.into())))?;
 
         // Wait for server's "ready" signal to confirm setup succeeded.
         // The server sends ack_up_to_offset = -1 after successful auth, schema validation,
@@ -648,7 +650,8 @@ impl ZerobusArrowStream {
             Ok(None) => {
                 // Server closed the stream without sending anything.
                 error!(target: super::LOG_TARGET, "Server closed stream during setup without response");
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                return Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+                    GrpcCode::Internal,
                     "Server closed stream during setup",
                 )));
             }
@@ -707,7 +710,7 @@ impl ZerobusArrowStream {
             .await
             // `.into()` preserves the inner gRPC code; `Status::from_error` would
             // flatten it to `Unknown` and break auth/retry classification.
-            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
+            .map_err(|e| ZerobusError::CreateStreamError(GrpcStatus::from_tonic(e.into())))?;
 
         let setup_timeout = Duration::from_millis(parameters.options.connection_timeout_ms);
         match timeout(setup_timeout, response_stream.next()).await {
@@ -741,7 +744,8 @@ impl ZerobusArrowStream {
             }
             Ok(None) => {
                 error!(target: super::LOG_TARGET, "Server closed stream during reconnect without response");
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                return Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+                    GrpcCode::Internal,
                     "Server closed stream during reconnect",
                 )));
             }
@@ -786,11 +790,8 @@ mod tests {
     struct PassthroughTlsConfig;
 
     impl TlsConfig for PassthroughTlsConfig {
-        fn configure_endpoint(
-            &self,
-            endpoint: tonic::transport::Endpoint,
-        ) -> ZerobusResult<tonic::transport::Endpoint> {
-            Ok(endpoint)
+        fn tls_settings(&self) -> ZerobusResult<crate::TlsSettings> {
+            Ok(crate::TlsSettings::plaintext())
         }
     }
 

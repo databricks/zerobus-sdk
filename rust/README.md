@@ -60,14 +60,13 @@ Add the SDK to your `Cargo.toml`:
 
 ```bash
 cargo add databricks-zerobus-ingest-sdk
-cargo add async-trait tonic
+cargo add async-trait
 cargo add prost prost-types
 cargo add tokio --features macros,rt-multi-thread
 ```
 **Why these dependencies?**
 - **`databricks-zerobus-ingest-sdk`** - The SDK itself
 - **`async-trait`** - Required when implementing the async `HeadersProvider` trait
-- **`tonic`** - Provides `transport::Endpoint` for custom `TlsConfig` implementations
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
@@ -585,18 +584,34 @@ let sdk = ZerobusSdk::builder()
 
 A `.no_tls()` shorthand on `ZerobusSdkBuilder` is also available behind the `testing` feature and is equivalent to the snippet above. Paired with `StreamBuilder::no_auth()` (also `testing`-gated, uses `NoAuthHeadersProvider`), it covers local testing against an unauthenticated plaintext server.
 
-For custom certificate handling, implement the `TlsConfig` trait:
+For custom certificate handling, pass `TlsSettings`. It can trust extra CA certificates, present a client identity for mutual TLS, and override the verified server name:
 
 ```rust
-use databricks_zerobus_ingest_sdk::{TlsConfig, ZerobusResult};
-use tonic::transport::Endpoint;
+use databricks_zerobus_ingest_sdk::{TlsSettings, ZerobusSdk};
+use std::sync::Arc;
 
-struct MyTlsConfig { /* ... */ }
+let tls = TlsSettings::new()
+    .with_ca_certificate_pem(std::fs::read("ca.pem")?)
+    .with_client_identity_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
 
-impl TlsConfig for MyTlsConfig {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
-        // Custom TLS configuration logic
-        Ok(endpoint)
+let sdk = ZerobusSdk::builder()
+    .endpoint(zerobus_endpoint)
+    .tls_config(Arc::new(tls))
+    .build()?;
+```
+
+To load certificates at connection time, for example to pick up rotated files, implement the `TlsConfig` trait. The SDK calls `tls_settings()` each time it opens a channel, including on reconnects:
+
+```rust
+use databricks_zerobus_ingest_sdk::{TlsConfig, TlsSettings, ZerobusError, ZerobusResult};
+
+struct RotatingTlsConfig;
+
+impl TlsConfig for RotatingTlsConfig {
+    fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
+        let ca_pem = std::fs::read("/etc/zerobus/ca.pem")
+            .map_err(|e| ZerobusError::InvalidArgument(format!("failed to read CA: {e}")))?;
+        Ok(TlsSettings::new().with_ca_certificate_pem(ca_pem))
     }
 }
 ```
@@ -1203,11 +1218,11 @@ Require manual intervention:
 - `InvalidTableName` - Table doesn't exist or invalid format
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `InvalidSchema` (Arrow Flight) - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
-- `Code::Unauthenticated` - Authentication failure
-- `Code::PermissionDenied` - Insufficient table permissions
+- `GrpcCode::Unauthenticated` - Authentication failure
+- `GrpcCode::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
 
-`Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
+`GrpcCode::Unauthenticated` and `GrpcCode::PermissionDenied` remain globally non-retryable and
 require manual intervention. During initial stream setup only, if recovery is enabled
 and at least one configured retry remains, the SDK may invalidate the rejected
 credentials and spend at most one recovery retry on another setup attempt. A second
@@ -1527,16 +1542,19 @@ Trait for TLS configuration strategies.
 **Implementations:**
 - `SecureTlsConfig` (default) - Production TLS with system CA certificates
 - `NoTlsConfig` - No-op TLS for testing with `http://` endpoints (requires `testing` feature)
+- `TlsSettings` - Custom CA certificates, client identity (mutual TLS), and domain-name override
 
 ```rust
 pub trait TlsConfig: Send + Sync {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint>;
+    fn tls_settings(&self) -> ZerobusResult<TlsSettings>;
 }
 ```
 
 ### `ZerobusError`
 
 Error type for all SDK operations.
+
+`CreateStreamError` and `StreamClosedError` carry a `GrpcStatus`; use `status.code()` (a `GrpcCode`) and `status.message()` to inspect the server's response.
 
 **Methods:**
 ```rust

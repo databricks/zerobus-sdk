@@ -28,6 +28,7 @@ use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
 };
+use crate::{GrpcCode, GrpcStatus};
 
 /// What the supervisor reports back to the constructor once the stream is
 /// first opened: the server-assigned identity and, for a persistent resume, the
@@ -142,7 +143,8 @@ impl ZerobusStream {
                         )
                         .await
                         .map_err(|_| {
-                            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                            ZerobusError::CreateStreamError(GrpcStatus::new(
+                                GrpcCode::DeadlineExceeded,
                                 "Stream creation timed out",
                             ))
                         })
@@ -346,7 +348,7 @@ impl ZerobusStream {
                     // Mapping this to pass certain e2e tests.
                     // TODO: Remove this once we fix tests.
                     ZerobusError::StreamClosedError(status)
-                        if status.code() == tonic::Code::InvalidArgument =>
+                        if status.code() == GrpcCode::InvalidArgument =>
                     {
                         ZerobusError::InvalidArgument(status.message().to_string())
                     }

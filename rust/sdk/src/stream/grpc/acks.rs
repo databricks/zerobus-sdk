@@ -11,6 +11,7 @@ use tracing::{debug, error, instrument, trace};
 
 use super::ZerobusStream;
 use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
+use crate::{GrpcCode, GrpcStatus};
 
 impl ZerobusStream {
     /// Once a stream has opened, a later stream-creation failure belongs to a
@@ -76,7 +77,8 @@ impl ZerobusStream {
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(Self::normalize_wait_error(server_error));
                     }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    return Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+                        GrpcCode::Internal,
                         format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
                 }
@@ -113,7 +115,8 @@ impl ZerobusStream {
                 }
             }
 
-            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+            Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+                GrpcCode::Internal,
                 format!("Stream closed during {}", operation_name.to_lowercase()),
             )))
         };
@@ -132,9 +135,10 @@ impl ZerobusStream {
                 } else {
                     error!(table_name = %self.table_properties.table_name, "{} timed out", operation_name);
                 }
-                Err(ZerobusError::StreamClosedError(
-                    tonic::Status::deadline_exceeded(format!("{} timed out", operation_name)),
-                ))
+                Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+                    GrpcCode::DeadlineExceeded,
+                    format!("{} timed out", operation_name),
+                )))
             }
         }
     }

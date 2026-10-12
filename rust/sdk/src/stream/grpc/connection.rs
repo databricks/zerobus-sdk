@@ -20,6 +20,7 @@ use super::transport::{
 };
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::RecordType;
+use crate::{GrpcCode, GrpcStatus};
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
 /// A freshly opened stream connection: the outbound sink, the inbound response
@@ -92,7 +93,8 @@ impl super::ZerobusStream {
         )
         .await
         .map_err(|_| {
-            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+            ZerobusError::CreateStreamError(GrpcStatus::new(
+                GrpcCode::DeadlineExceeded,
                 "Stream creation timed out",
             ))
         })?;
@@ -157,7 +159,8 @@ impl super::ZerobusStream {
         debug!("Sending stream-open request.");
         sink.send_open(open_params).await.map_err(|_| {
             error!(table_name = %table_properties.table_name, "Failed to send stream-open request");
-            ZerobusError::StreamClosedError(tonic::Status::internal(
+            ZerobusError::StreamClosedError(GrpcStatus::new(
+                GrpcCode::Internal,
                 "Failed to send stream-open request",
             ))
         })?;

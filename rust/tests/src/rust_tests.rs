@@ -372,7 +372,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
                 );
             }
             Err(ZerobusError::CreateStreamError(status)) => {
-                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                assert_eq!(
+                    status.code(),
+                    databricks_zerobus_ingest_sdk::GrpcCode::DeadlineExceeded
+                );
             }
             Err(error) => panic!("unexpected stream creation error: {error}"),
         }
@@ -3228,7 +3231,10 @@ mod failure_scenarios_tests {
                 assert!(result.is_err());
                 match result {
                     Err(ZerobusError::StreamClosedError(status)) => {
-                        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                        assert_eq!(
+                            status.code(),
+                            databricks_zerobus_ingest_sdk::GrpcCode::PermissionDenied
+                        );
                         assert!(status.message().contains("Permission denied"));
                     }
                     _ => panic!("Expected StreamClosedError with PermissionDenied status"),
@@ -3527,7 +3533,7 @@ mod failure_scenarios_tests {
                     matches!(
                         result,
                         Err(ZerobusError::StreamClosedError(ref status))
-                            if status.code() == tonic::Code::Unavailable
+                            if status.code() == databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
                                 && status.message() == "recovery exhausted"
                     ),
                     "expected exhausted recovery to surface as StreamClosedError, got {result:?}"

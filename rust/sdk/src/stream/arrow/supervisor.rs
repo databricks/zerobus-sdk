@@ -27,6 +27,7 @@ use crate::proxy::ConnectorFactory;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+use crate::{GrpcCode, GrpcStatus};
 
 pub(super) struct Supervisor {
     endpoint: String,
@@ -635,7 +636,7 @@ impl Supervisor {
         failure_message: &'static str,
     ) -> ZerobusResult<bool> {
         let permit = tx.reserve().await.map_err(|_| {
-            ZerobusError::StreamClosedError(tonic::Status::internal(failure_message))
+            ZerobusError::StreamClosedError(GrpcStatus::new(GrpcCode::Internal, failure_message))
         })?;
         // Capacity waits stay outside the ingest lock. The close check and handoff share
         // that lock with publication, ordering each replay batch wholly before or after it.

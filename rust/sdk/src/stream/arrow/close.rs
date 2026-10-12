@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
+use crate::{GrpcCode, GrpcStatus};
 
 use super::batch::PendingBatch;
 use super::{BatchSender, RecordBatch, ZerobusArrowStream};
@@ -151,7 +152,10 @@ impl CloseCoordinator {
     }
 
     pub(super) fn flush_timeout_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded("Flush timed out"))
+        ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::DeadlineExceeded,
+            "Flush timed out",
+        ))
     }
 }
 

@@ -161,6 +161,7 @@ mod tests {
         landing_zone::LandingZone, MultiplexedStream, NoAuthHeadersProvider, StreamType,
         TableProperties,
     };
+    use crate::{GrpcCode, GrpcStatus};
 
     // Substitute only background tasks; tests exercise public close, flush,
     // and recovery, with explicit gates and no gRPC server scheduling.
@@ -235,7 +236,7 @@ mod tests {
             .await
             .expect("retry must not flush the stopped lane for another second");
         assert!(
-            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded)
+            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::DeadlineExceeded)
         );
         let records: Vec<_> = mux.get_unacked_records().await.unwrap().collect();
         assert!(
@@ -263,8 +264,10 @@ mod tests {
         // Publish the terminal failure during close, after its all-acked flush.
         stream.supervisor_task = tokio::spawn(async move {
             cancelled.cancelled().await;
-            let error =
-                ZerobusError::StreamClosedError(tonic::Status::permission_denied("terminal close"));
+            let error = ZerobusError::StreamClosedError(GrpcStatus::new(
+                GrpcCode::PermissionDenied,
+                "terminal close",
+            ));
             closed.store(true, Ordering::Relaxed);
             error_tx.send(Some(error.clone())).unwrap();
             terminal.cancel();
@@ -280,7 +283,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied)
+                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied)
             );
         }
     }

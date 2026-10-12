@@ -9,19 +9,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    ConnectorFactory, NoTlsConfig, ProxyConnector, TlsConfig, ZerobusError, ZerobusResult,
+    ConnectorFactory, NoTlsConfig, ProxyConnector, SecureTlsConfig, TlsConfig, TlsSettings,
     ZerobusSdk,
 };
 use mock_arrow_flight::{
     start_mock_flight_server, start_mock_tls_flight_server, MockFlightResponse,
 };
-use mock_grpc::{start_mock_server, start_mock_tls_server, MockResponse};
+use mock_grpc::{start_mock_mtls_server, start_mock_server, start_mock_tls_server, MockResponse};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
 use tokio_rustls::TlsAcceptor;
-use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::info;
 use utils::{
     create_test_arrow_schema, create_test_record_batch, setup_tracing, TestHeadersProvider,
@@ -53,20 +52,11 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[derive(Debug)]
-struct TestTlsConfig {
-    ca_pem: Vec<u8>,
-}
-
-impl TlsConfig for TestTlsConfig {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(&self.ca_pem))
-            .domain_name("localhost");
-        endpoint
-            .tls_config(tls)
-            .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)
-    }
+fn test_tls_settings(ca_pem: Vec<u8>) -> TlsSettings {
+    TlsSettings::new()
+        .with_native_roots(false)
+        .with_ca_certificate_pem(ca_pem)
+        .with_domain_name("localhost")
 }
 
 /// Minimal HTTP CONNECT proxy for testing.
@@ -376,7 +366,7 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
         let (proxy_url, connect_count) = start_mock_proxy().await;
         std::env::set_var("grpc_proxy", &proxy_url);
 
-        ingest_one_arrow_batch_with_tls(&server_url, Arc::new(TestTlsConfig { ca_pem })).await?;
+        ingest_one_arrow_batch_with_tls(&server_url, Arc::new(test_tls_settings(ca_pem))).await?;
 
         std::env::remove_var("grpc_proxy");
 
@@ -397,7 +387,7 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
         let (proxy_url, connect_count) = start_mock_proxy().await;
         std::env::set_var("grpc_proxy", &proxy_url);
 
-        ingest_one_record_with_tls(&server_url, Arc::new(TestTlsConfig { ca_pem })).await?;
+        ingest_one_record_with_tls(&server_url, Arc::new(test_tls_settings(ca_pem))).await?;
 
         std::env::remove_var("grpc_proxy");
 
@@ -588,6 +578,43 @@ async fn test_arrow_custom_connector_factory_is_reused_for_recreation(
         2,
         "Expected the original and recreated Arrow streams through the proxy"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_tls_settings_trust_and_client_identity() -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+
+    // The OS trust store doesn't trust the mock's self-signed certificate.
+    let (_mock_server, server_url, _ca_pem) = start_mock_tls_server().await?;
+    assert!(
+        ingest_one_record_with_tls(&server_url, Arc::new(SecureTlsConfig::new()))
+            .await
+            .is_err(),
+        "native roots alone must not trust a self-signed server"
+    );
+
+    let (mock_server, server_url, ca_pem, (cert_pem, key_pem)) = start_mock_mtls_server().await?;
+    mock_server
+        .inject_responses(TABLE_NAME, mock_responses())
+        .await;
+    let trusted = TlsSettings::new()
+        .with_native_roots(false)
+        .with_ca_certificate_pem(ca_pem);
+
+    // The server requires a client certificate signed by its CA.
+    assert!(
+        ingest_one_record_with_tls(&server_url, Arc::new(trusted.clone()))
+            .await
+            .is_err(),
+        "a server that requires mutual TLS must reject a client without an identity"
+    );
+    ingest_one_record_with_tls(
+        &server_url,
+        Arc::new(trusted.with_client_identity_pem(cert_pem, key_pem)),
+    )
+    .await?;
 
     Ok(())
 }

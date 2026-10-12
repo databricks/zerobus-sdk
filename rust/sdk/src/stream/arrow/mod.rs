@@ -37,6 +37,7 @@ use crate::proxy::ConnectorFactory;
 use crate::stats::StatsExporter;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+use crate::{GrpcCode, GrpcStatus};
 
 #[cfg(feature = "internal-arrow-c-data")]
 pub(crate) mod c_data;
@@ -509,7 +510,10 @@ impl ZerobusArrowStream {
             .acquire_owned()
             .await
             .map_err(|_| {
-                ZerobusError::StreamClosedError(tonic::Status::internal("Stream is closed"))
+                ZerobusError::StreamClosedError(GrpcStatus::new(
+                    GrpcCode::Internal,
+                    "Stream is closed",
+                ))
             })?;
 
         let _guard = self.ingest_mutex.lock().await;
@@ -719,7 +723,7 @@ impl ZerobusArrowStream {
                 tokio::select! {
                     result = offset_rx.changed() => {
                         if result.is_err() {
-                            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            return Err(ZerobusError::StreamClosedError(GrpcStatus::new(GrpcCode::Internal,
                                 format!(
                                     "Ack channel closed during {}",
                                     operation_name.to_lowercase()
@@ -734,10 +738,10 @@ impl ZerobusArrowStream {
 
         timeout(flush_timeout, wait_future).await.map_err(|_| {
             error!(target: LOG_TARGET, "{} timed out", operation_name);
-            ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded(format!(
-                "{} timed out",
-                operation_name
-            )))
+            ZerobusError::StreamClosedError(GrpcStatus::new(
+                GrpcCode::DeadlineExceeded,
+                format!("{} timed out", operation_name),
+            ))
         })?
     }
 
@@ -1248,11 +1252,15 @@ impl ZerobusArrowStream {
     }
 
     fn stream_closing_or_closed_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::internal("Stream is closing or closed"))
+        ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::Internal,
+            "Stream is closing or closed",
+        ))
     }
 
     fn close_coordinator_stopped_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::internal(
+        ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::Internal,
             "Close coordinator stopped unexpectedly",
         ))
     }
@@ -1263,7 +1271,7 @@ impl ZerobusArrowStream {
     ) -> ZerobusError {
         let terminal_error = error_rx.borrow().clone();
         terminal_error.unwrap_or_else(|| {
-            ZerobusError::StreamClosedError(tonic::Status::internal(fallback_message()))
+            ZerobusError::StreamClosedError(GrpcStatus::new(GrpcCode::Internal, fallback_message()))
         })
     }
 }

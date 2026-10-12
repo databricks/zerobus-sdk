@@ -75,7 +75,7 @@ pub use dynamic_proto::{
     message_descriptor, missing_required_fields, DynamicMessage, DynamicRecord, IntoDynamicValue,
     MessageDescriptor, Value,
 };
-pub use errors::{SchemaValidationCause, ZerobusError};
+pub use errors::{GrpcCode, GrpcStatus, SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{
@@ -111,7 +111,7 @@ pub use stream::{
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
-pub use tls_config::{SecureTlsConfig, TlsConfig};
+pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;
