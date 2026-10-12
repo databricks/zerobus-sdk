@@ -6,7 +6,8 @@ JOBS ?= 4
 SANITIZE ?=
 SANITIZE_FLAG := $(if $(SANITIZE),-DZEROBUS_SANITIZE=$(SANITIZE),)
 
-# Extra -D flags forwarded to cmake configure (lint sets -DZEROBUS_WERROR=ON).
+# Extra -D flags forwarded to CMake configure or proto/generate-proto.cmake.
+# lint sets -DZEROBUS_WERROR=ON.
 CMAKE_EXTRA ?=
 
 # Sanitizer builds use their own build dir so they don't clash with a normal
@@ -43,8 +44,13 @@ help:
 	@echo "  make check          - fmt-check + lint (static gates, no tests)"
 	@echo "  make verify         - Full workspace check: check + tests, plain and sanitized"
 	@echo "  make coverage       - Coverage build+test, then gcov: read .gcov files for uncovered lines (#####)"
-	@echo "  make generate-proto - Generate missing or stale protobuf-c sources under generated/"
-	@echo "  make clean          - Remove build dirs (build and build-*) and generated"
+	@echo "  make clean          - Remove build dirs (build and build-*)"
+	@echo "  make generate-proto - Regenerate protobuf-c sources under proto/generated/"
+	@echo ""
+	@echo "  Builds require a C toolchain, CMake, and libprotobuf-c headers/library."
+	@echo "  Regeneration additionally requires the tools pinned in proto/generate-proto.cmake."
+	@echo "  Override generation paths with CMAKE_EXTRA='-DGENERATED_DIR=..."
+	@echo "    -DPROTOC_EXECUTABLE=... -DPROTOC_GEN_C_EXECUTABLE=...'."
 	@echo ""
 	@echo "  Add SANITIZE=address (or thread/undefined) to build+test with a"
 	@echo "  sanitizer, e.g. 'make test SANITIZE=address'."
@@ -64,9 +70,6 @@ test: build
 
 examples: build
 	@echo "Examples built under $(BUILD_DIR)/examples/"
-
-generate-proto:
-	cmake -P generate-proto.cmake
 
 fmt:
 	clang-format -i $(SOURCES)
@@ -101,4 +104,8 @@ coverage:
 	cd "$(COV_OBJ_DIR)" && find . -name '*.gcno' -execdir $(GCOV) {} +
 
 clean:
-	rm -rf build build-* generated
+	rm -rf build build-*
+
+# Regeneration is a contributor operation, normal builds use committed sources.
+generate-proto:
+	cmake $(CMAKE_EXTRA) -P proto/generate-proto.cmake

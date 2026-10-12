@@ -3,8 +3,5 @@
 /build-*/
 compile_commands.json
 
-# Generated protobuf-c bindings
-/generated/
-
 # clangd index cache
 /.cache/

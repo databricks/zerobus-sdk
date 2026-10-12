@@ -48,16 +48,15 @@ set_target_properties(zerobus_protobuf_c PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${PROTOBUF_C_INCLUDE_DIR}")
 
 # ---------------------------------------------------------------------------
-# Protobuf generation
+# Committed protobuf bindings
 # ---------------------------------------------------------------------------
-# Generate missing or stale protobuf-c bindings during configuration.
-include("${CMAKE_CURRENT_SOURCE_DIR}/generate-proto.cmake")
+set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto/generated")
 
 # protoc-gen-c 1.3.3 emits a union initializer that GCC warns about.
 # Keep this exception on generated code; handwritten sources retain -Werror.
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   set_source_files_properties(
-    generated/zerobus_service.pb-c.c
+    "${GENERATED_DIR}/zerobus_service.pb-c.c"
     PROPERTIES COMPILE_OPTIONS -Wno-missing-braces)
 endif()
 
@@ -73,8 +72,8 @@ set(ZEROBUS_SOURCES
   src/sdk.c
   src/stream.c
 
-  generated/google/protobuf/duration.pb-c.c
-  generated/zerobus_service.pb-c.c
+  "${GENERATED_DIR}/google/protobuf/duration.pb-c.c"
+  "${GENERATED_DIR}/zerobus_service.pb-c.c"
 )
 
 add_library(zerobus_c STATIC ${ZEROBUS_SOURCES})
@@ -83,7 +82,7 @@ add_library(zerobus::c ALIAS zerobus_c)
 target_include_directories(zerobus_c
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
-          ${CMAKE_CURRENT_SOURCE_DIR}/generated)
+          "${GENERATED_DIR}")
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
@@ -97,7 +96,7 @@ target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          ${CMAKE_CURRENT_SOURCE_DIR}/src
          ${CMAKE_CURRENT_SOURCE_DIR}/tests/src
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/generated)
+  PRIVATE "${GENERATED_DIR}")
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c_testing PRIVATE c_std_11)
 target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c)
