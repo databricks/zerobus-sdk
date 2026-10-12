@@ -5641,6 +5641,57 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
+        async fn test_ipc_compression_defaults_to_zstd() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ipc_compression_defaults_to_zstd");
+
+            for disable_compression in [false, true] {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        }],
+                    )
+                    .await;
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone());
+                if disable_compression {
+                    builder = builder.ipc_compression(None);
+                }
+                let stream = builder.build_arrow().await?;
+
+                let batch = create_test_record_batch(schema, vec![1], vec![Some("default")]);
+                stream.ingest_batch(batch).await?;
+                stream.flush().await?;
+
+                assert_eq!(mock_server.get_batch_count().await, 1);
+                assert_eq!(
+                    mock_server.get_zstd_compressed_record_batch_count().await,
+                    if disable_compression { 0 } else { 1 },
+                    "disable_compression={disable_compression}",
+                );
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_mixed_ingest_batch_and_ipc() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_mixed_ingest_batch_and_ipc");
