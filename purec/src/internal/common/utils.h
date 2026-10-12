@@ -1,7 +1,7 @@
 /*
- * Input validation and owned-memory helpers shared by the public entry points
- * in sdk.c and stream.c. Local checks only: no transport, OAuth, protobuf, TLS
- * or threading code lives here.
+ * Input validation, text, and owned-memory helpers shared across the SDK.
+ * Local checks only: no transport, OAuth, protobuf, TLS or threading code
+ * lives here.
  */
 #ifndef ZB_UTILS_H
 #define ZB_UTILS_H
@@ -30,6 +30,10 @@ bool zb_is_empty(zerobus_string_view_t view);
 
 /* Non-empty, well-formed UTF-8, no embedded NUL. */
 bool zb_is_valid_string(zerobus_string_view_t view);
+
+/* True if s (len bytes) begins with prefix, matched case-insensitively. prefix
+ * is NUL-terminated and must be lowercase (only s is folded). */
+bool zb_starts_with(const char *s, size_t len, const char *prefix);
 
 /*
  * Report whether a table name is a fully qualified catalog.schema.table: three

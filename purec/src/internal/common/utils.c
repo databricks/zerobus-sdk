@@ -130,9 +130,7 @@ ZB_STATIC bool host_labels_are_valid(const char *host, size_t len)
     return len > 0;
 }
 
-/* True if s (len bytes) begins with prefix, matched case-insensitively. prefix
- * is NUL-terminated and must be lowercase (only s is folded). */
-static bool starts_with(const char *s, size_t len, const char *prefix)
+bool zb_starts_with(const char *s, size_t len, const char *prefix)
 {
     for (size_t i = 0; prefix[i] != '\0'; ++i) {
         if (i >= len) {
@@ -157,10 +155,10 @@ zb_url_result zb_url_validate(zerobus_string_view_t endpoint)
 
     const char *rest;
     size_t rest_len;
-    if (starts_with(endpoint.data, endpoint.len, "https://")) {
+    if (zb_starts_with(endpoint.data, endpoint.len, "https://")) {
         rest = endpoint.data + 8;
         rest_len = endpoint.len - 8;
-    } else if (starts_with(endpoint.data, endpoint.len, "http://")) {
+    } else if (zb_starts_with(endpoint.data, endpoint.len, "http://")) {
         rest = endpoint.data + 7;
         rest_len = endpoint.len - 7;
     } else {

@@ -58,6 +58,18 @@ static void test_utf8(void)
     CHECK(!is_valid_utf8("\xE2\x9C\x28", 3));     /* bad later continuation */
 }
 
+static void test_starts_with(void)
+{
+    CHECK(zb_starts_with("https://x", 9, "https://"));
+    CHECK(zb_starts_with("HTTPS://x", 9, "https://"));
+    CHECK(zb_starts_with("abc", 3, "abc"));     /* whole input */
+    CHECK(zb_starts_with("abc", 3, ""));        /* empty prefix */
+    CHECK(!zb_starts_with("http", 4, "https")); /* input too short */
+    /* Only len bytes are read, even if s continues. */
+    CHECK(!zb_starts_with("https", 4, "https"));
+    CHECK(!zb_starts_with("ftp://x", 7, "https://"));
+}
+
 static void test_table_name(void)
 {
     CHECK(zb_table_name_is_valid(sv("catalog.schema.table")));
@@ -226,6 +238,7 @@ int main(void)
 {
     test_view_classification();
     test_utf8();
+    test_starts_with();
     test_table_name();
     test_url_validate();
     test_host_labels();
