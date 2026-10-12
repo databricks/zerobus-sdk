@@ -1,10 +1,10 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use arrow_array::{
+use databricks_zerobus_ingest_sdk::arrow_array::{
     Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
 };
-use arrow_ipc::CompressionType;
+use databricks_zerobus_ingest_sdk::arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{
     channel_exporter, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
 };

@@ -650,6 +650,65 @@ mod arrow_flight_tests {
     mod ingestion_tests {
         use super::*;
 
+        #[tokio::test]
+        async fn test_ingest_batch_built_from_reexported_arrow_crates(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::arrow_array::{
+                ArrayRef, Int64Array, RecordBatch, StringArray,
+            };
+            use databricks_zerobus_ingest_sdk::arrow_ipc::CompressionType;
+            use databricks_zerobus_ingest_sdk::arrow_schema::{
+                DataType, Field, Schema as ArrowSchema,
+            };
+
+            setup_tracing();
+            info!("Starting test_ingest_batch_built_from_reexported_arrow_crates");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 2,
+                    }],
+                )
+                .await;
+
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("message", DataType::Utf8, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                    Arc::new(StringArray::from(vec![Some("a"), None])),
+                ],
+            )?;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .ipc_compression(Some(CompressionType::LZ4_FRAME))
+                .build_arrow()
+                .await?;
+
+            stream.ingest_batch(batch).await?;
+            stream.flush().await?;
+
+            assert_eq!(mock_server.get_total_records_received().await, 2);
+            Ok(())
+        }
+
         /// A zero-row batch must be rejected with InvalidArgument rather than accepted
         /// (the Flight encoder emits no data message for it, so it would never be acked
         /// and flush() would hang).

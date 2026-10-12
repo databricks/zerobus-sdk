@@ -23,6 +23,8 @@ Arrow Flight is a third record format option alongside JSON and Protocol Buffers
 - Batch sizes, transmission attempts, acknowledgments, and reconnect telemetry
 
 > **Feature flag.** The Arrow Flight API is behind the `arrow-flight` Cargo feature. The example's `Cargo.toml` enables it for you.
+>
+> The SDK re-exports the Arrow crates it uses (`arrow_array`, `arrow_schema`, `arrow_ipc`), so the example imports them from `databricks_zerobus_ingest_sdk` instead of depending on them directly. That keeps its Arrow version in step with the SDK.
 
 Send multiple rows per `RecordBatch`. Start with natural application-sized batches; sending one row per call works but negates most of the performance advantage of using Arrow. For sparse, one-row-at-a-time traffic, the JSON or Protocol Buffers examples in `examples/json/` and `examples/proto/` are usually a better fit. `ingest_batch` returns an `OffsetId` directly; there is no future-based variant for the Arrow Flight API.
 
@@ -74,7 +76,7 @@ let mut stream = sdk
 **Queue many `RecordBatch`es, then flush once:**
 
 ```rust
-use arrow_array::{Int32Array, LargeStringArray, RecordBatch};
+use databricks_zerobus_ingest_sdk::arrow_array::{Int32Array, LargeStringArray, RecordBatch};
 
 const ROWS_PER_BATCH: usize = 10_000;
 
@@ -130,10 +132,10 @@ See the [SDK telemetry docs](../../README.md#telemetry-beta) for aggregation lim
 
 Arrow streams compress IPC payloads with `ZSTD` by default, which reduces bytes on the wire at the cost of CPU on the client. Use `ipc_compression` on the stream builder to choose a different codec or turn compression off.
 
-The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` sets the codec explicitly on the stream builder:
+The `CompressionType` enum comes from the `arrow-ipc` crate, re-exported as `databricks_zerobus_ingest_sdk::arrow_ipc`. The example's `main.rs` sets the codec explicitly on the stream builder:
 
 ```rust
-use arrow_ipc::CompressionType;
+use databricks_zerobus_ingest_sdk::arrow_ipc::CompressionType;
 
 let stream = sdk
     .stream_builder()

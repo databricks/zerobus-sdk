@@ -12,6 +12,10 @@
   `ArrowStreamConfigurationOptions::ipc_compression` defaults to
   `Some(CompressionType::ZSTD)` instead of `None`. To keep sending uncompressed
   payloads, call `.ipc_compression(None)` on the stream builder.
+- With the `arrow-flight` feature, the SDK re-exports the Arrow crates it is
+  built against as `arrow_array`, `arrow_schema`, and `arrow_ipc`. Building
+  batches through these paths keeps Arrow types on the same version as the SDK
+  without a separate Arrow dependency.
 
 ### Bug Fixes
 

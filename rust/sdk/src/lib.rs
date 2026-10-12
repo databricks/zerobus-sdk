@@ -108,6 +108,13 @@ pub use stream::{
     ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch, TimeUnit,
     ZerobusArrowStream,
 };
+// Re-exported so callers can build batches with the exact Arrow version the SDK uses.
+#[cfg(feature = "arrow-flight")]
+pub use arrow_array;
+#[cfg(feature = "arrow-flight")]
+pub use arrow_ipc;
+#[cfg(feature = "arrow-flight")]
+pub use arrow_schema;
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;

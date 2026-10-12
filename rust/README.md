@@ -311,6 +311,11 @@ lifecycle state machine.
 
 ### Arrow Flight Lifecycle
 
+The SDK re-exports the Arrow crates it is built against as
+`databricks_zerobus_ingest_sdk::arrow_array`, `arrow_schema`, and `arrow_ipc`.
+Building batches through these paths keeps your Arrow types on the same version
+as the SDK without a separate Arrow dependency.
+
 Arrow Flight uses a dedicated DoPut request/response exchange:
 
 ```text
