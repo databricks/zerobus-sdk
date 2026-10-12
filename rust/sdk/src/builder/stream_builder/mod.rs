@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::callbacks::AckCallback;
-use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{
@@ -34,6 +33,7 @@ use crate::headers_provider::{
 use crate::stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "avro")]
 use crate::AvroSchema;
+use crate::RecordType;
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
     ZerobusStream,

@@ -64,6 +64,58 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn test_create_request_carries_builder_record_type(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as WireRecordType;
+        use databricks_zerobus_ingest_sdk::RecordType;
+
+        setup_tracing();
+        info!("Starting test_create_request_carries_builder_record_type");
+
+        for (record_type, wire) in [
+            (RecordType::Json, WireRecordType::Json),
+            (RecordType::Proto, WireRecordType::Proto),
+        ] {
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockResponse::CreateStream {
+                        stream_id: format!("{record_type:?}_stream"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let builder = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()));
+            let stream = if record_type == RecordType::Json {
+                builder.json().recovery(false).build().await?
+            } else {
+                builder
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(false)
+                    .build()
+                    .await?
+            };
+
+            assert_eq!(stream.options.record_type, record_type);
+            let requests = mock_server.get_create_requests().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].record_type, Some(wire as i32));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_each_stream_uses_its_own_connection_by_default(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mock_server, server_url) = start_mock_server().await?;
