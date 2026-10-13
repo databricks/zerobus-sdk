@@ -1,5 +1,6 @@
-/* Passive gRPC-over-HTTP/2 client for one call. An I/O owner drives the
- * nghttp2 session; everything here runs on the owner's thread. */
+/* Passive gRPC-over-HTTP/2 client for any number of calls on one connection.
+ * An I/O owner drives the nghttp2 session; everything here runs on the
+ * owner's thread. */
 #ifndef ZB_NETWORK_GRPC_H
 #define ZB_NETWORK_GRPC_H
 
@@ -7,6 +8,9 @@
 
 #include "message.h"
 #include "zerobus/common.h"
+
+typedef struct zb_grpc zb_grpc_t;
+typedef struct zb_grpc_call zb_grpc_call_t;
 
 /* An incoming message being assembled across DATA chunks. */
 typedef struct {
@@ -16,14 +20,23 @@ typedef struct {
     zb_message_t *message;
 } zb_grpc_decoder_t;
 
+/* Connection settings, shared by all calls. */
 typedef struct {
-    zerobus_string_view_t authority; /* host[:port]; borrowed, init only. */
+    zerobus_string_view_t authority; /* host[:port]; copied by init. */
     bool tls;
 
     size_t max_header_bytes;
     size_t max_message_bytes;
+} zb_grpc_config_t;
 
-    void *context; /* For the callbacks, valid until destroy. */
+/* One call's settings. */
+typedef struct {
+    /* Borrowed only for the duration of zb_grpc_call_open. */
+    zerobus_string_view_t path;
+    const zb_metadata_t *headers;
+    size_t header_count;
+
+    void *context; /* For the callbacks, valid until the call completes. */
 
     /* Callbacks run inside the owner's calls into nghttp2 and this component,
      * and must not re-enter either. */
@@ -33,22 +46,23 @@ typedef struct {
      * ever follow. Required. */
     zb_message_t *(*pull_send)(void *context, bool *eof);
     /* Receives each complete message in order. On true takes ownership, on
-     * false refuses it for now, pausing input until zb_grpc_retry_receive
-     * offers it again. Required. */
+     * false refuses it for now, pausing input for every call until
+     * zb_grpc_retry_receive offers it again. Required. */
     bool (*on_message)(void *context, zb_message_t *message);
-    /* Receives the call's final result exactly once. Result is borrowed,
+    /* Receives the call's final result exactly once. The call is already
+     * detached, so the owner may free it from here on. Result is borrowed,
      * result->message (may be NULL) is transferred. Optional. */
     void (*on_complete)(void *context, const zb_rpc_result_t *result);
-} zb_grpc_config_t;
+} zb_grpc_call_config_t;
 
-typedef struct {
-    /* Session and call lifecycle. */
-    nghttp2_session *session;
-    zb_grpc_config_t config; /* authority cleared after init. */
+struct zb_grpc_call {
+    /* Call lifecycle. */
+    zb_grpc_t *grpc;
+    zb_grpc_call_t *next;         /* In the session's list of open calls. */
+    zb_grpc_call_config_t config; /* Callbacks only; no request fields. */
     int32_t id;
     bool completed;
     bool request_closed;
-    zerobus_status_t failure;
 
     /* Request: framing outgoing messages into DATA frames. */
     zb_message_t *sending;
@@ -68,33 +82,51 @@ typedef struct {
     uint32_t grpc_status;
     char *grpc_message;
 
-    /* Response: decoding messages and holding a refused one. */
+    /* Response: decoding messages. */
     zb_grpc_decoder_t decoder;
-    bool paused; /* on_message refused, see zb_grpc_retry_receive. */
+};
+
+struct zb_grpc {
+    /* Session lifecycle. */
+    nghttp2_session *session;
+    zb_grpc_config_t config; /* authority views the copy below. */
+    char *authority;         /* Owned copy. */
+    zerobus_status_t failure;
+    zb_grpc_call_t *calls; /* Open calls. */
+
+    /* Receive pause: one refused message stops input for every call. */
+    bool paused;                 /* See zb_grpc_retry_receive. */
+    zb_grpc_call_t *paused_call; /* Holds it; NULL once that call completes. */
     /* Rest of the paused chunk, borrowed from the owner's input buffer. */
     const uint8_t *remainder;
     size_t remainder_len;
-} zb_grpc_t;
+};
 
-/* Initializes the session and queues the call, nothing is sent until the
- * owner's next nghttp2_session_mem_send. *grpc must be zeroed; config, path and
- * headers are borrowed only for the duration of this call. On failure *grpc
- * is left destroyed and on_complete is not called. */
-zerobus_status_t zb_grpc_init(zb_grpc_t *grpc, const zb_grpc_config_t *config,
-                              zerobus_string_view_t path,
-                              const zb_metadata_t *headers,
-                              size_t header_count);
+/* Initializes the session. *grpc must be zeroed. Config is borrowed only for
+ * the duration of this call. On failure *grpc is left destroyed. */
+zerobus_status_t zb_grpc_init(zb_grpc_t *grpc, const zb_grpc_config_t *config);
 
-/* Completes an unfinished call as CANCELLED and frees everything. Accepts
- * zeroed or already destroyed state. */
+/* Completes every open call as CANCELLED and frees the session. Accepts zeroed
+ * or already destroyed state. */
 void zb_grpc_destroy(zb_grpc_t *grpc);
 
-/* For a fatal connection failure: completes the call with status and sets
- * failure. Only the first abort counts. Sends nothing. NULL safe. */
+/* For a fatal connection failure: completes every open call with status and
+ * sets failure. Only the first abort counts. Sends nothing. NULL safe. */
 void zb_grpc_abort(zb_grpc_t *grpc, zerobus_status_t status);
 
 /* While paused, offers the refused message to on_message again, then decodes
  * the rest of its chunk, otherwise does nothing. */
 zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc);
+
+/* Queues a call on the session. It opens on the wire with the owner's next
+ * nghttp2_session_mem_send. *call must be zeroed or completed, and stay in
+ * place until it completes. Config is borrowed only for the duration of this
+ * call. On failure the call is not opened and on_complete is not called. */
+zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
+                                   const zb_grpc_call_config_t *config);
+
+/* Completes an open call as CANCELLED and resets its stream; other calls
+ * continue. Does nothing for a zeroed or completed call. */
+void zb_grpc_call_cancel(zb_grpc_call_t *call);
 
 #endif /* ZB_NETWORK_GRPC_H */
