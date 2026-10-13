@@ -1,0 +1,6 @@
+# Optional workaround for the host's uninstrumented OpenSSL 1.1.1f runtime.
+# A CRYPTO_THREAD rwlock cycle wholly inside this library was reported by TSan;
+# its cause is not established. Suppress this external deadlock diagnostic; leave SDK
+# deadlock detection and all data-race checks enabled. Run without this file
+# first, and record its use with test results. No production flags use it.
+deadlock:CRYPTO_THREAD_write_lock

@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(OpenSSL 1.1.1)
+find_dependency(PkgConfig)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2>=1.40)
+set(zbperf_NGHTTP2_VERSION "@NGHTTP2_VERSION@")
+set(zbperf_OPENSSL_VERSION "@OPENSSL_VERSION@")
+include("${CMAKE_CURRENT_LIST_DIR}/zbperfTargets.cmake")
+check_required_components(zbperf)

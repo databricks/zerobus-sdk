@@ -1,0 +1,31 @@
+{
+  "baseline": {
+    "host": "6051921418418893.zerobus.us-west-2.staging.cloud.databricks.com",
+    "port": 443,
+    "table": "shinkansen.default.danilo_fluentbit_poc",
+    "input": "examples/records-1k.jsonl",
+    "streams": 1,
+    "connections": 1,
+    "io-threads": 1,
+    "queue": "mutex",
+    "batch": "single",
+    "batch-records": 1024,
+    "batch-bytes": 1048576,
+    "retention": "acked",
+    "idle": "sleep",
+    "write-coalesce-bytes": 32768,
+    "buffer-bytes": 33554432,
+    "queue-capacity": 32768,
+    "max-inflight": 32768,
+    "sample-every": 1024,
+    "admission-timeout-ms": 10000,
+    "warmup": 2,
+    "duration": 10,
+    "drain-timeout": 30
+  },
+  "finalists": [
+    {"name": "single", "options": {}},
+    {"name": "explicit-1m", "options": {"batch": "explicit"}},
+    {"name": "auto-1m", "options": {"batch": "auto"}}
+  ]
+}

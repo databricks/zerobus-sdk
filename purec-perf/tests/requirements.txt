@@ -1,0 +1,2 @@
+# Local protocol fixture only; not required by the C library or benchmark.
+h2>=4.1,<5
