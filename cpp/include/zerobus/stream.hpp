@@ -87,6 +87,57 @@ class Stream {
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
+#if defined(ZEROBUS_AVRO)
+  /// Ingest a single pre-encoded Avro datum, blocking until it is queued
+  /// (Beta).
+  ///
+  /// @param data Pointer to the pre-encoded Avro datum bytes.
+  /// @param len Number of bytes in @p data.
+  /// @return The logical offset assigned to the record.
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
+  std::int64_t ingest_avro_record(const std::uint8_t* data, std::size_t len);
+
+  /// @overload
+  /// @param data The pre-encoded Avro datum bytes.
+  std::int64_t ingest_avro_record(const std::vector<std::uint8_t>& data);
+
+  /// Ingest a single Avro record from JSON, blocking until it is queued (Beta).
+  ///
+  /// The JSON object is encoded against the stream's writer schema. Unknown
+  /// keys are ignored; the server maps fields to the table's columns by name.
+  ///
+  /// @param json The record as a UTF-8 JSON object (e.g., `{"id": 1, "name":
+  /// "Alice"}`).
+  /// @return The logical offset assigned to the record.
+  /// @throws ZerobusException if the stream is closed, ingestion fails, or the
+  ///         record does not match the schema.
+  std::int64_t ingest_avro_record(const std::string& json);
+
+  /// Ingest a batch of pre-encoded Avro datums, blocking until they are queued
+  /// (Beta).
+  ///
+  /// Prefer the batch APIs over per-record calls in hot paths.
+  ///
+  /// @param records The pre-encoded Avro datums to ingest.
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op).
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
+  std::int64_t ingest_avro_records(
+      const std::vector<std::vector<std::uint8_t>>& records);
+
+  /// Ingest a batch of Avro records from JSON, blocking until they are queued
+  /// (Beta).
+  ///
+  /// Prefer the batch APIs over per-record calls in hot paths.
+  ///
+  /// @param jsons The records, each a UTF-8 JSON object.
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p jsons is empty (a no-op).
+  /// @throws ZerobusException if the stream is closed, ingestion fails, or any
+  ///         record does not match the schema.
+  std::int64_t ingest_avro_records(const std::vector<std::string>& jsons);
+#endif
+
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
   /// @param offset A logical offset returned by an ingest call (for a batch,
@@ -135,9 +186,19 @@ class Stream {
 
  private:
   friend class Sdk;
+#if defined(ZEROBUS_AVRO)
   Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> /*unused*/,
-         std::shared_ptr<AckCallback> ack_callback)
+         std::shared_ptr<AckCallback> ack_callback,
+         std::string avro_schema_json = "")
+      : handle_(handle),
+        ack_callback_(std::move(ack_callback)),
+        avro_schema_json_(std::move(avro_schema_json)) {}
+#else
+  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> /*unused*/,
+         std::shared_ptr<AckCallback> ack_callback,
+         std::string /*avro_schema_json*/ = "")
       : handle_(handle), ack_callback_(std::move(ack_callback)) {}
+#endif
 
   CZerobusStream* handle_;
   // The headers provider (if any) is owned by the FFI, not the Stream: the core
@@ -148,6 +209,10 @@ class Stream {
   // callback can still run after close(), so dropping this at ~Stream() can
   // free it mid-call (see AckCallback). May be null.
   std::shared_ptr<AckCallback> ack_callback_;
+#if defined(ZEROBUS_AVRO)
+  // Avro writer schema JSON, used for encoding JSON records to binary.
+  std::string avro_schema_json_;
+#endif
 };
 
 }  // namespace zerobus
