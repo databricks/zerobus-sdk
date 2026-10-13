@@ -2,282 +2,8 @@
 #include <string.h>
 
 #include "grpc.h"
+#include "grpc_utils.h"
 #include "internal/common/utils.h"
-
-/* ---- message framing --------------------------------------------------- */
-
-static void write_prefix(uint8_t prefix[5], uint32_t length)
-{
-    prefix[0] = 0; /* uncompressed flag */
-    prefix[1] = (uint8_t)(length >> 24);
-    prefix[2] = (uint8_t)(length >> 16);
-    prefix[3] = (uint8_t)(length >> 8);
-    prefix[4] = (uint8_t)length;
-}
-
-static void decoder_clear(zb_grpc_decoder_t *decoder)
-{
-    if (decoder->message != NULL) {
-        free(decoder->message->data);
-        free(decoder->message);
-    }
-    memset(decoder, 0, sizeof(*decoder));
-}
-
-static bool decoder_between_messages(const zb_grpc_decoder_t *decoder)
-{
-    return decoder->prefix_used == 0 && decoder->message == NULL;
-}
-
-static zerobus_status_t start_message(zb_grpc_decoder_t *decoder,
-                                      size_t maximum)
-{
-    const uint8_t *prefix = decoder->prefix;
-    if (prefix[0] != 0) {
-        return prefix[0] == 1 ? ZEROBUS_STATUS_UNIMPLEMENTED
-                              : ZEROBUS_STATUS_INTERNAL;
-    }
-    uint32_t length = 0;
-    for (size_t i = 1; i < 5; ++i) {
-        length = (length << 8) | prefix[i];
-    }
-    if ((size_t)length > maximum) {
-        return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
-    }
-    zb_message_t *message = calloc(1, sizeof(*message));
-    if (message == NULL) {
-        return ZEROBUS_STATUS_OUT_OF_MEMORY;
-    }
-    message->len = length;
-    if (length != 0 && (message->data = malloc(length)) == NULL) {
-        free(message);
-        return ZEROBUS_STATUS_OUT_OF_MEMORY;
-    }
-    decoder->message = message;
-    return ZEROBUS_STATUS_OK;
-}
-
-static void fill_from_input(uint8_t *buffer, size_t size, size_t *used,
-                            const uint8_t *data, size_t len, size_t *consumed)
-{
-    size_t take = size - *used;
-    if (take > len - *consumed) {
-        take = len - *consumed;
-    }
-    if (take != 0) {
-        memcpy(buffer + *used, data + *consumed, take);
-        *used += take;
-        *consumed += take;
-    }
-}
-
-/* Decodes gRPC messages from a stream that arrives in chunks, one chunk per
- * call. A message split across chunks is completed by later calls.
- *
- * deliver is the output: it receives each complete message in order and
- * returns true to take ownership of it. It returns false to refuse the message
- * for now (e.g. no room downstream): the decoder keeps it, stops right after
- * it, and sets *paused. While paused, the next call, made with the rest of the
- * same input, offers the kept message again. */
-static zerobus_status_t
-decoder_feed(zb_grpc_decoder_t *decoder, const uint8_t *data, size_t len,
-             size_t maximum, bool (*deliver)(void *, zb_message_t *),
-             void *context, size_t *consumed, bool *paused)
-{
-    zerobus_status_t status = ZEROBUS_STATUS_OK;
-    *consumed = 0;
-    *paused = false;
-    while (status == ZEROBUS_STATUS_OK) {
-        zb_message_t *message = decoder->message;
-        if (message != NULL && decoder->payload_used == message->len) {
-            if (!deliver(context, message)) {
-                *paused = true;
-                break;
-            }
-            *decoder = (zb_grpc_decoder_t){0};
-        } else if (*consumed == len) {
-            break;
-        } else if (message == NULL) {
-            fill_from_input(decoder->prefix, 5, &decoder->prefix_used, data,
-                            len, consumed);
-            if (decoder->prefix_used == 5) {
-                status = start_message(decoder, maximum);
-            }
-        } else {
-            fill_from_input(message->data, message->len, &decoder->payload_used,
-                            data, len, consumed);
-        }
-    }
-    return status;
-}
-
-/* ---- status mapping ---------------------------------------------------- */
-
-static zerobus_status_t map_grpc_status(uint32_t code)
-{
-    switch (code) {
-    case 0:
-        return ZEROBUS_STATUS_OK;
-    case 1:
-        return ZEROBUS_STATUS_CANCELLED;
-    case 3:
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
-    case 4:
-        return ZEROBUS_STATUS_DEADLINE_EXCEEDED;
-    case 5:
-        return ZEROBUS_STATUS_NOT_FOUND;
-    case 7:
-        return ZEROBUS_STATUS_PERMISSION_DENIED;
-    case 8:
-        return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
-    case 9:
-        return ZEROBUS_STATUS_FAILED_PRECONDITION;
-    case 12:
-        return ZEROBUS_STATUS_UNIMPLEMENTED;
-    case 13:
-        return ZEROBUS_STATUS_INTERNAL;
-    case 14:
-        return ZEROBUS_STATUS_UNAVAILABLE;
-    case 16:
-        return ZEROBUS_STATUS_UNAUTHENTICATED;
-    default:
-        return ZEROBUS_STATUS_UNKNOWN;
-    }
-}
-
-static zerobus_status_t map_http_status(uint32_t code)
-{
-    switch (code) {
-    case 400:
-        return ZEROBUS_STATUS_INTERNAL;
-    case 401:
-        return ZEROBUS_STATUS_UNAUTHENTICATED;
-    case 403:
-        return ZEROBUS_STATUS_PERMISSION_DENIED;
-    case 404:
-        return ZEROBUS_STATUS_UNIMPLEMENTED;
-    case 429:
-    case 502:
-    case 503:
-    case 504:
-        return ZEROBUS_STATUS_UNAVAILABLE;
-    default:
-        return ZEROBUS_STATUS_UNKNOWN;
-    }
-}
-
-static zerobus_status_t map_http2_error(uint32_t error)
-{
-    switch (error) {
-    case NGHTTP2_REFUSED_STREAM:
-        return ZEROBUS_STATUS_UNAVAILABLE;
-    case NGHTTP2_CANCEL:
-        return ZEROBUS_STATUS_CANCELLED;
-    case NGHTTP2_ENHANCE_YOUR_CALM:
-        return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
-    case NGHTTP2_INADEQUATE_SECURITY:
-        return ZEROBUS_STATUS_PERMISSION_DENIED;
-    default:
-        return ZEROBUS_STATUS_INTERNAL;
-    }
-}
-
-/* Maps an nghttp2 library error (NGHTTP2_ERR_*), not an HTTP/2 error code. */
-static zerobus_status_t map_nghttp2_error(int error)
-{
-    switch (error) {
-    case NGHTTP2_ERR_NOMEM:
-        return ZEROBUS_STATUS_OUT_OF_MEMORY;
-    case NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE:
-        return ZEROBUS_STATUS_UNAVAILABLE;
-    default:
-        return ZEROBUS_STATUS_INTERNAL;
-    }
-}
-
-/* ---- header values ----------------------------------------------------- */
-
-static bool parse_decimal(const uint8_t *value, size_t len, uint32_t *out)
-{
-    if (len == 0) {
-        return false;
-    }
-    uint32_t res = 0;
-    for (size_t i = 0; i < len; ++i) {
-        uint32_t c = (uint32_t)(value[i] - '0');
-        if (value[i] < '0' || value[i] > '9' || res > (UINT32_MAX - c) / 10) {
-            return false;
-        }
-        res = res * 10 + c;
-    }
-    *out = res;
-    return true;
-}
-
-/* True for application/grpc, matched case-insensitively and optionally followed
- * by a "+subtype" or ";parameters". */
-static bool is_grpc_content_type(const uint8_t *value, size_t len)
-{
-    static const char type[] = "application/grpc";
-    const size_t prefix = sizeof(type) - 1;
-    return zb_starts_with((const char *)value, len, type) &&
-           (len == prefix || value[prefix] == '+' || value[prefix] == ';');
-}
-
-static int hex(char c)
-{
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-/* Percent-decodes a grpc-message value in place and NUL-terminates it, so value
- * needs len + 1 bytes. Malformed escapes remain literal as required by gRPC. */
-static void percent_decode(char *value, size_t len)
-{
-    size_t out = 0;
-    for (size_t i = 0; i < len; ++i) {
-        char c = value[i];
-        if (c == '%' && len - i >= 3) {
-            int high = hex(value[i + 1]);
-            int low = hex(value[i + 2]);
-            if (high >= 0 && low >= 0) {
-                c = (char)(high * 16 + low);
-                i += 2;
-            }
-        }
-        value[out++] = c == '\0' ? '?' : c;
-    }
-    value[out] = '\0';
-}
-
-/* Adds one header field's size to *total, counted the way HTTP/2 sizes header
- * lists (RFC 7540, 6.5.2): name + value + 32 octets of per-field overhead.
- * Returns false, leaving *total unchanged, when that would exceed limit. */
-static bool add_header_bytes(size_t *total, size_t name_len, size_t value_len,
-                             size_t limit)
-{
-    if (name_len > limit || value_len > limit - name_len ||
-        limit - name_len - value_len < 32 ||
-        *total > limit - name_len - value_len - 32) {
-        return false;
-    }
-    *total += name_len + value_len + 32;
-    return true;
-}
-
-static bool equals(zerobus_string_view_t value, const char *literal)
-{
-    return value.len == strlen(literal) &&
-           memcmp(value.data, literal, value.len) == 0;
-}
 
 /* ---- call completion --------------------------------------------------- */
 
@@ -337,7 +63,7 @@ static void complete(zb_grpc_call_t *call, zerobus_status_t status,
         grpc->paused_call = NULL;
     }
     release_send(call);
-    decoder_clear(&call->decoder);
+    zb_grpc_decoder_clear(&call->decoder);
     const zb_rpc_result_t result = {.status = status,
                                     .has_grpc_status = has_grpc_status,
                                     .grpc_status = call->grpc_status,
@@ -384,7 +110,7 @@ static int decode(zb_grpc_call_t *call, const uint8_t *data, size_t len,
                   size_t *consumed)
 {
     zb_grpc_t *grpc = call->grpc;
-    zerobus_status_t result = decoder_feed(
+    zerobus_status_t result = zb_grpc_decoder_feed(
         &call->decoder, data, len, grpc->config.max_message_bytes,
         call->config.on_message, call->config.context, consumed, &grpc->paused);
     if (result == ZEROBUS_STATUS_OK) {
@@ -426,15 +152,16 @@ static ssize_t on_data_source_read(nghttp2_session *session, int32_t stream_id,
                          NGHTTP2_INTERNAL_ERROR);
                 return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
             }
-            write_prefix(call->send_prefix, (uint32_t)call->sending->len);
+            zb_write_grpc_prefix(call->send_prefix,
+                                 (uint32_t)call->sending->len);
         }
         if (written == length) {
             break;
         }
         zb_message_t *message = call->sending;
-        fill_from_input(buffer, length, &written, call->send_prefix, 5,
+        zb_copy_bounded(buffer, length, &written, call->send_prefix, 5,
                         &call->send_prefix_used);
-        fill_from_input(buffer, length, &written, message->data, message->len,
+        zb_copy_bounded(buffer, length, &written, message->data, message->len,
                         &call->send_payload_used);
         if (call->send_prefix_used == 5 &&
             call->send_payload_used == message->len) {
@@ -493,30 +220,30 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
     if (call == NULL) {
         return 0;
     }
-    if (!add_header_bytes(&call->header_bytes, name_len, value_len,
-                          call->grpc->config.max_header_bytes)) {
+    if (!zb_add_http2_header_bytes(&call->header_bytes, name_len, value_len,
+                                   call->grpc->config.max_header_bytes)) {
         return bad_header(call, ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
     }
     zerobus_string_view_t key = {(const char *)name, name_len};
-    if (equals(key, ":status")) {
+    if (zb_view_equals(key, ":status")) {
         if (call->block_http_status != 0 || value_len != 3 ||
-            !parse_decimal(value, value_len, &call->block_http_status) ||
+            !zb_parse_u32(value, value_len, &call->block_http_status) ||
             call->block_http_status < 100) {
             return bad_header(call, ZEROBUS_STATUS_INTERNAL);
         }
-    } else if (equals(key, "content-type")) {
+    } else if (zb_view_equals(key, "content-type")) {
         if (call->content_type_seen) {
             return bad_header(call, ZEROBUS_STATUS_INTERNAL);
         }
         call->content_type_seen = true;
-        call->content_type_valid = is_grpc_content_type(value, value_len);
-    } else if (equals(key, "grpc-status")) {
+        call->content_type_valid = zb_is_grpc_content_type(value, value_len);
+    } else if (zb_view_equals(key, "grpc-status")) {
         if (call->grpc_status_seen ||
-            !parse_decimal(value, value_len, &call->grpc_status)) {
+            !zb_parse_u32(value, value_len, &call->grpc_status)) {
             return bad_header(call, ZEROBUS_STATUS_INTERNAL);
         }
         call->grpc_status_seen = true;
-    } else if (equals(key, "grpc-message")) {
+    } else if (zb_view_equals(key, "grpc-message")) {
         if (call->grpc_message != NULL) {
             return bad_header(call, ZEROBUS_STATUS_INTERNAL);
         }
@@ -525,7 +252,7 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
             return bad_header(call, ZEROBUS_STATUS_OUT_OF_MEMORY);
         }
         memcpy(call->grpc_message, value, value_len);
-        percent_decode(call->grpc_message, value_len);
+        zb_grpc_percent_decode(call->grpc_message, value_len);
     }
     return 0;
 }
@@ -577,7 +304,7 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
             if (!call->content_type_valid) {
                 if (call->http_status != 200 && !call->grpc_status_seen) {
                     return CALLBACK_RESULT(
-                        close_call(call, map_http_status(call->http_status),
+                        close_call(call, zb_map_http_status(call->http_status),
                                    false, NGHTTP2_CANCEL));
                 }
                 goto invalid;
@@ -595,13 +322,14 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
     } else if (frame->hd.type != NGHTTP2_DATA || !end) {
         return 0;
     }
-    if (!decoder_between_messages(&call->decoder)) {
+    if (!zb_grpc_decoder_between_messages(&call->decoder)) {
         goto invalid;
     }
     bool has_status =
         frame->hd.type == NGHTTP2_HEADERS && call->grpc_status_seen;
-    zerobus_status_t status = has_status ? map_grpc_status(call->grpc_status)
-                                         : map_http_status(call->http_status);
+    zerobus_status_t status = has_status
+                                  ? zb_map_grpc_status(call->grpc_status)
+                                  : zb_map_http_status(call->http_status);
     if (!call->request_closed) {
         return CALLBACK_RESULT(
             close_call(call, status, has_status, NGHTTP2_NO_ERROR));
@@ -656,83 +384,12 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id,
     (void)session;
     zb_grpc_call_t *call = find_call(user_data, stream_id);
     if (call != NULL) {
-        complete(call, map_http2_error(error_code), false, error_code);
+        complete(call, zb_map_http2_error(error_code), false, error_code);
     }
     return 0;
 }
 
 /* ---- request submission ------------------------------------------------ */
-
-/* Checks a :path (must start with '/') or :authority (no '/', '?' or '@')
- * value: non-empty visible ASCII without '#'. */
-static bool valid_target(zerobus_string_view_t value, bool authority)
-{
-    if (value.data == NULL || value.len == 0 ||
-        (!authority && value.data[0] != '/')) {
-        return false;
-    }
-    for (size_t i = 0; i < value.len; ++i) {
-        unsigned char c = (unsigned char)value.data[i];
-        if (c < 0x21 || c > 0x7e || c == '#' ||
-            (authority && (c == '/' || c == '?' || c == '@'))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* Checks one caller metadata entry: a lowercase gRPC header name, other than
- * the grpc-* names and headers that the transport owns or HTTP/2 forbids, with
- * a printable-ASCII value. */
-static bool valid_metadata(const zb_metadata_t *header)
-{
-    if (header->name.data == NULL || header->name.len == 0 ||
-        (header->value.data == NULL && header->value.len != 0)) {
-        return false;
-    }
-    for (size_t i = 0; i < header->name.len; ++i) {
-        char c = header->name.data[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
-              c == '-' || c == '.')) {
-            return false;
-        }
-    }
-    static const char *const reserved[] = {"content-type",
-                                           "content-length",
-                                           "te",
-                                           "host",
-                                           "connection",
-                                           "keep-alive",
-                                           "proxy-connection",
-                                           "transfer-encoding",
-                                           "upgrade"};
-    if (header->name.len >= 5 && memcmp(header->name.data, "grpc-", 5) == 0) {
-        return false;
-    }
-    for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i) {
-        if (equals(header->name, reserved[i])) {
-            return false;
-        }
-    }
-    for (size_t i = 0; i < header->value.len; ++i) {
-        unsigned char c = (unsigned char)header->value.data[i];
-        if (c < 0x20 || c > 0x7e) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static nghttp2_nv make_nv(const zb_metadata_t *header)
-{
-    nghttp2_nv nv = {(uint8_t *)header->name.data,
-                     (uint8_t *)header->value.data, header->name.len,
-                     header->value.len, NGHTTP2_NV_FLAG_NONE};
-    if (equals(header->name, "authorization")) {
-        nv.flags = NGHTTP2_NV_FLAG_NO_INDEX;
-    }
-    return nv;
-}
 
 /* Queues a call on an initialized session. Nothing is sent: the call opens on
  * the wire when the owner next calls nghttp2_session_mem_send. nghttp2 copies
@@ -757,11 +414,12 @@ static zerobus_status_t queue_call(zb_grpc_call_t *call,
         const zb_metadata_t *header =
             i < protocol_count ? &protocol[i]
                                : &request->headers[i - protocol_count];
-        if (!add_header_bytes(&total, header->name.len, header->value.len,
-                              config->max_header_bytes)) {
+        if (!zb_add_http2_header_bytes(&total, header->name.len,
+                                       header->value.len,
+                                       config->max_header_bytes)) {
             return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
         }
-        if (i >= protocol_count && !valid_metadata(header)) {
+        if (i >= protocol_count && !zb_is_valid_grpc_metadata(header)) {
             return ZEROBUS_STATUS_INVALID_ARGUMENT;
         }
     }
@@ -773,14 +431,14 @@ static zerobus_status_t queue_call(zb_grpc_call_t *call,
         const zb_metadata_t *header =
             i < protocol_count ? &protocol[i]
                                : &request->headers[i - protocol_count];
-        nva[i] = make_nv(header);
+        nva[i] = zb_make_nghttp2_nv(header);
     }
     const nghttp2_data_provider provider = {{0}, on_data_source_read};
     int32_t id = nghttp2_submit_request(call->grpc->session, NULL, nva, count,
                                         &provider, call);
     free(nva);
     if (id < 0) {
-        return map_nghttp2_error(id);
+        return zb_map_nghttp2_error(id);
     }
     call->id = id;
     return ZEROBUS_STATUS_OK;
@@ -795,7 +453,7 @@ zerobus_status_t zb_grpc_init(zb_grpc_t *grpc, const zb_grpc_config_t *config)
         config->max_message_bytes == 0 ||
         config->max_message_bytes > UINT32_MAX ||
         config->authority.len > config->max_header_bytes ||
-        !valid_target(config->authority, true)) {
+        !zb_is_valid_grpc_target(config->authority, true)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
 
@@ -888,7 +546,7 @@ zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc)
         grpc->paused_call = NULL;
     }
     if (result < 0) {
-        zb_grpc_abort(grpc, map_nghttp2_error(result));
+        zb_grpc_abort(grpc, zb_map_nghttp2_error(result));
     }
     return grpc->failure;
 }
@@ -908,7 +566,7 @@ zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
         config->path.len > grpc->config.max_header_bytes) {
         return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
     }
-    if (!valid_target(config->path, false)) {
+    if (!zb_is_valid_grpc_target(config->path, false)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (grpc->failure != ZEROBUS_STATUS_OK) {
@@ -937,7 +595,7 @@ void zb_grpc_call_cancel(zb_grpc_call_t *call)
         int result =
             close_call(call, ZEROBUS_STATUS_CANCELLED, false, NGHTTP2_CANCEL);
         if (result != 0) {
-            zb_grpc_abort(grpc, map_nghttp2_error(result));
+            zb_grpc_abort(grpc, zb_map_nghttp2_error(result));
         }
     }
 }

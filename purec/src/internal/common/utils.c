@@ -80,6 +80,47 @@ bool zb_is_valid_string(zerobus_string_view_t view)
     return is_valid_utf8(view.data, view.len);
 }
 
+bool zb_view_equals(zerobus_string_view_t value, const char *literal)
+{
+    size_t len = strlen(literal);
+    return value.len == len &&
+           (len == 0 ||
+            (value.data != NULL && memcmp(value.data, literal, len) == 0));
+}
+
+/* ---- parsing ----------------------------------------------------------- */
+
+bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
+{
+    if (len == 0) {
+        return false;
+    }
+    uint32_t res = 0;
+    for (size_t i = 0; i < len; ++i) {
+        uint32_t c = (uint32_t)(value[i] - '0');
+        if (value[i] < '0' || value[i] > '9' || res > (UINT32_MAX - c) / 10) {
+            return false;
+        }
+        res = res * 10 + c;
+    }
+    *out = res;
+    return true;
+}
+
+int zb_hex_value(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
 /* ---- table name -------------------------------------------------------- */
 
 bool zb_table_name_is_valid(zerobus_string_view_t table)
@@ -235,6 +276,20 @@ zb_url_result zb_url_validate(zerobus_string_view_t endpoint)
 }
 
 /* ---- owned-memory helpers ---------------------------------------------- */
+
+void zb_copy_bounded(uint8_t *buffer, size_t size, size_t *used,
+                     const uint8_t *data, size_t len, size_t *consumed)
+{
+    size_t take = size - *used;
+    if (take > len - *consumed) {
+        take = len - *consumed;
+    }
+    if (take != 0) {
+        memcpy(buffer + *used, data + *consumed, take);
+        *used += take;
+        *consumed += take;
+    }
+}
 
 bool zb_replace_string(char **target, zerobus_string_view_t view)
 {

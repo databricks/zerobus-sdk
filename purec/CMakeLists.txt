@@ -73,6 +73,7 @@ set(ZEROBUS_SOURCES
   src/internal/platform/log.c
   src/internal/proto/zerobus_service.c
   src/internal/network/grpc.c
+  src/internal/network/grpc_utils.c
   src/internal/landing_zone.c
   src/error.c
   src/sdk.c

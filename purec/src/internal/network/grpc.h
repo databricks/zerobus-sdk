@@ -6,19 +6,12 @@
 
 #include <nghttp2/nghttp2.h>
 
+#include "grpc_utils.h"
 #include "message.h"
 #include "zerobus/common.h"
 
 typedef struct zb_grpc zb_grpc_t;
 typedef struct zb_grpc_call zb_grpc_call_t;
-
-/* An incoming message being assembled across DATA chunks. */
-typedef struct {
-    uint8_t prefix[5];
-    size_t prefix_used;
-    size_t payload_used;
-    zb_message_t *message;
-} zb_grpc_decoder_t;
 
 /* Connection settings, shared by all calls. */
 typedef struct {
