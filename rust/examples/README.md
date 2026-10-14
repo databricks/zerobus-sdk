@@ -46,6 +46,7 @@ The SDK supports four ingestion formats and two ingestion methods:
 | [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `cargo run -p example_arrow` |
+| [Arrow Multiplexed](arrow/README.md#multiplexed-arrow-flight) | Arrow Flight | Multiplexed | `cargo run -p example_arrow --example arrow_multiplexed` |
 | [Avro Single](avro/README.md#single-record-example) | Avro | Single-record | `cd avro && cargo run --example avro_single` |
 | [Avro Batch](avro/README.md#batch-example) | Avro | Batch | `cd avro && cargo run --example avro_batch` |
 | [Avro Multiplexed](avro/README.md#multiplexed-example) | Avro | Multiplexed | `cd avro && cargo run --example avro_multiplexed` |
