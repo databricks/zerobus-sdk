@@ -2,46 +2,45 @@
 #define ZB_RECORD_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
-#include "utils.h"
 #include "zerobus/common.h"
 
-typedef struct zb_record {
-    char *json;
+/* Placeholder until the protobuf request representation is settled. */
+typedef struct zb_ingest_request {
     size_t len;
-} zb_record_t;
+    char data[];
+} zb_ingest_request_t;
 
-/* Owns a copy of json. Non-empty payloads are NUL-terminated.
- * Returns NULL on allocation failure or NULL data with nonzero length. */
-static inline zb_record_t *zb_record_new(zerobus_string_view_t json)
+/* Owns a NUL-terminated copy of data.
+ * Returns NULL on size overflow, allocation failure, or NULL data with nonzero
+ * length. */
+static inline zb_ingest_request_t *
+zb_ingest_request_new(zerobus_string_view_t data)
 {
-    if (json.data == NULL && json.len != 0) {
+    if ((data.data == NULL && data.len != 0) ||
+        data.len > SIZE_MAX - sizeof(zb_ingest_request_t) - 1) {
         return NULL;
     }
-    zb_record_t *record = (zb_record_t *)calloc(1, sizeof(*record));
-    if (record == NULL) {
+    zb_ingest_request_t *request =
+        (zb_ingest_request_t *)malloc(sizeof(*request) + data.len + 1);
+    if (request == NULL) {
         return NULL;
     }
-    if (json.len == 0) {
-        return record;
+    request->len = data.len;
+    if (data.len != 0) {
+        memcpy(request->data, data.data, data.len);
     }
-    record->json = zb_strdup_view(json);
-    record->len = json.len;
-    if (record->json == NULL) {
-        free(record);
-        return NULL;
-    }
-    return record;
+    request->data[data.len] = '\0';
+    return request;
 }
 
-/* Frees the record and its payload. Accepts NULL. */
-static inline void zb_record_free(zb_record_t *record)
+/* Frees the request and its payload. Accepts NULL. */
+static inline void zb_ingest_request_free(zb_ingest_request_t *request)
 {
-    if (record != NULL) {
-        free(record->json);
-        free(record);
-    }
+    free(request);
 }
 
 #endif /* ZB_RECORD_H */

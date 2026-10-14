@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <string.h>
 
 #include "internal/common/record.h"
@@ -5,51 +6,63 @@
 
 /* ---- tests ------------------------------------------------------------- */
 
-static void test_record_owns_exact_length_copy(void)
+static void test_request_owns_exact_length_copy(void)
 {
-    char json[] = {'{', '}'};
-    zb_record_t *record =
-        zb_record_new((zerobus_string_view_t){json, sizeof(json)});
-    REQUIRE(record != NULL);
-    REQUIRE(record->json != NULL);
-    CHECK_EQ_INT(record->len, sizeof(json));
-    CHECK(record->json != json);
-    memset(json, 'x', sizeof(json));
-    CHECK(memcmp(record->json, "{}", sizeof(json)) == 0);
-    CHECK_EQ_INT(record->json[sizeof(json)], '\0');
+    char data[] = {'a', '\0', 'b'};
+    zb_ingest_request_t *request =
+        zb_ingest_request_new((zerobus_string_view_t){data, sizeof(data)});
+    REQUIRE(request != NULL);
+    CHECK_EQ_INT(request->len, sizeof(data));
+    CHECK(request->data != data);
+    memset(data, 'x', sizeof(data));
+    CHECK(memcmp(request->data, "a\0b", sizeof(data)) == 0);
+    CHECK_EQ_INT(request->data[sizeof(data)], '\0');
 
 zb_cleanup:
-    zb_record_free(record);
+    zb_ingest_request_free(request);
 }
 
-static void test_empty_records(void)
+static void test_empty_requests(void)
 {
-    zb_record_t *records[2] = {NULL};
+    zb_ingest_request_t *requests[2] = {NULL};
     for (unsigned int i = 0; i < 2; i++) {
-        records[i] =
-            zb_record_new((zerobus_string_view_t){i == 0 ? NULL : "x", 0});
-        REQUIRE(records[i] != NULL);
-        CHECK_EQ_INT(records[i]->len, 0);
-        CHECK(records[i]->json == NULL);
+        requests[i] = zb_ingest_request_new(
+            (zerobus_string_view_t){i == 0 ? NULL : "x", 0});
+        REQUIRE(requests[i] != NULL);
+        CHECK_EQ_INT(requests[i]->len, 0);
+        CHECK_EQ_INT(requests[i]->data[0], '\0');
     }
 
 zb_cleanup:
-    zb_record_free(records[0]);
-    zb_record_free(records[1]);
+    zb_ingest_request_free(requests[0]);
+    zb_ingest_request_free(requests[1]);
 }
 
 static void test_null_input_and_free(void)
 {
-    zb_record_t *record = zb_record_new((zerobus_string_view_t){NULL, 1});
-    CHECK(record == NULL);
-    zb_record_free(record);
-    zb_record_free(NULL);
+    zb_ingest_request_t *request =
+        zb_ingest_request_new((zerobus_string_view_t){NULL, 1});
+    CHECK(request == NULL);
+    zb_ingest_request_free(request);
+    zb_ingest_request_free(NULL);
+}
+
+static void test_allocation_size_overflow(void)
+{
+    const size_t lengths[] = {SIZE_MAX, SIZE_MAX - sizeof(zb_ingest_request_t)};
+    for (unsigned int i = 0; i < 2; i++) {
+        zb_ingest_request_t *request =
+            zb_ingest_request_new((zerobus_string_view_t){"x", lengths[i]});
+        CHECK(request == NULL);
+        zb_ingest_request_free(request);
+    }
 }
 
 int main(void)
 {
-    test_record_owns_exact_length_copy();
-    test_empty_records();
+    test_request_owns_exact_length_copy();
+    test_empty_requests();
     test_null_input_and_free();
+    test_allocation_size_overflow();
     TEST_MAIN_RETURN();
 }

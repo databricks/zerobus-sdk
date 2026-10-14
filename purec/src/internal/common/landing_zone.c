@@ -54,11 +54,11 @@ free_zone:
 }
 
 zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
-                                      zb_record_t *record,
+                                      zb_ingest_request_t *request,
                                       zb_deadline_t deadline,
                                       zerobus_offset_t *out_offset)
 {
-    if (zone == NULL || record == NULL) {
+    if (zone == NULL || request == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (atomic_load(&zone->closed)) {
@@ -73,7 +73,7 @@ zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
         return ZEROBUS_STATUS_FAILED_PRECONDITION;
     }
     uint64_t position;
-    while ((status = zb_queue_push(zone->queue, record, &position)) ==
+    while ((status = zb_queue_push(zone->queue, request, &position)) ==
            ZEROBUS_STATUS_RESOURCE_EXHAUSTED) {
         zb_thread_yield();
     }
@@ -90,7 +90,7 @@ zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
 
 zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
                                          zb_deadline_t deadline,
-                                         zb_record_t **out_record,
+                                         zb_ingest_request_t **out_request,
                                          zerobus_offset_t *out_offset)
 {
     if (zone == NULL) {
@@ -101,13 +101,13 @@ zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
         return status;
     }
     uint64_t position;
-    zb_record_t *record;
-    while ((record = (zb_record_t *)zb_queue_advance(zone->queue, &position)) ==
-           NULL) {
+    zb_ingest_request_t *request;
+    while ((request = (zb_ingest_request_t *)zb_queue_advance(
+                zone->queue, &position)) == NULL) {
         zb_thread_yield();
     }
-    if (out_record != NULL) {
-        *out_record = record;
+    if (out_request != NULL) {
+        *out_request = request;
     }
     if (out_offset != NULL) {
         *out_offset = position;
@@ -115,21 +115,22 @@ zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
     return ZEROBUS_STATUS_OK;
 }
 
-zb_record_t *zb_landing_zone_pop(zb_landing_zone_t *zone,
-                                 zerobus_offset_t *out_offset)
+zb_ingest_request_t *zb_landing_zone_pop(zb_landing_zone_t *zone,
+                                         zerobus_offset_t *out_offset)
 {
     if (zone == NULL) {
         return NULL;
     }
     uint64_t position;
-    zb_record_t *record = (zb_record_t *)zb_queue_pop(zone->queue, &position);
-    if (record != NULL) {
+    zb_ingest_request_t *request =
+        (zb_ingest_request_t *)zb_queue_pop(zone->queue, &position);
+    if (request != NULL) {
         (void)zb_sem_post(&zone->space);
         if (out_offset != NULL) {
             *out_offset = position;
         }
     }
-    return record;
+    return request;
 }
 
 zerobus_status_t zb_landing_zone_reset_observe(zb_landing_zone_t *zone)
@@ -163,9 +164,10 @@ void zb_landing_zone_free(zb_landing_zone_t *zone)
     }
     while (zb_queue_advance(zone->queue, NULL) != NULL) {
     }
-    zb_record_t *record;
-    while ((record = (zb_record_t *)zb_queue_pop(zone->queue, NULL)) != NULL) {
-        zb_record_free(record);
+    zb_ingest_request_t *request;
+    while ((request = (zb_ingest_request_t *)zb_queue_pop(zone->queue, NULL)) !=
+           NULL) {
+        zb_ingest_request_free(request);
     }
     zb_queue_free(zone->queue);
     (void)zb_sem_destroy(&zone->items);
