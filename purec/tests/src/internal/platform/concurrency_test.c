@@ -1,7 +1,7 @@
 /* Offline concurrency tests coordinate through predicates, never sleeps. */
 #include <stdlib.h>
 
-#include "internal/concurrency.h"
+#include "internal/platform/concurrency.h"
 #include "test_common.h"
 
 enum { WORKERS = 4, INCREMENTS = 1000, WAIT_TIMEOUT_MS = 5000 };

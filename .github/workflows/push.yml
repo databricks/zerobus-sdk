@@ -74,6 +74,7 @@ jobs:
               - '.github/workflows/ci-purego.yml'
             purec:
               - 'purec/**'
+              - 'rust/sdk/zerobus_service.proto'
               - '.github/workflows/ci-purec.yml'
             cpp:
               - 'cpp/**'

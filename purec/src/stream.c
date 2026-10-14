@@ -3,9 +3,9 @@
 #include <stdlib.h>
 
 #include "error.h"
-#include "internal/log.h"
+#include "internal/common/utils.h"
+#include "internal/platform/log.h"
 #include "sdk.h"
-#include "utils.h"
 #include "zerobus/sdk.h"
 #include "zerobus/stream.h"
 
@@ -197,6 +197,10 @@ zerobus_status_t zerobus_stream_ingest_json_record(
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "record of %zu bytes exceeds the %u-byte limit",
                        json_record.len, (unsigned)ZB_MAX_PAYLOAD_BYTES);
+    }
+    if (!zb_is_valid_string(json_record)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "record must be valid UTF-8 without embedded NUL");
     }
 
     /* TODO: copy the record, assign its offset, and queue it for the sender. On

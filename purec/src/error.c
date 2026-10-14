@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "error.h"
-#include "internal/log.h"
+#include "internal/platform/log.h"
 #include "zerobus/common.h"
 #include "zerobus/error.h"
 

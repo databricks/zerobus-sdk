@@ -6,7 +6,8 @@ JOBS ?= 4
 SANITIZE ?=
 SANITIZE_FLAG := $(if $(SANITIZE),-DZEROBUS_SANITIZE=$(SANITIZE),)
 
-# Extra -D flags forwarded to cmake configure (lint sets -DZEROBUS_WERROR=ON).
+# Extra -D flags forwarded to CMake configure or proto/generate-proto.cmake.
+# lint sets -DZEROBUS_WERROR=ON.
 CMAKE_EXTRA ?=
 
 # Sanitizer builds use their own build dir so they don't clash with a normal
@@ -27,23 +28,29 @@ GCOV ?= $(shell \
 		else echo gcov; \
 	fi)
 
-# All hand-written C sources (excludes the CMake build tree).
+# All hand-written C sources (excludes build trees and generated).
 SOURCES := $(shell find include src examples tests -name '*.c' -o -name '*.h' 2>/dev/null)
 
-.PHONY: help configure build test examples lint fmt fmt-check clean check verify coverage
+.PHONY: help configure build test examples lint fmt fmt-check clean check verify coverage generate-proto
 
 help:
 	@echo "Available targets:"
-	@echo "  make build      - Configure and build the SDK, examples, and tests"
-	@echo "  make test       - Build and run the offline test suite (ctest)"
-	@echo "  make examples   - Build the example binaries"
-	@echo "  make fmt        - Format all C sources with clang-format"
-	@echo "  make fmt-check  - Check formatting without modifying files"
-	@echo "  make lint       - Warnings-as-errors build (-Werror)"
-	@echo "  make check      - fmt-check + lint (static gates, no tests)"
-	@echo "  make verify     - Full workspace check: check + tests, plain and sanitized"
-	@echo "  make coverage   - Coverage build+test, then gcov: read .gcov files for uncovered lines (#####)"
-	@echo "  make clean      - Remove the build dirs (build and build-*)"
+	@echo "  make build          - Configure and build the SDK, examples, and tests"
+	@echo "  make test           - Build and run the offline test suite (ctest)"
+	@echo "  make examples       - Build the example binaries"
+	@echo "  make fmt            - Format all C sources with clang-format"
+	@echo "  make fmt-check      - Check formatting without modifying files"
+	@echo "  make lint           - Warnings-as-errors build (-Werror)"
+	@echo "  make check          - fmt-check + lint (static gates, no tests)"
+	@echo "  make verify         - Full workspace check: check + tests, plain and sanitized"
+	@echo "  make coverage       - Coverage build+test, then gcov: read .gcov files for uncovered lines (#####)"
+	@echo "  make clean          - Remove build dirs (build and build-*)"
+	@echo "  make generate-proto - Regenerate protobuf-c sources under proto/generated/"
+	@echo ""
+	@echo "  Builds require a C toolchain, CMake, and libprotobuf-c headers/library."
+	@echo "  Regeneration additionally requires the tools pinned in proto/generate-proto.cmake."
+	@echo "  Override generation paths with CMAKE_EXTRA='-DGENERATED_DIR=..."
+	@echo "    -DPROTOC_EXECUTABLE=... -DPROTOC_GEN_C_EXECUTABLE=...'."
 	@echo ""
 	@echo "  Add SANITIZE=address (or thread/undefined) to build+test with a"
 	@echo "  sanitizer, e.g. 'make test SANITIZE=address'."
@@ -98,3 +105,7 @@ coverage:
 
 clean:
 	rm -rf build build-*
+
+# Regeneration is a contributor operation, normal builds use committed sources.
+generate-proto:
+	cmake $(CMAKE_EXTRA) -P proto/generate-proto.cmake
