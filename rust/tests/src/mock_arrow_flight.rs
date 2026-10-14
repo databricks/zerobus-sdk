@@ -1,6 +1,6 @@
 //! Mock Arrow Flight server for testing the Arrow Flight SDK functionality.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -152,6 +152,8 @@ pub enum MockFlightResponse {
 pub struct MockFlightServer {
     /// Responses to inject for each table
     responses: Arc<Mutex<HashMap<String, Vec<MockFlightResponse>>>>,
+    /// Optional scripts consumed once per DoPut, for independent mux lanes/reconnects.
+    connection_scripts: Arc<Mutex<HashMap<String, VecDeque<Vec<MockFlightResponse>>>>>,
     connection_count: Arc<AtomicU64>,
     /// Track the maximum offset received from clients
     max_offset_received: Arc<Mutex<i64>>,
@@ -188,6 +190,7 @@ impl MockFlightServer {
     pub fn new() -> Self {
         Self {
             responses: Arc::new(Mutex::new(HashMap::new())),
+            connection_scripts: Arc::new(Mutex::new(HashMap::new())),
             connection_count: Arc::new(AtomicU64::new(0)),
             max_offset_received: Arc::new(Mutex::new(-1)),
             batch_count: Arc::new(Mutex::new(0)),
@@ -225,6 +228,17 @@ impl MockFlightServer {
 
         let mut indices = self.response_indices.lock().await;
         indices.insert(table_name.to_string(), 0);
+    }
+
+    pub async fn inject_connection_scripts(
+        &self,
+        table: &str,
+        scripts: Vec<Vec<MockFlightResponse>>,
+    ) {
+        self.connection_scripts
+            .lock()
+            .await
+            .insert(table.into(), scripts.into());
     }
 
     pub fn connection_count(&self) -> u64 {
@@ -378,7 +392,18 @@ impl FlightService for MockFlightServer {
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
 
-        self.connection_count.fetch_add(1, Ordering::Relaxed);
+        let connection_id = self.connection_count.fetch_add(1, Ordering::Relaxed);
+        let connection_script = self
+            .connection_scripts
+            .lock()
+            .await
+            .get_mut(&table_name)
+            .and_then(VecDeque::pop_front);
+        let response_key = if connection_script.is_some() {
+            format!("{table_name}#connection-{connection_id}")
+        } else {
+            table_name.clone()
+        };
         let responses = Arc::clone(&self.responses);
         let max_offset_received = Arc::clone(&self.max_offset_received);
         let batch_count = Arc::clone(&self.batch_count);
@@ -419,9 +444,12 @@ impl FlightService for MockFlightServer {
                 }
             }
 
+            if let Some(script) = connection_script {
+                stream_responses = script;
+            }
             let mut response_index = {
                 let indices = response_indices.lock().await;
-                *indices.get(&table_name).unwrap_or(&0)
+                *indices.get(&response_key).unwrap_or(&0)
             };
 
             let clean_request_eof = loop {
@@ -483,7 +511,7 @@ impl FlightService for MockFlightServer {
                             response_index += 1;
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             if delay_ms > 0 {
                                 delayed_setup_armed.notify_one();
@@ -634,7 +662,7 @@ impl FlightService for MockFlightServer {
                                 // Update response index
                                 {
                                     let mut indices = response_indices.lock().await;
-                                    indices.insert(table_name.clone(), response_index);
+                                    indices.insert(response_key.clone(), response_index);
                                 }
                             }
                         }
@@ -653,7 +681,7 @@ impl FlightService for MockFlightServer {
                             // Save response index before returning so next connection continues from here
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             let _ = tx.send(Err(status.clone())).await;
                             return;
@@ -665,7 +693,7 @@ impl FlightService for MockFlightServer {
                             response_index += 1;
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             let _ = tx.send(Err(status)).await;
                             return;
@@ -679,7 +707,7 @@ impl FlightService for MockFlightServer {
                             response_index += 1;
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             let _ = tx.send(Err(status)).await;
                             return;
@@ -694,7 +722,7 @@ impl FlightService for MockFlightServer {
                             // Save response index before returning so next connection continues from here
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             return;
                         }
@@ -731,7 +759,7 @@ impl FlightService for MockFlightServer {
                             response_index += 1;
                             {
                                 let mut indices = response_indices.lock().await;
-                                indices.insert(table_name.clone(), response_index);
+                                indices.insert(response_key.clone(), response_index);
                             }
                             // Continue processing - the main loop waits for more batches.
                             // During grace period the client won't send new batches,
@@ -865,6 +893,7 @@ async fn start_mock_flight_server_inner(
     let mock_server = MockFlightServer::new();
     let server_clone = MockFlightServer {
         responses: Arc::clone(&mock_server.responses),
+        connection_scripts: Arc::clone(&mock_server.connection_scripts),
         connection_count: Arc::clone(&mock_server.connection_count),
         max_offset_received: Arc::clone(&mock_server.max_offset_received),
         batch_count: Arc::clone(&mock_server.batch_count),
