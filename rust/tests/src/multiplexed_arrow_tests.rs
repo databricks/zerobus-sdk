@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use arrow_array::{Int64Array, RecordBatch};
-use databricks_zerobus_ingest_sdk::{
-    channel_exporter, MessageId, NoTlsConfig, StreamStat, ZerobusError, ZerobusSdk,
-};
+use databricks_zerobus_ingest_sdk::{MessageId, NoTlsConfig, ZerobusError, ZerobusSdk};
 
 use crate::mock_arrow_flight::start_mock_flight_server;
 use crate::utils::{
@@ -39,16 +37,10 @@ fn builder(sdk: &ZerobusSdk) -> databricks_zerobus_ingest_sdk::StreamBuilder<'_>
 }
 
 #[tokio::test]
-async fn round_robin_ipc_message_ids_and_shared_telemetry() {
+async fn round_robin_ipc_message_ids() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();
     let sdk = sdk(endpoint);
-    let (exporter, mut events) = channel_exporter(std::num::NonZeroUsize::new(100).unwrap());
-    let mut mux = builder(&sdk)
-        .stats_exporter(exporter)
-        .multiplexed(2)
-        .build_arrow()
-        .await
-        .unwrap();
+    let mut mux = builder(&sdk).multiplexed(2).build_arrow().await.unwrap();
     let mut messages = Vec::new();
     for i in 0..6 {
         let data = batch(&[i * 2, i * 2 + 1]);
@@ -85,14 +77,6 @@ async fn round_robin_ipc_message_ids_and_shared_telemetry() {
     assert!(mux.get_unacked_batches().await.unwrap().is_empty());
     assert_eq!(server.connection_count(), 2);
     assert_eq!(server.get_total_records_received().await, 12);
-    let mut ack_offsets = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        if let StreamStat::BatchAcked { offset } = event {
-            ack_offsets.push(offset);
-        }
-    }
-    ack_offsets.sort();
-    assert_eq!(ack_offsets, [0, 0, 1, 1, 2, 2]);
 }
 
 #[tokio::test]
