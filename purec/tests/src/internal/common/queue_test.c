@@ -25,7 +25,7 @@ enum {
 struct stress {
     zb_queue_t *queue;
     unsigned int values[STRESS_ITEMS];
-    size_t positions[STRESS_ITEMS];
+    uint64_t positions[STRESS_ITEMS];
     atomic_uint advanced;
     atomic_uint consumed;
     atomic_bool stop; /* set when the test bails out early */
@@ -42,7 +42,7 @@ struct worker {
     zerobus_status_t status;
     unsigned int count;
     unsigned int got[STRESS_ITEMS];
-    size_t got_positions[STRESS_ITEMS];
+    uint64_t got_positions[STRESS_ITEMS];
 };
 
 /* Spin on a full or empty queue: the queue never blocks. */
@@ -72,7 +72,7 @@ static void *run_worker(void *arg)
     atomic_uint *done =
         worker->role == ROLE_ADVANCE ? &stress->advanced : &stress->consumed;
     while (atomic_load(done) < STRESS_ITEMS && !atomic_load(&stress->stop)) {
-        size_t position;
+        uint64_t position;
         void *item = worker->role == ROLE_ADVANCE
                          ? zb_queue_advance(stress->queue, &position)
                          : zb_queue_pop(stress->queue, &position);
@@ -119,7 +119,7 @@ static void test_new_rejects_invalid_arguments(void)
 static void test_null_queue_rejected(void)
 {
     int value = 0;
-    size_t position = 99;
+    uint64_t position = 99;
     /* push reports the bad argument; advance, peek and pop can only signal it
      * by returning NULL. None writes out_position. */
     CHECK_EQ_INT(zb_queue_push(NULL, &value, &position),
@@ -127,6 +127,7 @@ static void test_null_queue_rejected(void)
     CHECK(zb_queue_advance(NULL, &position) == NULL);
     CHECK(zb_queue_peek(NULL, &position) == NULL);
     CHECK(zb_queue_pop(NULL, &position) == NULL);
+    CHECK_EQ_INT(zb_queue_rewind(NULL), 0);
     CHECK_EQ_INT(position, 99);
 }
 
@@ -134,21 +135,33 @@ static void test_empty_queue_returns_null(void)
 {
     zb_queue_t *queue = NULL;
     int value = 0;
-    size_t position = 99;
+    const uint64_t sentinel = UINT64_C(1) << 32;
+    uint64_t position = sentinel;
     REQUIRE_OK(zb_queue_new(4, &queue));
+    CHECK_EQ_INT(zb_queue_rewind(queue), 0);
     CHECK(zb_queue_advance(queue, &position) == NULL);
     CHECK(zb_queue_peek(queue, &position) == NULL);
     CHECK(zb_queue_pop(queue, &position) == NULL);
     /* Returning no item leaves the position unchanged. */
-    CHECK_EQ_INT(position, 99);
+    CHECK_EQ_INT(position, sentinel);
 
     /* An item not advanced yet cannot be peeked at or popped. */
     CHECK_OK(zb_queue_push(queue, &value, NULL));
+    CHECK_EQ_INT(zb_queue_rewind(queue), 0);
     CHECK(zb_queue_peek(queue, &position) == NULL);
     CHECK(zb_queue_pop(queue, &position) == NULL);
-    CHECK_EQ_INT(position, 99);
+    CHECK_EQ_INT(position, sentinel);
     CHECK(zb_queue_advance(queue, &position) == &value);
     CHECK_EQ_INT(position, 0);
+
+    /* Successful operations overwrite the complete 64-bit output. */
+    position = sentinel;
+    CHECK(zb_queue_peek(queue, &position) == &value);
+    CHECK_EQ_INT(position, 0);
+    position = sentinel;
+    CHECK(zb_queue_pop(queue, &position) == &value);
+    CHECK_EQ_INT(position, 0);
+    CHECK_EQ_INT(zb_queue_rewind(queue), 0);
 
 zb_cleanup:
     zb_queue_free(queue);
@@ -158,11 +171,12 @@ static void test_push_rejects_null_item(void)
 {
     zb_queue_t *queue = NULL;
     int value = 0;
-    size_t position = 99;
+    const uint64_t sentinel = UINT64_C(1) << 32;
+    uint64_t position = sentinel;
     REQUIRE_OK(zb_queue_new(4, &queue));
     CHECK_EQ_INT(zb_queue_push(queue, NULL, &position),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(position, 99);
+    CHECK_EQ_INT(position, sentinel);
     CHECK(zb_queue_advance(queue, NULL) == NULL);
 
     /* The rejected push took no position. */
@@ -177,7 +191,7 @@ static void test_positions_are_optional(void)
 {
     zb_queue_t *queue = NULL;
     int values[2] = {0, 1};
-    size_t position = 99;
+    uint64_t position = 99;
     REQUIRE_OK(zb_queue_new(4, &queue));
 
     /* A push without an out_position still takes its position. */
@@ -201,7 +215,7 @@ static void test_advance_follows_push_order(void)
 {
     zb_queue_t *queue = NULL;
     int values[3] = {0, 1, 2};
-    size_t position;
+    uint64_t position;
     REQUIRE_OK(zb_queue_new(4, &queue));
     for (unsigned int i = 0; i < 3; i++) {
         CHECK_OK(zb_queue_push(queue, &values[i], &position));
@@ -225,7 +239,7 @@ static void test_pop_follows_advance_order(void)
 {
     zb_queue_t *queue = NULL;
     int values[3] = {0, 1, 2};
-    size_t position;
+    uint64_t position;
     REQUIRE_OK(zb_queue_new(4, &queue));
     for (unsigned int i = 0; i < 3; i++) {
         CHECK_OK(zb_queue_push(queue, &values[i], NULL));
@@ -255,7 +269,7 @@ static void test_full_until_pop(void)
 {
     zb_queue_t *queue = NULL;
     int values[5] = {0, 1, 2, 3, 4};
-    size_t position;
+    uint64_t position;
     REQUIRE_OK(zb_queue_new(4, &queue));
     for (unsigned int i = 0; i < 4; i++) {
         CHECK_OK(zb_queue_push(queue, &values[i], &position));
@@ -286,7 +300,7 @@ static void test_wraparound_preserves_order(void)
 {
     zb_queue_t *queue = NULL;
     int values[WRAPPED_ITEMS] = {0};
-    size_t position;
+    uint64_t position;
     REQUIRE_OK(zb_queue_new(4, &queue));
 
     /* Keep two items held so every counter wraps the ring many times. */
@@ -318,11 +332,85 @@ zb_cleanup:
     zb_queue_free(queue);
 }
 
+static void test_rewind_retains_items_and_positions(void)
+{
+    zb_queue_t *queue = NULL;
+    int values[6] = {0};
+    uint64_t position = 99;
+    REQUIRE_OK(zb_queue_new(4, &queue));
+    for (unsigned int i = 0; i < 4; i++) {
+        CHECK_OK(zb_queue_push(queue, &values[i], NULL));
+    }
+    for (unsigned int i = 0; i < 3; i++) {
+        CHECK(zb_queue_advance(queue, NULL) == &values[i]);
+    }
+    CHECK(zb_queue_pop(queue, NULL) == &values[0]);
+
+    /* Only positions 1 and 2 move back; 0 is gone and 3 is unadvanced. */
+    CHECK_EQ_INT(zb_queue_rewind(queue), 2);
+    CHECK_EQ_INT(zb_queue_rewind(queue), 0);
+    CHECK(zb_queue_peek(queue, NULL) == NULL);
+    CHECK(zb_queue_pop(queue, NULL) == NULL);
+    CHECK_OK(zb_queue_push(queue, &values[4], &position));
+    CHECK_EQ_INT(position, 4);
+    CHECK_EQ_INT(zb_queue_push(queue, &values[5], NULL),
+                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+
+    for (unsigned int i = 1; i < 5; i++) {
+        CHECK(zb_queue_advance(queue, &position) == &values[i]);
+        CHECK_EQ_INT(position, i);
+        CHECK(zb_queue_pop(queue, &position) == &values[i]);
+        CHECK_EQ_INT(position, i);
+    }
+    CHECK(zb_queue_advance(queue, NULL) == NULL);
+    CHECK(zb_queue_pop(queue, NULL) == NULL);
+
+zb_cleanup:
+    zb_queue_free(queue);
+}
+
+static void test_rewind_full_ring_across_wraparound(void)
+{
+    zb_queue_t *queue = NULL;
+    int values[8] = {0};
+    uint64_t position = 99;
+    REQUIRE_OK(zb_queue_new(4, &queue));
+    for (unsigned int i = 0; i < 3; i++) {
+        CHECK_OK(zb_queue_push(queue, &values[i], NULL));
+        CHECK(zb_queue_advance(queue, NULL) == &values[i]);
+        CHECK(zb_queue_pop(queue, NULL) == &values[i]);
+    }
+    for (unsigned int i = 3; i < 7; i++) {
+        CHECK_OK(zb_queue_push(queue, &values[i], NULL));
+        CHECK(zb_queue_advance(queue, NULL) == &values[i]);
+    }
+    /* The retained range covers slots 3, 0, 1 and 2. */
+    for (unsigned int replay = 0; replay < 2; replay++) {
+        CHECK_EQ_INT(zb_queue_rewind(queue), 4);
+        CHECK_EQ_INT(zb_queue_push(queue, &values[7], NULL),
+                     ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+        for (unsigned int i = 3; i < 7; i++) {
+            CHECK(zb_queue_advance(queue, &position) == &values[i]);
+            CHECK_EQ_INT(position, i);
+        }
+        CHECK(zb_queue_advance(queue, NULL) == NULL);
+    }
+    for (unsigned int i = 3; i < 7; i++) {
+        CHECK(zb_queue_pop(queue, &position) == &values[i]);
+        CHECK_EQ_INT(position, i);
+    }
+    CHECK_OK(zb_queue_push(queue, &values[7], &position));
+    CHECK_EQ_INT(position, 7);
+
+zb_cleanup:
+    zb_queue_free(queue);
+}
+
 static void test_drain_returns_every_item(void)
 {
     zb_queue_t *queue = NULL;
     int values[4] = {0, 1, 2, 3};
-    size_t position;
+    uint64_t position;
     REQUIRE_OK(zb_queue_new(4, &queue));
     for (unsigned int i = 0; i < 4; i++) {
         CHECK_OK(zb_queue_push(queue, &values[i], NULL));
@@ -414,7 +502,7 @@ static void test_concurrent_stages_keep_push_order(void)
     /* Positions are 0..STRESS_ITEMS-1, each returned once, and increase in
      * each producer's push order. */
     for (unsigned int value = 0; value < STRESS_ITEMS; value++) {
-        size_t position = stress->positions[value];
+        uint64_t position = stress->positions[value];
         REQUIRE(position < STRESS_ITEMS);
         claimed[position]++;
         if (value % ITEMS_PER_PRODUCER != 0) {
@@ -431,7 +519,7 @@ static void test_concurrent_stages_keep_push_order(void)
         long long last = -1;
         for (unsigned int k = 0; k < workers[i].count; k++) {
             unsigned int value = workers[i].got[k];
-            size_t position = workers[i].got_positions[k];
+            uint64_t position = workers[i].got_positions[k];
             REQUIRE(value < STRESS_ITEMS);
             counts[value]++;
             /* Advance and pop report the position push returned. */
@@ -476,6 +564,8 @@ int main(void)
     test_pop_follows_advance_order();
     test_full_until_pop();
     test_wraparound_preserves_order();
+    test_rewind_retains_items_and_positions();
+    test_rewind_full_ring_across_wraparound();
     test_drain_returns_every_item();
     test_free_leaves_items_to_caller();
     test_concurrent_stages_keep_push_order();

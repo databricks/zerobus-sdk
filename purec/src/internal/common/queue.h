@@ -2,6 +2,7 @@
 #define ZB_QUEUE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "zerobus/common.h"
 
@@ -13,6 +14,7 @@
  *
  * push, advance and pop may each run concurrently from any number of threads.
  * peek must not run concurrently with pop (see peek).
+ * rewind may run concurrently with push and peek (see rewind).
  * new and free are exclusive.
  *
  * An item's position is 0 for the first item pushed, then consecutive.
@@ -36,7 +38,7 @@ zerobus_status_t zb_queue_new(size_t capacity, zb_queue_t **out_queue);
  * full. Advanced items occupy slots too: only pop frees one.
  */
 zerobus_status_t zb_queue_push(zb_queue_t *queue, void *item,
-                               size_t *out_position);
+                               uint64_t *out_position);
 
 /* The oldest item not advanced yet, now advanced and still held by the
  * queue. NULL when no item is waiting to advance, including one whose push
@@ -44,7 +46,7 @@ zerobus_status_t zb_queue_push(zb_queue_t *queue, void *item,
  *
  * The returned pointer can dangle if a concurrent pop's caller frees the item.
  * Callers that dereference it must coordinate that. */
-void *zb_queue_advance(zb_queue_t *queue, size_t *out_position);
+void *zb_queue_advance(zb_queue_t *queue, uint64_t *out_position);
 
 /* The oldest advanced item, still held by the queue. NULL when no advanced
  * item is waiting, also NULL for a NULL queue.
@@ -53,12 +55,17 @@ void *zb_queue_advance(zb_queue_t *queue, size_t *out_position);
  * slot, so peek can read a torn or replaced item, or return a position that no
  * longer matches the item (a data race on queue storage). Any number of
  * concurrent push and advance calls are fine. */
-void *zb_queue_peek(const zb_queue_t *queue, size_t *out_position);
+void *zb_queue_peek(const zb_queue_t *queue, uint64_t *out_position);
 
 /* Remove the oldest advanced item and hand it to the caller. NULL when no
  * advanced item is waiting, including one whose advance has not published it
  * yet, also NULL for a NULL queue. */
-void *zb_queue_pop(zb_queue_t *queue, size_t *out_position);
+void *zb_queue_pop(zb_queue_t *queue, uint64_t *out_position);
+
+/* Move all advanced items back to the first part, keeping their positions.
+ * Returns the number moved, or 0 for NULL. May run concurrently with push and
+ * peek. Must be serialized with advance, pop and other rewind calls. */
+size_t zb_queue_rewind(zb_queue_t *queue);
 
 /* Frees the queue but not the items it still holds, those remain the caller's.
  * To get them back, drain first: advance until NULL, then pop until NULL.

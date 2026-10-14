@@ -13,11 +13,11 @@
  * How the queue looks. Example: capacity 8, after 18 pushes, 15 advances and
  * 13 pops.
  *
- * Positions count up forever, one per pushed item. The three counters split
+ * Positions use 64-bit counters, one per pushed item. The counters split
  * them into regions: [head, cursor) is the second part, [cursor, tail) the
  * first part, and [tail, head + capacity) the free slots. The counters never
  * pass each other, and tail never gets more than capacity ahead of head:
- * head <= cursor <= tail <= head + capacity.
+ * head <= cursor <= tail <= head + capacity, modulo 2^64.
  *
  *                    head      cursor         tail
  *                    v         v              v
@@ -38,9 +38,9 @@
  *   seq == p + 2         in the second part: advanced, waiting to be popped
  *   seq == p + capacity  popped: free again, now for position p + capacity
  *
- * Each slot cycles through first part, second part and free, and its seq only
- * ever increases. In the diagram below, a free slot shows the position that
- * will use it next.
+ * Each slot cycles through first part, second part and free, with increasing
+ * sequence numbers. In the diagram below, a free slot shows the position
+ * that will use it next.
  *
  *    slot        0    1    2    3    4    5    6    7
  *              +----+----+----+----+----+----+----+----+
@@ -51,7 +51,7 @@
  *                          ^              ^         ^
  *                          tail           head      cursor
  *
- * Each operation claims the position under its own counter with a CAS, but
+ * Each push, advance or pop claims its counter's position with a CAS, but
  * only once that position's slot is in the stage the operation requires: free
  * for push, first part for advance, second part for pop. It then hands the
  * slot to the next stage with a release store of its seq:
@@ -74,6 +74,10 @@
  *     in the first part (seq head or head + 1, behind head + 2);
  *   - in flight: another operation has moved its counter but not yet stored
  *     the new seq, so the slot still reads as the previous stage.
+ *
+ * Rewind moves second-part slots back to the first part and resets cursor to
+ * head. It is the exception to sequence-number monotonicity: each rewound
+ * slot's seq decreases by one.
  */
 
 enum { STAGE_PUSH = 0, STAGE_ADVANCE = 1, STAGE_POP = 2 };
@@ -86,8 +90,10 @@ enum { STAGE_PUSH = 0, STAGE_ADVANCE = 1, STAGE_POP = 2 };
 #define ZB_CACHE_LINE 64
 #endif
 
+typedef _Atomic(uint64_t) counter_t;
+
 struct slot {
-    atomic_size_t seq;
+    counter_t seq;
     void *item; /* borrowed */
 };
 
@@ -97,30 +103,30 @@ struct zb_queue {
 
     /* Keep each counter on its own cache line. */
     char pad_config[ZB_CACHE_LINE];
-    atomic_size_t head; /* next position to pop */
-    char pad_head[ZB_CACHE_LINE - sizeof(atomic_size_t)];
-    atomic_size_t cursor; /* next position to advance */
-    char pad_cursor[ZB_CACHE_LINE - sizeof(atomic_size_t)];
-    atomic_size_t tail; /* next position to push */
+    counter_t head; /* next position to pop */
+    char pad_head[ZB_CACHE_LINE - sizeof(counter_t)];
+    counter_t cursor; /* next position to advance */
+    char pad_cursor[ZB_CACHE_LINE - sizeof(counter_t)];
+    counter_t tail; /* next position to push */
 };
 
 /* True when seq has not reached expected yet (modular comparison). */
-static bool is_behind(size_t seq, size_t expected)
+static bool is_behind(uint64_t seq, uint64_t expected)
 {
-    return seq - expected > SIZE_MAX / 2;
+    return seq - expected > UINT64_MAX / 2;
 }
 
 /*
  * Claim the next position of counter once its slot reaches stage. NULL when
  * that slot is behind, i.e. the previous stage has not finished with it.
  */
-static struct slot *claim(zb_queue_t *queue, atomic_size_t *counter,
-                          size_t stage, size_t *out_position)
+static struct slot *claim(zb_queue_t *queue, counter_t *counter, uint64_t stage,
+                          uint64_t *out_position)
 {
     for (;;) {
-        size_t position = atomic_load_explicit(counter, memory_order_relaxed);
+        uint64_t position = atomic_load_explicit(counter, memory_order_relaxed);
         struct slot *slot = &queue->slots[position & (queue->capacity - 1)];
-        size_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
+        uint64_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
         if (is_behind(seq, position + stage)) {
             return NULL;
         }
@@ -161,12 +167,12 @@ zerobus_status_t zb_queue_new(size_t capacity, zb_queue_t **out_queue)
 }
 
 zerobus_status_t zb_queue_push(zb_queue_t *queue, void *item,
-                               size_t *out_position)
+                               uint64_t *out_position)
 {
     if (queue == NULL || item == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    size_t position;
+    uint64_t position;
     struct slot *slot = claim(queue, &queue->tail, STAGE_PUSH, &position);
     if (slot == NULL) {
         return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
@@ -180,12 +186,12 @@ zerobus_status_t zb_queue_push(zb_queue_t *queue, void *item,
     return ZEROBUS_STATUS_OK;
 }
 
-void *zb_queue_advance(zb_queue_t *queue, size_t *out_position)
+void *zb_queue_advance(zb_queue_t *queue, uint64_t *out_position)
 {
     if (queue == NULL) {
         return NULL;
     }
-    size_t position;
+    uint64_t position;
     struct slot *slot = claim(queue, &queue->cursor, STAGE_ADVANCE, &position);
     if (slot == NULL) {
         return NULL;
@@ -199,14 +205,15 @@ void *zb_queue_advance(zb_queue_t *queue, size_t *out_position)
     return item;
 }
 
-void *zb_queue_peek(const zb_queue_t *queue, size_t *out_position)
+void *zb_queue_peek(const zb_queue_t *queue, uint64_t *out_position)
 {
     if (queue == NULL) {
         return NULL;
     }
-    size_t position = atomic_load_explicit(&queue->head, memory_order_relaxed);
+    uint64_t position =
+        atomic_load_explicit(&queue->head, memory_order_relaxed);
     const struct slot *slot = &queue->slots[position & (queue->capacity - 1)];
-    size_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
+    uint64_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
     if (seq != position + STAGE_POP) {
         return NULL;
     }
@@ -216,12 +223,12 @@ void *zb_queue_peek(const zb_queue_t *queue, size_t *out_position)
     return slot->item;
 }
 
-void *zb_queue_pop(zb_queue_t *queue, size_t *out_position)
+void *zb_queue_pop(zb_queue_t *queue, uint64_t *out_position)
 {
     if (queue == NULL) {
         return NULL;
     }
-    size_t position;
+    uint64_t position;
     struct slot *slot = claim(queue, &queue->head, STAGE_POP, &position);
     if (slot == NULL) {
         return NULL;
@@ -233,6 +240,23 @@ void *zb_queue_pop(zb_queue_t *queue, size_t *out_position)
         *out_position = position;
     }
     return item;
+}
+
+size_t zb_queue_rewind(zb_queue_t *queue)
+{
+    if (queue == NULL) {
+        return 0;
+    }
+    uint64_t head = atomic_load_explicit(&queue->head, memory_order_relaxed);
+    uint64_t cursor =
+        atomic_load_explicit(&queue->cursor, memory_order_relaxed);
+    for (uint64_t position = head; position != cursor; position++) {
+        struct slot *slot = &queue->slots[position & (queue->capacity - 1)];
+        atomic_store_explicit(&slot->seq, position + STAGE_ADVANCE,
+                              memory_order_relaxed);
+    }
+    atomic_store_explicit(&queue->cursor, head, memory_order_relaxed);
+    return cursor - head;
 }
 
 void zb_queue_free(zb_queue_t *queue)

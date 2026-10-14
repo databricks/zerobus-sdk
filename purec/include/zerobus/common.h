@@ -88,7 +88,7 @@ enum {
 
 /* A record's position within its stream: returned by ingest as a handle to
  * wait on, monotonically increasing. */
-typedef int64_t zerobus_offset_t;
+typedef uint64_t zerobus_offset_t;
 
 #ifdef __cplusplus
 } /* extern "C" */

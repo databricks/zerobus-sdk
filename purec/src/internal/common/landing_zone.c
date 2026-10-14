@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "internal/platform/log.h"
@@ -71,7 +72,7 @@ zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
         (void)zb_sem_post(&zone->space);
         return ZEROBUS_STATUS_FAILED_PRECONDITION;
     }
-    size_t position;
+    uint64_t position;
     while ((status = zb_queue_push(zone->queue, record, &position)) ==
            ZEROBUS_STATUS_RESOURCE_EXHAUSTED) {
         zb_thread_yield();
@@ -82,7 +83,7 @@ zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
     }
     (void)zb_sem_post(&zone->items);
     if (out_offset != NULL) {
-        *out_offset = (zerobus_offset_t)position;
+        *out_offset = position;
     }
     return ZEROBUS_STATUS_OK;
 }
@@ -99,7 +100,7 @@ zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
     if (status != ZEROBUS_STATUS_OK) {
         return status;
     }
-    size_t position;
+    uint64_t position;
     zb_record_t *record;
     while ((record = (zb_record_t *)zb_queue_advance(zone->queue, &position)) ==
            NULL) {
@@ -109,7 +110,7 @@ zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
         *out_record = record;
     }
     if (out_offset != NULL) {
-        *out_offset = (zerobus_offset_t)position;
+        *out_offset = position;
     }
     return ZEROBUS_STATUS_OK;
 }
@@ -120,15 +121,27 @@ zb_record_t *zb_landing_zone_pop(zb_landing_zone_t *zone,
     if (zone == NULL) {
         return NULL;
     }
-    size_t position;
+    uint64_t position;
     zb_record_t *record = (zb_record_t *)zb_queue_pop(zone->queue, &position);
     if (record != NULL) {
         (void)zb_sem_post(&zone->space);
         if (out_offset != NULL) {
-            *out_offset = (zerobus_offset_t)position;
+            *out_offset = position;
         }
     }
     return record;
+}
+
+zerobus_status_t zb_landing_zone_reset_observe(zb_landing_zone_t *zone)
+{
+    if (zone == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    size_t count = zb_queue_rewind(zone->queue);
+    for (size_t i = 0; i < count; i++) {
+        (void)zb_sem_post(&zone->items);
+    }
+    return ZEROBUS_STATUS_OK;
 }
 
 zerobus_status_t zb_landing_zone_close(zb_landing_zone_t *zone)

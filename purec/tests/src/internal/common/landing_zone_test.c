@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "internal/common/landing_zone.h"
@@ -118,6 +119,8 @@ static void test_invalid_arguments(void)
                                          &offset),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(zb_landing_zone_pop(NULL, &offset) == NULL);
+    CHECK_EQ_INT(zb_landing_zone_reset_observe(NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_landing_zone_close(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     zb_landing_zone_free(NULL);
     CHECK(borrowed == &marker);
@@ -133,6 +136,7 @@ static void test_empty_waits(void)
     zb_record_t marker = {0}, *borrowed = &marker;
     zerobus_offset_t offset = 99;
     REQUIRE_OK(zb_landing_zone_new(4, &zone));
+    CHECK_OK(zb_landing_zone_reset_observe(zone));
     CHECK(zb_landing_zone_pop(zone, &offset) == NULL);
     CHECK_EQ_INT(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                          &offset),
@@ -158,6 +162,7 @@ static void test_fifo_and_offsets(void)
     zb_landing_zone_t *zone = NULL;
     zb_record_t *borrowed = NULL, *owned = NULL;
     zerobus_offset_t offset = -1;
+    CHECK(offset > INT64_MAX);
     REQUIRE_OK(zb_landing_zone_new(4, &zone));
     for (unsigned int i = 0; i < 4; i++) {
         REQUIRE_OK(push_record(zone, (char)('0' + i), &offset));
@@ -251,6 +256,92 @@ static void test_full_waits_and_pop_releases_space(void)
 zb_cleanup:
     zb_record_free(owned);
     zb_record_free(pending);
+    zb_landing_zone_free(zone);
+}
+
+static void test_reset_observe_replays_retained_records(void)
+{
+    zb_landing_zone_t *zone = NULL;
+    zb_record_t *original[3] = {NULL}, *borrowed = NULL, *owned = NULL;
+    zerobus_offset_t offset = -1;
+    REQUIRE_OK(zb_landing_zone_new(4, &zone));
+    for (unsigned int i = 0; i < 4; i++) {
+        REQUIRE_OK(push_record(zone, (char)('0' + i), NULL));
+    }
+    CHECK_OK(zb_landing_zone_reset_observe(zone));
+    for (unsigned int i = 0; i < 3; i++) {
+        REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
+                                           &original[i], NULL));
+    }
+    owned = zb_landing_zone_pop(zone, NULL);
+    REQUIRE(owned != NULL);
+    CHECK(owned == original[0]);
+    zb_record_free(owned);
+    owned = NULL;
+
+    CHECK_OK(zb_landing_zone_reset_observe(zone));
+    CHECK_OK(zb_landing_zone_reset_observe(zone));
+    owned = zb_landing_zone_pop(zone, NULL);
+    REQUIRE(owned == NULL);
+    REQUIRE_OK(push_record(zone, '4', &offset));
+    CHECK_EQ_INT(offset, 4);
+    CHECK_EQ_INT(push_record(zone, '5', NULL),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+    for (unsigned int i = 1; i < 5; i++) {
+        REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
+                                           &borrowed, &offset));
+        CHECK_EQ_INT(offset, i);
+        CHECK_EQ_INT(borrowed->json[0], '0' + i);
+        if (i < 3) {
+            CHECK(borrowed == original[i]);
+        }
+        owned = zb_landing_zone_pop(zone, NULL);
+        REQUIRE(owned != NULL);
+        CHECK(owned == borrowed);
+        zb_record_free(owned);
+        owned = NULL;
+    }
+    CHECK_EQ_INT(
+        zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, NULL, NULL),
+        ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    zb_record_free(owned);
+    zb_landing_zone_free(zone);
+}
+
+static void test_reset_observe_closed_zone(void)
+{
+    zb_landing_zone_t *zone = NULL;
+    zb_record_t *borrowed = NULL, *owned = NULL;
+    zerobus_offset_t offset = -1;
+    REQUIRE_OK(zb_landing_zone_new(4, &zone));
+    for (unsigned int i = 0; i < 4; i++) {
+        REQUIRE_OK(push_record(zone, (char)('0' + i), NULL));
+        REQUIRE_OK(
+            zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, NULL, NULL));
+    }
+    CHECK_OK(zb_landing_zone_close(zone));
+    CHECK_OK(zb_landing_zone_reset_observe(zone));
+    CHECK_EQ_INT(push_record(zone, '4', NULL),
+                 ZEROBUS_STATUS_FAILED_PRECONDITION);
+    for (unsigned int i = 0; i < 4; i++) {
+        REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
+                                           &borrowed, &offset));
+        CHECK_EQ_INT(offset, i);
+        CHECK_EQ_INT(borrowed->json[0], '0' + i);
+        owned = zb_landing_zone_pop(zone, NULL);
+        REQUIRE(owned != NULL);
+        CHECK(owned == borrowed);
+        zb_record_free(owned);
+        owned = NULL;
+    }
+    CHECK_EQ_INT(
+        zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, NULL, NULL),
+        ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    zb_record_free(owned);
     zb_landing_zone_free(zone);
 }
 
@@ -385,7 +476,7 @@ static void test_close_rejects_producers(void)
     for (unsigned int i = 0; i < 4; i++) {
         join_worker(&producers[i]);
         CHECK_EQ_INT(producers[i].status, ZEROBUS_STATUS_FAILED_PRECONDITION);
-        CHECK_EQ_INT(producers[i].offset, -1);
+        CHECK(producers[i].offset == UINT64_MAX);
         CHECK_EQ_INT(producers[i].record->json[0], '4');
     }
 
@@ -404,6 +495,8 @@ int main(void)
     test_fifo_and_offsets();
     test_observe_with_optional_outputs();
     test_full_waits_and_pop_releases_space();
+    test_reset_observe_replays_retained_records();
+    test_reset_observe_closed_zone();
     test_close_rejects_push_and_allows_observe_and_pop();
     test_pop_transfers_ownership();
     test_producer_progress_after_pop();
