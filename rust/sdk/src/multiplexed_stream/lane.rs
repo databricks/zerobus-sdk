@@ -46,9 +46,6 @@ impl CapacityLimit {
     }
 }
 
-// `async_trait` emits `#[must_use]` on boxed futures, which Clippy 1.99
-// considers redundant. Keep this scoped to the private lane contract.
-#[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait MuxLane: Send + Sync {
     /// Name used in mux errors and lifecycle logs.
@@ -63,7 +60,8 @@ pub(crate) trait MuxLane: Send + Sync {
     fn capacity_context(&self) -> CapacityContext<'_>;
     /// Whether this lane has permanently stopped accepting new batches.
     fn is_terminal(&self) -> bool;
-    /// Signal background work to stop when the mux is dropped.
+    /// Start stopping background work before the lane's own `Drop` runs.
+    /// May be a no-op when `Drop` alone stops the lane.
     fn signal_shutdown(&self);
     /// Return the finalized cause; call only after `is_terminal()` is true.
     /// May wait for terminal finalization and return `None` after a clean close.

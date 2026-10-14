@@ -363,10 +363,9 @@ impl<S: MuxLane> Drop for MuxCore<S> {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
         self.closed_token.cancel();
-        // Fire cancellation on every sub-stream in parallel so their
-        // background tasks can start unwinding concurrently. The Vec drop
-        // below then runs each lane's Drop, which aborts any
-        // JoinHandles that haven't already exited.
+        // Let lanes start teardown before the Vec drop runs each lane's Drop.
+        // A lane whose Drop already stops its background work may treat this
+        // as a no-op.
         for stream in &self.streams {
             stream.signal_shutdown();
         }

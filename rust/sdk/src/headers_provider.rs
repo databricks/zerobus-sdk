@@ -38,8 +38,6 @@ use std::time::Duration;
 ///     }
 /// }
 /// ```
-// Rust 1.99 Clippy treats `async_trait`'s generated `#[must_use]` as redundant.
-#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HeadersProvider: Send + Sync {
     /// Asynchronously gets the headers for a request.
