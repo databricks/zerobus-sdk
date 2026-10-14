@@ -483,9 +483,9 @@ impl<'a> StreamBuilder<'a> {
     /// is required because those tasks outlive this call. Pass an `Arc` clone when
     /// you need to keep a handle (e.g. the [`channel_exporter`](crate::channel_exporter) pair).
     ///
-    /// Supported only by Arrow Flight streams: configuring it and then calling
-    /// [`build`](Self::build) (a non-Arrow stream) is rejected. Use
-    /// [`build_arrow`](Self::build_arrow).
+    /// Supported only by standalone Arrow Flight streams. Non-Arrow streams and
+    /// multiplexed Arrow streams reject this option. Use
+    /// [`build_arrow`](Self::build_arrow) without `.multiplexed(...)`.
     #[cfg(feature = "arrow-flight")]
     pub fn stats_exporter<E>(mut self, exporter: E) -> Self
     where
@@ -548,8 +548,8 @@ impl<'a> StreamBuilder<'a> {
     /// across sub-streams using integer division. JSON, compiled protobuf,
     /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
     /// Arrow Flight uses `.arrow(schema).multiplexed(n).build_arrow()` with the
-    /// `arrow-flight` feature. Arrow batches remain whole and callbacks are
-    /// unsupported. All lanes share the stats exporter; events retain local IDs.
+    /// `arrow-flight` feature. Arrow batches remain whole; callbacks and stats
+    /// exporters are unsupported.
     pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
         MultiplexedStreamBuilder::new(self, stream_count)
     }

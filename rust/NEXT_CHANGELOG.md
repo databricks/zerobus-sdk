@@ -25,8 +25,8 @@
 
 ### Documentation
 
-- Documented Arrow mux lifecycle, capacity, partial-ack recovery, and shared
-  lane-local telemetry; added the `arrow_multiplexed` example.
+- Documented Arrow mux lifecycle, capacity, partial-ack recovery, and telemetry
+  restrictions; added the `arrow_multiplexed` example.
 
 ### Internal Changes
 

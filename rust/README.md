@@ -851,10 +851,8 @@ rows. Results are grouped by lane, without global submission order.
 
 Construction opens all lanes concurrently with the same bounded startup jitter
 and atomic cleanup as the gRPC mux. Arrow mux streams reject both callback
-setters. All lanes share the configured `stats_exporter`; its events remain
-lane-local, carry no lane identifier, and may have overlapping offsets. This API
-is Rust-only. See the runnable [`arrow_multiplexed`](examples/arrow/multiplexed.rs)
-example.
+setters and `stats_exporter`. See the runnable
+[`arrow_multiplexed`](examples/arrow/multiplexed.rs) example.
 
 #### Avro Stream (Beta, opt-in)
 

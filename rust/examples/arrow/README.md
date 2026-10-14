@@ -212,6 +212,5 @@ the mux. Healthy message waits stay lane-specific; `flush()` attempts every lane
 After close, `get_unacked_batches()` returns only unacknowledged rows, including
 suffixes of partially acknowledged batches. Results are grouped by lane.
 
-Arrow mux streams do not support acknowledgment callbacks. A configured stats
-exporter is shared by all lanes; events carry lane-local offsets without lane
-identifiers and can be ambiguous. The API is Rust-only and requires `arrow-flight`.
+Arrow mux streams do not support acknowledgment callbacks or stats exporters.
+The API requires `arrow-flight`.

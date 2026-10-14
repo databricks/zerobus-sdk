@@ -14,8 +14,8 @@ use crate::{ZerobusArrowStream, ZerobusResult};
 /// Each lane retains Arrow's recovery and close behavior. Once an operation
 /// observes a terminal lane failure, ingestion is rejected across the mux.
 /// Healthy lanes remain alive until close or drop; their message waits remain
-/// independent of sibling failures. A shared stats exporter receives lane-local
-/// events whose offsets may overlap. Acknowledgment callbacks are unsupported.
+/// independent of sibling failures. Acknowledgment callbacks and stats exporters
+/// are unsupported.
 ///
 /// ```no_run
 /// # use databricks_zerobus_ingest_sdk::{MultiplexedArrowStream, ZerobusError};

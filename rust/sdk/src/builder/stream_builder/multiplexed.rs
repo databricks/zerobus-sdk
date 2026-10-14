@@ -75,6 +75,11 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         #[cfg(feature = "arrow-flight")]
         if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
             self.inner.validate_arrow()?;
+            if self.inner.stats_exporter.is_some() {
+                return Err(ZerobusError::InvalidArgument(
+                    "stats_exporter is not supported for multiplexed Arrow Flight streams".into(),
+                ));
+            }
             if self.max_inflight_batches_per_stream().is_none() {
                 return Err(ZerobusError::InvalidArgument(format!(
                     "max_inflight_batches ({}) must be at least stream_count ({}) for multiplexed streams",
@@ -205,8 +210,8 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     /// Opens a multiplexed Arrow Flight stream. Requires `.arrow(schema)`.
     ///
     /// Whole batches route round-robin. `max_inflight_batches` is a mux-wide
-    /// budget divided evenly across lanes (unused remainder). Callbacks are
-    /// unsupported. The stats exporter is shared; events retain lane-local IDs.
+    /// budget divided evenly across lanes (unused remainder). Callbacks and
+    /// stats exporters are unsupported.
     /// Construction is atomic and cancellation-safe, like [`Self::build`].
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<crate::MultiplexedArrowStream> {
@@ -233,7 +238,6 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .map(|(delay, headers_provider)| {
                 let table_properties = table_properties.clone();
                 let options = options.clone();
-                let stats_exporter = inner.stats_exporter.clone();
                 async move {
                     tokio::time::sleep(delay).await;
                     crate::ZerobusArrowStream::new(
@@ -244,7 +248,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
                         headers_provider,
                         options,
                         Arc::clone(&sdk.sdk_identifier),
-                        stats_exporter,
+                        None,
                     )
                     .await
                 }

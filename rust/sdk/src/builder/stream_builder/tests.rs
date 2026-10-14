@@ -596,3 +596,27 @@ async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
         );
     }
 }
+
+#[cfg(feature = "arrow-flight")]
+#[tokio::test]
+async fn arrow_mux_rejects_stats_exporter() {
+    let sdk = test_sdk();
+    let (exporter, _rx) = crate::stats::channel_exporter(std::num::NonZeroUsize::new(4).unwrap());
+    let mux = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(Arc::new(arrow_schema::Schema::empty()))
+        .stats_exporter(exporter)
+        .multiplexed(2);
+    let expected = "stats_exporter is not supported for multiplexed Arrow Flight streams";
+
+    assert!(matches!(
+        mux.validate(),
+        Err(ZerobusError::InvalidArgument(message)) if message == expected
+    ));
+    assert!(matches!(
+        mux.build_arrow().await,
+        Err(ZerobusError::InvalidArgument(message)) if message == expected
+    ));
+}
