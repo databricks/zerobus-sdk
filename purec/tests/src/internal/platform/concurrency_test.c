@@ -252,6 +252,7 @@ struct sem_fixture {
 
 struct sem_context {
     struct sem_fixture *fixture;
+    zb_deadline_t deadline;
     zerobus_status_t status;
 };
 
@@ -270,8 +271,7 @@ static void *wait_for_permit(void *arg)
         context->status = status;
     }
     if (context->status == ZEROBUS_STATUS_OK) {
-        context->status =
-            zb_sem_wait(&fixture->available, ZB_DEADLINE_INFINITE);
+        context->status = zb_sem_wait(&fixture->available, context->deadline);
     }
     if (context->status != ZEROBUS_STATUS_OK) {
         return NULL;
@@ -689,6 +689,68 @@ zb_cleanup:
     }
 }
 
+static void test_semaphore_immediate_mutex_contention(void)
+{
+    struct sem_fixture fixture = {0};
+    struct sem_context context = {&fixture, ZB_DEADLINE_IMMEDIATE,
+                                  ZEROBUS_STATUS_UNKNOWN};
+    zb_thread_t thread;
+    bool available_initialized = false;
+    bool mutex_initialized = false;
+    bool progress_initialized = false;
+    bool available_holding = false;
+    bool holding = false;
+    bool started = false;
+
+    REQUIRE_OK(zb_sem_init(&fixture.available, 1));
+    available_initialized = true;
+    REQUIRE_OK(zb_mutex_init(&fixture.mutex));
+    mutex_initialized = true;
+    REQUIRE_OK(zb_cond_init(&fixture.progress));
+    progress_initialized = true;
+    REQUIRE_OK(zb_mutex_lock(&fixture.available.mutex));
+    available_holding = true;
+    REQUIRE_OK(zb_thread_create(&thread, wait_for_permit, &context));
+    started = true;
+    REQUIRE_OK(zb_mutex_lock(&fixture.mutex));
+    holding = true;
+    zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
+    while (fixture.ready == 0) {
+        REQUIRE_OK(
+            zb_cond_wait_until(&fixture.progress, &fixture.mutex, deadline));
+    }
+    REQUIRE_OK(zb_mutex_unlock(&fixture.mutex));
+    holding = false;
+    REQUIRE_OK(zb_mutex_unlock(&fixture.available.mutex));
+    available_holding = false;
+    join_owned(&thread);
+    started = false;
+    CHECK_OK(context.status);
+    CHECK_EQ_INT(fixture.completed, 1);
+    CHECK_EQ_INT(zb_sem_wait(&fixture.available, ZB_DEADLINE_IMMEDIATE),
+                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+
+zb_cleanup:
+    if (holding) {
+        CHECK_OK(zb_mutex_unlock(&fixture.mutex));
+    }
+    if (available_holding) {
+        CHECK_OK(zb_mutex_unlock(&fixture.available.mutex));
+    }
+    if (started) {
+        join_owned(&thread);
+    }
+    if (progress_initialized) {
+        CHECK_OK(zb_cond_destroy(&fixture.progress));
+    }
+    if (mutex_initialized) {
+        CHECK_OK(zb_mutex_destroy(&fixture.mutex));
+    }
+    if (available_initialized) {
+        CHECK_OK(zb_sem_destroy(&fixture.available));
+    }
+}
+
 static void test_semaphore_overflow_preserves_count(void)
 {
     zb_sem_t sem;
@@ -724,15 +786,17 @@ static void test_semaphore_wakes_waiters(void)
     mutex_initialized = true;
     REQUIRE_OK(zb_cond_init(&fixture.progress));
     progress_initialized = true;
+    zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
     for (unsigned int i = 0; i < WORKERS; i++) {
-        contexts[i] = (struct sem_context){&fixture, ZEROBUS_STATUS_UNKNOWN};
+        contexts[i] = (struct sem_context){
+            &fixture, i % 2 == 0 ? ZB_DEADLINE_INFINITE : deadline,
+            ZEROBUS_STATUS_UNKNOWN};
         REQUIRE_OK(
             zb_thread_create(&threads[i], wait_for_permit, &contexts[i]));
         created++;
     }
     REQUIRE_OK(zb_mutex_lock(&fixture.mutex));
     holding = true;
-    zb_deadline_t deadline = zb_deadline_after_ms(WAIT_TIMEOUT_MS);
     while (fixture.ready != WORKERS) {
         REQUIRE_OK(
             zb_cond_wait_until(&fixture.progress, &fixture.mutex, deadline));
@@ -877,6 +941,7 @@ int main(void)
     test_semaphore_arguments();
     test_semaphore_counting();
     test_semaphore_timeout();
+    test_semaphore_immediate_mutex_contention();
     test_semaphore_overflow_preserves_count();
     test_semaphore_wakes_waiters();
 

@@ -1,5 +1,4 @@
-/* sem_clockwait needs GNU declarations, local to this translation unit. */
-#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
 
 #include <errno.h> // IWYU pragma: keep
 #include <limits.h>
@@ -219,11 +218,20 @@ zerobus_status_t zb_cond_broadcast(zb_cond_t *cond)
 
 zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value)
 {
-    if (sem == NULL) {
+    if (sem == NULL || value > ZB_SEM_VALUE_MAX) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    return sem_init(sem, 0, value) == 0 ? ZEROBUS_STATUS_OK
-                                        : backend_status(errno);
+    zerobus_status_t status = zb_mutex_init(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    status = zb_cond_init(&sem->cond);
+    if (status != ZEROBUS_STATUS_OK) {
+        (void)zb_mutex_destroy(&sem->mutex);
+        return status;
+    }
+    sem->count = value;
+    return ZEROBUS_STATUS_OK;
 }
 
 zerobus_status_t zb_sem_destroy(zb_sem_t *sem)
@@ -231,7 +239,11 @@ zerobus_status_t zb_sem_destroy(zb_sem_t *sem)
     if (sem == NULL) {
         return ZEROBUS_STATUS_OK;
     }
-    return sem_destroy(sem) == 0 ? ZEROBUS_STATUS_OK : backend_status(errno);
+    zerobus_status_t status = zb_cond_destroy(&sem->cond);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    return zb_mutex_destroy(&sem->mutex);
 }
 
 zerobus_status_t zb_sem_post(zb_sem_t *sem)
@@ -239,7 +251,21 @@ zerobus_status_t zb_sem_post(zb_sem_t *sem)
     if (sem == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    return sem_post(sem) == 0 ? ZEROBUS_STATUS_OK : backend_status(errno);
+    zerobus_status_t status = zb_mutex_lock(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    if (sem->count == ZB_SEM_VALUE_MAX) {
+        status = ZEROBUS_STATUS_INTERNAL;
+    } else {
+        sem->count++;
+        status = zb_cond_signal(&sem->cond);
+        if (status != ZEROBUS_STATUS_OK) {
+            sem->count--;
+        }
+    }
+    zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
+    return status == ZEROBUS_STATUS_OK ? unlock_status : status;
 }
 
 zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline)
@@ -247,27 +273,22 @@ zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline)
     if (sem == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    struct timespec until = {0};
-    if (deadline != ZB_DEADLINE_IMMEDIATE && deadline != ZB_DEADLINE_INFINITE) {
-        until = deadline_timespec(deadline);
+    zerobus_status_t status = zb_mutex_lock(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
-    int result;
-    do {
-        if (deadline == ZB_DEADLINE_IMMEDIATE) {
-            result = sem_trywait(sem);
-        } else if (deadline == ZB_DEADLINE_INFINITE) {
-            result = sem_wait(sem);
-        } else {
-            result = sem_clockwait(sem, CLOCK_MONOTONIC, &until);
-        }
-    } while (result != 0 && errno == EINTR);
-    if (result == 0) {
-        return ZEROBUS_STATUS_OK;
+    if (deadline == ZB_DEADLINE_IMMEDIATE) {
+        status = ZEROBUS_STATUS_DEADLINE_EXCEEDED;
     }
-    if (errno == EAGAIN || errno == ETIMEDOUT) {
-        return ZEROBUS_STATUS_DEADLINE_EXCEEDED;
+    while (status == ZEROBUS_STATUS_OK && sem->count == 0) {
+        status = zb_cond_wait_until(&sem->cond, &sem->mutex, deadline);
     }
-    return backend_status(errno);
+    if (sem->count != 0) {
+        sem->count--;
+        status = ZEROBUS_STATUS_OK;
+    }
+    zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
+    return status == ZEROBUS_STATUS_OK ? unlock_status : status;
 }
 
 zerobus_status_t zb_thread_create(zb_thread_t *thread, void *(*entry)(void *),
