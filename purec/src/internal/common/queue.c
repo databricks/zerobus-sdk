@@ -259,6 +259,14 @@ size_t zb_queue_rewind(zb_queue_t *queue)
     return cursor - head;
 }
 
+uint64_t zb_queue_next_position(const zb_queue_t *queue)
+{
+    if (queue == NULL) {
+        return 0;
+    }
+    return atomic_load_explicit(&queue->tail, memory_order_relaxed);
+}
+
 void zb_queue_free(zb_queue_t *queue)
 {
     if (queue == NULL) {

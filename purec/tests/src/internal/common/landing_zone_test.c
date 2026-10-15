@@ -1,4 +1,3 @@
-#include <stdint.h>
 #include <stdlib.h>
 
 #include "internal/common/landing_zone.h"
@@ -123,6 +122,7 @@ static void test_invalid_arguments(void)
     CHECK_EQ_INT(zb_landing_zone_reset_observe(NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_landing_zone_close(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(zb_landing_zone_last_offset(NULL) == -1);
     zb_landing_zone_free(NULL);
     CHECK(borrowed == &marker);
     CHECK_EQ_INT(offset, 99);
@@ -163,11 +163,12 @@ static void test_fifo_and_offsets(void)
     zb_landing_zone_t *zone = NULL;
     zb_ingest_request_t *borrowed = NULL, *owned = NULL;
     zerobus_offset_t offset = -1;
-    CHECK(offset > INT64_MAX);
     REQUIRE_OK(zb_landing_zone_new(4, &zone));
+    CHECK(zb_landing_zone_last_offset(zone) == -1);
     for (unsigned int i = 0; i < 4; i++) {
         REQUIRE_OK(push_request(zone, (char)('0' + i), &offset));
         CHECK_EQ_INT(offset, i);
+        CHECK_EQ_INT(zb_landing_zone_last_offset(zone), i);
     }
     for (unsigned int i = 0; i < 4; i++) {
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
@@ -184,6 +185,7 @@ static void test_fifo_and_offsets(void)
         zb_ingest_request_free(owned);
         owned = NULL;
     }
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 3);
 
 zb_cleanup:
     zb_ingest_request_free(owned);
@@ -282,10 +284,12 @@ static void test_reset_observe_replays_retained_requests(void)
 
     CHECK_OK(zb_landing_zone_reset_observe(zone));
     CHECK_OK(zb_landing_zone_reset_observe(zone));
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 3);
     owned = zb_landing_zone_pop(zone, NULL);
     REQUIRE(owned == NULL);
     REQUIRE_OK(push_request(zone, '4', &offset));
     CHECK_EQ_INT(offset, 4);
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 4);
     CHECK_EQ_INT(push_request(zone, '5', NULL),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     for (unsigned int i = 1; i < 5; i++) {
@@ -305,6 +309,7 @@ static void test_reset_observe_replays_retained_requests(void)
     CHECK_EQ_INT(
         zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, NULL, NULL),
         ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 4);
 
 zb_cleanup:
     zb_ingest_request_free(owned);
@@ -339,7 +344,7 @@ static void test_reset_observe_closed_zone(void)
     }
     CHECK_EQ_INT(
         zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, NULL, NULL),
-        ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+        ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
 
 zb_cleanup:
     zb_ingest_request_free(owned);
@@ -359,16 +364,17 @@ static void test_close_rejects_push_and_allows_observe_and_pop(void)
         zb_landing_zone_push(zone, &marker, ZB_DEADLINE_IMMEDIATE, &offset),
         ZEROBUS_STATUS_FAILED_PRECONDITION);
     CHECK_EQ_INT(offset, 99);
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 0);
     REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                        &offset));
     CHECK_EQ_INT(borrowed->data[0], '0');
     CHECK_EQ_INT(offset, 0);
     CHECK_EQ_INT(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                          &offset),
-                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
     CHECK_EQ_INT(zb_landing_zone_observe(zone, zb_deadline_after_ms(1),
                                          &borrowed, &offset),
-                 ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
     CHECK_EQ_INT(borrowed->data[0], '0');
     CHECK_EQ_INT(offset, 0);
 
@@ -474,10 +480,11 @@ static void test_close_rejects_producers(void)
             zb_sem_wait(&producers[i].ready, zb_deadline_after_ms(5000)));
     }
     CHECK_OK(zb_landing_zone_close(zone));
+    CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 3);
     for (unsigned int i = 0; i < 4; i++) {
         join_worker(&producers[i]);
         CHECK_EQ_INT(producers[i].status, ZEROBUS_STATUS_FAILED_PRECONDITION);
-        CHECK(producers[i].offset == UINT64_MAX);
+        CHECK_EQ_INT(producers[i].offset, -1);
         CHECK_EQ_INT(producers[i].request->data[0], '4');
     }
 
@@ -486,6 +493,24 @@ zb_cleanup:
     for (unsigned int i = 0; i < 4; i++) {
         finish_worker(&producers[i]);
     }
+    zb_landing_zone_free(zone);
+}
+
+static void test_close_wakes_observer(void)
+{
+    zb_landing_zone_t *zone = NULL;
+    struct worker observer = {0};
+    REQUIRE_OK(zb_landing_zone_new(4, &zone));
+    REQUIRE_OK(start_worker(&observer, zone));
+    REQUIRE_OK(zb_sem_wait(&observer.ready, zb_deadline_after_ms(5000)));
+    CHECK_OK(zb_landing_zone_close(zone));
+    join_worker(&observer);
+    CHECK_EQ_INT(observer.status, ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+    CHECK(observer.request == NULL);
+    CHECK(observer.offset == -1);
+
+zb_cleanup:
+    finish_worker(&observer);
     zb_landing_zone_free(zone);
 }
 
@@ -503,5 +528,6 @@ int main(void)
     test_producer_progress_after_pop();
     test_observer_progress_after_push();
     test_close_rejects_producers();
+    test_close_wakes_observer();
     TEST_MAIN_RETURN();
 }

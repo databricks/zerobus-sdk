@@ -67,6 +67,10 @@ void *zb_queue_pop(zb_queue_t *queue, uint64_t *out_position);
  * peek. Must be serialized with advance, pop and other rewind calls. */
 size_t zb_queue_rewind(zb_queue_t *queue);
 
+/* The position the next push will take, which is also the number of items
+ * pushed so far. Concurrent pushes may move it on. 0 for NULL. */
+uint64_t zb_queue_next_position(const zb_queue_t *queue);
+
 /* Frees the queue but not the items it still holds, those remain the caller's.
  * To get them back, drain first: advance until NULL, then pop until NULL.
  * Accepts NULL. */

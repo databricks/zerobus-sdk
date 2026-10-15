@@ -128,6 +128,7 @@ static void test_null_queue_rejected(void)
     CHECK(zb_queue_peek(NULL, &position) == NULL);
     CHECK(zb_queue_pop(NULL, &position) == NULL);
     CHECK_EQ_INT(zb_queue_rewind(NULL), 0);
+    CHECK_EQ_INT(zb_queue_next_position(NULL), 0);
     CHECK_EQ_INT(position, 99);
 }
 
@@ -277,6 +278,7 @@ static void test_full_until_pop(void)
     CHECK_EQ_INT(zb_queue_push(queue, &values[4], &position),
                  ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
     CHECK_EQ_INT(position, 3);
+    CHECK_EQ_INT(zb_queue_next_position(queue), 4);
 
     /* Advanced items still occupy their slots. */
     for (unsigned int i = 0; i < 4; i++) {
@@ -291,6 +293,7 @@ static void test_full_until_pop(void)
     CHECK_EQ_INT(position, 4);
     CHECK(zb_queue_advance(queue, &position) == &values[4]);
     CHECK_EQ_INT(position, 4);
+    CHECK_EQ_INT(zb_queue_next_position(queue), 5);
 
 zb_cleanup:
     zb_queue_free(queue);

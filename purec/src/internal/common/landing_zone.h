@@ -23,7 +23,10 @@ zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,
                                       zerobus_offset_t *out_offset);
 
 /* Returns a borrowed request through out_request, kept alive until pop or zone
- * free. After pop, the new owner controls its lifetime. */
+ * free. After pop, the new owner controls its lifetime.
+ *
+ * Once the zone is closed, observe never waits: it returns a remaining
+ * request, or RESOURCE_EXHAUSTED if none is left. */
 zerobus_status_t zb_landing_zone_observe(zb_landing_zone_t *zone,
                                          zb_deadline_t deadline,
                                          zb_ingest_request_t **out_request,
@@ -38,9 +41,12 @@ zb_ingest_request_t *zb_landing_zone_pop(zb_landing_zone_t *zone,
  * waiting calls), pop and other reset_observe calls. */
 zerobus_status_t zb_landing_zone_reset_observe(zb_landing_zone_t *zone);
 
-/* Rejects pushes with FAILED_PRECONDITION and wakes waiting producers.
- * Idempotent. Admitted pushes may finish later. Observers are unaffected. */
+/* Rejects new and waiting pushes with FAILED_PRECONDITION, waits for admitted
+ * pushes to land, then wakes waiting observers. observe and pop are still
+ * allowed. Idempotent, also when called concurrently. */
 zerobus_status_t zb_landing_zone_close(zb_landing_zone_t *zone);
+
+zerobus_offset_t zb_landing_zone_last_offset(const zb_landing_zone_t *zone);
 
 /* Frees remaining requests, their payloads, and the zone. */
 void zb_landing_zone_free(zb_landing_zone_t *zone);
