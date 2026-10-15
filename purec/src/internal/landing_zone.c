@@ -3,9 +3,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "internal/common/queue.h"
 #include "internal/platform/log.h"
 #include "landing_zone.h"
-#include "queue.h"
 #include "zerobus/common.h"
 
 struct zb_landing_zone {

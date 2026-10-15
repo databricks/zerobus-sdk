@@ -1,7 +1,7 @@
 #include <stdlib.h>
 
-#include "internal/common/landing_zone.h"
-#include "internal/common/record.h"
+#include "internal/ingest_request.h"
+#include "internal/landing_zone.h"
 #include "internal/platform/concurrency.h"
 #include "test_common.h"
 

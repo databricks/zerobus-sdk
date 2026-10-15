@@ -1,5 +1,5 @@
-#ifndef ZB_RECORD_H
-#define ZB_RECORD_H
+#ifndef ZB_INGEST_REQUEST_H
+#define ZB_INGEST_REQUEST_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,4 +43,4 @@ static inline void zb_ingest_request_free(zb_ingest_request_t *request)
     free(request);
 }
 
-#endif /* ZB_RECORD_H */
+#endif /* ZB_INGEST_REQUEST_H */

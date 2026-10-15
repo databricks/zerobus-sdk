@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "internal/common/record.h"
+#include "internal/ingest_request.h"
 #include "test_common.h"
 
 /* ---- tests ------------------------------------------------------------- */
