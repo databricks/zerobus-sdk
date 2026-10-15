@@ -38,7 +38,9 @@ zb_ingest_request_t *zb_landing_zone_pop(zb_landing_zone_t *zone,
 
 /* Makes observed requests available to observe again, keeping their offsets.
  * May run concurrently with push. Must be serialized with observe (including
- * waiting calls), pop and other reset_observe calls. */
+ * waiting calls), pop and other reset_observe calls. Breaking this can make a
+ * later observe spin forever, because a concurrent push can wake a waiting
+ * observe mid-rewind. */
 zerobus_status_t zb_landing_zone_reset_observe(zb_landing_zone_t *zone);
 
 /* Rejects new and waiting pushes with FAILED_PRECONDITION, waits for admitted
@@ -46,6 +48,8 @@ zerobus_status_t zb_landing_zone_reset_observe(zb_landing_zone_t *zone);
  * allowed. Idempotent, also when called concurrently. */
 zerobus_status_t zb_landing_zone_close(zb_landing_zone_t *zone);
 
+/* Offset of the most recent push, or -1 if nothing was pushed. May include a
+ * push that has taken its offset but not returned yet. */
 zerobus_offset_t zb_landing_zone_last_offset(const zb_landing_zone_t *zone);
 
 /* Frees remaining requests, their payloads, and the zone. */
