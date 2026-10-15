@@ -33,6 +33,11 @@ impl ZerobusStream {
     /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
     /// These waits are separate from the flush timeout.
     ///
+    /// On a standard stream, if records are still unacknowledged after the flush, the SDK
+    /// also reads late acknowledgments from the server for up to 500 ms. This read removes
+    /// records from `get_unacked_records()` and calls `on_ack()` for each one, so `close()`
+    /// can return the flush error while that list is empty.
+    ///
     /// # Returns
     ///
     /// `Ok(())` if the stream was already closed or flushing succeeded. Task shutdown
@@ -113,6 +118,8 @@ impl ZerobusStream {
 
     /// Retain the handle while awaiting callbacks so cancellation can be resumed.
     pub(crate) async fn shutdown_callbacks(&mut self) {
+        // The supervisor has shut down, so no more callbacks are produced. Queued ones run first.
+        self.callback_cancellation_token.cancel();
         if let Some(task) = self.callback_handler_task.as_mut() {
             Self::shutdown_callback_task(task, self.options.callback_max_wait_time_ms).await;
             self.callback_handler_task.take();
@@ -120,7 +127,7 @@ impl ZerobusStream {
     }
 
     /// Drains the callback handler task during teardown. The caller must have
-    /// already cancelled the `cancellation_token`. With `Some(ms)`, waits up to
+    /// already cancelled the callback task's token. With `Some(ms)`, waits up to
     /// that long then aborts; with `None`, waits indefinitely.
     ///
     /// Split out so the teardown can be exercised in isolation by tests
@@ -201,6 +208,7 @@ mod tests {
             server_error_rx: error_rx,
             cancellation_token: CancellationToken::new(),
             callback_handler_task: callback,
+            callback_cancellation_token: CancellationToken::new(),
             dynamic_message_descriptor: None,
         };
         (stream, error_tx)
