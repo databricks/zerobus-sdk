@@ -40,8 +40,10 @@ static void test_macros(void)
         CHECK_EQ_INT(evaluated[i], 1);
     }
 
-    /* Check dangling-else safety and format-only macro calls. */
+    /* Check dangling-else safety and format-only macro calls. The bodies must
+     * stay unbraced, so formatting is off here. */
     int else_taken = 0;
+    /* clang-format off */
     if (1)
         ZB_DEBUG("suppressed");
     else
@@ -51,6 +53,7 @@ static void test_macros(void)
         ZB_ERROR("unreachable");
     else
         ZB_INFO("format-only message");
+    /* clang-format on */
 }
 
 static void test_level_filter(void)
