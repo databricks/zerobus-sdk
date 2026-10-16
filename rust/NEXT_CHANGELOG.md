@@ -12,6 +12,9 @@
 
 ### Internal Changes
 
+- Added a stateful persistent-stream mock and integration coverage for create,
+  flush, resume offset continuity, and unknown stream IDs.
+
 ### Breaking Changes
 
 ### Deprecations
