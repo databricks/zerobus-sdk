@@ -43,10 +43,12 @@ from typing import Any, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
 
 # Import base Rust stream class
 _RustZerobusStream = _core.aio.ZerobusStream
 _RustAsyncZerobusArrowStream = _core.arrow.AsyncZerobusArrowStream
+PersistentStream = _core.aio.PersistentStream
 
 
 class ZerobusStream:
@@ -263,6 +265,45 @@ class ZerobusArrowStream:
         return [_deserialize_batch(ipc_bytes) for ipc_bytes in ipc_list]
 
 
+class PersistentStreamBuilder(_PersistentStreamBuilderBase):
+    """Fluent builder that creates or resumes a persistent (Eos) stream.
+
+    Obtain one from ``ZerobusSdk.persistent_stream_builder()``, set the table, authentication
+    and record format, then call ``build()`` or ``resume()``.
+
+    Example:
+        >>> stream = await (
+        ...     sdk.persistent_stream_builder()
+        ...     .table("catalog.schema.events")
+        ...     .oauth("client-id", "client-secret")
+        ...     .json()
+        ...     .build()
+        ... )
+        >>> stream_id = stream.stream_id  # persist this to resume after a restart
+    """
+
+    async def build(self) -> PersistentStream:
+        """Open a new persistent stream. The server assigns its ``stream_id``.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set.
+        """
+        table_properties, settings = self._native_args()
+        return await self._sdk.open_persistent_stream(table_properties, settings)
+
+    async def resume(self, stream_id: str) -> PersistentStream:
+        """Reconnect to an existing persistent stream by its ``stream_id``.
+
+        The table and record format must match those the stream was created with. New
+        records get offsets that start after ``resume_watermark``.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set.
+        """
+        table_properties, settings = self._native_args()
+        return await self._sdk.open_persistent_stream(table_properties, settings, self._check_stream_id(stream_id))
+
+
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that returns wrapped streams."""
 
@@ -406,6 +447,17 @@ class ZerobusSdk:
             rust_stream = await self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream, avro_encoder=avro_encoder)
 
+    def persistent_stream_builder(self) -> PersistentStreamBuilder:
+        """
+        Start building a persistent (Eos) stream.
+
+        A persistent stream records its identity and committed offset on the server, so
+        ``PersistentStreamBuilder.resume()`` can reconnect to it after a restart with
+        exactly-once delivery. It supports JSON and protobuf records, with OAuth or a custom
+        headers provider.
+        """
+        return PersistentStreamBuilder(self._inner)
+
     async def recreate_stream(self, old_stream: ZerobusStream):
         """Recreate a stream from an old stream, preserving the Avro encoder if set."""
         rust_stream = await self._inner.recreate_stream(old_stream._inner)
@@ -424,6 +476,8 @@ NonRetriableException = _core.NonRetriableException
 __all__ = [
     "ZerobusSdk",
     "ZerobusStream",
+    "PersistentStream",
+    "PersistentStreamBuilder",
     "ZerobusArrowStream",
     "TableProperties",
     "StreamConfigurationOptions",

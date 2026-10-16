@@ -8,7 +8,8 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusSdk as RustSdk, ZerobusStream as RustStream,
+    PersistentStream as RustPersistentStream, StreamBuilder, ZerobusSdk as RustSdk,
+    ZerobusStream as RustStream,
 };
 
 use crate::arrow;
@@ -18,6 +19,7 @@ use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
+use crate::persistent::{PersistentConfig, PersistentStreamSettings};
 
 // =============================================================================
 // STREAM-BUILDER HELPERS
@@ -302,6 +304,114 @@ impl ZerobusStream {
 }
 
 // =============================================================================
+// PERSISTENT STREAM (ASYNC)
+// =============================================================================
+
+#[pyclass(name = "PersistentStream")]
+pub struct PersistentStream {
+    inner: Arc<RwLock<RustPersistentStream>>,
+    format: RecordFormat,
+    /// Captured when the stream opens; neither value changes afterwards.
+    stream_id: Option<String>,
+    resume_watermark: Option<i64>,
+}
+
+#[pymethods]
+impl PersistentStream {
+    /// The durable stream identity. Persist it to resume the stream later.
+    #[getter]
+    fn stream_id(&self) -> Option<String> {
+        self.stream_id.clone()
+    }
+
+    /// The offset the server had committed when the stream opened, or `None` for a new stream.
+    #[getter]
+    fn resume_watermark(&self) -> Option<i64> {
+        self.resume_watermark
+    }
+
+    /// Whether the stream is closed. A close that is in progress counts as closed.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        match self.inner.try_read() {
+            Ok(guard) => guard.is_closed(),
+            Err(_) => true,
+        }
+    }
+
+    /// Ingest a single record and return its offset once queued (async)
+    fn ingest_record_offset<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payload = extract_record_payload(payload, self.format)?;
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            let offset = guard
+                .ingest_record_offset(record_payload)
+                .await
+                .map_err(map_error)?;
+            Ok(offset)
+        })
+    }
+
+    /// Ingest a batch of records and return one offset for the whole batch (async).
+    /// Returns `None` for an empty batch.
+    fn ingest_records_offset<'py>(
+        &self,
+        py: Python<'py>,
+        payloads: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            if record_payloads.is_empty() {
+                return Ok(None);
+            }
+            let guard = stream.read().await;
+            guard
+                .ingest_records_offset(record_payloads)
+                .await
+                .map_err(map_error)
+        })
+    }
+
+    /// Wait for a specific offset to be acknowledged (async)
+    fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            guard.wait_for_offset(offset).await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Flush the stream (async)
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            guard.flush().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Close the stream (async)
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let mut guard = stream.write().await;
+            guard.close().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+}
+
+// =============================================================================
 // ZEROBUS SDK (ASYNC)
 // =============================================================================
 
@@ -456,6 +566,34 @@ impl ZerobusSdk {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
                 idp_holder: Some(idp_holder),
+            })
+        })
+    }
+
+    /// Open a new persistent (Eos) stream, or resume one when `resume_stream_id` is set (async)
+    #[pyo3(signature = (table_properties, settings, resume_stream_id = None))]
+    fn open_persistent_stream<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: &TableProperties,
+        settings: &PersistentStreamSettings,
+        resume_stream_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let sdk = self.inner.clone();
+        let config = PersistentConfig::resolve(py, settings, table_properties)?;
+        let format = config.format();
+
+        future_into_py(py, async move {
+            let sdk_guard = sdk.read().await;
+            let stream = config
+                .open(&sdk_guard, resume_stream_id)
+                .await
+                .map_err(map_error)?;
+            Ok(PersistentStream {
+                stream_id: stream.stream_id().map(str::to_owned),
+                resume_watermark: stream.resume_watermark(),
+                inner: Arc::new(RwLock::new(stream)),
+                format,
             })
         })
     }
