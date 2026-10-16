@@ -47,12 +47,14 @@ python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
 python examples/sync_example_avro.py      # Avro
 python examples/sync_example_arrow.py     # Arrow Flight
+python examples/sync_example_persistent.py # Persistent stream (create and resume)
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
 python examples/async_example_avro.py     # Avro
 python examples/async_example_arrow.py    # Arrow Flight
+python examples/async_example_persistent.py # Persistent stream (create and resume)
 ```
 
 ## Examples Overview
@@ -94,6 +96,12 @@ stream.flush()
 # Option 2: Pass pre-serialized bytes (client controls serialization)
 # offset = stream.ingest_record_offset(record.SerializeToString())
 ```
+
+#### Persistent stream
+**Files:** `sync_example_persistent.py`, `async_example_persistent.py`
+
+Creates a persistent (Eos) stream, ingests JSON records, and then resumes the same stream by
+its `stream_id`. Delivery into Delta stays exactly-once across restarts.
 
 #### JSON
 **Files:** `sync_example_json.py`, `async_example_json.py`

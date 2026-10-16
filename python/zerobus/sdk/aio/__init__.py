@@ -8,6 +8,8 @@ with native async/await support.
 from zerobus.sdk.aio.zerobus_sdk import (
     HeadersProvider,
     NonRetriableException,
+    PersistentStream,
+    PersistentStreamBuilder,
     RecordType,
     StreamConfigurationOptions,
     TableProperties,
@@ -19,6 +21,8 @@ from zerobus.sdk.aio.zerobus_sdk import (
 
 __all__ = [
     "ZerobusSdk",
+    "PersistentStream",
+    "PersistentStreamBuilder",
     "ZerobusStream",
     "ZerobusArrowStream",
     "TableProperties",

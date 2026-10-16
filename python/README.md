@@ -15,6 +15,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
   - [JSON (Simplest)](#option-1-json-simplest)
   - [Protocol Buffers](#option-2-protocol-buffers)
   - [Acknowledgments and throughput](#acknowledgments-and-throughput)
+- [Persistent Streams](#persistent-streams)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -368,6 +369,82 @@ See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) f
 
 For advanced cases you can supply your own `HeadersProvider` via
 `headers_provider=`; see the [`HeadersProvider`](#headersprovider) reference.
+
+## Persistent Streams
+
+A persistent (Eos) stream records its identity and committed offset on the server. After a
+restart, you resume the same stream by its `stream_id`, and delivery into Delta stays
+exactly-once.
+
+Persistent streams support JSON and protobuf records. They authenticate with OAuth or a
+custom headers provider. They do not support Avro or external-IdP federation.
+
+> **Experimental.** The persistent stream API in the Rust core is in development. It can
+> change in a minor release.
+
+```python
+from zerobus.sdk.sync import ZerobusSdk
+
+sdk = ZerobusSdk(host, unity_catalog_url)
+
+# Create a new stream. The server assigns the stream_id.
+stream = (
+    sdk.persistent_stream_builder()
+    .table("catalog.schema.events")
+    .oauth(client_id, client_secret)
+    .json()
+    .build()
+)
+stream_id = stream.stream_id  # save this to resume later
+
+for record in records:
+    stream.ingest_record_offset(record)
+stream.flush()
+stream.close()
+
+# After a restart, resume the same stream. Use the same table and record format.
+stream = (
+    sdk.persistent_stream_builder()
+    .table("catalog.schema.events")
+    .oauth(client_id, client_secret)
+    .json()
+    .resume(stream_id)
+)
+print(stream.resume_watermark)  # offset the server had committed, or None for a new stream
+```
+
+In the async SDK, `build()` and `resume()` are coroutines, and the stream methods are awaited.
+
+### Recovering after a failure
+
+Save the `stream_id` as soon as `build()` returns, before you ingest any record. If the
+process stops before you save it, you cannot resume the stream.
+
+A persistent stream has no `get_unacked_records()` and no `recreate_stream()`. To recover,
+follow these steps:
+
+1. Call `resume(stream_id)` with the same table and record format.
+2. Read `resume_watermark`. This is the last offset the server committed.
+3. Send again every record that your source holds after that offset.
+
+The SDK does not store your records. Your application must know which of its records
+match which offsets, for example by storing its own source position with each batch.
+
+Use one process per `stream_id`. The SDK does not check whether another client has
+resumed the same stream.
+
+The builder has these setters: `table`, `oauth`, `headers_provider`, `json`,
+`compiled_proto`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
+`recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
+`max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`, and
+`callback_max_wait_time_ms`. Unset values use the SDK defaults.
+
+`PersistentStream` has `ingest_record_offset()`, `ingest_records_offset()`,
+`wait_for_offset()`, `flush()`, and `close()`. It also has the properties `stream_id`,
+`resume_watermark`, and `is_closed`. Unlike `ZerobusStream`, it has no `ingest_record()`,
+no `*_nowait()` methods, and no `get_unacked_*()` methods.
+
+See `examples/sync_example_persistent.py` and `examples/async_example_persistent.py`.
 
 ## Configuration
 

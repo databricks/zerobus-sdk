@@ -174,6 +174,27 @@ class StreamConfigurationOptions:
 # EXCEPTIONS
 # =============================================================================
 
+class PersistentStreamSettings:
+    """Settings collected by ``PersistentStreamBuilder``. Internal; not for direct use."""
+
+    def __init__(
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        headers_provider: Optional[Any] = None,
+        recovery: Optional[bool] = None,
+        recovery_timeout_ms: Optional[int] = None,
+        recovery_backoff_ms: Optional[int] = None,
+        recovery_retries: Optional[int] = None,
+        server_lack_of_ack_timeout_ms: Optional[int] = None,
+        flush_timeout_ms: Optional[int] = None,
+        max_inflight_requests: Optional[int] = None,
+        max_ingest_payload_bytes: Optional[int] = None,
+        ack_callback: Optional[AckCallback] = None,
+        callback_max_wait_time_ms_set: bool = False,
+        callback_max_wait_time_ms: Optional[int] = None,
+    ) -> None: ...
+
 class ZerobusException(Exception):
     """Base class for all exceptions in the Zerobus SDK.
 
@@ -351,8 +372,59 @@ class sync:
             """Get the number of unacknowledged records."""
             ...
 
+    class PersistentStream:
+        """A durable, recoverable ingestion stream (Eos).
+
+        Create or resume one with ``ZerobusSdk.persistent_stream_builder()``. Ingest in a loop,
+        then call ``flush()`` once to confirm the batch.
+        """
+
+        @property
+        def stream_id(self) -> Optional[str]:
+            """The durable stream identity. Persist it to resume the stream later."""
+            ...
+
+        @property
+        def resume_watermark(self) -> Optional[int]:
+            """The offset the server had committed when the stream opened, or ``None`` for a new stream."""
+            ...
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed. A close that is in progress counts as closed."""
+            ...
+
+        def ingest_record_offset(self, payload: Any) -> int:
+            """Queue a record and return its offset. Does not wait for the acknowledgment."""
+            ...
+
+        def ingest_records_offset(self, payloads: Any) -> Optional[int]:
+            """Queue a batch and return one offset for it, or ``None`` for an empty batch."""
+            ...
+
+        def wait_for_offset(self, offset: int) -> None:
+            """Wait until the server acknowledges ``offset``."""
+            ...
+
+        def flush(self) -> None:
+            """Wait until the server acknowledges all pending records."""
+            ...
+
+        def close(self) -> None:
+            """Flush pending records and close the stream."""
+            ...
+
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
+
+        def open_persistent_stream(
+            self,
+            table_properties: TableProperties,
+            settings: PersistentStreamSettings,
+            resume_stream_id: Optional[str] = None,
+        ) -> "PersistentStream":
+            """Open a new persistent stream, or resume one when ``resume_stream_id`` is set."""
+            ...
 
         def __init__(
             self,
@@ -540,8 +612,59 @@ class aio:
             """Get the number of unacknowledged records."""
             ...
 
+    class PersistentStream:
+        """A durable, recoverable ingestion stream (Eos).
+
+        Create or resume one with ``ZerobusSdk.persistent_stream_builder()``. Ingest in a loop,
+        then call ``flush()`` once to confirm the batch.
+        """
+
+        @property
+        def stream_id(self) -> Optional[str]:
+            """The durable stream identity. Persist it to resume the stream later."""
+            ...
+
+        @property
+        def resume_watermark(self) -> Optional[int]:
+            """The offset the server had committed when the stream opened, or ``None`` for a new stream."""
+            ...
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed. A close that is in progress counts as closed."""
+            ...
+
+        async def ingest_record_offset(self, payload: Any) -> int:
+            """Queue a record and return its offset. Does not wait for the acknowledgment."""
+            ...
+
+        async def ingest_records_offset(self, payloads: Any) -> Optional[int]:
+            """Queue a batch and return one offset for it, or ``None`` for an empty batch."""
+            ...
+
+        async def wait_for_offset(self, offset: int) -> None:
+            """Wait until the server acknowledges ``offset``."""
+            ...
+
+        async def flush(self) -> None:
+            """Wait until the server acknowledges all pending records."""
+            ...
+
+        async def close(self) -> None:
+            """Flush pending records and close the stream."""
+            ...
+
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
+
+        async def open_persistent_stream(
+            self,
+            table_properties: TableProperties,
+            settings: PersistentStreamSettings,
+            resume_stream_id: Optional[str] = None,
+        ) -> "PersistentStream":
+            """Open a new persistent stream, or resume one when ``resume_stream_id`` is set."""
+            ...
 
         def __init__(
             self,
