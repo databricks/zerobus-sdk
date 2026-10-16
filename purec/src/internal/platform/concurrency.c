@@ -58,6 +58,22 @@ static struct timespec deadline_timespec(zb_deadline_t deadline)
     };
 }
 
+static zb_deadline_t now(void)
+{
+    struct timespec current;
+    (void)clock_gettime(CLOCK_MONOTONIC, &current);
+    zb_deadline_t limit = max_deadline();
+    uint64_t seconds = (uint64_t)current.tv_sec;
+    if (seconds > limit / ZB_NS_PER_SECOND) {
+        return limit;
+    }
+    uint64_t elapsed = seconds * ZB_NS_PER_SECOND;
+    if ((uint64_t)current.tv_nsec > limit - elapsed) {
+        return limit;
+    }
+    return elapsed + (uint64_t)current.tv_nsec;
+}
+
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
 {
     if (timeout_ms == UINT64_MAX) {
@@ -66,22 +82,12 @@ zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
     if (timeout_ms == 0) {
         return ZB_DEADLINE_IMMEDIATE;
     }
-    struct timespec now;
-    (void)clock_gettime(CLOCK_MONOTONIC, &now);
     zb_deadline_t limit = max_deadline();
-    uint64_t seconds = (uint64_t)now.tv_sec;
-    if (seconds > limit / ZB_NS_PER_SECOND) {
+    zb_deadline_t start = now();
+    if (timeout_ms > (limit - start) / ZB_NS_PER_MS) {
         return limit;
     }
-    uint64_t elapsed = seconds * ZB_NS_PER_SECOND;
-    if ((uint64_t)now.tv_nsec > limit - elapsed) {
-        return limit;
-    }
-    elapsed += (uint64_t)now.tv_nsec;
-    if (timeout_ms > (limit - elapsed) / ZB_NS_PER_MS) {
-        return limit;
-    }
-    return elapsed + timeout_ms * ZB_NS_PER_MS;
+    return start + timeout_ms * ZB_NS_PER_MS;
 }
 
 zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds)
@@ -93,6 +99,23 @@ zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds)
         return max_deadline();
     }
     return zb_deadline_after_ms(timeout_seconds * ZB_MS_PER_SECOND);
+}
+
+uint64_t zb_deadline_remaining_ms(zb_deadline_t deadline)
+{
+    if (deadline == ZB_DEADLINE_INFINITE) {
+        return UINT64_MAX;
+    }
+    zb_deadline_t current = now();
+    if (deadline <= current) {
+        return 0;
+    }
+    return (deadline - current - 1) / ZB_NS_PER_MS + 1;
+}
+
+bool zb_deadline_expired(zb_deadline_t deadline)
+{
+    return now() >= deadline;
 }
 
 zerobus_status_t zb_mutex_init(zb_mutex_t *mutex)

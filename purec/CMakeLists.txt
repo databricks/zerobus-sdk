@@ -71,6 +71,7 @@ set(ZEROBUS_SOURCES
   src/internal/common/queue.c
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
+  src/internal/platform/network.c
   src/internal/proto/zerobus_service.c
   src/internal/network/grpc.c
   src/internal/network/grpc_utils.c
