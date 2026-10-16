@@ -1,6 +1,7 @@
 #ifndef ZB_CONCURRENCY_H
 #define ZB_CONCURRENCY_H
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,9 +23,15 @@ zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds);
 /* Caller-owned storage. Access it through the wrapper functions below. */
 typedef pthread_mutex_t zb_mutex_t;
 typedef pthread_cond_t zb_cond_t;
+typedef struct zb_sem {
+    zb_mutex_t mutex;
+    zb_cond_t cond;
+    unsigned int count;
+} zb_sem_t;
 typedef pthread_t zb_thread_t;
 typedef pthread_once_t zb_once_t;
 #define ZB_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+#define ZB_SEM_VALUE_MAX INT_MAX
 #define ZB_ONCE_INIT PTHREAD_ONCE_INIT
 
 /* Initialize mutexes and condition variables before use, and destroy them
@@ -46,7 +53,7 @@ zerobus_status_t zb_cond_destroy(zb_cond_t *cond);
 
 /*
  * Call with mutex locked. Waiting atomically releases it, then reacquires it
- * before returning success or timeout; other errors have no such guarantee.
+ * before returning; the calling thread holds it on return, including errors.
  * Concurrent waiters on the same condition must use the same mutex.
  */
 zerobus_status_t zb_cond_wait(zb_cond_t *cond, zb_mutex_t *mutex);
@@ -54,6 +61,20 @@ zerobus_status_t zb_cond_wait_until(zb_cond_t *cond, zb_mutex_t *mutex,
                                     zb_deadline_t deadline);
 zerobus_status_t zb_cond_signal(zb_cond_t *cond);
 zerobus_status_t zb_cond_broadcast(zb_cond_t *cond);
+
+/* Process-local counting semaphore. Value must not exceed ZB_SEM_VALUE_MAX.
+ * Initialize before use, destroy only after all users have finished.
+ * Destroy accepts NULL. */
+zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value);
+zerobus_status_t zb_sem_destroy(zb_sem_t *sem);
+zerobus_status_t zb_sem_post(zb_sem_t *sem);
+
+/* Consume one permit, waiting until deadline if none is available.
+ * IMMEDIATE waits for the internal mutex but not for a permit.
+ * Deadlines bound condition waits, not mutex acquisition; INFINITE waits
+ * without a timeout.
+ * DEADLINE_EXCEEDED never consumes a permit. */
+zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline);
 
 /*
  * arg may be NULL; otherwise, keep it valid until join succeeds. The worker
@@ -76,5 +97,8 @@ zerobus_status_t zb_thread_join(zb_thread_t *thread, void **out_result);
  * once; concurrent callers wait until it finishes.
  */
 zerobus_status_t zb_once(zb_once_t *once, void (*init)(void));
+
+/* Scheduling hint, does not guarantee another thread runs. */
+void zb_thread_yield(void);
 
 #endif /* ZB_CONCURRENCY_H */

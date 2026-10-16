@@ -1,9 +1,9 @@
-/* Keep POSIX declarations local without changing the project's C99 baseline. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h> // IWYU pragma: keep
 #include <limits.h>
 #include <pthread.h>
+#include <sched.h>
 #include <time.h>
 
 #include "concurrency.h"
@@ -44,6 +44,18 @@ static zb_deadline_t max_deadline(void)
         return UINT64_MAX - 1;
     }
     return max_seconds * ZB_NS_PER_SECOND + ZB_NS_PER_SECOND - 1;
+}
+
+static struct timespec deadline_timespec(zb_deadline_t deadline)
+{
+    zb_deadline_t limit = max_deadline();
+    if (deadline > limit) {
+        deadline = limit;
+    }
+    return (struct timespec){
+        .tv_sec = (time_t)(deadline / ZB_NS_PER_SECOND),
+        .tv_nsec = (long)(deadline % ZB_NS_PER_SECOND),
+    };
 }
 
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
@@ -179,14 +191,7 @@ zerobus_status_t zb_cond_wait_until(zb_cond_t *cond, zb_mutex_t *mutex,
     if (deadline == ZB_DEADLINE_INFINITE) {
         result = pthread_cond_wait(cond, mutex);
     } else {
-        zb_deadline_t limit = max_deadline();
-        if (deadline > limit) {
-            deadline = limit;
-        }
-        struct timespec until = {
-            .tv_sec = (time_t)(deadline / ZB_NS_PER_SECOND),
-            .tv_nsec = (long)(deadline % ZB_NS_PER_SECOND),
-        };
+        struct timespec until = deadline_timespec(deadline);
         result = pthread_cond_timedwait(cond, mutex, &until);
     }
     if (result == ETIMEDOUT) {
@@ -209,6 +214,81 @@ zerobus_status_t zb_cond_broadcast(zb_cond_t *cond)
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     return backend_status(pthread_cond_broadcast(cond));
+}
+
+zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value)
+{
+    if (sem == NULL || value > ZB_SEM_VALUE_MAX) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    zerobus_status_t status = zb_mutex_init(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    status = zb_cond_init(&sem->cond);
+    if (status != ZEROBUS_STATUS_OK) {
+        (void)zb_mutex_destroy(&sem->mutex);
+        return status;
+    }
+    sem->count = value;
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zb_sem_destroy(zb_sem_t *sem)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_OK;
+    }
+    zerobus_status_t status = zb_cond_destroy(&sem->cond);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    return zb_mutex_destroy(&sem->mutex);
+}
+
+zerobus_status_t zb_sem_post(zb_sem_t *sem)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    zerobus_status_t status = zb_mutex_lock(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    if (sem->count == ZB_SEM_VALUE_MAX) {
+        status = ZEROBUS_STATUS_INTERNAL;
+    } else {
+        sem->count++;
+        status = zb_cond_signal(&sem->cond);
+        if (status != ZEROBUS_STATUS_OK) {
+            sem->count--;
+        }
+    }
+    zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
+    return status == ZEROBUS_STATUS_OK ? unlock_status : status;
+}
+
+zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline)
+{
+    if (sem == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    zerobus_status_t status = zb_mutex_lock(&sem->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    if (deadline == ZB_DEADLINE_IMMEDIATE) {
+        status = ZEROBUS_STATUS_DEADLINE_EXCEEDED;
+    }
+    while (status == ZEROBUS_STATUS_OK && sem->count == 0) {
+        status = zb_cond_wait_until(&sem->cond, &sem->mutex, deadline);
+    }
+    if (sem->count != 0) {
+        sem->count--;
+        status = ZEROBUS_STATUS_OK;
+    }
+    zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
+    return status == ZEROBUS_STATUS_OK ? unlock_status : status;
 }
 
 zerobus_status_t zb_thread_create(zb_thread_t *thread, void *(*entry)(void *),
@@ -242,4 +322,9 @@ zerobus_status_t zb_once(zb_once_t *once, void (*init)(void))
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     return backend_status(pthread_once(once, init));
+}
+
+void zb_thread_yield(void)
+{
+    (void)sched_yield();
 }
