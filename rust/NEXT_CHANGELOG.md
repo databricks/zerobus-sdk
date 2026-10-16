@@ -10,6 +10,9 @@
 
 ### Documentation
 
+- Added a persistent JSON example demonstrating durable stream creation,
+  pipelined ingestion followed by one `flush()`, and resume by `stream_id`.
+
 ### Internal Changes
 
 - Added a stateful persistent-stream mock and integration coverage for create,
