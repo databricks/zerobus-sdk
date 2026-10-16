@@ -20,6 +20,11 @@ typedef uint64_t zb_deadline_t;
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms);
 zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds);
 
+/* Milliseconds left until deadline, rounded up: 0 only once it has passed,
+ * UINT64_MAX for ZB_DEADLINE_INFINITE. */
+uint64_t zb_deadline_remaining_ms(zb_deadline_t deadline);
+bool zb_deadline_expired(zb_deadline_t deadline);
+
 /* Caller-owned storage. Access it through the wrapper functions below. */
 typedef pthread_mutex_t zb_mutex_t;
 typedef pthread_cond_t zb_cond_t;
