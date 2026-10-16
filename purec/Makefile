@@ -28,17 +28,20 @@ GCOV ?= $(shell \
 		else echo gcov; \
 	fi)
 
+CLANG_FORMAT_VERSION ?= 20
+CLANG_FORMAT ?= clang-format-$(CLANG_FORMAT_VERSION)
+
 # All hand-written C sources (excludes build trees and generated).
 SOURCES := $(shell find include src examples tests -name '*.c' -o -name '*.h' 2>/dev/null)
 
-.PHONY: help configure build test examples lint fmt fmt-check clean check verify coverage generate-proto
+.PHONY: help configure build test examples lint fmt fmt-check print-clang-format-version clean check verify coverage generate-proto
 
 help:
 	@echo "Available targets:"
 	@echo "  make build          - Configure and build the SDK, examples, and tests"
 	@echo "  make test           - Build and run the offline test suite (ctest)"
 	@echo "  make examples       - Build the example binaries"
-	@echo "  make fmt            - Format all C sources with clang-format"
+	@echo "  make fmt            - Format all C sources with $(CLANG_FORMAT)"
 	@echo "  make fmt-check      - Check formatting without modifying files"
 	@echo "  make lint           - Warnings-as-errors build (-Werror)"
 	@echo "  make check          - fmt-check + lint (static gates, no tests)"
@@ -72,10 +75,14 @@ examples: build
 	@echo "Examples built under $(BUILD_DIR)/examples/"
 
 fmt:
-	clang-format -i $(SOURCES)
+	$(CLANG_FORMAT) -i $(SOURCES)
 
 fmt-check:
-	clang-format --dry-run --Werror $(SOURCES)
+	$(CLANG_FORMAT) --dry-run --Werror $(SOURCES)
+
+# CI reads the pin from here so it installs the same major version.
+print-clang-format-version:
+	@echo $(CLANG_FORMAT_VERSION)
 
 # No clang-tidy here, so -Wall -Wextra is the linter: run the build with
 # -Werror. Its own tree keeps the flag out of the normal build's cache.
