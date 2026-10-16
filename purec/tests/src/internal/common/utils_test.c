@@ -1,4 +1,5 @@
-/* Unit tests for the input-validation and owned-string helpers in utils.c. */
+/* Unit tests for the input-validation, text, buffer and owned-string helpers
+ * in utils.c. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,6 +16,11 @@ static bool utf8_ok(const char *s)
 static bool labels_ok(const char *s)
 {
     return host_labels_are_valid(s, strlen(s));
+}
+
+static bool parse(const char *s, uint32_t *out)
+{
+    return zb_parse_u32((const uint8_t *)s, strlen(s), out);
 }
 
 /* ---- tests ------------------------------------------------------------- */
@@ -56,6 +62,107 @@ static void test_utf8(void)
     CHECK(!is_valid_utf8("\xF4\x90\x80\x80", 4)); /* > U+10FFFF (F4 bound) */
     CHECK(!is_valid_utf8("\xE2\x28\xA1", 3));     /* bad first continuation */
     CHECK(!is_valid_utf8("\xE2\x9C\x28", 3));     /* bad later continuation */
+}
+
+static void test_starts_with(void)
+{
+    CHECK(zb_starts_with("https://x", 9, "https://"));
+    CHECK(zb_starts_with("HTTPS://x", 9, "https://"));
+    CHECK(zb_starts_with("abc", 3, "abc"));     /* whole input */
+    CHECK(zb_starts_with("abc", 3, ""));        /* empty prefix */
+    CHECK(!zb_starts_with("http", 4, "https")); /* input too short */
+    /* Only len bytes are read, even if s continues. */
+    CHECK(!zb_starts_with("https", 4, "https"));
+    CHECK(!zb_starts_with("ftp://x", 7, "https://"));
+}
+
+static void test_parse_u32(void)
+{
+    uint32_t out = 0;
+    CHECK(parse("0", &out) && out == 0);
+    CHECK(parse("200", &out) && out == 200);
+    CHECK(parse("007", &out) && out == 7); /* leading zeros are digits */
+    CHECK(parse("4294967295", &out) && out == UINT32_MAX);
+    /* Only len bytes are read. */
+    CHECK(zb_parse_u32((const uint8_t *)"123", 2, &out) && out == 12);
+
+    /* A failure leaves *out as it was. */
+    out = 7;
+    CHECK(!parse("", &out));
+    CHECK(!parse("4294967296", &out)); /* UINT32_MAX + 1 */
+    CHECK(!parse("99999999999", &out));
+    CHECK(!parse("-1", &out));
+    CHECK(!parse("+1", &out));
+    CHECK(!parse(" 1", &out));
+    CHECK(!parse("1x", &out));
+    CHECK_EQ_INT(out, 7);
+}
+
+static void test_hex_value(void)
+{
+    CHECK_EQ_INT(zb_hex_value('0'), 0);
+    CHECK_EQ_INT(zb_hex_value('9'), 9);
+    CHECK_EQ_INT(zb_hex_value('a'), 10);
+    CHECK_EQ_INT(zb_hex_value('f'), 15);
+    CHECK_EQ_INT(zb_hex_value('A'), 10);
+    CHECK_EQ_INT(zb_hex_value('F'), 15);
+    /* The neighbours of each range are not digits. */
+    CHECK_EQ_INT(zb_hex_value('/'), -1);
+    CHECK_EQ_INT(zb_hex_value(':'), -1);
+    CHECK_EQ_INT(zb_hex_value('`'), -1);
+    CHECK_EQ_INT(zb_hex_value('g'), -1);
+    CHECK_EQ_INT(zb_hex_value('@'), -1);
+    CHECK_EQ_INT(zb_hex_value('G'), -1);
+    CHECK_EQ_INT(zb_hex_value('\0'), -1);
+}
+
+static void test_view_equals(void)
+{
+    CHECK(zb_view_equals(sv("te"), "te"));
+    CHECK(!zb_view_equals(sv("Te"), "te")); /* case-sensitive */
+    CHECK(!zb_view_equals(sv("te"), "tea"));
+    CHECK(!zb_view_equals(sv("tea"), "te"));
+    /* Only len bytes are compared. */
+    CHECK(zb_view_equals((zerobus_string_view_t){"tea", 2}, "te"));
+
+    /* Empty and NULL views never dereference their data. */
+    CHECK(zb_view_equals((zerobus_string_view_t){"", 0}, ""));
+    CHECK(zb_view_equals((zerobus_string_view_t){NULL, 0}, ""));
+    CHECK(!zb_view_equals((zerobus_string_view_t){NULL, 0}, "x"));
+    CHECK(!zb_view_equals((zerobus_string_view_t){NULL, 3}, "abc"));
+}
+
+static void test_copy_bounded(void)
+{
+    uint8_t buffer[4] = {0};
+    size_t used = 0;
+    size_t consumed = 0;
+
+    /* Copies what fits and advances both cursors. */
+    zb_copy_bounded(buffer, sizeof(buffer), &used, (const uint8_t *)"ab", 2,
+                    &consumed);
+    CHECK(used == 2 && consumed == 2 && memcmp(buffer, "ab", 2) == 0);
+
+    /* The buffer limits the copy, and the input continues where it stopped. */
+    consumed = 0;
+    zb_copy_bounded(buffer, sizeof(buffer), &used, (const uint8_t *)"cdef", 4,
+                    &consumed);
+    CHECK(used == 4 && consumed == 2 && memcmp(buffer, "abcd", 4) == 0);
+    used = 0;
+    zb_copy_bounded(buffer, sizeof(buffer), &used, (const uint8_t *)"cdef", 4,
+                    &consumed);
+    CHECK(used == 2 && consumed == 4 && memcmp(buffer, "ef", 2) == 0);
+
+    /* A full buffer or a used-up input copies nothing, and an empty input may
+     * be NULL. */
+    used = 4;
+    consumed = 0;
+    zb_copy_bounded(buffer, sizeof(buffer), &used, (const uint8_t *)"x", 1,
+                    &consumed);
+    CHECK(used == 4 && consumed == 0);
+    used = 0;
+    zb_copy_bounded(buffer, sizeof(buffer), &used, NULL, 0, &consumed);
+    CHECK(used == 0 && consumed == 0);
 }
 
 static void test_table_name(void)
@@ -226,6 +333,11 @@ int main(void)
 {
     test_view_classification();
     test_utf8();
+    test_starts_with();
+    test_parse_u32();
+    test_hex_value();
+    test_view_equals();
+    test_copy_bounded();
     test_table_name();
     test_url_validate();
     test_host_labels();
