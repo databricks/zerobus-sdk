@@ -22,6 +22,8 @@ import {
 } from '../index';
 import { HeadersProvider } from '../src/headers_provider';
 import { loadDescriptorProto } from '../utils/descriptor.js';
+// AvroEncoder is internal (not in the public .d.ts); require it for tests.
+const { _AvroEncoder: AvroEncoder } = require('../wrapper');
 
 const descriptor = require('protobufjs/ext/descriptor');
 
@@ -346,6 +348,53 @@ describe('RecordType enum', () => {
 
     it('should have Proto value', () => {
         assert.strictEqual(RecordType.Proto, 1);
+    });
+
+    it('should have Avro value', () => {
+        assert.strictEqual(RecordType.Avro, 2);
+    });
+});
+
+describe('Avro encoding', () => {
+    const schema = JSON.stringify({
+        type: 'record',
+        name: 'Order',
+        fields: [
+            { name: 'id', type: 'long' },
+            { name: 'name', type: 'string' },
+        ],
+    });
+
+    it('encodes a record object to Avro bytes', () => {
+        const enc = new AvroEncoder(schema);
+        const buf = enc.encode({ id: 1n, name: 'Alice' });
+        assert.ok(Buffer.isBuffer(buf) && buf.length > 0);
+    });
+
+    it('passes a pre-encoded Buffer through unchanged', () => {
+        const enc = new AvroEncoder(schema);
+        const pre = Buffer.from([1, 2, 3]);
+        assert.ok(enc.encode(pre).equals(pre));
+    });
+
+    it('round-trips a full-range int64 via BigInt (no 2^53 precision loss)', () => {
+        const enc = new AvroEncoder(schema);
+        const buf = enc.encode({ id: 9223372036854775807n, name: 'x' });
+        const back = (enc as any)._avroType().fromBuffer(buf);
+        assert.strictEqual(back.id, 9223372036854775807n);
+    });
+
+    it('encodeBatch encodes an array and rejects a single record', () => {
+        const enc = new AvroEncoder(schema);
+        const out = enc.encodeBatch([{ id: 1n, name: 'a' }, Buffer.from([9])]);
+        assert.strictEqual(out.length, 2);
+        assert.ok(out.every((b) => Buffer.isBuffer(b)));
+        assert.throws(() => enc.encodeBatch({ id: 1n, name: 'a' } as any), /array of records/);
+    });
+
+    it('a bytes-only payload never parses the schema', () => {
+        const enc = new AvroEncoder('not valid json');
+        assert.ok(enc.encode(Buffer.from([1])).equals(Buffer.from([1])));
     });
 });
 
