@@ -33,7 +33,7 @@ async-trait = "0.1"
 bytes = "1"
 
 arrow-array = { version = "59.2", optional = true }
-arrow-schema = { version = "59.2", optional = true }
+arrow-schema = { version = "60.0", optional = true }
 arrow-ipc = { version = "59.2", features = ["lz4", "zstd"], optional = true }
 
 [build-dependencies]

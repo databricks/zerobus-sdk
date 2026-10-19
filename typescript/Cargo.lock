@@ -49,7 +49,7 @@ dependencies = [
  "ahash",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "chrono",
  "half",
  "hashbrown 0.17.1",
@@ -80,7 +80,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-ord",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "arrow-select",
  "atoi",
  "base64 0.23.1",
@@ -98,7 +98,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "723fe4aeed7604e00b9883a465af4ff0a0e6c44c03e41a68c3d1cbc403e0e44d"
 dependencies = [
  "arrow-buffer",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "half",
  "num-integer",
  "num-traits",
@@ -113,7 +113,7 @@ dependencies = [
  "arrow-cast",
  "arrow-data",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "base64 0.23.1",
  "bytes",
  "futures",
@@ -132,7 +132,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "arrow-select",
  "flatbuffers",
  "lz4_flex",
@@ -148,15 +148,21 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "arrow-select",
 ]
 
 [[package]]
 name = "arrow-schema"
-version = "59.2.0"
+version = "59.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6fed2ca0d1eade57e811cbe73b98ad50cc08a1183e13b2d2aa43a7df593f40e"
+checksum = "37b6c8a6b12cf3869d299ce36ed8e1cd6fe9836264b68fb6c6538473a36124a1"
+
+[[package]]
+name = "arrow-schema"
+version = "60.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f85a9a58cd03560526b0066487574aacb9008e413504fa0ee23d61141e96c338"
 
 [[package]]
 name = "arrow-select"
@@ -168,7 +174,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 59.3.1",
  "num-traits",
 ]
 
@@ -409,12 +415,12 @@ dependencies = [
 
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.11.0"
+version = "2.12.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 60.0.0",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -2968,7 +2974,7 @@ version = "1.4.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 60.0.0",
  "async-trait",
  "base64 0.21.7",
  "bytes",
