@@ -36,6 +36,7 @@ endif()
 # ---------------------------------------------------------------------------
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
+find_package(OpenSSL 1.1.1 REQUIRED)
 
 find_path(PROTOBUF_C_INCLUDE_DIR NAMES protobuf-c/protobuf-c.h)
 find_library(PROTOBUF_C_LIBRARY NAMES protobuf-c libprotobuf-c)
@@ -66,6 +67,7 @@ endif()
 set(ZEROBUS_SOURCES
   src/internal/common/utils.c
   src/internal/common/queue.c
+  src/internal/network/tls.c
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
   src/internal/platform/network.c
@@ -89,7 +91,7 @@ target_include_directories(zerobus_c
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
-target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c)
+target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c OpenSSL::SSL OpenSSL::Crypto)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
@@ -102,7 +104,7 @@ target_include_directories(zerobus_c_testing
   PRIVATE "${GENERATED_DIR}")
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c_testing PRIVATE c_std_11)
-target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c)
+target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c OpenSSL::SSL OpenSSL::Crypto)
 
 # ---------------------------------------------------------------------------
 # Sanitizers
