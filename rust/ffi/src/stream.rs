@@ -3,7 +3,7 @@
 use crate::common::*;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusStream,
+    EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusResult, ZerobusStream,
 };
 use prost::Message;
 use std::ffi::CString;
@@ -245,41 +245,41 @@ fn invoke_record_array_async_callback(
     }
 }
 
-fn encoded_records_to_c_array(records_vec: Vec<EncodedRecord>) -> CRecordArray {
-    let len = records_vec.len();
-
-    let mut c_records: Vec<CRecord> = records_vec
+/// Fails on a record type the C API cannot represent. Every record is checked before any
+/// buffer is handed to C, so the error path leaks nothing.
+fn encoded_records_to_c_array(records_vec: Vec<EncodedRecord>) -> ZerobusResult<CRecordArray> {
+    let records = records_vec
         .into_iter()
         .map(|record| match record {
-            EncodedRecord::Proto(data) => {
-                let data_len = data.len();
-                let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
-                CRecord {
-                    is_json: false,
-                    data: data_ptr,
-                    data_len,
-                }
-            }
-            EncodedRecord::Json(json_str) => {
-                let bytes = json_str.into_bytes();
-                let data_len = bytes.len();
-                let data_ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-                CRecord {
-                    is_json: true,
-                    data: data_ptr,
-                    data_len,
-                }
+            EncodedRecord::Proto(data) => Ok((false, data)),
+            EncodedRecord::Json(json_str) => Ok((true, json_str.into_bytes())),
+            _ => Err(ZerobusError::InvalidStateError(
+                "unacknowledged records include a record type the C API does not support"
+                    .to_string(),
+            )),
+        })
+        .collect::<ZerobusResult<Vec<_>>>()?;
+    let len = records.len();
+
+    let c_records: Vec<CRecord> = records
+        .into_iter()
+        .map(|(is_json, data)| {
+            let data_len = data.len();
+            let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
+            CRecord {
+                is_json,
+                data: data_ptr,
+                data_len,
             }
         })
         .collect();
 
-    let records_ptr = c_records.as_mut_ptr();
-    std::mem::forget(c_records);
+    let records_ptr = Box::into_raw(c_records.into_boxed_slice()) as *mut CRecord;
 
-    CRecordArray {
+    Ok(CRecordArray {
         records: records_ptr,
         len,
-    }
+    })
 }
 
 /// Create a stream with OAuth authentication
@@ -1708,12 +1708,14 @@ pub extern "C" fn zerobus_stream_get_unacked_records(
             }
         };
 
-        let records_res = RUNTIME.block_on(async { stream_ref.get_unacked_records().await });
+        let records_res = RUNTIME
+            .block_on(async { stream_ref.get_unacked_records().await })
+            .and_then(|records_iter| encoded_records_to_c_array(records_iter.collect()));
 
         match records_res {
-            Ok(records_iter) => {
+            Ok(records) => {
                 write_success_result(result);
-                encoded_records_to_c_array(records_iter.collect())
+                records
             }
             Err(err) => {
                 if !result.is_null() {
@@ -1747,10 +1749,14 @@ pub extern "C" fn zerobus_stream_get_unacked_records_async(
         let stream_arc = unsafe { clone_stream_arc(stream) };
         let callback_user_data = SendPtr::new(user_data);
         RUNTIME.spawn(async move {
-            match stream_arc.get_unacked_records().await {
-                Ok(records_iter) => invoke_record_array_async_callback(
+            match stream_arc
+                .get_unacked_records()
+                .await
+                .and_then(|records_iter| encoded_records_to_c_array(records_iter.collect()))
+            {
+                Ok(records) => invoke_record_array_async_callback(
                     callback,
-                    encoded_records_to_c_array(records_iter.collect()),
+                    records,
                     CResult::success(),
                     callback_user_data.get(),
                 ),

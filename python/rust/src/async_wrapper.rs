@@ -270,8 +270,9 @@ impl ZerobusStream {
             let records = guard.get_unacked_records().await.map_err(map_error)?;
 
             Python::attach(|py| {
-                let out: Vec<Py<PyAny>> =
-                    records.map(|r| encoded_record_to_pybytes(py, r)).collect();
+                let out: Vec<Py<PyAny>> = records
+                    .map(|r| encoded_record_to_pybytes(py, r))
+                    .collect::<PyResult<_>>()?;
                 Ok(out)
             })
         })
@@ -292,9 +293,9 @@ impl ZerobusStream {
                         batch
                             .into_iter()
                             .map(|r| encoded_record_to_pybytes(py, r))
-                            .collect()
+                            .collect::<PyResult<_>>()
                     })
-                    .collect();
+                    .collect::<PyResult<_>>()?;
                 Ok(out)
             })
         })

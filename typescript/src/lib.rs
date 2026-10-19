@@ -214,6 +214,17 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
     }
 }
 
+/// Converts an unacknowledged record to a Buffer (JSON strings become UTF-8 bytes).
+fn record_payload_to_buffer(record: RustRecordPayload) -> Result<Buffer> {
+    match record {
+        RustRecordPayload::Proto(vec) => Ok(vec.into()),
+        RustRecordPayload::Json(s) => Ok(s.into_bytes().into()),
+        _ => Err(Error::from_reason(
+            "unacknowledged records include a record type the TypeScript API does not support",
+        )),
+    }
+}
+
 /// A stream for ingesting data into a Databricks Delta table.
 ///
 /// The stream manages JSON or Protocol Buffer ingestion over a bidirectional
@@ -651,13 +662,7 @@ impl ZerobusStream {
             .await
             .map_err(|e| Error::from_reason(format!("Failed to get unacked records: {}", e)))?;
 
-        Ok(unacked
-            .into_iter()
-            .map(|payload| match payload {
-                RustRecordPayload::Proto(vec) => vec.into(),
-                RustRecordPayload::Json(s) => s.into_bytes().into(),
-            })
-            .collect())
+        unacked.into_iter().map(record_payload_to_buffer).collect()
     }
 
     /// Gets unacknowledged records grouped by their original batches.
@@ -697,18 +702,15 @@ impl ZerobusStream {
             .await
             .map_err(|e| Error::from_reason(format!("Failed to get unacked batches: {}", e)))?;
 
-        Ok(unacked_batches
+        unacked_batches
             .into_iter()
             .map(|batch| {
                 batch
                     .into_iter()
-                    .map(|record| match record {
-                        RustRecordPayload::Proto(vec) => vec.into(),
-                        RustRecordPayload::Json(s) => s.into_bytes().into(),
-                    })
-                    .collect()
+                    .map(record_payload_to_buffer)
+                    .collect::<Result<_>>()
             })
-            .collect())
+            .collect()
     }
 }
 

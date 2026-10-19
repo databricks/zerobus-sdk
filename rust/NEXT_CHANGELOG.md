@@ -32,6 +32,16 @@
   build. Arrow `60` requires Rust 1.88 or newer. Consumers on the default build
   (without the `arrow-flight` feature) are unaffected.
 
+- Added `#[non_exhaustive]` to the `EncodedRecord`, `EncodedBatch`, and
+  `EncodedBatchIter` enums, and to the doc-hidden `PreparedInput`. Enabling the
+  `avro` feature anywhere in a build, or adding a record format in a later
+  release, no longer breaks exhaustive matches in other crates
+  ([#909](https://github.com/databricks/zerobus-sdk/issues/909)).
+
+  Migration: add a `_ => { … }` arm to any `match` on these enums, such as one
+  over the records returned by `get_unacked_records()` or
+  `get_unacked_batches()`.
+
 ### Deprecations
 
 ### API Changes
