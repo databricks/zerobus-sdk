@@ -726,6 +726,10 @@ use databricks_zerobus_ingest_sdk::{message_descriptor, ProtoBytes};
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 
 // Build the descriptor at runtime (a column's proto field number is `position + 1`).
+let columns = vec![
+    UcColumn::new("id", "BIGINT").with_nullable(false).with_position(0),
+    UcColumn::new("customer_name", "STRING").with_position(1),
+];
 let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
 let descriptor = message_descriptor(&descriptor_proto)?;
 
