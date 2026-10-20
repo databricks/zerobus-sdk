@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use arrow_ipc::{reader::StreamReader, writer::IpcWriteOptions, CompressionType};
+use arrow_ipc::{reader::StreamReader, writer::IpcWriteOptions, CompressionType, MetadataVersion};
 use bytes::Bytes;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Duration, Instant};
@@ -253,15 +253,21 @@ pub(super) fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
     }
 }
 
+/// Alignment of IPC buffers in compressed payloads, the smallest that the IPC format allows.
+const COMPRESSED_IPC_ALIGNMENT: usize = 8;
+
 /// Builds [`IpcWriteOptions`] for the given optional compression codec.
+///
+/// With compression, 64-byte alignment gives readers no benefit, so compressed payloads
+/// use [`COMPRESSED_IPC_ALIGNMENT`].
 #[allow(clippy::result_large_err)]
 pub(super) fn make_ipc_write_options(
     compression: Option<CompressionType>,
 ) -> ZerobusResult<IpcWriteOptions> {
     match compression {
         None => Ok(IpcWriteOptions::default()),
-        Some(c) => IpcWriteOptions::default()
-            .try_with_compression(Some(c))
+        Some(c) => IpcWriteOptions::try_new(COMPRESSED_IPC_ALIGNMENT, false, MetadataVersion::V5)
+            .and_then(|options| options.try_with_compression(Some(c)))
             .map_err(|e| {
                 ZerobusError::InvalidArgument(format!(
                     "Failed to enable Arrow IPC compression: {e}"
@@ -275,15 +281,18 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::Int32Array;
+    use arrow_flight::encode::FlightDataEncoderBuilder;
+    use arrow_ipc::CompressionType;
     use arrow_schema::{DataType, Field, Schema};
+    use futures::TryStreamExt;
     use tokio::sync::Semaphore;
     use tokio::time::{Duration, Instant};
 
     use crate::ZerobusError;
 
     use super::{
-        oldest_pending_ack_deadline, rebuild_pending_for_replay, refresh_pending_ack_deadlines,
-        PendingBatch, RecordBatch,
+        make_ipc_write_options, oldest_pending_ack_deadline, rebuild_pending_for_replay,
+        refresh_pending_ack_deadlines, PendingBatch, RecordBatch,
     };
 
     #[allow(clippy::manual_div_ceil)]
@@ -370,5 +379,22 @@ mod tests {
             }
             other => panic!("expected an invalid-argument error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn zstd_ipc_buffers_are_8_byte_aligned() {
+        let batch =
+            RecordBatch::try_from_iter([("a", Arc::new(Int32Array::from(vec![1, 2, 3])) as _)])
+                .unwrap();
+        let frames: Vec<_> = FlightDataEncoderBuilder::new()
+            .with_options(make_ipc_write_options(Some(CompressionType::ZSTD)).unwrap())
+            .build(futures::stream::iter([Ok(batch)]))
+            .try_collect()
+            .await
+            .unwrap();
+        let message = arrow_ipc::root_as_message(&frames[1].data_header).unwrap();
+        let buffers = message.header_as_record_batch().unwrap().buffers().unwrap();
+        assert!(buffers.iter().all(|b| b.offset() % 8 == 0));
+        assert!(buffers.iter().any(|b| b.offset() % 64 != 0));
     }
 }
