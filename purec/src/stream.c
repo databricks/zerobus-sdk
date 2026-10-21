@@ -4,20 +4,19 @@
 
 #include "error.h"
 #include "internal/common/utils.h"
+#include "internal/platform/concurrency.h"
 #include "internal/platform/log.h"
 #include "sdk.h"
+#include "stream.h"
 #include "zerobus/sdk.h"
 #include "zerobus/stream.h"
-
-/* Record size limit: just under the server's ~10 MiB request cap, leaving
- * headroom for framing and protocol overhead. No public knob for it yet. */
-#define ZB_MAX_PAYLOAD_BYTES (10u * 1024u * 1024u - 64u * 1024u)
 
 struct zerobus_stream_builder {
     zerobus_sdk_t *sdk; /* owned reference */
     char *table;
     char *client_id;
     char *client_secret; /* zeroized on free */
+    zb_stream_config_t config;
 };
 
 struct zerobus_stream {
@@ -25,6 +24,7 @@ struct zerobus_stream {
     char *table;
     char *client_id;
     char *client_secret; /* zeroized on free */
+    zb_stream_config_t config;
 
     atomic_bool closed; /* set by close, rejects ingest once true */
 };
@@ -51,8 +51,24 @@ zerobus_stream_builder_new(zerobus_sdk_t *sdk,
     }
     b->sdk = sdk;
     zb_sdk_ref(sdk);
+    b->config = zb_stream_config_default;
     *out_builder = b;
     ZB_DEBUG("stream builder created");
+    return ZEROBUS_STATUS_OK;
+}
+
+/* Argument checks shared by the builder setters. */
+static zerobus_status_t
+check_setter_args(const zerobus_stream_builder_t *builder,
+                  zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (builder == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "builder must not be NULL");
+    }
     return ZEROBUS_STATUS_OK;
 }
 
@@ -61,12 +77,9 @@ zerobus_stream_builder_set_table(zerobus_stream_builder_t *builder,
                                  zerobus_string_view_t table_name,
                                  zerobus_error_t **out_error)
 {
-    if (out_error != NULL && *out_error != NULL) {
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
-    }
-    if (builder == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "builder must not be NULL");
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
     if (!zb_is_valid_string(table_name)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -88,12 +101,9 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
     zerobus_stream_builder_t *builder, zerobus_string_view_t client_id,
     zerobus_string_view_t client_secret, zerobus_error_t **out_error)
 {
-    if (out_error != NULL && *out_error != NULL) {
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
-    }
-    if (builder == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "builder must not be NULL");
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
     if (!zb_is_valid_string(client_id) || !zb_is_valid_string(client_secret)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -113,6 +123,116 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
     builder->client_id = id_copy;
     builder->client_secret = secret_copy;
     return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zerobus_stream_builder_set_max_inflight_requests(
+    zerobus_stream_builder_t *builder, size_t max_inflight_requests,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    /* The landing zone's capacity rule. */
+    size_t n = max_inflight_requests;
+    if (n < 4 || n >= ZB_SEM_VALUE_MAX || (n & (n - 1)) != 0) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "max in-flight requests must be a power of two from 4 "
+                       "to 2^30, got %zu",
+                       n);
+    }
+    builder->config.max_inflight_requests = n;
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t
+zerobus_stream_builder_set_recovery(zerobus_stream_builder_t *builder,
+                                    bool enabled, zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.recovery = enabled;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_stream_builder_set_recovery_timeout_ms(
+    zerobus_stream_builder_t *builder, uint64_t timeout_ms,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.recovery_timeout_ms = timeout_ms;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_stream_builder_set_recovery_backoff_ms(
+    zerobus_stream_builder_t *builder, uint64_t backoff_ms,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.recovery_backoff_ms = backoff_ms;
+    }
+    return status;
+}
+
+zerobus_status_t
+zerobus_stream_builder_set_recovery_retries(zerobus_stream_builder_t *builder,
+                                            uint32_t retries,
+                                            zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.recovery_retries = retries;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(
+    zerobus_stream_builder_t *builder, uint64_t timeout_ms,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.server_lack_of_ack_timeout_ms = timeout_ms;
+    }
+    return status;
+}
+
+zerobus_status_t
+zerobus_stream_builder_set_flush_timeout_ms(zerobus_stream_builder_t *builder,
+                                            uint64_t timeout_ms,
+                                            zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.flush_timeout_ms = timeout_ms;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_stream_builder_set_stream_paused_max_wait_time_ms(
+    zerobus_stream_builder_t *builder, uint64_t wait_ms,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.stream_paused_max_wait_time_ms = wait_ms;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_stream_builder_set_max_ingest_payload_bytes(
+    zerobus_stream_builder_t *builder, size_t max_bytes,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->config.max_ingest_payload_bytes = max_bytes;
+    }
+    return status;
 }
 
 zerobus_status_t
@@ -148,6 +268,7 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     s->table = zb_strdup(builder->table);
     s->client_id = zb_strdup(builder->client_id);
     s->client_secret = zb_strdup(builder->client_secret);
+    s->config = builder->config;
     if (s->table == NULL || s->client_id == NULL || s->client_secret == NULL) {
         ZB_ERROR("stream configuration allocation failed");
         zerobus_stream_free(s);
@@ -193,10 +314,11 @@ zerobus_status_t zerobus_stream_ingest_json_record(
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "record must be non-empty");
     }
-    if (json_record.len > ZB_MAX_PAYLOAD_BYTES) {
+    if (json_record.len > stream->config.max_ingest_payload_bytes) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record of %zu bytes exceeds the %u-byte limit",
-                       json_record.len, (unsigned)ZB_MAX_PAYLOAD_BYTES);
+                       "record of %zu bytes exceeds the %zu-byte limit",
+                       json_record.len,
+                       stream->config.max_ingest_payload_bytes);
     }
     if (!zb_is_valid_string(json_record)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
