@@ -1410,14 +1410,21 @@ mod tests {
 
     #[test]
     fn uc_column_new_matches_deserialization_defaults() {
-        let built = UcColumn::new("id", "INT");
+        let UcColumn {
+            name,
+            type_name,
+            type_text,
+            type_json,
+            nullable,
+            position,
+        } = UcColumn::new("id", "INT");
         let parsed: UcColumn = serde_json::from_str(r#"{"name":"id","type_name":"INT"}"#).unwrap();
-        assert_eq!(built.name, parsed.name);
-        assert_eq!(built.type_name, parsed.type_name);
-        assert_eq!(built.type_text, parsed.type_text);
-        assert_eq!(built.type_json, parsed.type_json);
-        assert_eq!(built.nullable, parsed.nullable);
-        assert_eq!(built.position, parsed.position);
+        assert_eq!(name, parsed.name);
+        assert_eq!(type_name, parsed.type_name);
+        assert_eq!(type_text, parsed.type_text);
+        assert_eq!(type_json, parsed.type_json);
+        assert_eq!(nullable, parsed.nullable);
+        assert_eq!(position, parsed.position);
     }
 
     #[cfg(feature = "arrow-flight")]

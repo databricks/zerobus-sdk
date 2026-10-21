@@ -1303,7 +1303,7 @@ match stream.wait_for_offset(offset).await {
 
 (Requires `features = ["arrow-flight"]`.)
 
-`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Pass `ArrowSchemaOptions { annotate_variant_extension: true }` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
+`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Set `annotate_variant_extension` on `ArrowSchemaOptions` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
 
 ```rust
 use databricks_zerobus_ingest_sdk::schema::{
