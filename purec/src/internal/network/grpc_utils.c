@@ -42,7 +42,7 @@ static zerobus_status_t start_message(zb_grpc_decoder_t *decoder,
         length = (length << 8) | prefix[i];
     }
     if ((size_t)length > maximum) {
-        return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
+        return ZEROBUS_STATUS_OUT_OF_RANGE;
     }
     zb_message_t *message = calloc(1, sizeof(*message));
     if (message == NULL) {
@@ -112,6 +112,8 @@ zerobus_status_t zb_map_grpc_status(uint32_t code)
         return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
     case 9:
         return ZEROBUS_STATUS_FAILED_PRECONDITION;
+    case 11:
+        return ZEROBUS_STATUS_OUT_OF_RANGE;
     case 12:
         return ZEROBUS_STATUS_UNIMPLEMENTED;
     case 13:

@@ -23,6 +23,8 @@ typedef struct {
     bool has_grpc_status;
     uint32_t grpc_status;
     uint32_t http_status;
+    /* RST_STREAM code sent or received, or the peer's GOAWAY code; 0 if
+     * none. */
     uint32_t http2_error;
     char *message;
 } zb_rpc_result_t;

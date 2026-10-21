@@ -167,7 +167,7 @@ static void test_decoder_errors(void)
     zb_grpc_decoder_clear(&decoder);
     CHECK_EQ_INT(
         feed(&decoder, &sink, too_long, sizeof(too_long), &consumed, &paused),
-        ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+        ZEROBUS_STATUS_OUT_OF_RANGE);
     zb_grpc_decoder_clear(&decoder);
     CHECK_OK(
         feed(&decoder, &sink, largest, sizeof(largest), &consumed, &paused));
@@ -215,6 +215,7 @@ static void test_map_grpc_status(void)
     CHECK_EQ_INT(zb_map_grpc_status(7), ZEROBUS_STATUS_PERMISSION_DENIED);
     CHECK_EQ_INT(zb_map_grpc_status(8), ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
     CHECK_EQ_INT(zb_map_grpc_status(9), ZEROBUS_STATUS_FAILED_PRECONDITION);
+    CHECK_EQ_INT(zb_map_grpc_status(11), ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK_EQ_INT(zb_map_grpc_status(12), ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK_EQ_INT(zb_map_grpc_status(13), ZEROBUS_STATUS_INTERNAL);
     CHECK_EQ_INT(zb_map_grpc_status(14), ZEROBUS_STATUS_UNAVAILABLE);
@@ -223,7 +224,6 @@ static void test_map_grpc_status(void)
     CHECK_EQ_INT(zb_map_grpc_status(2), ZEROBUS_STATUS_UNKNOWN);
     CHECK_EQ_INT(zb_map_grpc_status(6), ZEROBUS_STATUS_UNKNOWN);
     CHECK_EQ_INT(zb_map_grpc_status(10), ZEROBUS_STATUS_UNKNOWN);
-    CHECK_EQ_INT(zb_map_grpc_status(11), ZEROBUS_STATUS_UNKNOWN);
     CHECK_EQ_INT(zb_map_grpc_status(15), ZEROBUS_STATUS_UNKNOWN);
     CHECK_EQ_INT(zb_map_grpc_status(17), ZEROBUS_STATUS_UNKNOWN);
     CHECK_EQ_INT(zb_map_grpc_status(UINT32_MAX), ZEROBUS_STATUS_UNKNOWN);

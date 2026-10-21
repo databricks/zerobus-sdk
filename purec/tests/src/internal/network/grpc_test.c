@@ -63,6 +63,7 @@ typedef struct {
 typedef struct {
     nghttp2_session *session;
     sent_t sent[CALLS]; /* sent[i] is call i's stream */
+    uint32_t goaway;    /* the client's GOAWAY code, or UINT32_MAX */
     uint8_t out[16384];
     size_t out_len;
 } peer_t;
@@ -208,6 +209,10 @@ static int peer_on_frame(nghttp2_session *session, const nghttp2_frame *frame,
 {
     (void)session;
     (void)user_data;
+    if (frame->hd.type == NGHTTP2_GOAWAY) {
+        peer.goaway = frame->goaway.error_code;
+        return 0;
+    }
     sent_t *sent = sent_on(frame->hd.stream_id);
     if (sent == NULL) {
         return 0;
@@ -249,6 +254,7 @@ static void peer_init(void)
     for (int i = 0; i < CALLS; ++i) {
         peer.sent[i].reset = UINT32_MAX;
     }
+    peer.goaway = UINT32_MAX;
     if (nghttp2_session_callbacks_new(&callbacks) == 0) {
         nghttp2_session_callbacks_set_on_header_callback(callbacks,
                                                          peer_on_header);
@@ -440,7 +446,7 @@ static void test_init_validation(void)
     CHECK_EQ_INT(open_request(0, PATH, &upper, 1),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(open_request(0, PATH, &large, SIZE_MAX),
-                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+                 ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK(calls[0].grpc == NULL);
 
     /* An open call cannot be opened again, and a failed session refuses new
@@ -456,8 +462,7 @@ static void test_init_validation(void)
     zb_grpc_destroy(&grpc);
     config.max_header_bytes = 512;
     REQUIRE_OK(zb_grpc_init(&grpc, &config));
-    CHECK_EQ_INT(open_request(0, PATH, &large, 1),
-                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+    CHECK_EQ_INT(open_request(0, PATH, &large, 1), ZEROBUS_STATUS_OUT_OF_RANGE);
 zb_cleanup:
     stop();
 }
@@ -521,7 +526,7 @@ static void test_request(void)
     ctx[0].queue[0]->len = (size_t)UINT32_MAX + 1;
     CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, CALL_STREAM), 0);
     CHECK_EQ_INT(pump(), 0);
-    CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+    CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK_EQ_INT(sent->data_frames, 0);
     CHECK_EQ_INT(sent->reset, NGHTTP2_INTERNAL_ERROR);
 #endif
@@ -597,7 +602,7 @@ static void test_response_paused(void)
     REQUIRE(n >= 0 && grpc.paused);
     CHECK_OK(zb_grpc_retry_receive(&grpc));
     CHECK_EQ_INT(ctx[0].delivered, 1);
-    CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+    CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK(receive((size_t)n) >= 0);
     CHECK_EQ_INT(pump(), 0);
     CHECK_EQ_INT(peer.sent[0].reset, NGHTTP2_CANCEL);
@@ -649,12 +654,14 @@ static void test_response_checks(void)
 
     /* grpc-status must be a decimal, and only in the block that ends the
      * stream. The content type must be gRPC, and a header block must fit
-     * max_header_bytes (4096). */
+     * max_header_bytes (4096). An invalid header resets the stream with
+     * PROTOCOL_ERROR. */
     CHECK_EQ_INT(respond(END, FIELDS(bad_status)), ZEROBUS_STATUS_INTERNAL);
     CHECK_EQ_INT(respond(0, FIELDS(ok_only)), ZEROBUS_STATUS_INTERNAL);
     CHECK_EQ_INT(respond(0, FIELDS(not_grpc)), ZEROBUS_STATUS_INTERNAL);
-    CHECK_EQ_INT(respond(0, FIELDS(oversized)),
-                 ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+    CHECK_EQ_INT(respond(0, FIELDS(oversized)), ZEROBUS_STATUS_OUT_OF_RANGE);
+    CHECK_EQ_INT(peer.sent[0].reset, NGHTTP2_PROTOCOL_ERROR);
+    CHECK_EQ_INT(peer.sent[0].reset, ctx[0].result.http2_error);
 
     /* After the response headers, the stream may not end inside a message,
      * and HTTP 200 alone (no trailers) is not OK. */
@@ -715,25 +722,30 @@ static void test_goaway(void)
     CHECK(peer.sent[0].headers[0] == '\0');
 
     /* A connection error (DATA on stream 0) makes nghttp2 send an error
-     * GOAWAY, and sending it fails the session. */
+     * GOAWAY. It reaches the peer, the session fails, and nghttp2 wants no
+     * more I/O. */
     start();
     REQUIRE_OK(open_call(0));
     peer_data(0, 0, "x", 1);
-    CHECK_EQ_INT(pump(), NGHTTP2_ERR_CALLBACK_FAILURE);
+    CHECK_EQ_INT(pump(), 0);
+    CHECK_EQ_INT(peer.goaway, NGHTTP2_PROTOCOL_ERROR);
     CHECK_EQ_INT(grpc.failure, ZEROBUS_STATUS_INTERNAL);
     CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_INTERNAL);
+    CHECK(!nghttp2_session_want_read(grpc.session));
+    CHECK(!nghttp2_session_want_write(grpc.session));
 zb_cleanup:
     stop();
 }
 
 static void test_abort_and_destroy(void)
 {
-    /* Retrying does nothing while not paused. Abort completes every call; OK
-     * becomes UNAVAILABLE, and only the first abort counts. */
+    /* Retrying does nothing while not paused and rejects NULL. Abort completes
+     * every call; OK becomes UNAVAILABLE, and only the first abort counts. */
     start();
     REQUIRE_OK(add_call(0));
     REQUIRE_OK(add_call(1));
     CHECK_OK(zb_grpc_retry_receive(&grpc));
+    CHECK_EQ_INT(zb_grpc_retry_receive(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     zb_grpc_abort(&grpc, ZEROBUS_STATUS_OK);
     zb_grpc_abort(&grpc, ZEROBUS_STATUS_INTERNAL);
     zb_grpc_abort(NULL, ZEROBUS_STATUS_INTERNAL);

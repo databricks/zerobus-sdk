@@ -71,6 +71,12 @@ static void test_error_is_retryable(void)
     CHECK(!zerobus_error_is_retryable(fatal));
     zerobus_error_free(fatal);
 
+    /* Past a limit, so the same request fails the same way again. */
+    zerobus_error_t *range = zb_error_newf(ZEROBUS_STATUS_OUT_OF_RANGE, "big");
+    CHECK(range != NULL);
+    CHECK(!zerobus_error_is_retryable(range));
+    zerobus_error_free(range);
+
     /* Transient transport failures are retryable. */
     zerobus_error_t *internal = zb_error_newf(ZEROBUS_STATUS_INTERNAL, "blip");
     CHECK(internal != NULL);

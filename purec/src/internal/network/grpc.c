@@ -98,12 +98,12 @@ static int close_call(zb_grpc_call_t *call, zerobus_status_t status,
     return reset_stream(grpc, id, error);
 }
 
-/* Completes the call for an invalid response header. The returned
- * TEMPORAL_CALLBACK_FAILURE makes nghttp2 close the stream itself. */
+/* Completes the call for an invalid response header and resets its stream with
+ * PROTOCOL_ERROR. The call is detached, so the rest of the block is ignored. */
 static int bad_header(zb_grpc_call_t *call, zerobus_status_t status)
 {
-    complete(call, status, false, NGHTTP2_PROTOCOL_ERROR);
-    return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    return CALLBACK_RESULT(
+        close_call(call, status, false, NGHTTP2_PROTOCOL_ERROR));
 }
 
 static int decode(zb_grpc_call_t *call, const uint8_t *data, size_t len,
@@ -148,9 +148,11 @@ static ssize_t on_data_source_read(nghttp2_session *session, int32_t stream_id,
                 break;
             }
             if (call->sending->len > UINT32_MAX) {
-                complete(call, ZEROBUS_STATUS_RESOURCE_EXHAUSTED, false,
-                         NGHTTP2_INTERNAL_ERROR);
-                return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+                if (close_call(call, ZEROBUS_STATUS_OUT_OF_RANGE, false,
+                               NGHTTP2_INTERNAL_ERROR) != 0) {
+                    return NGHTTP2_ERR_CALLBACK_FAILURE;
+                }
+                return NGHTTP2_ERR_DEFERRED;
             }
             zb_write_grpc_prefix(call->send_prefix,
                                  (uint32_t)call->sending->len);
@@ -174,8 +176,10 @@ static ssize_t on_data_source_read(nghttp2_session *session, int32_t stream_id,
     return (ssize_t)written;
 }
 
-/* Called from nghttp2_session_mem_send after each frame is sent. For a GOAWAY
- * with an error code, aborts the session and returns a session-fatal error. */
+/* Called from nghttp2_session_mem_send after each frame is sent. An error
+ * GOAWAY aborts the session, and is still sent. A GOAWAY queued by
+ * nghttp2_session_terminate_session, as nghttp2's own are, also ends the
+ * session: want_read and want_write then report 0. */
 static int on_frame_send(nghttp2_session *session, const nghttp2_frame *frame,
                          void *user_data)
 {
@@ -184,7 +188,6 @@ static int on_frame_send(nghttp2_session *session, const nghttp2_frame *frame,
     if (frame->hd.type == NGHTTP2_GOAWAY &&
         frame->goaway.error_code != NGHTTP2_NO_ERROR) {
         zb_grpc_abort(grpc, ZEROBUS_STATUS_INTERNAL);
-        return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
     return 0;
 }
@@ -222,7 +225,7 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
     }
     if (!zb_add_http2_header_bytes(&call->header_bytes, name_len, value_len,
                                    call->grpc->config.max_header_bytes)) {
-        return bad_header(call, ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
+        return bad_header(call, ZEROBUS_STATUS_OUT_OF_RANGE);
     }
     zerobus_string_view_t key = {(const char *)name, name_len};
     if (zb_view_equals(key, ":status")) {
@@ -249,7 +252,9 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
         }
         call->grpc_message = malloc(value_len + 1);
         if (call->grpc_message == NULL) {
-            return bad_header(call, ZEROBUS_STATUS_OUT_OF_MEMORY);
+            return CALLBACK_RESULT(close_call(call,
+                                              ZEROBUS_STATUS_OUT_OF_MEMORY,
+                                              false, NGHTTP2_INTERNAL_ERROR));
         }
         memcpy(call->grpc_message, value, value_len);
         zb_grpc_percent_decode(call->grpc_message, value_len);
@@ -417,7 +422,7 @@ static zerobus_status_t queue_call(zb_grpc_call_t *call,
         if (!zb_add_http2_header_bytes(&total, header->name.len,
                                        header->value.len,
                                        config->max_header_bytes)) {
-            return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
+            return ZEROBUS_STATUS_OUT_OF_RANGE;
         }
         if (i >= protocol_count && !zb_is_valid_grpc_metadata(header)) {
             return ZEROBUS_STATUS_INVALID_ARGUMENT;
@@ -527,6 +532,9 @@ void zb_grpc_abort(zb_grpc_t *grpc, zerobus_status_t status)
 
 zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc)
 {
+    if (grpc == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
     if (!grpc->paused) {
         return grpc->failure;
     }
@@ -564,7 +572,7 @@ zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
     if (config->header_count > grpc->config.max_header_bytes / 32 ||
         config->header_count > SIZE_MAX / sizeof(nghttp2_nv) - 6 ||
         config->path.len > grpc->config.max_header_bytes) {
-        return ZEROBUS_STATUS_RESOURCE_EXHAUSTED;
+        return ZEROBUS_STATUS_OUT_OF_RANGE;
     }
     if (!zb_is_valid_grpc_target(config->path, false)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;

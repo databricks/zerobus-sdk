@@ -18,8 +18,8 @@ typedef struct {
     zerobus_string_view_t authority; /* host[:port]; copied by init. */
     bool tls;
 
-    size_t max_header_bytes;
-    size_t max_message_bytes;
+    size_t max_header_bytes;  /* Request and response headers. */
+    size_t max_message_bytes; /* Received messages only. */
 } zb_grpc_config_t;
 
 /* One call's settings. */
