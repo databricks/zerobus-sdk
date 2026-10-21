@@ -247,7 +247,9 @@ fn invoke_record_array_async_callback(
 
 /// Fails on a record type the C API cannot represent. Every record is checked before any
 /// buffer is handed to C, so the error path leaks nothing.
-fn encoded_records_to_c_array(records_vec: Vec<EncodedRecord>) -> ZerobusResult<CRecordArray> {
+pub(crate) fn encoded_records_to_c_array(
+    records_vec: Vec<EncodedRecord>,
+) -> ZerobusResult<CRecordArray> {
     let records = records_vec
         .into_iter()
         .map(|record| match record {
