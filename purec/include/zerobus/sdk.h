@@ -31,6 +31,14 @@ zerobus_sdk_builder_set_unity_catalog_endpoint(
     zerobus_sdk_builder_t *builder,
     zerobus_string_view_t unity_catalog_endpoint, zerobus_error_t **out_error);
 
+/*
+ * Trust only the CA certificates in the PEM file at path, instead of the
+ * system roots, for the Zerobus endpoint. The file is read at build.
+ */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_sdk_builder_set_tls_ca_file(
+    zerobus_sdk_builder_t *builder, zerobus_string_view_t path,
+    zerobus_error_t **out_error);
+
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                           zerobus_sdk_t **out_sdk, zerobus_error_t **out_error);

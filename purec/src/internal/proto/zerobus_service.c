@@ -90,6 +90,26 @@ static uint8_t *write_varint(uint8_t *out, uint64_t value)
     return out;
 }
 
+size_t zb_proto_write_ingest_header(uint8_t *out, zerobus_offset_t offset_id,
+                                    size_t len, bool batch)
+{
+    /* Update the encoding below whenever these fields change in
+     * rust/sdk/zerobus_service.proto:
+     *   EphemeralStreamRequest.ingest_record (2) and ingest_record_batch (3)
+     *   IngestRecordRequest.offset_id (1) and json_record (3)
+     *   IngestRecordBatchRequest.offset_id (1) and json_batch (3) */
+    uint8_t *start = out;
+    uint64_t offset = (uint64_t)offset_id;
+    size_t inner = 1 + varint_size(offset) + 1 + varint_size(len) + len;
+    *out++ = batch ? 0x1a : 0x12;
+    out = write_varint(out, inner);
+    *out++ = 0x08;
+    out = write_varint(out, offset);
+    *out++ = 0x1a;
+    out = write_varint(out, len);
+    return (size_t)(out - start);
+}
+
 zerobus_status_t
 zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
                               zerobus_string_view_t json_record,
@@ -121,6 +141,75 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
     p = write_varint(p, json_record.len);
     if (json_record.len > 0) {
         memcpy(p, json_record.data, json_record.len);
+    }
+    *out_data = data;
+    *out_len = len;
+    return ZEROBUS_STATUS_OK;
+}
+
+size_t zb_proto_json_batch_size(const zerobus_string_view_t *records,
+                                size_t count)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) {
+        /* JsonRecordBatch.records: field 1, string. */
+        size_t field = 1 + varint_size(records[i].len) + records[i].len;
+        if (records[i].len > MAX_ENCODED_PAYLOAD ||
+            field > MAX_ENCODED_PAYLOAD - total) {
+            return 0;
+        }
+        total += field;
+    }
+    return total;
+}
+
+void zb_proto_write_json_batch(const zerobus_string_view_t *records,
+                               size_t count, uint8_t *out)
+{
+    for (size_t i = 0; i < count; ++i) {
+        *out++ = 0x0a; /* JsonRecordBatch.records: field 1, string. */
+        out = write_varint(out, records[i].len);
+        if (records[i].len > 0) {
+            memcpy(out, records[i].data, records[i].len);
+            out += records[i].len;
+        }
+    }
+}
+
+zerobus_status_t zb_proto_encode_ingest_record_batch(zerobus_offset_t offset_id,
+                                                     const uint8_t *json_batch,
+                                                     size_t json_batch_len,
+                                                     uint8_t **out_data,
+                                                     size_t *out_len)
+{
+    if (out_data == NULL || out_len == NULL ||
+        (json_batch == NULL && json_batch_len > 0) ||
+        json_batch_len > MAX_ENCODED_PAYLOAD) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    /* Update the sizes and encoding below whenever these fields change in
+     * rust/sdk/zerobus_service.proto:
+     *   EphemeralStreamRequest.ingest_record_batch
+     *   IngestRecordBatchRequest.offset_id
+     *   IngestRecordBatchRequest.json_batch */
+    uint64_t offset = (uint64_t)offset_id;
+    size_t batch_len = 1 + varint_size(offset) + 1 +
+                       varint_size(json_batch_len) + json_batch_len;
+    size_t len = 1 + varint_size(batch_len) + batch_len;
+    uint8_t *data = (uint8_t *)malloc(len);
+    if (data == NULL) {
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+
+    uint8_t *p = data;
+    *p++ = 0x1a; /* EphemeralStreamRequest.ingest_record_batch: field 3. */
+    p = write_varint(p, batch_len);
+    *p++ = 0x08; /* IngestRecordBatchRequest.offset_id: field 1, int64. */
+    p = write_varint(p, offset);
+    *p++ = 0x1a; /* IngestRecordBatchRequest.json_batch: field 3, message. */
+    p = write_varint(p, json_batch_len);
+    if (json_batch_len > 0) {
+        memcpy(p, json_batch, json_batch_len);
     }
     *out_data = data;
     *out_len = len;
@@ -207,6 +296,38 @@ zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,
         zb_response_clear(out_response);
     }
     return status;
+}
+
+/* Reads a varint of at most 10 bytes at *p, before end. */
+static bool read_varint(const uint8_t **p, const uint8_t *end, uint64_t *out)
+{
+    uint64_t value = 0;
+    for (unsigned shift = 0; shift < 70 && *p < end; shift += 7) {
+        uint8_t byte = *(*p)++;
+        value |= (uint64_t)(byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) {
+            *out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool zb_proto_decode_ack(const uint8_t *data, size_t len,
+                         zerobus_offset_t *out_offset)
+{
+    /* EphemeralStreamResponse.ingest_record_response: field 2, message,
+     * holding only IngestRecordResponse.durability_ack_up_to_offset: field 1,
+     * int64. */
+    const uint8_t *p = data, *end = data + len;
+    uint64_t inner = 0, offset = 0;
+    if (len < 4 || *p++ != 0x12 || !read_varint(&p, end, &inner) ||
+        inner != (uint64_t)(end - p) || *p++ != 0x08 ||
+        !read_varint(&p, end, &offset) || p != end) {
+        return false;
+    }
+    *out_offset = (zerobus_offset_t)offset;
+    return true;
 }
 
 void zb_response_clear(zb_response_t *response)

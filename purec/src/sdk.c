@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "error.h"
 #include "internal/common/utils.h"
@@ -11,6 +12,7 @@
 struct zerobus_sdk_builder {
     char *endpoint;    /* zerobus endpoint, owned */
     char *uc_endpoint; /* unity catalog endpoint, owned */
+    char *ca_file;     /* optional, owned */
 };
 
 struct zerobus_sdk {
@@ -18,6 +20,12 @@ struct zerobus_sdk {
     /* Independent copies of the validated configuration. */
     char *endpoint;
     char *uc_endpoint;
+    /* Derived from the endpoint at build. */
+    char *host;
+    uint16_t port;
+    bool plaintext;
+    char *workspace_id;
+    zb_tls_ctx_t *tls_context; /* NULL for plaintext. */
 };
 
 /* ---- builder ----------------------------------------------------------- */
@@ -128,6 +136,29 @@ zerobus_status_t zerobus_sdk_builder_set_unity_catalog_endpoint(
     return ZEROBUS_STATUS_OK;
 }
 
+zerobus_status_t
+zerobus_sdk_builder_set_tls_ca_file(zerobus_sdk_builder_t *builder,
+                                    zerobus_string_view_t path,
+                                    zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (builder == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "builder must not be NULL");
+    }
+    if (!zb_is_valid_string(path)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "CA file path must be non-empty valid UTF-8");
+    }
+    if (!zb_replace_string(&builder->ca_file, path)) {
+        ZB_ERROR("SDK CA file allocation failed");
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    return ZEROBUS_STATUS_OK;
+}
+
 zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                                            zerobus_sdk_t **out_sdk,
                                            zerobus_error_t **out_error)
@@ -148,8 +179,7 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                        "unity catalog endpoint is required");
     }
 
-    /* Endpoints were validated when set.
-     * TODO: initialize shared TLS/OAuth/transport state. */
+    /* Endpoints were validated when set. */
     zerobus_sdk_t *sdk = (zerobus_sdk_t *)calloc(1, sizeof(*sdk));
     if (sdk == NULL) {
         ZB_ERROR("SDK allocation failed");
@@ -158,10 +188,30 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     atomic_init(&sdk->ref_cnt, 1);
     sdk->endpoint = zb_strdup(builder->endpoint);
     sdk->uc_endpoint = zb_strdup(builder->uc_endpoint);
-    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL) {
+    bool tls = false;
+    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL ||
+        !zb_url_split(sdk->endpoint, &tls, &sdk->host, &sdk->port)) {
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    sdk->plaintext = !tls;
+    const char *dot = strchr(sdk->host, '.');
+    sdk->workspace_id = dot ? zb_strndup(sdk->host, (size_t)(dot - sdk->host))
+                            : zb_strdup(sdk->host);
+    if (sdk->workspace_id == NULL) {
+        zerobus_sdk_free(sdk);
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    if (tls) {
+        zerobus_status_t status =
+            zb_tls_ctx_new(builder->ca_file, &sdk->tls_context);
+        if (status != ZEROBUS_STATUS_OK) {
+            zerobus_sdk_free(sdk);
+            return zb_fail(
+                out_error, status, "loading TLS trust from %s failed",
+                builder->ca_file ? builder->ca_file : "the system roots");
+        }
     }
 
     *out_sdk = sdk;
@@ -176,6 +226,7 @@ void zerobus_sdk_builder_free(zerobus_sdk_builder_t *builder)
     }
     free(builder->endpoint);
     free(builder->uc_endpoint);
+    free(builder->ca_file);
     free(builder);
     ZB_DEBUG("SDK builder freed");
 }
@@ -187,6 +238,16 @@ void zb_sdk_ref(zerobus_sdk_t *sdk)
     atomic_fetch_add(&sdk->ref_cnt, 1);
 }
 
+void zb_sdk_endpoint(const zerobus_sdk_t *sdk, zb_sdk_endpoint_t *out)
+{
+    *out = (zb_sdk_endpoint_t){.host = sdk->host,
+                               .port = sdk->port,
+                               .plaintext = sdk->plaintext,
+                               .tls_context = sdk->tls_context,
+                               .uc_endpoint = sdk->uc_endpoint,
+                               .workspace_id = sdk->workspace_id};
+}
+
 void zerobus_sdk_free(zerobus_sdk_t *sdk)
 {
     if (sdk == NULL) {
@@ -195,9 +256,11 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     if (atomic_fetch_sub(&sdk->ref_cnt, 1) != 1) {
         return;
     }
-    /* TODO: tear down shared transport/auth resources (best-effort). */
+    zb_tls_ctx_free(sdk->tls_context);
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
+    free(sdk->host);
+    free(sdk->workspace_id);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }

@@ -3,6 +3,7 @@
 
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -20,13 +21,19 @@ typedef uint64_t zb_deadline_t;
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms);
 zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds);
 
+/* Milliseconds left until deadline, rounded up so a wait that long never ends
+ * early: 0 only once it has passed, UINT64_MAX for ZB_DEADLINE_INFINITE. */
+uint64_t zb_deadline_remaining_ms(zb_deadline_t deadline);
+bool zb_deadline_expired(zb_deadline_t deadline);
+
 /* Caller-owned storage. Access it through the wrapper functions below. */
 typedef pthread_mutex_t zb_mutex_t;
 typedef pthread_cond_t zb_cond_t;
 typedef struct zb_sem {
     zb_mutex_t mutex;
     zb_cond_t cond;
-    unsigned int count;
+    atomic_uint count;   /* Available permits. */
+    atomic_uint waiters; /* Threads that may sleep on cond. */
 } zb_sem_t;
 typedef pthread_t zb_thread_t;
 typedef pthread_once_t zb_once_t;
@@ -64,13 +71,15 @@ zerobus_status_t zb_cond_broadcast(zb_cond_t *cond);
 
 /* Process-local counting semaphore. Value must not exceed ZB_SEM_VALUE_MAX.
  * Initialize before use, destroy only after all users have finished.
- * Destroy accepts NULL. */
+ * Destroy accepts NULL. Taking or returning a permit is one atomic operation;
+ * the mutex and condition variable are used only to sleep and to wake
+ * sleepers. */
 zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value);
 zerobus_status_t zb_sem_destroy(zb_sem_t *sem);
 zerobus_status_t zb_sem_post(zb_sem_t *sem);
 
 /* Consume one permit, waiting until deadline if none is available.
- * IMMEDIATE waits for the internal mutex but not for a permit.
+ * IMMEDIATE never waits for a permit.
  * Deadlines bound condition waits, not mutex acquisition; INFINITE waits
  * without a timeout.
  * DEADLINE_EXCEEDED never consumes a permit. */
@@ -100,5 +109,8 @@ zerobus_status_t zb_once(zb_once_t *once, void (*init)(void));
 
 /* Scheduling hint, does not guarantee another thread runs. */
 void zb_thread_yield(void);
+
+/* Sleeps for at least the given number of microseconds. */
+void zb_sleep_us(uint64_t microseconds);
 
 #endif /* ZB_CONCURRENCY_H */

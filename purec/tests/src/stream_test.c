@@ -1,43 +1,79 @@
 /* Unit tests for the stream builder and stream handle (stream.c). */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "fake_zerobus.h"
 #include "internal/platform/concurrency.h"
 #include "test_common.h"
 
 /* ---- helpers ----------------------------------------------------------- */
 
-/* Build a valid SDK for the stream tests. Caller frees it. */
-static zerobus_sdk_t *make_sdk(void)
+/* The service most tests use, with default behavior. */
+static fake_zerobus_t *service;
+
+/* Build an SDK whose endpoints are server's. Caller frees it. */
+static zerobus_sdk_t *make_sdk_for(fake_zerobus_t *server)
 {
+    char endpoint[64], uc_endpoint[64];
+    snprintf(endpoint, sizeof(endpoint), "http://localhost:%u",
+             (unsigned)fake_zerobus_port(server));
+    snprintf(uc_endpoint, sizeof(uc_endpoint), "http://localhost:%u",
+             (unsigned)fake_zerobus_token_port(server));
     zerobus_sdk_builder_t *b = NULL;
     zerobus_sdk_builder_new(&b, NULL);
-    zerobus_sdk_builder_set_endpoint(
-        b, sv("https://myws.zerobus.us-west.cloud.databricks.com"), NULL);
-    zerobus_sdk_builder_set_unity_catalog_endpoint(
-        b, sv("https://myws.cloud.databricks.com"), NULL);
+    zerobus_sdk_builder_set_endpoint(b, sv(endpoint), NULL);
+    zerobus_sdk_builder_set_unity_catalog_endpoint(b, sv(uc_endpoint), NULL);
     zerobus_sdk_t *sdk = NULL;
     zerobus_sdk_builder_build(b, &sdk, NULL);
     zerobus_sdk_builder_free(b);
     return sdk;
 }
 
-/* Build a valid stream for the ingest/flush/close tests. Caller frees the
- * stream and the SDK passed in. */
-static zerobus_stream_t *make_stream(zerobus_sdk_t *sdk)
+/* Build a valid SDK for the stream tests. Caller frees it. */
+static zerobus_sdk_t *make_sdk(void)
+{
+    return make_sdk_for(service);
+}
+
+/* A builder for table with OAuth credentials. Caller frees it. */
+static zerobus_stream_builder_t *make_builder(zerobus_sdk_t *sdk)
 {
     zerobus_stream_builder_t *stb = NULL;
     zerobus_stream_builder_new(sdk, &stb, NULL);
     zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL);
     zerobus_stream_builder_set_oauth(stb, sv("client-id"), sv("client-secret"),
                                      NULL);
+    return stb;
+}
+
+/* Build a valid stream for the ingest/flush/close tests. Caller frees the
+ * stream and the SDK passed in. */
+static zerobus_stream_t *make_stream(zerobus_sdk_t *sdk)
+{
+    zerobus_stream_builder_t *stb = make_builder(sdk);
     zerobus_stream_t *stream = NULL;
     zerobus_stream_builder_build(stb, &stream, NULL);
     zerobus_stream_builder_free(stb);
     return stream;
 }
 
-enum { WORKERS = 5, ITERATIONS = 1000 };
+/* Ingests count small records, stopping at the first failure. */
+static zerobus_status_t ingest_records(zerobus_stream_t *stream, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        char record[48];
+        int len = snprintf(record, sizeof(record), "{\"id\":%u}", i);
+        zerobus_status_t status = zerobus_stream_ingest_json_record(
+            stream, (zerobus_string_view_t){record, (size_t)len}, NULL, NULL);
+        if (status != ZEROBUS_STATUS_OK) {
+            return status;
+        }
+    }
+    return ZEROBUS_STATUS_OK;
+}
+
+enum { WORKERS = 5, ITERATIONS = 1000, BUILDS = 20 };
 
 /* Hold workers until setup is complete or cleanup releases them. */
 struct start_gate {
@@ -102,7 +138,7 @@ static void *build_and_free_streams(void *arg)
 {
     struct ownership_context *context = (struct ownership_context *)arg;
     await_start(context->gate);
-    for (unsigned int i = 0; i < ITERATIONS; i++) {
+    for (unsigned int i = 0; i < BUILDS; i++) {
         zerobus_stream_t *stream = NULL;
         context->status =
             zerobus_stream_builder_build(context->builder, &stream, NULL);
@@ -146,7 +182,7 @@ static void *call_stream(void *arg)
         zerobus_error_free(err);
         bool expected = context->operation == CALL_CLOSE
                             ? status == ZEROBUS_STATUS_OK
-                            : status == ZEROBUS_STATUS_UNIMPLEMENTED ||
+                            : status == ZEROBUS_STATUS_OK ||
                                   status == ZEROBUS_STATUS_FAILED_PRECONDITION;
         if (!expected) {
             context->unexpected_status = status;
@@ -299,23 +335,22 @@ static void test_ingest_validation(void)
     zerobus_error_free(err);
     err = NULL;
 
-    CHECK_EQ_INT(
-        zerobus_stream_ingest_json_record(stream, sv("record"), NULL, &err),
-        ZEROBUS_STATUS_UNIMPLEMENTED);
+    zerobus_offset_t offset = -1;
+    CHECK_OK(
+        zerobus_stream_ingest_json_record(stream, sv("record"), &offset, &err));
+    CHECK_EQ_INT(offset, 0);
     CHECK(err == NULL);
-    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                     stream, sv("{\"id\":1,\"m\":\"hi\"}"), NULL, &err),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_ingest_json_record(
+        stream, sv("{\"id\":1,\"m\":\"hi\"}"), &offset, &err));
+    CHECK_EQ_INT(offset, 1);
     CHECK(err == NULL);
 
     /* Valid multibyte UTF-8 and an escaped NUL pass text validation. */
-    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                     stream, sv("{\"k\":\"\xe2\x82\xac\"}"), NULL, &err),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_ingest_json_record(
+        stream, sv("{\"k\":\"\xe2\x82\xac\"}"), NULL, &err));
     CHECK(err == NULL);
-    CHECK_EQ_INT(zerobus_stream_ingest_json_record(
-                     stream, sv("{\"k\":\"\\u0000\"}"), NULL, &err),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_ingest_json_record(
+        stream, sv("{\"k\":\"\\u0000\"}"), NULL, &err));
     CHECK(err == NULL);
 
     static const char raw_nul[] = {'{', '\0', '}'};
@@ -366,8 +401,7 @@ static void test_flush_close_idempotent(void)
     zerobus_error_free(err);
     err = NULL;
 
-    CHECK_EQ_INT(zerobus_stream_flush(stream, &err),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_flush(stream, &err));
     CHECK_OK(zerobus_stream_close(stream, &err));
     /* Idempotent: a second close still succeeds. */
     CHECK_OK(zerobus_stream_close(stream, &err));
@@ -425,8 +459,7 @@ static void test_stream_builder_retains_sdk(void)
     first = NULL;
     zerobus_stream_builder_free(builder);
     builder = NULL;
-    CHECK_EQ_INT(zerobus_stream_flush(second, NULL),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_flush(second, NULL));
     CHECK_OK(zerobus_stream_close(second, NULL));
 
 zb_cleanup:
@@ -443,9 +476,7 @@ static void test_stream_retains_sdk(void)
     CHECK(stream != NULL);
 
     zerobus_sdk_free(sdk);
-    CHECK_EQ_INT(
-        zerobus_stream_ingest_json_record(stream, sv("{}"), NULL, NULL),
-        ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_OK(zerobus_stream_ingest_json_record(stream, sv("{}"), NULL, NULL));
     CHECK_OK(zerobus_stream_close(stream, NULL));
     zerobus_stream_free(stream);
 }
@@ -480,7 +511,7 @@ zb_cleanup:
     finish_workers(&gate, threads, created);
     for (unsigned int i = 0; i < created; i++) {
         CHECK_OK(contexts[i].status);
-        CHECK_EQ_INT(contexts[i].completed, ITERATIONS);
+        CHECK_EQ_INT(contexts[i].completed, BUILDS);
     }
     for (unsigned int i = 0; i < WORKERS; i++) {
         zerobus_stream_builder_free(contexts[i].builder);
@@ -618,8 +649,285 @@ zb_cleanup:
     zerobus_sdk_free(sdk);
 }
 
+/* Records admitted before flush are acknowledged, singly or in a batch with
+ * one offset, and close then ends the call cleanly. */
+static void test_flush_acknowledges_records(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+
+    REQUIRE_OK(fake_zerobus_start(NULL, &server));
+    sdk = make_sdk_for(server);
+    stream = make_stream(sdk);
+    REQUIRE(stream != NULL);
+    CHECK_OK(ingest_records(stream, 1000));
+    const zerobus_string_view_t batch[3] = {sv("{\"a\":1}"), sv("{\"a\":2}"),
+                                            sv("{\"a\":3}")};
+    zerobus_offset_t offset = -1;
+    CHECK_OK(
+        zerobus_stream_ingest_json_records(stream, batch, 3, &offset, NULL));
+    CHECK_EQ_INT(offset, 1000);
+    CHECK_OK(
+        zerobus_stream_ingest_json_records(stream, batch, 0, &offset, NULL));
+    CHECK_EQ_INT(offset, -1);
+    CHECK_OK(zerobus_stream_flush(stream, NULL));
+    CHECK_EQ_INT(fake_zerobus_records(server), 1003);
+    CHECK_OK(zerobus_stream_close(stream, NULL));
+    CHECK_EQ_INT(fake_zerobus_calls(server), 1);
+    CHECK_EQ_INT(fake_zerobus_tokens(server), 1);
+
+zb_cleanup:
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* The acknowledged offset is -1 before any acknowledgment, and reaches an
+ * ingested batch's offset without a flush. */
+static void test_acked_offset_without_waiting(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+    zerobus_offset_t acked = 0;
+
+    REQUIRE_OK(fake_zerobus_start(NULL, &server));
+    sdk = make_sdk_for(server);
+    stream = make_stream(sdk);
+    REQUIRE(stream != NULL);
+    CHECK_EQ_INT(zerobus_stream_get_acked_offset(NULL, &acked, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    zerobus_error_free(err);
+    err = NULL;
+    CHECK_EQ_INT(zerobus_stream_get_acked_offset(stream, NULL, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_OK(zerobus_stream_get_acked_offset(stream, &acked, NULL));
+    CHECK_EQ_INT(acked, -1);
+
+    CHECK_OK(ingest_records(stream, 100));
+    const zerobus_string_view_t batch[2] = {sv("{\"a\":1}"), sv("{\"a\":2}")};
+    zerobus_offset_t offset = -1;
+    CHECK_OK(
+        zerobus_stream_ingest_json_records(stream, batch, 2, &offset, NULL));
+    CHECK_EQ_INT(offset, 100);
+    zb_deadline_t deadline = zb_deadline_after_ms(10000);
+    zerobus_status_t status = ZEROBUS_STATUS_OK;
+    while (status == ZEROBUS_STATUS_OK && acked < offset &&
+           !zb_deadline_expired(deadline)) {
+        status = zerobus_stream_get_acked_offset(stream, &acked, NULL);
+    }
+    CHECK_OK(status);
+    CHECK_EQ_INT(acked, offset);
+    CHECK_EQ_INT(fake_zerobus_records(server), 102);
+    CHECK_OK(zerobus_stream_close(stream, NULL));
+    /* Still readable after close. */
+    CHECK_OK(zerobus_stream_get_acked_offset(stream, &acked, NULL));
+    CHECK_EQ_INT(acked, offset);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* Records longer than a transport buffer, and records whose framing straddles
+ * two buffers, arrive intact and in order. */
+static void test_records_span_buffers(void)
+{
+    enum { COUNT = 600, BIG = 200 * 1024 };
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+    char *record = NULL;
+
+    REQUIRE_OK(fake_zerobus_start(NULL, &server));
+    sdk = make_sdk_for(server);
+    stream = make_stream(sdk);
+    REQUIRE(stream != NULL);
+    record = malloc(BIG);
+    REQUIRE(record != NULL);
+    uint64_t digest = FAKE_ZEROBUS_DIGEST_SEED;
+    for (unsigned i = 0; i < COUNT; ++i) {
+        size_t len = i == 0 || i == COUNT - 1 ? BIG : 8 + (i * 997u) % 3000u;
+        memcpy(record, "{\"p\":\"", 6);
+        for (size_t j = 6; j < len - 2; ++j) {
+            record[j] = (char)('a' + (i + j) % 26);
+        }
+        memcpy(record + len - 2, "\"}", 2);
+        CHECK_OK(zerobus_stream_ingest_json_record(
+            stream, (zerobus_string_view_t){record, len}, NULL, NULL));
+        digest = fake_zerobus_digest_add(digest, record, len);
+    }
+    CHECK_OK(zerobus_stream_flush(stream, NULL));
+    CHECK_EQ_INT(fake_zerobus_records(server), COUNT);
+    CHECK(fake_zerobus_digest(server) == digest);
+    CHECK_OK(zerobus_stream_close(stream, NULL));
+
+zb_cleanup:
+    free(record);
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* A server refusing the stream fails build with its status, without
+ * retrying a non-retryable one. (An auth rejection gets one retry on the
+ * first open, to refresh a stale credential.) */
+static void test_build_reports_refusal(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+
+    const fake_zerobus_options_t options = {.refuse_status = 5};
+    REQUIRE_OK(fake_zerobus_start(&options, &server));
+    sdk = make_sdk_for(server);
+    stb = make_builder(sdk);
+    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, &err),
+                 ZEROBUS_STATUS_NOT_FOUND);
+    CHECK(stream == NULL);
+    CHECK(err != NULL);
+    CHECK_EQ_INT(fake_zerobus_calls(server), 1);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_stream_free(stream);
+    zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* A headers provider replaces OAuth, and its credentials reach the server;
+ * a rejected credential fails build as UNAUTHENTICATED. */
+static void test_headers_provider_authorizes(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_stream_t *rejected = NULL;
+
+    const fake_zerobus_options_t options = {.authorization = "Bearer abc"};
+    REQUIRE_OK(fake_zerobus_start(&options, &server));
+    sdk = make_sdk_for(server);
+    stb = make_builder(sdk);
+    REQUIRE_OK(zerobus_stream_builder_set_recovery(stb, false, NULL));
+    const zerobus_header_t good = {sv("authorization"), sv("Bearer abc")};
+    REQUIRE_OK(zerobus_headers_provider_new(&good, 1, &provider, NULL));
+    REQUIRE_OK(
+        zerobus_stream_builder_set_headers_provider(stb, provider, NULL));
+    zerobus_headers_provider_free(provider); /* The builder keeps it. */
+    provider = NULL;
+    CHECK_OK(zerobus_stream_builder_build(stb, &stream, NULL));
+    CHECK_OK(ingest_records(stream, 10));
+    CHECK_OK(zerobus_stream_flush(stream, NULL));
+    CHECK_EQ_INT(fake_zerobus_tokens(server), 0);
+
+    const zerobus_header_t bad = {sv("authorization"), sv("Bearer nope")};
+    REQUIRE_OK(zerobus_headers_provider_new(&bad, 1, &provider, NULL));
+    REQUIRE_OK(
+        zerobus_stream_builder_set_headers_provider(stb, provider, NULL));
+    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &rejected, NULL),
+                 ZEROBUS_STATUS_UNAUTHENTICATED);
+    CHECK(rejected == NULL);
+
+    /* Invalid header names are refused when the provider is created. */
+    zerobus_headers_provider_t *invalid = NULL;
+    const zerobus_header_t upper = {sv("Authorization"), sv("x")};
+    CHECK_EQ_INT(zerobus_headers_provider_new(&upper, 1, &invalid, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(invalid == NULL);
+
+zb_cleanup:
+    zerobus_stream_free(rejected);
+    zerobus_stream_free(stream);
+    zerobus_headers_provider_free(provider);
+    zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* After the server fails the call, recovery opens a new one and resends the
+ * unacknowledged records, so flush still succeeds. */
+static void test_recovery_resends_unacknowledged(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+
+    const fake_zerobus_options_t options = {.fail_after = 500, .fail_calls = 1};
+    REQUIRE_OK(fake_zerobus_start(&options, &server));
+    sdk = make_sdk_for(server);
+    stream = make_stream(sdk);
+    REQUIRE(stream != NULL);
+    CHECK_OK(ingest_records(stream, 2000));
+    CHECK_OK(zerobus_stream_flush(stream, NULL));
+    CHECK_EQ_INT(fake_zerobus_calls(server), 2);
+    CHECK(fake_zerobus_records(server) >= 2000);
+    CHECK_OK(zerobus_stream_close(stream, NULL));
+
+zb_cleanup:
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
+/* Without recovery the failure is terminal: flush, ingest and close report
+ * it. */
+static void test_failure_without_recovery(void)
+{
+    fake_zerobus_t *server = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+
+    const fake_zerobus_options_t options = {.fail_after = 100, .fail_calls = 1};
+    REQUIRE_OK(fake_zerobus_start(&options, &server));
+    sdk = make_sdk_for(server);
+    stb = make_builder(sdk);
+    REQUIRE_OK(zerobus_stream_builder_set_recovery(stb, false, NULL));
+    REQUIRE_OK(zerobus_stream_builder_build(stb, &stream, NULL));
+    zerobus_status_t status = ingest_records(stream, 1000);
+    CHECK(status == ZEROBUS_STATUS_OK || status == ZEROBUS_STATUS_UNAVAILABLE);
+    CHECK_EQ_INT(zerobus_stream_flush(stream, &err),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    CHECK(err != NULL);
+    zerobus_error_free(err);
+    err = NULL;
+    zerobus_offset_t acked = -2;
+    CHECK_EQ_INT(zerobus_stream_get_acked_offset(stream, &acked, &err),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    CHECK(err != NULL);
+    CHECK(acked >= -1 && acked < 1000);
+    zerobus_error_free(err);
+    err = NULL;
+    CHECK_EQ_INT(
+        zerobus_stream_ingest_json_record(stream, sv("{}"), NULL, NULL),
+        ZEROBUS_STATUS_UNAVAILABLE);
+    CHECK_EQ_INT(zerobus_stream_close(stream, NULL),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_stream_free(stream);
+    zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(server);
+}
+
 int main(void)
 {
+    if (fake_zerobus_start(NULL, &service) != ZEROBUS_STATUS_OK) {
+        fprintf(stderr, "cannot start the fake Zerobus service\n");
+        return 1;
+    }
     test_stream_builder_validation();
     test_stream_builder_edges();
     test_stream_oauth_transactional();
@@ -632,5 +940,13 @@ int main(void)
     test_concurrent_ingest_flush_close();
     test_stream_out_error_must_be_null();
     test_stream_out_handle_untouched_on_failure();
+    test_flush_acknowledges_records();
+    test_acked_offset_without_waiting();
+    test_records_span_buffers();
+    test_build_reports_refusal();
+    test_headers_provider_authorizes();
+    test_recovery_resends_unacknowledged();
+    test_failure_without_recovery();
+    fake_zerobus_stop(service);
     TEST_MAIN_RETURN();
 }

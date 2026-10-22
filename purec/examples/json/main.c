@@ -3,10 +3,6 @@
  * OAuth-authenticated ephemeral JSON stream, queue a few records without
  * waiting after each one, flush once, then close and free everything.
  *
- * NOTE: the SDK is under early development. The operations validate inputs and
- * return the documented statuses but perform no network I/O yet, so this shows
- * the API shape and lifecycle rather than delivering records.
- *
  * The table schema must match the two example JSON fields (id, message), or the
  * records must be replaced with ones matching the selected table.
  */
@@ -108,22 +104,20 @@ int main(int argc, char **argv)
     zerobus_stream_builder_free(stream_builder);
     stream_builder = NULL;
 
-    /* Queue all records. Do NOT wait for each record's acknowledgment.
-     * The networking core is not implemented yet, so ingest and flush validate
-     * their inputs and return ZEROBUS_STATUS_UNIMPLEMENTED. Treat that as the
-     * expected outcome during development. */
+    /* Queue all records. Do NOT wait for each record's acknowledgment: ingest
+     * returns once the record is queued, and the flush below waits once for
+     * all of them. */
     for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); ++i) {
         status = zerobus_stream_ingest_json_record(
             stream, zerobus_string_view(records[i]), NULL, &error);
-        if (status != ZEROBUS_STATUS_OK &&
-            status != ZEROBUS_STATUS_UNIMPLEMENTED) {
+        if (status != ZEROBUS_STATUS_OK) {
             goto fail;
         }
     }
 
     /* One durability barrier for everything admitted above. */
     status = zerobus_stream_flush(stream, &error);
-    if (status != ZEROBUS_STATUS_OK && status != ZEROBUS_STATUS_UNIMPLEMENTED) {
+    if (status != ZEROBUS_STATUS_OK) {
         goto fail;
     }
 
@@ -132,9 +126,7 @@ int main(int argc, char **argv)
         goto fail;
     }
 
-    printf("exercised the ingest lifecycle for %zu records (no network I/O "
-           "yet)\n",
-           sizeof(records) / sizeof(records[0]));
+    printf("ingested %zu records\n", sizeof(records) / sizeof(records[0]));
     exit_code = 0;
 
 fail:

@@ -47,6 +47,11 @@ set_target_properties(zerobus_protobuf_c PROPERTIES
   IMPORTED_LOCATION "${PROTOBUF_C_LIBRARY}"
   INTERFACE_INCLUDE_DIRECTORIES "${PROTOBUF_C_INCLUDE_DIR}")
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2>=1.40)
+find_package(OpenSSL 1.1.1 REQUIRED)
+include(CTest)
+
 # ---------------------------------------------------------------------------
 # Committed protobuf bindings
 # ---------------------------------------------------------------------------
@@ -69,6 +74,20 @@ set(ZEROBUS_SOURCES
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
   src/internal/proto/zerobus_service.c
+  src/internal/network/grpc.c
+  src/internal/network/grpc_utils.c
+  src/internal/platform/network.c
+  src/internal/network/tls.c
+  src/internal/network/channel.c
+  src/internal/network/io.c
+  src/internal/network/transport.c
+  src/internal/auth/http.c
+  src/internal/auth/oauth.c
+  src/internal/auth/headers_provider.c
+  src/internal/ephemeral_stream/ephemeral_stream.c
+  src/internal/ephemeral_stream/supervisor.c
+  src/internal/ephemeral_stream/sender.c
+  src/internal/ephemeral_stream/receiver.c
   src/internal/landing_zone.c
   src/error.c
   src/sdk.c
@@ -88,20 +107,22 @@ target_include_directories(zerobus_c
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
-target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c)
+target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
-add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
-target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
-target_include_directories(zerobus_c_testing
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         ${CMAKE_CURRENT_SOURCE_DIR}/src
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/src
-  PRIVATE "${GENERATED_DIR}")
-target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
-target_compile_features(zerobus_c_testing PRIVATE c_std_11)
-target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c)
+if(BUILD_TESTING)
+  add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
+  target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
+  target_include_directories(zerobus_c_testing
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           ${CMAKE_CURRENT_SOURCE_DIR}/src
+           ${CMAKE_CURRENT_SOURCE_DIR}/tests/src
+    PRIVATE "${GENERATED_DIR}")
+  target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
+  target_compile_features(zerobus_c_testing PRIVATE c_std_11)
+  target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 # ---------------------------------------------------------------------------
 # Sanitizers
@@ -111,14 +132,17 @@ set(ZEROBUS_SANITIZE "" CACHE STRING "Runtime sanitizer: address|thread|undefine
 
 if(ZEROBUS_SANITIZE)
   foreach(lib zerobus_c zerobus_c_testing)
-    target_compile_options(${lib} PUBLIC -fsanitize=${ZEROBUS_SANITIZE} -fno-omit-frame-pointer -g)
-    target_link_options(${lib} PUBLIC -fsanitize=${ZEROBUS_SANITIZE})
+    if(TARGET ${lib})
+      target_compile_options(${lib} PUBLIC -fsanitize=${ZEROBUS_SANITIZE} -fno-omit-frame-pointer -g)
+      target_link_options(${lib} PUBLIC -fsanitize=${ZEROBUS_SANITIZE})
+    endif()
   endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
 # Tests and examples
 # ---------------------------------------------------------------------------
-enable_testing()
 add_subdirectory(examples)
-add_subdirectory(tests)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()

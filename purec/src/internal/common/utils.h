@@ -1,13 +1,14 @@
 /*
- * Input validation and owned-memory helpers shared by the public entry points
- * in sdk.c and stream.c. Local checks only: no transport, OAuth, protobuf, TLS
- * or threading code lives here.
+ * Input validation, text, and owned-memory helpers shared across the SDK.
+ * Local checks only: no transport, OAuth, protobuf, TLS or threading code
+ * lives here.
  */
 #ifndef ZB_UTILS_H
 #define ZB_UTILS_H
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "zerobus/common.h"
 
@@ -30,6 +31,22 @@ bool zb_is_empty(zerobus_string_view_t view);
 
 /* Non-empty, well-formed UTF-8, no embedded NUL. */
 bool zb_is_valid_string(zerobus_string_view_t view);
+
+/* True if s (len bytes) begins with prefix, matched case-insensitively. prefix
+ * is NUL-terminated and must be lowercase (only s is folded). */
+bool zb_starts_with(const char *s, size_t len, const char *prefix);
+
+/* True if value is exactly literal, compared case-sensitively. {NULL, 0}
+ * equals ""; {NULL, nonzero} equals nothing. */
+bool zb_view_equals(zerobus_string_view_t value, const char *literal);
+
+/* Parses all len bytes as an unsigned decimal into *out. False, leaving *out
+ * unchanged, if len is 0, a byte is not a digit, or the value exceeds
+ * UINT32_MAX. */
+bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out);
+
+/* The value of hex digit c, in either case, or -1 if c is not one. */
+int zb_hex_value(char c);
 
 /*
  * Report whether a table name is a fully qualified catalog.schema.table: three
@@ -55,6 +72,17 @@ typedef enum {
  * to store and append a path to (e.g. the OAuth "/oidc/v1/token").
  */
 zb_url_result zb_url_validate(zerobus_string_view_t endpoint);
+
+/* Splits an endpoint accepted by zb_url_validate into *out_tls (https),
+ * a malloc-owned *out_host and *out_port, which defaults to 443 or 80. False,
+ * changing nothing, on allocation failure. */
+bool zb_url_split(const char *endpoint, bool *out_tls, char **out_host,
+                  uint16_t *out_port);
+
+/* Copies as much of data[*consumed, len) as fits into buffer[*used, size),
+ * and advances *used and *consumed by the number of bytes copied. */
+void zb_copy_bounded(uint8_t *buffer, size_t size, size_t *used,
+                     const uint8_t *data, size_t len, size_t *consumed);
 
 /* Replace *target with a copy of view, freeing the previous value. False on
  * OOM, leaving *target untouched. */

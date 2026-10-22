@@ -58,6 +58,22 @@ static struct timespec deadline_timespec(zb_deadline_t deadline)
     };
 }
 
+static zb_deadline_t now(void)
+{
+    struct timespec current;
+    (void)clock_gettime(CLOCK_MONOTONIC, &current);
+    zb_deadline_t limit = max_deadline();
+    uint64_t seconds = (uint64_t)current.tv_sec;
+    if (seconds > limit / ZB_NS_PER_SECOND) {
+        return limit;
+    }
+    uint64_t elapsed = seconds * ZB_NS_PER_SECOND;
+    if ((uint64_t)current.tv_nsec > limit - elapsed) {
+        return limit;
+    }
+    return elapsed + (uint64_t)current.tv_nsec;
+}
+
 zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
 {
     if (timeout_ms == UINT64_MAX) {
@@ -66,22 +82,12 @@ zb_deadline_t zb_deadline_after_ms(uint64_t timeout_ms)
     if (timeout_ms == 0) {
         return ZB_DEADLINE_IMMEDIATE;
     }
-    struct timespec now;
-    (void)clock_gettime(CLOCK_MONOTONIC, &now);
     zb_deadline_t limit = max_deadline();
-    uint64_t seconds = (uint64_t)now.tv_sec;
-    if (seconds > limit / ZB_NS_PER_SECOND) {
+    zb_deadline_t start = now();
+    if (timeout_ms > (limit - start) / ZB_NS_PER_MS) {
         return limit;
     }
-    uint64_t elapsed = seconds * ZB_NS_PER_SECOND;
-    if ((uint64_t)now.tv_nsec > limit - elapsed) {
-        return limit;
-    }
-    elapsed += (uint64_t)now.tv_nsec;
-    if (timeout_ms > (limit - elapsed) / ZB_NS_PER_MS) {
-        return limit;
-    }
-    return elapsed + timeout_ms * ZB_NS_PER_MS;
+    return start + timeout_ms * ZB_NS_PER_MS;
 }
 
 zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds)
@@ -93,6 +99,23 @@ zb_deadline_t zb_deadline_after_seconds(uint64_t timeout_seconds)
         return max_deadline();
     }
     return zb_deadline_after_ms(timeout_seconds * ZB_MS_PER_SECOND);
+}
+
+uint64_t zb_deadline_remaining_ms(zb_deadline_t deadline)
+{
+    if (deadline == ZB_DEADLINE_INFINITE) {
+        return UINT64_MAX;
+    }
+    zb_deadline_t current = now();
+    if (deadline <= current) {
+        return 0;
+    }
+    return (deadline - current - 1) / ZB_NS_PER_MS + 1;
+}
+
+bool zb_deadline_expired(zb_deadline_t deadline)
+{
+    return now() >= deadline;
 }
 
 zerobus_status_t zb_mutex_init(zb_mutex_t *mutex)
@@ -230,7 +253,8 @@ zerobus_status_t zb_sem_init(zb_sem_t *sem, unsigned int value)
         (void)zb_mutex_destroy(&sem->mutex);
         return status;
     }
-    sem->count = value;
+    atomic_init(&sem->count, value);
+    atomic_init(&sem->waiters, 0);
     return ZEROBUS_STATUS_OK;
 }
 
@@ -246,24 +270,41 @@ zerobus_status_t zb_sem_destroy(zb_sem_t *sem)
     return zb_mutex_destroy(&sem->mutex);
 }
 
+/* Takes a permit if one is available. */
+static bool sem_take(zb_sem_t *sem)
+{
+    unsigned int count = atomic_load(&sem->count);
+    while (count != 0) {
+        if (atomic_compare_exchange_weak(&sem->count, &count, count - 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A sleeper publishes itself in waiters before rechecking count, and post
+ * publishes its permit before reading waiters: one of them sees the other.
+ * Post signals under the mutex, which the sleeper holds from publishing until
+ * it waits, so the signal cannot fall between its check and its wait. */
 zerobus_status_t zb_sem_post(zb_sem_t *sem)
 {
     if (sem == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
+    unsigned int count = atomic_load(&sem->count);
+    do {
+        if (count == ZB_SEM_VALUE_MAX) {
+            return ZEROBUS_STATUS_INTERNAL;
+        }
+    } while (!atomic_compare_exchange_weak(&sem->count, &count, count + 1));
+    if (atomic_load(&sem->waiters) == 0) {
+        return ZEROBUS_STATUS_OK;
+    }
     zerobus_status_t status = zb_mutex_lock(&sem->mutex);
     if (status != ZEROBUS_STATUS_OK) {
         return status;
     }
-    if (sem->count == ZB_SEM_VALUE_MAX) {
-        status = ZEROBUS_STATUS_INTERNAL;
-    } else {
-        sem->count++;
-        status = zb_cond_signal(&sem->cond);
-        if (status != ZEROBUS_STATUS_OK) {
-            sem->count--;
-        }
-    }
+    status = zb_cond_signal(&sem->cond);
     zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
     return status == ZEROBUS_STATUS_OK ? unlock_status : status;
 }
@@ -273,22 +314,31 @@ zerobus_status_t zb_sem_wait(zb_sem_t *sem, zb_deadline_t deadline)
     if (sem == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
+    if (sem_take(sem)) {
+        return ZEROBUS_STATUS_OK;
+    }
+    if (deadline == ZB_DEADLINE_IMMEDIATE) {
+        return ZEROBUS_STATUS_DEADLINE_EXCEEDED;
+    }
     zerobus_status_t status = zb_mutex_lock(&sem->mutex);
     if (status != ZEROBUS_STATUS_OK) {
         return status;
     }
-    if (deadline == ZB_DEADLINE_IMMEDIATE) {
-        status = ZEROBUS_STATUS_DEADLINE_EXCEEDED;
-    }
-    while (status == ZEROBUS_STATUS_OK && sem->count == 0) {
+    (void)atomic_fetch_add(&sem->waiters, 1);
+    bool taken = false;
+    for (;;) {
+        if (sem_take(sem)) {
+            taken = true;
+            break;
+        }
+        if (status != ZEROBUS_STATUS_OK) {
+            break; /* Timed out or failed, and still no permit. */
+        }
         status = zb_cond_wait_until(&sem->cond, &sem->mutex, deadline);
     }
-    if (sem->count != 0) {
-        sem->count--;
-        status = ZEROBUS_STATUS_OK;
-    }
+    (void)atomic_fetch_sub(&sem->waiters, 1);
     zerobus_status_t unlock_status = zb_mutex_unlock(&sem->mutex);
-    return status == ZEROBUS_STATUS_OK ? unlock_status : status;
+    return taken ? unlock_status : status;
 }
 
 zerobus_status_t zb_thread_create(zb_thread_t *thread, void *(*entry)(void *),
@@ -327,4 +377,14 @@ zerobus_status_t zb_once(zb_once_t *once, void (*init)(void))
 void zb_thread_yield(void)
 {
     (void)sched_yield();
+}
+
+void zb_sleep_us(uint64_t microseconds)
+{
+    struct timespec delay = {
+        .tv_sec = (time_t)(microseconds / 1000000u),
+        .tv_nsec = (long)(microseconds % 1000000u) * 1000L,
+    };
+    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+    }
 }

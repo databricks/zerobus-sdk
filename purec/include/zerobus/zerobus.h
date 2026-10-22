@@ -28,9 +28,10 @@
 #ifndef ZEROBUS_H
 #define ZEROBUS_H
 
-#include "zerobus/common.h" // IWYU pragma: export
-#include "zerobus/error.h"  // IWYU pragma: export
-#include "zerobus/sdk.h"    // IWYU pragma: export
-#include "zerobus/stream.h" // IWYU pragma: export
+#include "zerobus/common.h"  // IWYU pragma: export
+#include "zerobus/error.h"   // IWYU pragma: export
+#include "zerobus/headers.h" // IWYU pragma: export
+#include "zerobus/sdk.h"     // IWYU pragma: export
+#include "zerobus/stream.h"  // IWYU pragma: export
 
 #endif /* ZEROBUS_H */
