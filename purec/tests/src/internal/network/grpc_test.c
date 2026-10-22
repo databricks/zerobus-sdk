@@ -483,9 +483,12 @@ static void test_request(void)
     const sent_t *sent = &peer.sent[0];
 
     /* The first send carries our SETTINGS and the request HEADERS, with the
-     * credential never indexed. With nothing queued there is no DATA. */
+     * credential never indexed. Resuming before then does nothing. With
+     * nothing queued there is no DATA. */
     start();
-    REQUIRE_OK(open_call(0));
+    REQUIRE_OK(add_call(0));
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
+    CHECK_EQ_INT(pump(), 0);
     CHECK_EQ_INT(nghttp2_session_get_remote_settings(
                      peer.session, NGHTTP2_SETTINGS_ENABLE_PUSH),
                  0);
@@ -500,14 +503,14 @@ static void test_request(void)
      * that finishes it. */
     queue_message(0, 3, 'a');
     queue_message(0, 0, 0);
-    CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, CALL_STREAM), 0);
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
     CHECK_EQ_INT(pump(), 0);
     CHECK(sent->data_len == sizeof(framed) &&
           memcmp(sent->data, framed, sizeof(framed)) == 0);
     CHECK(!sent->ended);
     queue_message(0, 20000, 'z');
     ctx[0].eof = true;
-    CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, CALL_STREAM), 0);
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
     CHECK_EQ_INT(pump(), 0);
     CHECK_EQ_INT(sent->data_frames, 3);
     CHECK_EQ_INT(sent->data_len, sizeof(framed) + 5 + 20000);
@@ -524,7 +527,7 @@ static void test_request(void)
     queue_message(0, 1, 'q');
     REQUIRE(ctx[0].queue[0] != NULL);
     ctx[0].queue[0]->len = (size_t)UINT32_MAX + 1;
-    CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, CALL_STREAM), 0);
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
     CHECK_EQ_INT(pump(), 0);
     CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK_EQ_INT(sent->data_frames, 0);
@@ -757,7 +760,8 @@ static void test_abort_and_destroy(void)
     CHECK(ctx[0].completions == 1 && ctx[1].completions == 1);
 
     /* Destroy completes unfinished calls as CANCELLED, once, and accepts
-     * destroyed and NULL state. Cancel does nothing for a completed call. */
+     * destroyed and NULL state. Cancel does nothing for a completed call, and
+     * resuming does nothing for a NULL, zeroed or completed one. */
     start();
     REQUIRE_OK(add_call(0));
     zb_grpc_destroy(&grpc);
@@ -765,6 +769,9 @@ static void test_abort_and_destroy(void)
     zb_grpc_destroy(NULL);
     zb_grpc_call_cancel(&calls[0]);
     zb_grpc_call_cancel(NULL);
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
+    CHECK_OK(zb_grpc_call_resume_send(&calls[2]));
+    CHECK_OK(zb_grpc_call_resume_send(NULL));
     CHECK_EQ_INT(ctx[0].completions, 1);
     CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_CANCELLED);
     CHECK(grpc.session == NULL);
@@ -786,8 +793,8 @@ static void test_multiple_calls(void)
     REQUIRE_OK(open_call(1));
     queue_message(0, 1, 'a');
     queue_message(1, 1, 'b');
-    CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, CALL_STREAM), 0);
-    CHECK_EQ_INT(nghttp2_session_resume_data(grpc.session, OTHER_STREAM), 0);
+    CHECK_OK(zb_grpc_call_resume_send(&calls[0]));
+    CHECK_OK(zb_grpc_call_resume_send(&calls[1]));
     CHECK_EQ_INT(pump(), 0);
     CHECK(peer.sent[0].data_len == 6 && peer.sent[0].data[5] == 'a');
     CHECK(peer.sent[1].data_len == 6 && peer.sent[1].data[5] == 'b');

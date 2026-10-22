@@ -177,9 +177,7 @@ static ssize_t on_data_source_read(nghttp2_session *session, int32_t stream_id,
 }
 
 /* Called from nghttp2_session_mem_send after each frame is sent. An error
- * GOAWAY aborts the session, and is still sent. A GOAWAY queued by
- * nghttp2_session_terminate_session, as nghttp2's own are, also ends the
- * session: want_read and want_write then report 0. */
+ * GOAWAY aborts the session, and is still sent. */
 static int on_frame_send(nghttp2_session *session, const nghttp2_frame *frame,
                          void *user_data)
 {
@@ -594,6 +592,19 @@ zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
     call->next = grpc->calls;
     grpc->calls = call;
     return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zb_grpc_call_resume_send(zb_grpc_call_t *call)
+{
+    if (call == NULL || call->grpc == NULL || call->completed) {
+        return ZEROBUS_STATUS_OK;
+    }
+    int result = nghttp2_session_resume_data(call->grpc->session, call->id);
+    /* INVALID_ARGUMENT means nothing is deferred: the HEADERS are still queued
+     * or the DATA source is active, and nghttp2 asks again by itself. */
+    return result == 0 || result == NGHTTP2_ERR_INVALID_ARGUMENT
+               ? ZEROBUS_STATUS_OK
+               : zb_map_nghttp2_error(result);
 }
 
 void zb_grpc_call_cancel(zb_grpc_call_t *call)

@@ -35,8 +35,9 @@ typedef struct {
      * and must not re-enter either. */
 
     /* Returns the next message to send and transfers ownership of it. Returns
-     * NULL if none is queued yet. Sets *eof with NULL only when no message will
-     * ever follow. Required. */
+     * NULL if none is queued yet, and is not asked again until
+     * zb_grpc_call_resume_send is called. Sets *eof with NULL only when no
+     * message will ever follow. Required. */
     zb_message_t *(*pull_send)(void *context, bool *eof);
     /* Receives each complete message in order. On true takes ownership, on
      * false refuses it for now, pausing input for every call until
@@ -108,7 +109,10 @@ void zb_grpc_destroy(zb_grpc_t *grpc);
 void zb_grpc_abort(zb_grpc_t *grpc, zerobus_status_t status);
 
 /* While paused, offers the refused message to on_message again, then decodes
- * the rest of its chunk, otherwise does nothing. */
+ * the rest of its chunk, otherwise does nothing. The rest is borrowed from the
+ * owner's input: until this clears grpc->paused, keep all input passed to
+ * nghttp2_session_mem_recv unchanged and don't call mem_recv. Afterwards, call
+ * mem_recv with the remaining input, even if it's empty. */
 zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc);
 
 /* Queues a call on the session. It opens on the wire with the owner's next
@@ -117,6 +121,11 @@ zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc);
  * call. On failure the call is not opened and on_complete is not called. */
 zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
                                    const zb_grpc_call_config_t *config);
+
+/* Asks pull_send again after it returned NULL. Call once a message or EOF is
+ * queued, the next nghttp2_session_mem_send call sends it. Does nothing for
+ * a zeroed or completed call. */
+zerobus_status_t zb_grpc_call_resume_send(zb_grpc_call_t *call);
 
 /* Completes an open call as CANCELLED and resets its stream; other calls
  * continue. Does nothing for a zeroed or completed call. */
