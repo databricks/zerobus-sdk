@@ -15,8 +15,10 @@
 
 ### Documentation
 
-- Added a persistent JSON example demonstrating durable stream creation,
-  pipelined ingestion followed by one `flush()`, and resume by `stream_id`.
+- Documented persistent streams (behind the `eos` feature) in the Rust README,
+  with a usage section, API reference entries, and a runnable JSON example that
+  creates a durable stream, ingests in a loop with one `flush()`, and resumes by
+  `stream_id`.
 
 ### Internal Changes
 
