@@ -31,6 +31,14 @@ bool zb_is_empty(zerobus_string_view_t view);
 /* Non-empty, well-formed UTF-8, no embedded NUL. */
 bool zb_is_valid_string(zerobus_string_view_t view);
 
+/* True if every byte is allowed in an HTTP header value: a tab, or anything
+ * from 0x20 up except DEL. */
+bool zb_is_header_value(zerobus_string_view_t view);
+
+/* The view without leading or trailing ASCII whitespace. A view with NULL data
+ * is returned unchanged. */
+zerobus_string_view_t zb_trim_whitespace(zerobus_string_view_t view);
+
 /*
  * Report whether a table name is a fully qualified catalog.schema.table: three
  * non-empty, dot-separated components. This is a simplified structural check —

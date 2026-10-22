@@ -190,6 +190,65 @@ static void test_sdk_setter_transactional(void)
     zerobus_sdk_free(sdk);
 }
 
+/* Every option setter accepts a value, the application name is checked as
+ * header text, and the configured builder builds. */
+static void test_sdk_options(void)
+{
+    zerobus_sdk_builder_t *b = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_error_t *err = NULL;
+
+    REQUIRE_OK(zerobus_sdk_builder_new(&b, NULL));
+    REQUIRE_OK(zerobus_sdk_builder_set_endpoint(
+        b, sv("https://myws.zerobus.us-west.cloud.databricks.com"), NULL));
+    REQUIRE_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+        b, sv("https://myws.cloud.databricks.com"), NULL));
+
+    CHECK_OK(zerobus_sdk_builder_set_token_refresh_buffer_ms(b, 0, NULL));
+    CHECK_OK(zerobus_sdk_builder_set_connection_per_stream(b, false, NULL));
+
+    /* Trimmed with a tab inside, then cleared by blank and empty names. */
+    CHECK_OK(zerobus_sdk_builder_set_application_name(
+        b, sv(" \tmy-app/1.0\tbeta \r\n"), NULL));
+    CHECK_OK(zerobus_sdk_builder_set_application_name(b, sv(" \n"), NULL));
+    CHECK_OK(zerobus_sdk_builder_set_application_name(
+        b, (zerobus_string_view_t){NULL, 0}, NULL));
+
+    static const zerobus_string_view_t bad_names[] = {
+        {"my\napp", 6},
+        {"my\177app", 6},
+        {"\xff", 1},
+        {NULL, 1},
+    };
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); ++i) {
+        CHECK_EQ_INT(
+            zerobus_sdk_builder_set_application_name(b, bad_names[i], &err),
+            ZEROBUS_STATUS_INVALID_ARGUMENT);
+        CHECK(err != NULL);
+        zerobus_error_free(err);
+        err = NULL;
+    }
+
+    CHECK_OK(
+        zerobus_sdk_builder_set_application_name(b, sv("my-app/1.0"), NULL));
+    REQUIRE_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+
+    /* The argument checks every setter shares. */
+    CHECK_EQ_INT(
+        zerobus_sdk_builder_set_application_name(NULL, sv("app"), &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    REQUIRE(err != NULL);
+    const zerobus_error_t *seeded = err;
+    CHECK_EQ_INT(zerobus_sdk_builder_set_connection_per_stream(b, true, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err == seeded);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_sdk_free(sdk);
+    zerobus_sdk_builder_free(b);
+}
+
 /* Every SDK-side *_free accepts NULL. */
 static void test_sdk_free_null_safe(void)
 {
@@ -313,6 +372,7 @@ int main(void)
     test_sdk_builder_edges();
     test_sdk_build_ok();
     test_sdk_setter_transactional();
+    test_sdk_options();
     test_sdk_free_null_safe();
     test_sdk_retained_reference();
     test_sdk_out_error_must_be_null();
