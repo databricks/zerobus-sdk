@@ -266,14 +266,10 @@ mod tests {
     use super::*;
 
     fn simple(name: &str, type_name: &str, nullable: bool, position: i32) -> UcColumn {
-        UcColumn {
-            name: name.into(),
-            type_name: type_name.into(),
-            type_text: type_name.to_lowercase(),
-            type_json: String::new(),
-            nullable,
-            position,
-        }
+        UcColumn::new(name, type_name)
+            .with_type_text(type_name.to_lowercase())
+            .with_nullable(nullable)
+            .with_position(position)
     }
 
     fn complex(
@@ -283,14 +279,10 @@ mod tests {
         nullable: bool,
         position: i32,
     ) -> UcColumn {
-        UcColumn {
-            name: name.into(),
-            type_name: type_name.into(),
-            type_text: String::new(),
-            type_json: type_json.into(),
-            nullable,
-            position,
-        }
+        UcColumn::new(name, type_name)
+            .with_type_json(type_json)
+            .with_nullable(nullable)
+            .with_position(position)
     }
 
     #[test]
