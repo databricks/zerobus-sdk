@@ -88,6 +88,20 @@ bool zb_view_equals(zerobus_string_view_t value, const char *literal)
             (value.data != NULL && memcmp(value.data, literal, len) == 0));
 }
 
+bool zb_is_header_value(zerobus_string_view_t view)
+{
+    if (view.data == NULL) {
+        return view.len == 0;
+    }
+    for (size_t i = 0; i < view.len; i++) {
+        unsigned char c = (unsigned char)view.data[i];
+        if (c < 0x20 || c > 0x7e) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* ---- parsing ----------------------------------------------------------- */
 
 bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
@@ -119,6 +133,29 @@ int zb_hex_value(char c)
         return c - 'A' + 10;
     }
     return -1;
+}
+
+/* ---- trimming ---------------------------------------------------------- */
+
+/* Space, tab, line feed, vertical tab, form feed, or carriage return. */
+static bool is_ascii_space(char c)
+{
+    return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
+zerobus_string_view_t zb_trim_whitespace(zerobus_string_view_t view)
+{
+    if (view.data == NULL) {
+        return view;
+    }
+    while (view.len > 0 && is_ascii_space(view.data[0])) {
+        view.data++;
+        view.len--;
+    }
+    while (view.len > 0 && is_ascii_space(view.data[view.len - 1])) {
+        view.len--;
+    }
+    return view;
 }
 
 /* ---- table name -------------------------------------------------------- */
