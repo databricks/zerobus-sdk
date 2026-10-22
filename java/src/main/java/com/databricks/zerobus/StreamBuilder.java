@@ -224,6 +224,18 @@ public final class StreamBuilder {
     return new ArrowStreamBuilder(this, schema);
   }
 
+  /**
+   * Selects the Avro record format (Beta).
+   *
+   * <p>Requires Java 11+ and the {@code org.apache.avro:avro} dependency on the classpath.
+   *
+   * @param schemaJson the Avro writer schema as a JSON string
+   * @return an {@link AvroStreamBuilder} that builds a {@link ZerobusAvroStream}
+   */
+  public AvroStreamBuilder avro(String schemaJson) {
+    return new AvroStreamBuilder(this, requireNonBlank(schemaJson, "schemaJson"));
+  }
+
   // ==================== Package-private helpers ====================
 
   /** Validates that the required table name and authentication have been configured. */
@@ -330,6 +342,34 @@ public final class StreamBuilder {
       base.validateRequired();
       return base.sdk.createJsonStreamInternal(
           base.tableName,
+          base.clientId,
+          base.clientSecret,
+          base.headersProvider,
+          base.toStreamOptions());
+    }
+  }
+
+  /** Builds a {@link ZerobusAvroStream}. Created via {@link StreamBuilder#avro(String)}. */
+  public static final class AvroStreamBuilder {
+    private final StreamBuilder base;
+    private final String schemaJson;
+
+    private AvroStreamBuilder(StreamBuilder base, String schemaJson) {
+      this.base = base;
+      this.schemaJson = schemaJson;
+    }
+
+    /**
+     * Builds and opens the Avro stream.
+     *
+     * @return a future that completes with the {@link ZerobusAvroStream} when ready
+     * @throws IllegalStateException if the table name or authentication has not been set
+     */
+    public CompletableFuture<ZerobusAvroStream> build() {
+      base.validateRequired();
+      return base.sdk.createAvroStreamInternal(
+          base.tableName,
+          schemaJson,
           base.clientId,
           base.clientSecret,
           base.headersProvider,

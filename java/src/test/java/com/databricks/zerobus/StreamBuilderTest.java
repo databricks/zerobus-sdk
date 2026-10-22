@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import java.util.Collections;
@@ -93,6 +94,13 @@ public class StreamBuilderTest {
   @Test
   void arrowRejectsNullSchema() {
     assertThrows(NullPointerException.class, () -> builder().arrow(null));
+  }
+
+  @Test
+  void avroRejectsNullAndBlankSchema() {
+    assertThrows(NullPointerException.class, () -> builder().avro(null));
+    assertThrows(IllegalArgumentException.class, () -> builder().avro(""));
+    assertThrows(IllegalArgumentException.class, () -> builder().avro("   "));
   }
 
   @Test
@@ -277,8 +285,34 @@ public class StreamBuilderTest {
         .createJsonStreamInternal(
             eq("cat.sch.json"), eq("json-id"), eq("json-secret"), eq(null), opts.capture());
     assertEquals(4242, opts.getValue().maxInflightRecords());
-    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any(), any());
-    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any(), any());
+    verifyNoMoreInteractions(sdk);
+  }
+
+  @Test
+  void avroBuildRoutesToCreateAvroStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    String schemaJson = "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.avro")
+        .oauth("avro-id", "avro-secret")
+        .maxInflightRecords(777)
+        .avro(schemaJson)
+        .build();
+
+    ArgumentCaptor<StreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(StreamConfigurationOptions.class);
+    verify(sdk)
+        .createAvroStreamInternal(
+            eq("cat.sch.avro"),
+            eq(schemaJson),
+            eq("avro-id"),
+            eq("avro-secret"),
+            eq(null),
+            opts.capture());
+    assertEquals(777, opts.getValue().maxInflightRecords());
+    verifyNoMoreInteractions(sdk);
   }
 
   @Test

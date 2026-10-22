@@ -60,11 +60,7 @@ public class ZerobusStream<RecordType extends Message> extends BaseZerobusStream
       StreamConfigurationOptions options,
       String clientId,
       String clientSecret) {
-    super(
-        nativeHandle,
-        tableProperties != null ? tableProperties.getTableName() : null,
-        options,
-        false);
+    super(nativeHandle, tableProperties != null ? tableProperties.getTableName() : null, options);
     this.tableProperties = tableProperties;
     this.clientId = clientId;
     this.clientSecret = clientSecret;
@@ -136,7 +132,7 @@ public class ZerobusStream<RecordType extends Message> extends BaseZerobusStream
    */
   public CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException {
     ensureOpen();
-    return nativeIngestRecord(nativeHandle, record.toByteArray(), false);
+    return nativeIngestRecord(nativeHandle, record.toByteArray());
   }
 
   /**
