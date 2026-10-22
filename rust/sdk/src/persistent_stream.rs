@@ -15,11 +15,17 @@ use crate::{EncodedRecord, OffsetId, ZerobusResult, ZerobusStream};
 
 /// A durable, recoverable ingestion stream (Eos).
 ///
+/// In development: this API and its server support can change or be removed. It
+/// is available behind the `eos` feature.
+///
 /// Unlike an ephemeral [`ZerobusStream`], a persistent stream's identity and
-/// committed offset are recorded server-side, so it can be resumed after a
-/// restart with exactly-once delivery into Delta. Persist
-/// [`stream_id`](Self::stream_id) to reconnect later via
-/// [`resume`](crate::PersistentStreamBuilder::resume).
+/// committed offset are recorded on the server. Save
+/// [`stream_id`](Self::stream_id) and reconnect with
+/// [`resume`](crate::PersistentStreamBuilder::resume), even from a new process.
+/// The resumed stream continues at the committed offset plus one (see
+/// [`resume_watermark`](Self::resume_watermark)). Replay only the records above
+/// that offset. If you ingest a record that the server already committed, the
+/// server writes it again.
 ///
 /// # Examples
 ///

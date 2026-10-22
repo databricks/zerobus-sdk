@@ -44,9 +44,15 @@ use crate::{PersistentStream, ZerobusResult, ZerobusStream};
 
 /// A fluent builder for creating or resuming persistent (Eos) streams.
 ///
-/// Configuration setters mirror [`StreamBuilder`] (they delegate to it); the
-/// terminals [`build`](Self::build) and [`resume`](Self::resume) open the
-/// stream. Arrow format is not supported for persistent streams.
+/// In development: this API can change. It is available behind the `eos`
+/// feature.
+///
+/// The setters for the table, authentication, the JSON and compiled protobuf
+/// formats, recovery, timeouts, backpressure, and callbacks delegate to
+/// [`StreamBuilder`]. The terminals [`build`](Self::build) and
+/// [`resume`](Self::resume) open the stream. Arrow, Avro, dynamic protobuf,
+/// multiplexing, and federated authentication are not available on persistent
+/// streams.
 #[must_use = "a PersistentStreamBuilder does nothing until `.build()` or `.resume()` is called"]
 pub struct PersistentStreamBuilder<'a> {
     inner: StreamBuilder<'a>,
@@ -168,7 +174,7 @@ impl<'a> PersistentStreamBuilder<'a> {
     ///
     /// The server mints a durable stream identity, available via
     /// [`PersistentStream::stream_id`]; persist it to reconnect later with
-    /// [`resume`](Self::resume). Delivery into Delta is exactly-once.
+    /// [`resume`](Self::resume) and continue without rewriting committed records.
     ///
     /// Returns an error if table name, authentication, or format has not been set.
     pub async fn build(self) -> ZerobusResult<PersistentStream> {
