@@ -1515,6 +1515,18 @@ Returns unacknowledged records grouped by batch, preserving the original batch s
 
 Only call after stream failure.
 
+`EncodedRecord` and `EncodedBatch` are `#[non_exhaustive]`. The `Avro` variants exist only with the `avro` feature, and later releases may add record formats, so a `match` on either needs a `_` arm:
+
+```rust
+for record in stream.get_unacked_records().await? {
+    match record {
+        EncodedRecord::Json(json) => { /* ... */ }
+        EncodedRecord::Proto(bytes) => { /* ... */ }
+        _ => { /* Avro, or a format added in a later release */ }
+    }
+}
+```
+
 ### `StreamBuilder`
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.

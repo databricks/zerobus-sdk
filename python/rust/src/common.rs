@@ -628,12 +628,19 @@ pub(crate) fn extract_record_payloads(
     Ok(out)
 }
 
-pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> Py<PyAny> {
-    match record {
-        EncodedRecord::Proto(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
-        EncodedRecord::Json(json_str) => PyBytes::new(py, json_str.as_bytes()).into_any().unbind(),
-        EncodedRecord::Avro(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
-    }
+pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> PyResult<Py<PyAny>> {
+    let bytes = match record {
+        EncodedRecord::Proto(bytes) => bytes,
+        EncodedRecord::Json(json_str) => json_str.into_bytes(),
+        EncodedRecord::Avro(bytes) => bytes,
+        _ => {
+            return Err(map_error(ZerobusError::InvalidStateError(
+                "unacknowledged records include a record type the Python API does not support"
+                    .to_string(),
+            )))
+        }
+    };
+    Ok(PyBytes::new(py, &bytes).into_any().unbind())
 }
 
 /// Apply a Python `StreamConfigurationOptions` to a `StreamBuilder` via the

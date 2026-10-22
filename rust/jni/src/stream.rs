@@ -438,6 +438,13 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClo
     }
 }
 
+/// Error thrown when an unacknowledged record has a type the Java API cannot represent.
+fn unsupported_record_type_error() -> databricks_zerobus_ingest_sdk::ZerobusError {
+    databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
+        "unacknowledged records include a record type the Java API does not support".to_string(),
+    )
+}
+
 /// Get unacked records as a list of byte arrays.
 ///
 /// # JNI Signature
@@ -491,6 +498,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
         let bytes = match record {
             EncodedRecord::Proto(p) => p,
             EncodedRecord::Json(j) => j.into_bytes(),
+            _ => {
+                throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
+                return JObject::null();
+            }
         };
 
         let byte_array = match env.byte_array_from_slice(&bytes) {
@@ -575,6 +586,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             EncodedBatch::Proto(records) => (false, records.into_iter().collect()),
             EncodedBatch::Json(records) => {
                 (true, records.into_iter().map(|r| r.into_bytes()).collect())
+            }
+            _ => {
+                throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
+                return JObject::null();
             }
         };
 
