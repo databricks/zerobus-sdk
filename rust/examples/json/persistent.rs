@@ -5,6 +5,9 @@
 //! provide it through `ZEROBUS_PERSISTENT_STREAM_ID` on later runs to resume
 //! from the server's last committed offset.
 //!
+//! Each run writes new records. Their ids continue after the last committed
+//! offset, so you can tell the rows of each run apart in the table.
+//!
 //! Records are queued without waiting for individual acknowledgements. A
 //! single `flush()` after the loop confirms the complete run.
 
@@ -50,15 +53,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(error.into()),
     };
 
+    // Every ingest call uses one offset. A new stream starts at offset 0. A resumed
+    // stream continues after the committed offset. The record id is the offset plus
+    // one, so each run writes rows with new ids.
+    let first_offset = stream
+        .resume_watermark()
+        .map_or(0, |watermark| watermark + 1);
     let now = chrono::Utc::now().timestamp_micros();
-    let records = [
-        format!(
-            r#"{{"id":1,"customer_name":"Alice","product_name":"Mouse","quantity":1,"price":25.99,"status":"pending","created_at":{now},"updated_at":{now}}}"#
-        ),
-        format!(
-            r#"{{"id":2,"customer_name":"Bob","product_name":"Keyboard","quantity":1,"price":89.99,"status":"pending","created_at":{now},"updated_at":{now}}}"#
-        ),
-    ];
+    let records: Vec<String> = (first_offset..first_offset + 2)
+        .map(|offset| {
+            let id = offset + 1;
+            format!(
+                r#"{{"id":{id},"customer_name":"customer-{id}","product_name":"Mouse","quantity":1,"price":25.99,"status":"pending","created_at":{now},"updated_at":{now}}}"#
+            )
+        })
+        .collect();
 
     for record in records {
         let offset = stream.ingest_record_offset(record).await?;
@@ -67,8 +76,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     stream.flush().await?;
     println!("All queued records are durable");
 
-    // Closing ends this connection but does not retire the durable stream. It
-    // can be resumed later with the same stream ID.
+    // Closing ends this connection. The durable stream stays available, and you
+    // can resume it later with the same stream ID.
     stream.close().await?;
     Ok(())
 }

@@ -181,9 +181,11 @@ ZEROBUS_PERSISTENT_STREAM_ID=<stream-id> \
   cargo run -p rust-examples-json --example json_persistent
 ```
 
-The example queues records in a loop and calls `flush()` once afterward. Its
-final `close()` ends only the current connection; the durable stream remains
-available for another resume.
+The example queues records in a loop and calls `flush()` once afterward. Each run
+writes new records. The record ids continue after the last committed offset: the
+first run writes ids 1 and 2, and the next run writes ids 3 and 4. Its final
+`close()` ends only the current connection; the durable stream remains available
+for another resume.
 
 ## Adapting for Your Custom Table
 
