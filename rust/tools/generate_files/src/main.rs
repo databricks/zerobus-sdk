@@ -14,6 +14,7 @@ mod generate;
 use generate::{
     clean_filename, fetch_table_info, generate_proto_file, generate_rust_and_descriptor,
 };
+mod protoc;
 mod token_factory;
 
 /// CLI arguments.

@@ -15,8 +15,6 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tonic-prost-build.workspace = true
 urlencoding.workspace = true
-
-[build-dependencies]
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]

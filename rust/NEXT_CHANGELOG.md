@@ -17,6 +17,10 @@
 
 ### Internal Changes
 
+- The `tools/generate_files` crate now resolves `protoc` on its own (`PROTOC`
+  env var first, then the vendored binary), so its tests no longer require a
+  system protoc on PATH.
+
 - Added a stateful persistent-stream mock and integration coverage for create,
   flush, resume offset continuity, and unknown stream IDs.
 
