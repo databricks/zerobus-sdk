@@ -18,8 +18,9 @@
   for wide or sparse schemas at more CPU. When it is enabled,
   `ipc_compression` is ignored and buffers are sent uncompressed with 8-byte
   alignment, so payloads are never compressed twice. The server must accept
-  zstd on Arrow Flight; otherwise stream creation fails with a non-retryable
-  `Unimplemented` error. The default leaves the wire format unchanged.
+  zstd on Arrow Flight; otherwise stream creation, including reconnects, fails
+  with a non-retryable `Unimplemented` error, so disable it on clients before
+  rolling a server back. The default leaves the wire format unchanged.
 
 ### Bug Fixes
 

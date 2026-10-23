@@ -128,7 +128,9 @@ pub struct ArrowStreamConfigurationOptions {
     /// When enabled, [`ipc_compression`](Self::ipc_compression) is ignored and buffers are
     /// sent uncompressed with 8-byte alignment, since compressing already-compressed buffers
     /// costs CPU without reducing size. The server must accept zstd on Arrow Flight;
-    /// otherwise stream creation fails with a non-retryable `Unimplemented` error.
+    /// otherwise stream creation fails with a non-retryable `Unimplemented` error. That
+    /// includes reconnects, so if a server stops accepting zstd (for example after a
+    /// rollback), disable this on clients first or their streams close.
     ///
     /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
     /// gRPC compression, so they overstate the bytes sent when this is enabled.

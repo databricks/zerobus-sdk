@@ -5831,22 +5831,26 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            // Recovery is on to show the rejection is not retried: stream creation fails
-            // fast instead of backing off and reconnecting.
+            // Recovery is on to show the rejection is not retried. A single retry would wait
+            // out a backoff far longer than the timeout, so finishing in time proves there
+            // was none.
+            let recovery_backoff = std::time::Duration::from_secs(60);
+            let started = std::time::Instant::now();
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(5),
                 sdk.stream_builder()
                     .table(TABLE_NAME)
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
                     .arrow(create_test_arrow_schema())
                     .recovery(true)
                     .recovery_retries(5)
-                    .recovery_backoff_ms(1_000)
+                    .recovery_backoff_ms(recovery_backoff.as_millis() as u64)
                     .grpc_compression(ArrowGrpcCompression::Zstd)
                     .build_arrow(),
             )
             .await
             .expect("stream creation should fail fast, not retry");
+            assert!(started.elapsed() < recovery_backoff);
 
             let Err(err) = result else {
                 panic!("expected stream creation to fail");
