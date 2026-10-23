@@ -4,7 +4,8 @@
 //! The bindings are generated here from the SDK's `zerobus_service.proto`
 //! rather than taken from the SDK, so the SDK's own generated types stay private.
 
-#[allow(clippy::enum_variant_names)]
+// tonic's generated server trait goes through async-trait, which Clippy >= 1.99 flags as double_must_use.
+#[allow(clippy::double_must_use, clippy::enum_variant_names)]
 pub mod databricks {
     pub mod zerobus {
         tonic::include_proto!("databricks.zerobus");
