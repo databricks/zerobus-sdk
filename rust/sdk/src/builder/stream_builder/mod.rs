@@ -528,9 +528,22 @@ impl<'a> StreamBuilder<'a> {
     /// Set the Arrow IPC compression type (Arrow streams only).
     ///
     /// Defaults to `Some(CompressionType::ZSTD)`. Pass `None` to send uncompressed payloads.
+    /// Ignored when [`grpc_compression`](Self::grpc_compression) is enabled.
     #[cfg(feature = "arrow-flight")]
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
         self.arrow_config.ipc_compression = compression;
+        self
+    }
+
+    /// Set gRPC message compression (Arrow streams only).
+    ///
+    /// Defaults to [`ArrowGrpcCompression::None`](crate::ArrowGrpcCompression::None). When
+    /// enabled, [`ipc_compression`](Self::ipc_compression) is ignored. See
+    /// [`ArrowStreamConfigurationOptions::grpc_compression`] for when to use it and the
+    /// server requirement.
+    #[cfg(feature = "arrow-flight")]
+    pub fn grpc_compression(mut self, compression: crate::ArrowGrpcCompression) -> Self {
+        self.arrow_config.grpc_compression = compression;
         self
     }
 

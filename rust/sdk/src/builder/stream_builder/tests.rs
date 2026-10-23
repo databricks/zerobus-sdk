@@ -527,6 +527,56 @@ fn shared_setters_write_to_arrow_config() {
 }
 
 #[cfg(feature = "arrow-flight")]
+fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "id",
+        DataType::Int32,
+        false,
+    )]));
+    sdk.stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(schema)
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+fn grpc_compression_defaults_off_and_keeps_ipc_default() {
+    let sdk = test_sdk();
+    let config = arrow_test_builder(&sdk).arrow_config;
+    assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::None);
+    assert_eq!(
+        config.ipc_compression,
+        Some(arrow_ipc::CompressionType::ZSTD)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+fn grpc_compression_setter_applies_in_either_order() {
+    let sdk = test_sdk();
+    // The builder records both settings as given; the stream ignores ipc_compression when
+    // gRPC compression is on (see stream_ipc_write_options).
+    let grpc_first = arrow_test_builder(&sdk)
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .arrow_config;
+    let grpc_last = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .arrow_config;
+    for config in [grpc_first, grpc_last] {
+        assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
+        assert_eq!(
+            config.ipc_compression,
+            Some(arrow_ipc::CompressionType::LZ4_FRAME)
+        );
+    }
+}
+
+#[cfg(feature = "arrow-flight")]
 #[tokio::test]
 async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
     let sdk = test_sdk();

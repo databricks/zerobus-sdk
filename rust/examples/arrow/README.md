@@ -11,6 +11,7 @@ The `arrow-flight` feature flag must be enabled.
 - [Code Highlights](#code-highlights)
 - [Telemetry](#telemetry)
 - [IPC compression](#ipc-compression)
+- [gRPC compression](#grpc-compression)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -149,6 +150,29 @@ let stream = sdk
 - `LZ4_FRAME` — fast, low CPU overhead, modest compression ratio.
 
 To disable compression, pass `.ipc_compression(None)`. This can help when client CPU, rather than network bandwidth, limits throughput.
+
+## gRPC compression
+
+IPC compression compresses each Arrow buffer separately and leaves the IPC message header and alignment padding uncompressed. For wide or sparse schemas, with hundreds of columns or many mostly-null columns, those can make up most of each message. `grpc_compression` instead compresses each whole gRPC request message with zstd, which usually sends noticeably fewer bytes for such schemas. It costs more CPU, mostly to decompress on the server.
+
+```rust
+use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .arrow(schema)
+    .grpc_compression(ArrowGrpcCompression::Zstd)
+    .build_arrow()
+    .await?;
+```
+
+- When it is enabled, `ipc_compression` is ignored: buffers are sent uncompressed with 8-byte alignment, because compressing already-compressed buffers again costs CPU without reducing size.
+- The Zerobus endpoint must accept zstd on Arrow Flight; otherwise `build_arrow()` fails with a non-retryable `Unimplemented` error. Reconnects fail the same way, so if a server stops accepting zstd (for example after a rollback), disable `grpc_compression` on clients first or their streams close.
+- The server's message size limit applies to the uncompressed message. Batches are split into small messages before sending, but a single row too large for the limit is rejected even if IPC compression would have made it fit.
+- Telemetry's `approximate_wire_bytes` is measured before gRPC compression, so it overstates the bytes sent when this is enabled.
+- Measure on your own data: for narrow, dense schemas, IPC compression may already be close.
 
 ## Adapting for Your Custom Table
 

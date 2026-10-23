@@ -5700,6 +5700,174 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// Configures gRPC and IPC compression on a builder: `ipc` of `None` leaves IPC
+        /// compression at the builder's default.
+        #[derive(Clone, Copy, Debug)]
+        struct CompressionCase {
+            grpc: databricks_zerobus_ingest_sdk::ArrowGrpcCompression,
+            ipc: Option<Option<arrow_ipc::CompressionType>>,
+            expected_grpc_encoding: Option<&'static str>,
+            expected_ipc_zstd_batches: u64,
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_wire_encoding() -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_wire_encoding");
+
+            let cases = [
+                // Default: no gRPC compression, IPC zstd.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::None,
+                    ipc: None,
+                    expected_grpc_encoding: None,
+                    expected_ipc_zstd_batches: 2,
+                },
+                // gRPC zstd turns IPC compression off.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::Zstd,
+                    ipc: None,
+                    expected_grpc_encoding: Some("zstd"),
+                    expected_ipc_zstd_batches: 0,
+                },
+                // gRPC zstd ignores an explicit IPC choice, so payloads are never
+                // compressed twice.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::Zstd,
+                    ipc: Some(Some(arrow_ipc::CompressionType::ZSTD)),
+                    expected_grpc_encoding: Some("zstd"),
+                    expected_ipc_zstd_batches: 0,
+                },
+            ];
+
+            for case in cases {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 0,
+                                delay_ms: 0,
+                                ack_up_to_records: 2,
+                            },
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 1,
+                                delay_ms: 0,
+                                ack_up_to_records: 3,
+                            },
+                        ],
+                    )
+                    .await;
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .grpc_compression(case.grpc);
+                if let Some(ipc) = case.ipc {
+                    builder = builder.ipc_compression(ipc);
+                }
+                let stream = builder.build_arrow().await?;
+
+                stream
+                    .ingest_batch(create_test_record_batch(
+                        schema.clone(),
+                        vec![1, 2],
+                        vec![Some("a"), Some("b")],
+                    ))
+                    .await?;
+                stream
+                    .ingest_batch(create_test_record_batch(schema, vec![3], vec![Some("c")]))
+                    .await?;
+                stream.flush().await?;
+
+                assert_eq!(mock_server.get_batch_count().await, 2, "{case:?}");
+                assert_eq!(
+                    mock_server.get_total_records_received().await,
+                    3,
+                    "{case:?}"
+                );
+                assert_eq!(mock_server.get_max_offset_received().await, 1, "{case:?}");
+                let encodings = mock_server.get_grpc_encodings().await;
+                assert!(!encodings.is_empty(), "{case:?}");
+                for encoding in encodings {
+                    assert_eq!(encoding.as_deref(), case.expected_grpc_encoding, "{case:?}");
+                }
+                assert_eq!(
+                    mock_server.get_zstd_compressed_record_batch_count().await,
+                    case.expected_ipc_zstd_batches,
+                    "{case:?}",
+                );
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_rejected_by_server_without_zstd(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_rejected_by_server_without_zstd");
+
+            let (mock_server, server_url) =
+                crate::mock_arrow_flight::start_mock_flight_server_without_zstd().await?;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Recovery is on to show the rejection is not retried. A single retry would wait
+            // out a backoff far longer than the timeout, so finishing in time proves there
+            // was none.
+            let recovery_backoff = std::time::Duration::from_secs(60);
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(create_test_arrow_schema())
+                    .recovery(true)
+                    .recovery_retries(5)
+                    .recovery_backoff_ms(recovery_backoff.as_millis() as u64)
+                    .grpc_compression(ArrowGrpcCompression::Zstd)
+                    .build_arrow(),
+            )
+            .await
+            .expect("stream creation should fail fast, not retry");
+            assert!(started.elapsed() < recovery_backoff);
+
+            let Err(err) = result else {
+                panic!("expected stream creation to fail");
+            };
+            assert!(!err.is_retryable(), "{err:?}");
+            match err {
+                ZerobusError::CreateStreamError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unimplemented);
+                }
+                other => panic!("expected CreateStreamError(Unimplemented), got {other:?}"),
+            }
+            // The server rejects the request before reaching the DoPut handler.
+            assert_eq!(mock_server.connection_count(), 0);
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_mixed_ingest_batch_and_ipc() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
