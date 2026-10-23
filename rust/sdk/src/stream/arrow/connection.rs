@@ -11,11 +11,13 @@ use std::task::Poll;
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
+use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::{FlightClient, FlightData, PutResult};
 use futures::{stream::poll_fn, Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{timeout, timeout_at, Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
@@ -26,8 +28,8 @@ use super::batch::make_ipc_write_options;
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::stats_size::frame_stats;
 use super::{
-    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem,
-    FlightConnectionParameters, ZerobusArrowStream,
+    configured_deadline, ArrowGrpcCompression, ArrowStreamConfigurationOptions,
+    ArrowTableProperties, BatchItem, FlightConnectionParameters, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -423,7 +425,13 @@ impl ZerobusArrowStream {
             None => configured_endpoint.connect_lazy(),
         };
 
-        let mut client = FlightClient::new(channel);
+        let inner = match options.grpc_compression {
+            ArrowGrpcCompression::None => FlightServiceClient::new(channel),
+            ArrowGrpcCompression::Zstd => {
+                FlightServiceClient::new(channel).send_compressed(CompressionEncoding::Zstd)
+            }
+        };
+        let mut client = FlightClient::new_from_inner(inner);
 
         // Add headers from the provider first, filtering out reserved headers.
         // The table name header is authoritative and must not be overridden.

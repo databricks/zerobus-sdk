@@ -11,6 +11,14 @@
   benefit and only adds padding bytes to the payload. Uncompressed payloads
   keep 64-byte alignment.
 
+- Added `grpc_compression` (`ArrowGrpcCompression::None` by default, or `Zstd`)
+  to Arrow Flight streams, set with `StreamBuilder::grpc_compression`. It
+  compresses each whole gRPC request message, including the IPC header and
+  alignment padding that IPC compression leaves raw, which sends fewer bytes
+  for wide or sparse schemas at more CPU. Enabling it turns IPC compression
+  off unless `ipc_compression` is also set. The server must accept zstd on
+  Arrow Flight. The default leaves the wire format unchanged.
+
 ### Bug Fixes
 
 ### Documentation

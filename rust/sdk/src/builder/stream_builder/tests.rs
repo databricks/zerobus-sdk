@@ -527,6 +527,66 @@ fn shared_setters_write_to_arrow_config() {
 }
 
 #[cfg(feature = "arrow-flight")]
+fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "id",
+        DataType::Int32,
+        false,
+    )]));
+    sdk.stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(schema)
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+fn grpc_compression_defaults_off_and_keeps_ipc_default() {
+    let sdk = test_sdk();
+    let config = arrow_test_builder(&sdk).resolved_arrow_config();
+    assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::None);
+    assert_eq!(
+        config.ipc_compression,
+        Some(arrow_ipc::CompressionType::ZSTD)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+fn grpc_compression_turns_off_default_ipc_compression() {
+    let sdk = test_sdk();
+    let config = arrow_test_builder(&sdk)
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .resolved_arrow_config();
+    assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
+    assert_eq!(config.ipc_compression, None);
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+fn grpc_compression_keeps_explicit_ipc_compression() {
+    let sdk = test_sdk();
+    // Order doesn't matter: an explicit ipc_compression call always wins.
+    let explicit_first = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .resolved_arrow_config();
+    let explicit_last = arrow_test_builder(&sdk)
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .resolved_arrow_config();
+    for config in [explicit_first, explicit_last] {
+        assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
+        assert_eq!(
+            config.ipc_compression,
+            Some(arrow_ipc::CompressionType::LZ4_FRAME)
+        );
+    }
+}
+
+#[cfg(feature = "arrow-flight")]
 #[tokio::test]
 async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
     let sdk = test_sdk();

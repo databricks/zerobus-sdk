@@ -5700,6 +5700,120 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// Configures gRPC and IPC compression on a builder: `ipc` of `None` leaves IPC
+        /// compression unset so the builder's default applies.
+        #[derive(Clone, Copy, Debug)]
+        struct CompressionCase {
+            grpc: databricks_zerobus_ingest_sdk::ArrowGrpcCompression,
+            ipc: Option<Option<arrow_ipc::CompressionType>>,
+            expected_grpc_encoding: Option<&'static str>,
+            expected_ipc_zstd_batches: u64,
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_wire_encoding() -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_wire_encoding");
+
+            let cases = [
+                // Default: no gRPC compression, IPC zstd.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::None,
+                    ipc: None,
+                    expected_grpc_encoding: None,
+                    expected_ipc_zstd_batches: 2,
+                },
+                // gRPC zstd turns the default IPC compression off.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::Zstd,
+                    ipc: None,
+                    expected_grpc_encoding: Some("zstd"),
+                    expected_ipc_zstd_batches: 0,
+                },
+                // An explicit IPC choice is kept alongside gRPC zstd.
+                CompressionCase {
+                    grpc: ArrowGrpcCompression::Zstd,
+                    ipc: Some(Some(arrow_ipc::CompressionType::ZSTD)),
+                    expected_grpc_encoding: Some("zstd"),
+                    expected_ipc_zstd_batches: 2,
+                },
+            ];
+
+            for case in cases {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 0,
+                                delay_ms: 0,
+                                ack_up_to_records: 2,
+                            },
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 1,
+                                delay_ms: 0,
+                                ack_up_to_records: 3,
+                            },
+                        ],
+                    )
+                    .await;
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .grpc_compression(case.grpc);
+                if let Some(ipc) = case.ipc {
+                    builder = builder.ipc_compression(ipc);
+                }
+                let stream = builder.build_arrow().await?;
+
+                stream
+                    .ingest_batch(create_test_record_batch(
+                        schema.clone(),
+                        vec![1, 2],
+                        vec![Some("a"), Some("b")],
+                    ))
+                    .await?;
+                stream
+                    .ingest_batch(create_test_record_batch(schema, vec![3], vec![Some("c")]))
+                    .await?;
+                stream.flush().await?;
+
+                assert_eq!(mock_server.get_batch_count().await, 2, "{case:?}");
+                assert_eq!(
+                    mock_server.get_total_records_received().await,
+                    3,
+                    "{case:?}"
+                );
+                assert_eq!(mock_server.get_max_offset_received().await, 1, "{case:?}");
+                let encodings = mock_server.get_grpc_encodings().await;
+                assert!(!encodings.is_empty(), "{case:?}");
+                for encoding in encodings {
+                    assert_eq!(encoding.as_deref(), case.expected_grpc_encoding, "{case:?}");
+                }
+                assert_eq!(
+                    mock_server.get_zstd_compressed_record_batch_count().await,
+                    case.expected_ipc_zstd_batches,
+                    "{case:?}",
+                );
+            }
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_mixed_ingest_batch_and_ipc() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
