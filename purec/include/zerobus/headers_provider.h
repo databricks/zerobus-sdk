@@ -2,7 +2,7 @@
  * Zerobus Pure C SDK — headers providers.
  *
  * A stream sends request headers each time it opens a gRPC call. A headers
- * provider supplies them through application callbacks.
+ * provider supplies them, through application callbacks or from a fixed list.
  *
  * The SDK sends these headers itself, and a provider must not supply them:
  *   - :method, :scheme, :authority and :path
@@ -96,6 +96,17 @@ typedef struct zerobus_headers_provider_vtable {
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_headers_provider_new(
     const zerobus_headers_provider_vtable_t *vtable, void *user_data,
     zerobus_headers_provider_t **out_provider, zerobus_error_t **out_error);
+
+/*
+ * Creates a provider that sends the same count headers on every call: names[i]
+ * with values[i]. Both arrays and their strings are copied, and each header is
+ * checked as by zerobus_headers_add. names and values may be NULL when count
+ * is 0.
+ */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_static_headers_provider_new(
+    const zerobus_string_view_t *names, const zerobus_string_view_t *values,
+    size_t count, zerobus_headers_provider_t **out_provider,
+    zerobus_error_t **out_error);
 
 /* Releases the caller's reference. Releasing the last reference calls
  * destroy. */

@@ -211,6 +211,105 @@ zb_cleanup:
     CHECK_EQ_INT(state.destroys, 0);
 }
 
+/* A static provider sends its own copy of the headers on every get. */
+static void test_static_provider(void)
+{
+    char value[] = "Bearer token";
+    const zerobus_string_view_t names[] = {sv("authorization"), sv("x-empty")};
+    const zerobus_string_view_t values[] = {sv(value), {NULL, 0}};
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_headers_t headers = {0};
+
+    REQUIRE_OK(
+        zerobus_static_headers_provider_new(names, values, 2, &provider, NULL));
+    value[0] = 'X';
+    for (int i = 0; i < 2; ++i) {
+        CHECK_OK(zb_headers_provider_get(provider, &headers));
+        REQUIRE(headers.count == 2);
+        CHECK(strcmp(headers.items[0].name, "authorization") == 0);
+        CHECK(strcmp(headers.items[0].value, "Bearer token") == 0);
+        CHECK(strcmp(headers.items[1].name, "x-empty") == 0);
+        CHECK(strcmp(headers.items[1].value, "") == 0);
+        zb_headers_clear(&headers);
+    }
+    zb_headers_provider_invalidate(provider);
+
+zb_cleanup:
+    zb_headers_clear(&headers);
+    zerobus_headers_provider_free(provider);
+}
+
+/* Invalid arguments are rejected, and out_provider is left untouched. */
+static void test_static_provider_invalid(void)
+{
+    const zerobus_string_view_t names[] = {sv("a"), {NULL, 0}};
+    const zerobus_string_view_t values[] = {sv("b"), sv("v")};
+    int marker;
+    zerobus_headers_provider_t *const sentinel =
+        (zerobus_headers_provider_t *)&marker;
+    zerobus_headers_provider_t *provider = sentinel;
+    zerobus_error_t *error = NULL;
+
+    /* The second name is empty: the first header is copied, then dropped. */
+    CHECK_EQ_INT(zerobus_static_headers_provider_new(names, values, 2,
+                                                     &provider, &error),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(error != NULL);
+    zerobus_error_free(error);
+    error = NULL;
+    CHECK_EQ_INT(
+        zerobus_static_headers_provider_new(NULL, values, 1, &provider, NULL),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_static_headers_provider_new(names, NULL, 1, &provider, NULL),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_static_headers_provider_new(names, values, 1, NULL, &error),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+
+    /* An error left from an earlier call is refused, not overwritten. */
+    zerobus_error_t *left = error;
+    CHECK_EQ_INT(zerobus_static_headers_provider_new(names, values, 1,
+                                                     &provider, &error),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(error == left);
+    zerobus_error_free(error);
+
+    CHECK(provider == sentinel);
+}
+
+static void test_empty_provider(void)
+{
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_headers_t headers = {0};
+
+    REQUIRE_OK(zb_empty_headers_provider_new(&provider));
+    CHECK_OK(zb_headers_provider_get(provider, &headers));
+    CHECK(headers.count == 0);
+
+zb_cleanup:
+    zb_headers_clear(&headers);
+    zerobus_headers_provider_free(provider);
+}
+
+/* Not implemented yet: get fails with UNIMPLEMENTED and adds nothing. */
+static void test_oauth_provider(void)
+{
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_headers_t headers = {0};
+
+    REQUIRE_OK(zb_oauth_headers_provider_new("https://ws.cloud.example.com",
+                                             "123", "c.s.t", "id", "secret",
+                                             &provider));
+    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers),
+                 ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK(headers.count == 0);
+
+zb_cleanup:
+    zb_headers_clear(&headers);
+    zerobus_headers_provider_free(provider);
+}
+
 int main(void)
 {
     test_add();
@@ -220,5 +319,9 @@ int main(void)
     test_provider_get_failure();
     test_provider_references();
     test_provider_optional_callbacks();
+    test_static_provider();
+    test_static_provider_invalid();
+    test_empty_provider();
+    test_oauth_provider();
     TEST_MAIN_RETURN();
 }
