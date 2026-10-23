@@ -13,7 +13,10 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Duration, Instant};
 use tracing::debug;
 
-use super::{configured_deadline, OutboundBatch, RecordBatch};
+use super::{
+    configured_deadline, ArrowGrpcCompression, ArrowStreamConfigurationOptions, OutboundBatch,
+    RecordBatch,
+};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
@@ -276,6 +279,30 @@ pub(super) fn make_ipc_write_options(
     }
 }
 
+/// Builds the [`IpcWriteOptions`] a stream encodes its batches with.
+///
+/// With gRPC compression on, each whole message is compressed, so `ipc_compression` is
+/// ignored: compressing buffers twice costs CPU without reducing size. Those buffers also
+/// use [`COMPRESSED_IPC_ALIGNMENT`], because wider padding only adds bytes for the server
+/// to decompress.
+#[allow(clippy::result_large_err)]
+pub(super) fn stream_ipc_write_options(
+    options: &ArrowStreamConfigurationOptions,
+) -> ZerobusResult<IpcWriteOptions> {
+    match options.grpc_compression {
+        ArrowGrpcCompression::None => make_ipc_write_options(options.ipc_compression),
+        ArrowGrpcCompression::Zstd => {
+            IpcWriteOptions::try_new(COMPRESSED_IPC_ALIGNMENT, false, MetadataVersion::V5).map_err(
+                |e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "Failed to configure Arrow IPC write options: {e}"
+                    ))
+                },
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -292,7 +319,8 @@ mod tests {
 
     use super::{
         make_ipc_write_options, oldest_pending_ack_deadline, rebuild_pending_for_replay,
-        refresh_pending_ack_deadlines, PendingBatch, RecordBatch,
+        refresh_pending_ack_deadlines, stream_ipc_write_options, ArrowGrpcCompression,
+        ArrowStreamConfigurationOptions, PendingBatch, RecordBatch,
     };
 
     #[allow(clippy::manual_div_ceil)]
@@ -396,5 +424,63 @@ mod tests {
         let buffers = message.header_as_record_batch().unwrap().buffers().unwrap();
         assert!(buffers.iter().all(|b| b.offset() % 8 == 0));
         assert!(buffers.iter().any(|b| b.offset() % 64 != 0));
+    }
+
+    /// Encodes a small batch with a stream's IPC options and returns the record-batch
+    /// message's buffer offsets and whether it carries IPC compression.
+    async fn encode_with_stream_options(
+        options: &ArrowStreamConfigurationOptions,
+    ) -> (Vec<i64>, bool) {
+        let batch =
+            RecordBatch::try_from_iter([("a", Arc::new(Int32Array::from(vec![1, 2, 3])) as _)])
+                .unwrap();
+        let frames: Vec<_> = FlightDataEncoderBuilder::new()
+            .with_options(stream_ipc_write_options(options).unwrap())
+            .build(futures::stream::iter([Ok(batch)]))
+            .try_collect()
+            .await
+            .unwrap();
+        let message = arrow_ipc::root_as_message(&frames[1].data_header).unwrap();
+        let record_batch = message.header_as_record_batch().unwrap();
+        let offsets = record_batch
+            .buffers()
+            .unwrap()
+            .iter()
+            .map(|b| b.offset())
+            .collect();
+        (offsets, record_batch.compression().is_some())
+    }
+
+    #[tokio::test]
+    async fn grpc_compression_overrides_ipc_compression_with_8_byte_alignment() {
+        for ipc_compression in [
+            None,
+            Some(CompressionType::ZSTD),
+            Some(CompressionType::LZ4_FRAME),
+        ] {
+            let options = ArrowStreamConfigurationOptions {
+                ipc_compression,
+                grpc_compression: ArrowGrpcCompression::Zstd,
+                ..Default::default()
+            };
+            let (offsets, ipc_compressed) = encode_with_stream_options(&options).await;
+            assert!(!ipc_compressed, "{ipc_compression:?} must be ignored");
+            assert!(offsets.iter().all(|o| o % 8 == 0));
+            assert!(offsets.iter().any(|o| o % 64 != 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn without_grpc_compression_ipc_options_are_unchanged() {
+        let compressed = ArrowStreamConfigurationOptions::default();
+        assert!(encode_with_stream_options(&compressed).await.1);
+
+        let uncompressed = ArrowStreamConfigurationOptions {
+            ipc_compression: None,
+            ..Default::default()
+        };
+        let (offsets, ipc_compressed) = encode_with_stream_options(&uncompressed).await;
+        assert!(!ipc_compressed);
+        assert!(offsets.iter().all(|o| o % 64 == 0));
     }
 }
