@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "error.h"
 #include "internal/common/utils.h"
@@ -11,13 +12,6 @@
 struct zerobus_sdk_builder {
     char *endpoint;    /* zerobus endpoint, owned */
     char *uc_endpoint; /* unity catalog endpoint, owned */
-};
-
-struct zerobus_sdk {
-    atomic_size_t ref_cnt;
-    /* Independent copies of the validated configuration. */
-    char *endpoint;
-    char *uc_endpoint;
 };
 
 /* ---- builder ----------------------------------------------------------- */
@@ -158,7 +152,10 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     atomic_init(&sdk->ref_cnt, 1);
     sdk->endpoint = zb_strdup(builder->endpoint);
     sdk->uc_endpoint = zb_strdup(builder->uc_endpoint);
-    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL) {
+    const char *host = strstr(builder->endpoint, "://") + 3;
+    sdk->workspace_id = zb_strndup(host, strcspn(host, ".:"));
+    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL ||
+        sdk->workspace_id == NULL) {
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
@@ -198,6 +195,7 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     /* TODO: tear down shared transport/auth resources (best-effort). */
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
+    free(sdk->workspace_id);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }

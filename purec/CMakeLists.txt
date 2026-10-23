@@ -71,6 +71,7 @@ set(ZEROBUS_SOURCES
   src/internal/proto/zerobus_service.c
   src/internal/landing_zone.c
   src/error.c
+  src/headers_provider.c
   src/sdk.c
   src/stream.c
 
