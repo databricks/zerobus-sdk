@@ -1,0 +1,38 @@
+[package]
+name = "zerobus-testing-harness-rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Layer-1 conformance harness: exposes the TestHarness gRPC service over the Rust Zerobus SDK"
+
+# Standalone crate. It is intentionally NOT a member of the rust/ workspace: it
+# links the SDK by path, the same way rust/tests does, but keeps its own lockfile.
+
+[[bin]]
+name = "zerobus-testing-harness-rust"
+path = "src/main.rs"
+
+[dependencies]
+# Real SDK, built from this checkout. `testing` provides `no_tls()` and `no_auth()`.
+databricks-zerobus-ingest-sdk = { path = "../../../rust/sdk", features = ["testing"] }
+
+# Protobuf / gRPC server for the TestHarness contract.
+prost = "0.14"
+prost-types = "0.14"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+
+# Dynamic protobuf: resolve the descriptor at runtime and map canonical
+# protobuf-JSON (record_json) onto it. Versions match the SDK's locked versions.
+prost-reflect = { version = "0.16", features = ["serde"] }
+serde_json = "1.0"
+
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1.18", features = ["net"] }
+
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3.0.0"

@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+// Control protocol between the orchestrator and a per-SDK harness subprocess.
+// The harness implements this; the orchestrator is the client.
+package zerobus.conformance.harness;
+
+service TestHarness {
+  // Open a stream from the SDK-under-test to the mock at server_endpoint.
+  rpc CreateStream(CreateStreamRequest) returns (CreateStreamResponse);
+  // Ingest ONE logical record; returns its offset handle. Queue-only: the
+  // harness must NOT block for an ack here.
+  rpc IngestRecord(IngestRecordRequest) returns (IngestRecordResponse);
+  // Block until the write for `offset` is durably acknowledged (or timeout).
+  rpc AwaitWriteCompleted(AwaitRequest) returns (AwaitResponse);
+  // Flush: block until all queued records are acknowledged.
+  rpc Flush(FlushRequest) returns (Empty);
+  rpc Close(CloseRequest) returns (Empty);
+  // Gracefully shut the harness process down.
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  GRPC = 1;
+  ARROW_FLIGHT = 2;
+}
+
+enum RecordFormat {
+  FORMAT_UNSPECIFIED = 0;
+  PROTO = 1;
+  JSON = 2;
+  AVRO = 3;
+  ARROW = 4;
+}
+
+message CreateStreamRequest {
+  Protocol protocol = 1;
+  RecordFormat format = 2;
+  // The mock's MOCK_ENDPOINT, "host:port" (plaintext; harness uses no-TLS/no-auth).
+  string server_endpoint = 3;
+  string table_path = 4;
+  // Schema artifact, populated per format:
+  bytes descriptor_proto_bytes = 5;  // PROTO: serialized google.protobuf.DescriptorProto
+  string avro_schema_json = 6;       // AVRO: Avro writer schema JSON
+  bytes arrow_schema_ipc = 7;        // ARROW: Arrow IPC-encoded schema
+}
+
+message CreateStreamResponse {
+  string stream_id = 1;  // harness-local stream handle
+}
+
+message IngestRecordRequest {
+  string stream_id = 1;
+  // Canonical logical record as a JSON object string (see CONTRACTS.md §Record JSON).
+  string record_json = 2;
+}
+
+message IngestRecordResponse {
+  int64 offset = 1;
+}
+
+message AwaitRequest {
+  string stream_id = 1;
+  int64 offset = 2;
+  int64 timeout_ms = 3;
+}
+
+// Empty error_message means success; non-empty means the wait failed.
+message AwaitResponse {
+  string error_message = 1;
+}
+
+message FlushRequest {
+  string stream_id = 1;
+}
+
+message CloseRequest {
+  string stream_id = 1;
+}
+
+message Empty {}

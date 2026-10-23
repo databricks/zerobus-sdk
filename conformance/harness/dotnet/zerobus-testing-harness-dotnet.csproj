@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    Layer-1 conformance harness for the .NET Zerobus SDK.
+
+    Standalone project (NOT part of dotnet/Zerobus.slnx). It links the real SDK by
+    project reference, so `dotnet build` also runs dotnet/build_native.sh, which builds
+    the Rust FFI (rust/ffi) from this checkout and places libzerobus_ffi.so under
+    dotnet/src/Zerobus/runtimes/<RID>/native/. The SDK's BuildNativeLibrary target only
+    runs for the net8.0 TFM, so this harness targets net8.0 (same as dotnet/examples).
+
+    Package versions mirror dotnet/Directory.Packages.props (central package management
+    does not apply outside dotnet/, so the versions are pinned here explicitly).
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>zerobus-testing-harness-dotnet</AssemblyName>
+    <RootNamespace>Zerobus.Conformance.Harness</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+    <PackageReference Include="Google.Protobuf" Version="3.33.5" />
+    <PackageReference Include="Grpc.Tools" Version="2.78.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Contract shared by all harnesses; server stubs only (the orchestrator is the client). -->
+    <Protobuf Include="..\proto\test_harness.proto" GrpcServices="Server" ProtoRoot="..\proto\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\dotnet\src\Zerobus\Zerobus.csproj" />
+  </ItemGroup>
+
+</Project>

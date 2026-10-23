@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerobus_test_runner"
+version = "0.1.0"
+description = "Layer-1 conformance test orchestrator for the Zerobus SDKs"
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.68",
+    "grpcio-tools>=1.68",
+    # Generated stubs (_generated/) need a protobuf runtime new enough for protoc 5.x+ output.
+    "protobuf>=5.29",
+    "fastavro>=1.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

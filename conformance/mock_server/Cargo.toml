@@ -1,0 +1,31 @@
+[package]
+name = "zerobus-mock-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Conformance mock Zerobus server: Zerobus data plane + MockAdmin control plane"
+
+# Standalone crate: not a member of the rust/ workspace.
+[workspace]
+
+[lib]
+name = "zerobus_mock_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zerobus-mock-server"
+path = "src/main.rs"
+
+[dependencies]
+prost = "0.14"
+prost-types = "0.14"
+tonic = { version = "0.14", features = ["transport", "codegen"] }
+tonic-prost = "0.14"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "net", "signal"] }
+tokio-stream = { version = "0.1.18", features = ["net"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3.0.0"

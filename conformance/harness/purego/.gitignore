@@ -1,0 +1,2 @@
+# Built harness binary (go build -o bin/...)
+bin/

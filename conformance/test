@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Zerobus SDK Layer-1 conformance runner. See conformance/DESIGN.md and conformance/CONTRACTS.md.
+#   ./conformance/test run --sdk rust --scenario happy_path_ingest --transport grpc --format proto
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Interpreter: $PYTHON if set, else the orchestrator venv if one exists, else python3.
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="$PYTHON"
+elif [[ -x "$HERE/orchestrator/.venv/bin/python" ]]; then
+  PYTHON_BIN="$HERE/orchestrator/.venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+PYTHONPATH="$HERE/orchestrator/src" exec "$PYTHON_BIN" -m zerobus_test_runner "$@"
