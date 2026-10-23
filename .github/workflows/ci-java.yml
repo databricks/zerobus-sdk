@@ -81,7 +81,7 @@ jobs:
       - name: Build JNI native library
         working-directory: rust
         shell: bash
-        run: cargo build --release -p zerobus-jni --features test-helpers
+        run: cargo build --release -p zerobus-jni --features test-helpers,avro
       - name: Stage native library for tests
         shell: bash
         run: |

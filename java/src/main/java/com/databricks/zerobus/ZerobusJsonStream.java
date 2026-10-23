@@ -127,7 +127,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       String clientId,
       String clientSecret,
       HeadersProvider headersProvider) {
-    super(nativeHandle, tableName, options, true);
+    super(nativeHandle, tableName, options);
     this.clientId = clientId;
     this.clientSecret = clientSecret;
     this.headersProvider = headersProvider;
@@ -174,9 +174,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    */
   public <T> long ingestRecordOffset(T object, JsonSerializer<T> serializer)
       throws ZerobusException {
-    ensureOpen();
-    String json = serializer.serialize(object);
-    return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
+    return ingestEncoded(serializer.serialize(object).getBytes(StandardCharsets.UTF_8));
   }
 
   /**
@@ -189,8 +187,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(String json) throws ZerobusException {
-    ensureOpen();
-    return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
+    return ingestEncoded(json.getBytes(StandardCharsets.UTF_8));
   }
 
   // ==================== Batch Ingestion ====================
@@ -215,14 +212,9 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       throws ZerobusException {
     List<byte[]> payloads = new ArrayList<>();
     for (T obj : objects) {
-      String json = serializer.serialize(obj);
-      payloads.add(json.getBytes(StandardCharsets.UTF_8));
+      payloads.add(serializer.serialize(obj).getBytes(StandardCharsets.UTF_8));
     }
-    if (payloads.isEmpty()) {
-      return Optional.empty();
-    }
-    ensureOpen();
-    return Optional.of(nativeIngestRecordsOffset(nativeHandle, payloads, true));
+    return ingestEncoded(payloads);
   }
 
   /**
@@ -239,11 +231,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
     for (String json : jsonStrings) {
       payloads.add(json.getBytes(StandardCharsets.UTF_8));
     }
-    if (payloads.isEmpty()) {
-      return Optional.empty();
-    }
-    ensureOpen();
-    return Optional.of(nativeIngestRecordsOffset(nativeHandle, payloads, true));
+    return ingestEncoded(payloads);
   }
 
   // ==================== Unacknowledged Records ====================

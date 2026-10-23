@@ -35,6 +35,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Protocol Buffers**: Strongly-typed schema using protobuf
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
 - **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
+- **Avro** *(Beta)*: Ingest Avro records or pre-encoded datums (requires Java 11+; see [Avro Examples](#avro-examples))
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
@@ -118,6 +119,17 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
     <groupId>org.apache.arrow</groupId>
     <artifactId>arrow-memory-netty</artifactId>
     <version>17.0.0</version>
+</dependency>
+```
+
+**When using Avro ingestion (`ZerobusAvroStream`, Beta)** — additional dependency, opt-in. Requires **Java 11+** at runtime (Apache Avro 1.12 is compiled for Java 11):
+- [`avro` 1.12.2](https://mvnrepository.com/artifact/org.apache.avro/avro/1.12.2)
+
+```xml
+<dependency>
+    <groupId>org.apache.avro</groupId>
+    <artifactId>avro</artifactId>
+    <version>1.12.2</version>
 </dependency>
 ```
 
@@ -575,6 +587,16 @@ try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
         .join()) {
     // ingest...
 }
+
+// Avro (Beta; requires Java 11+ and the org.apache.avro:avro dependency)
+try (ZerobusAvroStream avroStream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .avro(schemaJson)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 Stream configuration is set directly on the builder (for example `.maxInflightRecords(50000)`,
@@ -672,6 +694,50 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
     stream.flush();
 }
 ```
+
+### Avro Examples
+
+*(Beta.)* Best when your data is already Avro-native. Requires **Java 11+** and the
+`org.apache.avro:avro` dependency. Declare the writer schema as JSON, then ingest `GenericRecord`
+objects (encoded against the schema) or pre-encoded Avro datums (`byte[]`):
+
+```java
+String schemaJson = "{\"type\":\"record\",\"name\":\"Order\",\"fields\":["
+    + "{\"name\":\"id\",\"type\":\"long\"},{\"name\":\"customer\",\"type\":\"string\"}]}";
+Schema schema = new Schema.Parser().parse(schemaJson);
+
+try (ZerobusAvroStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .avro(schemaJson)
+        .build()
+        .join()) {
+    for (Order order : orders) {
+        GenericRecord record = new GenericData.Record(schema);
+        record.put("id", order.id);
+        record.put("customer", order.customer);
+        stream.ingestRecordOffset(record);     // GenericRecord, or a pre-encoded byte[]
+    }
+    stream.flush();                            // confirm durability once, not per record
+}
+```
+
+Build records with the Java value each Avro type expects. Date/time, `decimal`, and `uuid` logical
+types also accept their raw underlying primitive.
+
+| Avro type | Java value |
+|-----------|------------|
+| boolean / int / long / float / double | `Boolean` / `Integer` / `Long` / `Float` / `Double` |
+| string | `String` |
+| bytes | `java.nio.ByteBuffer` |
+| record / array / map | `GenericRecord` / `java.util.List` / `java.util.Map<String,?>` |
+| enum | `GenericData.EnumSymbol` |
+| fixed | `GenericData.Fixed` |
+| union | the branch value (resolved by its Java type); `null` for a null branch |
+| date | `java.time.LocalDate` |
+| timestamp-millis / timestamp-micros | `java.time.Instant` |
+| decimal | `java.math.BigDecimal` |
+| uuid | `java.util.UUID` |
 
 ---
 
