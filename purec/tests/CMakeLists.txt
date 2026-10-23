@@ -22,6 +22,7 @@ function(zerobus_add_test test_path)
 endfunction()
 
 zerobus_add_test(error_test)
+zerobus_add_test(headers_provider_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
 zerobus_add_test(internal/ingest_request_test)
