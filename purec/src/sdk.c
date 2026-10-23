@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "error.h"
 #include "internal/common/utils.h"
@@ -14,16 +15,6 @@ struct zerobus_sdk_builder {
     char *endpoint;         /* zerobus endpoint, owned */
     char *uc_endpoint;      /* unity catalog endpoint, owned */
     char *application_name; /* owned, NULL when unset */
-    uint64_t token_refresh_buffer_ms;
-    bool connection_per_stream;
-};
-
-struct zerobus_sdk {
-    atomic_size_t ref_cnt;
-    /* Independent copies of the validated configuration. */
-    char *endpoint;
-    char *uc_endpoint;
-    char *application_name;
     uint64_t token_refresh_buffer_ms;
     bool connection_per_stream;
 };
@@ -227,7 +218,10 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     sdk->application_name = zb_strdup(builder->application_name);
     sdk->token_refresh_buffer_ms = builder->token_refresh_buffer_ms;
     sdk->connection_per_stream = builder->connection_per_stream;
+    const char *host = strstr(builder->endpoint, "://") + 3;
+    sdk->workspace_id = zb_strndup(host, strcspn(host, ".:"));
     if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL ||
+        sdk->workspace_id == NULL ||
         (builder->application_name != NULL && sdk->application_name == NULL)) {
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
@@ -270,6 +264,7 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
     free(sdk->application_name);
+    free(sdk->workspace_id);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }

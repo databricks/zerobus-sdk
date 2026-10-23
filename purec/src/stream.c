@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "error.h"
+#include "headers_provider.h"
 #include "internal/common/utils.h"
 #include "internal/platform/log.h"
 #include "internal/proto/zerobus_service.h"
@@ -14,22 +15,44 @@
 struct zerobus_stream_builder {
     zerobus_sdk_t *sdk; /* owned reference */
     char *table;
-    char *client_id;
-    char *client_secret; /* zeroized on free */
     zb_stream_config_t config;
+
+    enum { AUTH_NONE, AUTH_OAUTH, AUTH_HEADERS_PROVIDER } auth_kind;
+    union {
+        struct {
+            char *client_id;
+            char *client_secret; /* zeroized on free */
+        } oauth;
+        zerobus_headers_provider_t *headers_provider; /* owned reference */
+    } auth;
 };
 
 struct zerobus_stream {
     zerobus_sdk_t *sdk; /* owned reference */
     char *table;
-    char *client_id;
-    char *client_secret; /* zeroized on free */
     zb_stream_config_t config;
+    zerobus_headers_provider_t *headers_provider; /* owned reference */
 
     atomic_bool closed; /* set by close, rejects ingest once true */
 };
 
 /* ---- builder ----------------------------------------------------------- */
+
+static void clear_auth(zerobus_stream_builder_t *builder)
+{
+    switch (builder->auth_kind) {
+    case AUTH_NONE:
+        break;
+    case AUTH_OAUTH:
+        free(builder->auth.oauth.client_id);
+        zb_secure_free_cstr(builder->auth.oauth.client_secret);
+        break;
+    case AUTH_HEADERS_PROVIDER:
+        zerobus_headers_provider_free(builder->auth.headers_provider);
+        break;
+    }
+    builder->auth_kind = AUTH_NONE;
+}
 
 zerobus_status_t
 zerobus_stream_builder_new(zerobus_sdk_t *sdk,
@@ -118,10 +141,10 @@ zerobus_status_t zerobus_stream_builder_set_oauth(
         zb_secure_free_cstr(secret_copy);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
-    free(builder->client_id);
-    zb_secure_free_cstr(builder->client_secret);
-    builder->client_id = id_copy;
-    builder->client_secret = secret_copy;
+    clear_auth(builder);
+    builder->auth_kind = AUTH_OAUTH;
+    builder->auth.oauth.client_id = id_copy;
+    builder->auth.oauth.client_secret = secret_copy;
     return ZEROBUS_STATUS_OK;
 }
 
@@ -245,6 +268,46 @@ zerobus_status_t zerobus_stream_builder_set_stream_paused_max_wait_time_ms(
     return status;
 }
 
+zerobus_status_t zerobus_stream_builder_set_headers_provider(
+    zerobus_stream_builder_t *builder, zerobus_headers_provider_t *provider,
+    zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (builder == NULL || provider == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "builder and provider must not be NULL");
+    }
+    /* Take the new reference first, in case provider is the one already set. */
+    zb_headers_provider_ref(provider);
+    clear_auth(builder);
+    builder->auth_kind = AUTH_HEADERS_PROVIDER;
+    builder->auth.headers_provider = provider;
+    return ZEROBUS_STATUS_OK;
+}
+
+static zerobus_status_t
+resolve_headers_provider(const zerobus_stream_builder_t *builder,
+                         zerobus_headers_provider_t **out_provider)
+{
+    switch (builder->auth_kind) {
+    case AUTH_NONE:
+        return zb_empty_headers_provider_new(out_provider);
+    case AUTH_OAUTH:
+        return zb_oauth_headers_provider_new(
+            builder->sdk->uc_endpoint, builder->sdk->workspace_id,
+            builder->table, builder->auth.oauth.client_id,
+            builder->auth.oauth.client_secret, out_provider);
+    case AUTH_HEADERS_PROVIDER:
+        zb_headers_provider_ref(builder->auth.headers_provider);
+        *out_provider = builder->auth.headers_provider;
+        return ZEROBUS_STATUS_OK;
+    default:
+        return ZEROBUS_STATUS_INTERNAL;
+    }
+}
+
 zerobus_status_t
 zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                              zerobus_stream_t **out_stream,
@@ -261,12 +324,8 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "table name is required");
     }
-    if (builder->client_id == NULL || builder->client_secret == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
-                       "OAuth client credentials are required");
-    }
 
-    /* TODO: mint an OAuth token and open the authenticated stream. */
+    /* TODO: open the stream. */
     zerobus_stream_t *s = (zerobus_stream_t *)calloc(1, sizeof(*s));
     if (s == NULL) {
         ZB_ERROR("stream allocation failed");
@@ -276,10 +335,10 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     s->sdk = builder->sdk;
     zb_sdk_ref(s->sdk);
     s->table = zb_strdup(builder->table);
-    s->client_id = zb_strdup(builder->client_id);
-    s->client_secret = zb_strdup(builder->client_secret);
     s->config = builder->config;
-    if (s->table == NULL || s->client_id == NULL || s->client_secret == NULL) {
+    zerobus_status_t status =
+        resolve_headers_provider(builder, &s->headers_provider);
+    if (s->table == NULL || status != ZEROBUS_STATUS_OK) {
         ZB_ERROR("stream configuration allocation failed");
         zerobus_stream_free(s);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
@@ -296,8 +355,7 @@ void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
         return;
     }
     free(builder->table);
-    free(builder->client_id);
-    zb_secure_free_cstr(builder->client_secret);
+    clear_auth(builder);
     zerobus_sdk_free(builder->sdk);
     free(builder);
     ZB_DEBUG("stream builder freed");
@@ -385,8 +443,7 @@ void zerobus_stream_free(zerobus_stream_t *stream)
     }
     /* TODO: tear down the transport and join I/O workers before freeing. */
     free(stream->table);
-    free(stream->client_id);
-    zb_secure_free_cstr(stream->client_secret);
+    zerobus_headers_provider_free(stream->headers_provider);
     zerobus_sdk_free(stream->sdk);
     free(stream);
     ZB_DEBUG("stream freed");

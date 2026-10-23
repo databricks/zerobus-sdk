@@ -37,6 +37,28 @@ static zerobus_stream_t *make_stream(zerobus_sdk_t *sdk)
     return stream;
 }
 
+static zerobus_status_t no_headers(void *user_data, zerobus_headers_t *headers)
+{
+    (void)user_data;
+    (void)headers;
+    return ZEROBUS_STATUS_OK;
+}
+
+static void count_destroy(void *user_data)
+{
+    ++*(int *)user_data;
+}
+
+/* Create a provider that counts its destroy calls in *destroys. */
+static zerobus_headers_provider_t *make_provider(int *destroys)
+{
+    zerobus_headers_provider_vtable_t vtable = {no_headers, NULL,
+                                                count_destroy};
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_headers_provider_new(&vtable, destroys, &provider, NULL);
+    return provider;
+}
+
 enum { WORKERS = 5, ITERATIONS = 1000 };
 
 /* Hold workers until setup is complete or cleanup releases them. */
@@ -205,12 +227,11 @@ static void test_stream_builder_validation(void)
     zerobus_error_free(err);
     err = NULL;
 
-    /* Table set but no credentials: still fails the precondition. */
+    /* Table set but no credentials: builds with no authentication. */
     zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL);
-    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, &err),
-                 ZEROBUS_STATUS_FAILED_PRECONDITION);
-    zerobus_error_free(err);
-    err = NULL;
+    CHECK_OK(zerobus_stream_builder_build(stb, &stream, &err));
+    CHECK(stream != NULL);
+    zerobus_stream_free(stream);
 
     zerobus_stream_builder_free(stb);
     zerobus_sdk_free(sdk);
@@ -356,6 +377,87 @@ zb_cleanup:
     zerobus_error_free(err);
     zerobus_stream_free(stream);
     zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+}
+/* A headers provider replaces OAuth credentials, and set_oauth replaces it. */
+static void test_stream_headers_provider(void)
+{
+    int destroys = 0;
+    zerobus_sdk_t *sdk = make_sdk();
+    zerobus_headers_provider_t *provider = make_provider(&destroys);
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+    REQUIRE(sdk != NULL && provider != NULL);
+    REQUIRE_OK(zerobus_stream_builder_new(sdk, &stb, NULL));
+    REQUIRE_OK(zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL));
+
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_headers_provider(NULL, provider, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err != NULL);
+    CHECK_EQ_INT(zerobus_stream_builder_set_headers_provider(stb, NULL, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+
+    CHECK_OK(
+        zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), NULL));
+    CHECK_OK(zerobus_stream_builder_set_headers_provider(stb, provider, NULL));
+    CHECK_OK(zerobus_stream_builder_build(stb, &stream, NULL));
+    zerobus_stream_free(stream);
+    stream = NULL;
+    CHECK_OK(
+        zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), NULL));
+    CHECK_OK(zerobus_stream_builder_build(stb, &stream, NULL));
+
+    /* set_oauth released the builder's reference. */
+    zerobus_headers_provider_free(provider);
+    provider = NULL;
+    CHECK_EQ_INT(destroys, 1);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_stream_free(stream);
+    zerobus_stream_builder_free(stb);
+    zerobus_headers_provider_free(provider);
+    zerobus_sdk_free(sdk);
+}
+
+/* The builder and each stream keep the provider alive until they are freed. */
+static void test_stream_retains_headers_provider(void)
+{
+    int destroys = 0;
+    zerobus_sdk_t *sdk = make_sdk();
+    zerobus_headers_provider_t *provider = make_provider(&destroys);
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_stream_t *first = NULL;
+    zerobus_stream_t *second = NULL;
+    REQUIRE(sdk != NULL && provider != NULL);
+    REQUIRE_OK(zerobus_stream_builder_new(sdk, &stb, NULL));
+    REQUIRE_OK(zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL));
+    /* Setting the same provider again keeps one builder reference. */
+    REQUIRE_OK(
+        zerobus_stream_builder_set_headers_provider(stb, provider, NULL));
+    REQUIRE_OK(
+        zerobus_stream_builder_set_headers_provider(stb, provider, NULL));
+    zerobus_headers_provider_free(provider);
+    provider = NULL;
+
+    REQUIRE_OK(zerobus_stream_builder_build(stb, &first, NULL));
+    REQUIRE_OK(zerobus_stream_builder_build(stb, &second, NULL));
+    zerobus_stream_builder_free(stb);
+    stb = NULL;
+    zerobus_stream_free(first);
+    first = NULL;
+    CHECK_EQ_INT(destroys, 0);
+    zerobus_stream_free(second);
+    second = NULL;
+    CHECK_EQ_INT(destroys, 1);
+
+zb_cleanup:
+    zerobus_stream_free(second);
+    zerobus_stream_free(first);
+    zerobus_stream_builder_free(stb);
+    zerobus_headers_provider_free(provider);
     zerobus_sdk_free(sdk);
 }
 
@@ -638,6 +740,8 @@ static void test_stream_out_error_must_be_null(void)
     CHECK_EQ_INT(
         zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), &err),
         ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_builder_set_headers_provider(stb, NULL, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zerobus_stream_builder_build(stb, &st, &err),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(
@@ -708,6 +812,8 @@ int main(void)
     test_stream_builder_edges();
     test_stream_oauth_transactional();
     test_stream_options();
+    test_stream_headers_provider();
+    test_stream_retains_headers_provider();
     test_ingest_validation();
     test_flush_close_idempotent();
     test_stream_free_null_safe();
