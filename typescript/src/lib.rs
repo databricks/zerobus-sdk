@@ -92,6 +92,11 @@ pub struct StreamConfigurationOptions {
     /// - Some(x): Wait up to min(x, server_duration) milliseconds
     /// Default: None (wait for full server duration)
     pub stream_paused_max_wait_time_ms: Option<u32>,
+
+    /// TESTING ONLY (conformance harness): send no authorization headers.
+    /// Requires the Rust SDK `testing` feature. Do not use against production.
+    /// Default: false
+    pub no_auth: Option<bool>,
 }
 
 /// Properties of the target Delta table for ingestion.
@@ -845,6 +850,10 @@ pub struct ZerobusSdkOptions {
     /// Whether every JSON/protobuf stream gets a dedicated gRPC connection.
     /// Defaults to true.
     pub connection_per_stream: Option<bool>,
+    /// TESTING ONLY (conformance harness): plaintext `http://` transport, no TLS.
+    /// Requires the Rust SDK `testing` feature. Do not use against production.
+    /// Default: false
+    pub no_tls: Option<bool>,
 }
 
 /// The main SDK for interacting with the Databricks Zerobus service.
@@ -923,6 +932,12 @@ impl ZerobusSdk {
         let builder = match options.application_name {
             Some(name) => builder.application_name(name),
             None => builder,
+        };
+        // TESTING ONLY: see ZerobusSdkOptions::no_tls.
+        let builder = if options.no_tls.unwrap_or(false) {
+            builder.no_tls()
+        } else {
+            builder
         };
         let inner = builder
             .build()
@@ -1023,6 +1038,7 @@ impl ZerobusSdk {
             server_lack_of_ack_timeout_ms: None,
             record_type: None,
             stream_paused_max_wait_time_ms: None,
+            no_auth: None,
         });
 
         let record_type = match opts.record_type {
@@ -1069,6 +1085,10 @@ impl ZerobusSdk {
                     .stream_builder()
                     .table(table_name)
                     .headers_provider(headers_provider_arc);
+                // TESTING ONLY: `no_auth()` overrides the provider set above (last wins).
+                if opts.no_auth.unwrap_or(false) {
+                    builder = builder.no_auth();
+                }
 
                 if let Some(v) = opts.max_inflight_requests {
                     builder = builder.max_inflight_requests(v as usize);

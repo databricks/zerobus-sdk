@@ -345,12 +345,14 @@ pub struct ZerobusSdk {
 #[pymethods]
 impl ZerobusSdk {
     #[new]
-    #[pyo3(signature = (host, unity_catalog_url, application_name = None, connection_per_stream = true))]
+    // `no_tls` is TESTING ONLY (conformance harness); see `testing` feature in Cargo.toml.
+    #[pyo3(signature = (host, unity_catalog_url, application_name = None, connection_per_stream = true, no_tls = false))]
     fn new(
         host: String,
         unity_catalog_url: String,
         application_name: Option<String>,
         connection_per_stream: bool,
+        no_tls: bool,
     ) -> PyResult<Self> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -375,6 +377,21 @@ impl ZerobusSdk {
         let builder = match application_name {
             Some(application_name) => builder.application_name(application_name),
             None => builder,
+        };
+        let builder = if no_tls {
+            // TESTING ONLY: plaintext http:// to a local mock. Requires the `testing` feature.
+            #[cfg(feature = "testing")]
+            {
+                builder.no_tls()
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "no_tls is testing-only; build the wheel with --features testing",
+                ));
+            }
+        } else {
+            builder
         };
         let inner = builder.build().map_err(map_error)?;
 
@@ -451,6 +468,42 @@ impl ZerobusSdk {
             runtime.block_on(async move {
                 let sdk_guard = sdk.read().await;
                 let builder = sdk_guard.stream_builder().headers_provider(provider);
+                let builder = apply_table_and_format(builder, &table_properties);
+                let builder = apply_grpc_options(builder, &opts)?;
+                builder.build().await.map_err(map_error)
+            })
+        })?;
+
+        Ok(ZerobusStream {
+            inner: Arc::new(RwLock::new(stream)),
+            runtime: runtime_for_stream,
+            format,
+            idp_holder: None,
+        })
+    }
+
+    /// TESTING ONLY: create a stream with no authentication headers (`no_auth`).
+    /// Only compiled with the `testing` feature.
+    #[cfg(feature = "testing")]
+    #[pyo3(signature = (table_properties, options = None))]
+    fn create_stream_no_auth(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        options: Option<StreamConfigurationOptions>,
+    ) -> PyResult<ZerobusStream> {
+        let opts = options.unwrap_or_default();
+        opts.validate()?;
+
+        let format = table_properties.resolve_format(opts.record_type)?;
+        let sdk = self.inner.clone();
+        let runtime = self.runtime.clone();
+        let runtime_for_stream = self.runtime.clone();
+
+        let stream = py.detach(|| {
+            runtime.block_on(async move {
+                let sdk_guard = sdk.read().await;
+                let builder = sdk_guard.stream_builder().no_auth();
                 let builder = apply_table_and_format(builder, &table_properties);
                 let builder = apply_grpc_options(builder, &opts)?;
                 builder.build().await.map_err(map_error)

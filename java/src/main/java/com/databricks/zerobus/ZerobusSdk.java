@@ -167,6 +167,30 @@ public class ZerobusSdk implements AutoCloseable {
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
+  /**
+   * TESTING ONLY. Creates an SDK that connects over plaintext gRPC (no TLS) to an {@code http://}
+   * endpoint, for conformance harnesses and local tests against a mock server. Requires a native
+   * library built with the {@code testing} cargo feature; otherwise a {@link ZerobusException} is
+   * thrown when the native handle is created.
+   *
+   * @param serverEndpoint Plaintext endpoint, e.g. {@code http://127.0.0.1:50051}.
+   * @return a new SDK instance. Call {@link #close()} when done.
+   * @throws RuntimeException if the native SDK cannot be created
+   */
+  public static ZerobusSdk forTestingNoTls(String serverEndpoint) {
+    long handle = nativeCreateNoTls(serverEndpoint);
+    if (handle == 0) {
+      throw new RuntimeException("Failed to create native SDK instance");
+    }
+    return new ZerobusSdk(handle, serverEndpoint, "");
+  }
+
+  private ZerobusSdk(long handle, String serverEndpoint, String unityCatalogEndpoint) {
+    this.nativeHandle = handle;
+    this.serverEndpoint = serverEndpoint;
+    this.unityCatalogEndpoint = unityCatalogEndpoint;
+  }
+
   // ==================== Stream Builder ====================
 
   /**
@@ -941,6 +965,9 @@ public class ZerobusSdk implements AutoCloseable {
 
   private static native long nativeCreate(
       String serverEndpoint, String unityCatalogEndpoint, String applicationName);
+
+  // TESTING ONLY: see forTestingNoTls(). Requires the `testing` feature on zerobus-jni.
+  private static native long nativeCreateNoTls(String serverEndpoint);
 
   private static native long nativeCreateWithConnectionPerStream(
       String serverEndpoint,

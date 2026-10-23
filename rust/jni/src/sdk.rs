@@ -153,6 +153,53 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithCo
     )
 }
 
+/// TESTING ONLY: create an SDK that connects over plaintext gRPC (no TLS) to an `http://`
+/// endpoint. Needs the `testing` cargo feature; without it this throws.
+///
+/// # JNI Signature
+/// ```java
+/// private static native long nativeCreateNoTls(String serverEndpoint);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateNoTls<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+) -> jlong {
+    let server_endpoint: String = match env.get_string(&server_endpoint) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            throw_zerobus_exception(&mut env, &format!("Invalid server endpoint: {}", e));
+            return 0;
+        }
+    };
+    #[cfg(feature = "testing")]
+    {
+        let sdk_identifier = format!("zerobus-sdk-java/{}", env!("CARGO_PKG_VERSION"));
+        match ZerobusSdk::builder()
+            .endpoint(server_endpoint)
+            .no_tls()
+            .sdk_identifier(sdk_identifier)
+            .build()
+        {
+            Ok(sdk) => NativeSdkHandle::new(sdk).into_raw(),
+            Err(e) => {
+                throw_from_zerobus_error(&mut env, &e);
+                0
+            }
+        }
+    }
+    #[cfg(not(feature = "testing"))]
+    {
+        let _ = server_endpoint;
+        throw_zerobus_exception(
+            &mut env,
+            "zerobus-jni was built without the `testing` feature; no-TLS is unavailable",
+        );
+        0
+    }
+}
+
 /// Destroy a ZerobusSdk instance.
 ///
 /// # JNI Signature

@@ -360,6 +360,7 @@ class sync:
             unity_catalog_url: str,
             application_name: Optional[str] = None,
             connection_per_stream: bool = True,
+            no_tls: bool = False,  # TESTING ONLY; requires the `testing` build feature
         ) -> None:
             """
             Create a synchronous Zerobus SDK instance.

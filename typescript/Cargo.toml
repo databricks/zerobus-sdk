@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
 napi-derive = "2"
 
-databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.9.0" }
+databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.9.0", features = ["testing"] } # TESTING-ONLY: enables no_tls()/no_auth() for conformance harness (see lib.rs noTls/noAuth)
 
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 

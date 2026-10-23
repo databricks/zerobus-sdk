@@ -31,6 +31,9 @@ arrow-ipc = { workspace = true, features = ["lz4", "zstd"] }
 [features]
 default = []
 test-helpers = []
+# TESTING ONLY (conformance harness): enables plaintext `nativeCreateNoTls`. Off by default,
+# so release/CI JNI builds do not expose the no-TLS SDK constructor.
+testing = ["databricks-zerobus-ingest-sdk/testing"]
 
 [dev-dependencies]
 arrow-flight.workspace = true

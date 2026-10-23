@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 
@@ -124,6 +125,12 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	}
 	if cfg.tlsConfig != nil {
 		dialOpts = append(dialOpts, transport.WithTLSConfig(cfg.tlsConfig))
+	}
+	if cfg.insecureForTesting {
+		// Testing only (see WithInsecureTransportForTesting). Appended after the TLS
+		// credentials, so this later gRPC option overrides them.
+		dialOpts = append(dialOpts, transport.WithGRPCDialOptions(
+			grpc.WithTransportCredentials(insecure.NewCredentials())))
 	}
 
 	dialConn := func() (*transport.Conn, error) {

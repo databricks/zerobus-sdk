@@ -242,6 +242,8 @@ class ZerobusSdk:
         unity_catalog_url: str,
         application_name: Optional[str] = None,
         connection_per_stream: bool = True,
+        *,
+        no_tls: bool = False,
     ):
         """
         Create a Zerobus SDK instance.
@@ -256,8 +258,11 @@ class ZerobusSdk:
             connection_per_stream: Whether each JSON/protobuf stream gets a
                 dedicated gRPC connection. Defaults to True. Set to False to
                 share one connection across streams.
+            no_tls: TESTING ONLY. Connect over plaintext (``http://``) without TLS.
+                Requires a wheel built with ``--features testing``; raises
+                ``ValueError`` otherwise.
         """
-        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name, connection_per_stream)
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name, connection_per_stream, no_tls)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None
@@ -327,6 +332,7 @@ class ZerobusSdk:
         headers_provider=None,
         *,
         auth=None,
+        no_auth: bool = False,
     ):
         """
         Create a stream with OAuth, external-IdP federation, or a custom headers provider.
@@ -339,7 +345,22 @@ class ZerobusSdk:
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
             auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation;
                 when set, client_id/client_secret are not required.
+            no_auth: TESTING ONLY. Send no authentication headers. Requires a wheel
+                built with ``--features testing``; cannot be combined with other auth args.
         """
+        if no_auth:
+            if client_id is not None or client_secret is not None or auth is not None or headers_provider is not None:
+                raise ValueError(
+                    "no_auth=True cannot be combined with client_id/client_secret, auth=, or headers_provider="
+                )
+            if table_properties is None:
+                raise ValueError("table_properties is required")
+            from zerobus.sdk.shared.avro import make_encoder
+
+            avro_encoder = make_encoder(table_properties.avro_schema)
+            rust_stream = self._inner.create_stream_no_auth(table_properties, options)
+            return ZerobusStream(rust_stream, avro_encoder=avro_encoder)
+
         if auth is not None and (client_id is not None or client_secret is not None):
             raise ValueError(
                 "client_id/client_secret cannot be combined with auth=; "

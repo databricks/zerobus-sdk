@@ -18,6 +18,8 @@ type sdkConfig struct {
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 	connectionPerStream       bool
+	// insecureForTesting disables TLS on the data-plane connection. TESTING ONLY.
+	insecureForTesting bool
 }
 
 func defaultSDKConfig() sdkConfig {
@@ -36,6 +38,15 @@ func WithApplicationName(name string) Option {
 // WithTLSConfig replaces the default system-root TLS configuration.
 func WithTLSConfig(tc *tls.Config) Option {
 	return func(c *sdkConfig) { c.tlsConfig = tc }
+}
+
+// WithInsecureTransportForTesting is TESTING ONLY (conformance harness). It
+// disables TLS on the Zerobus data-plane connection, so the SDK speaks plaintext
+// HTTP/2 to the endpoint, which must be a bare "host:port" (no scheme). It exists
+// because the conformance mock serves plaintext on loopback. It sends bearer
+// tokens and record data unencrypted: never use it against a real endpoint.
+func WithInsecureTransportForTesting() Option {
+	return func(c *sdkConfig) { c.insecureForTesting = true }
 }
 
 // WithProtoDescriptorFetchTimeout sets the timeout used by
