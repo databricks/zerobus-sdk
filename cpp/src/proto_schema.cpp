@@ -22,6 +22,7 @@ namespace {
 struct ProtoBytesGuard {
   std::uint8_t* data;
   std::uintptr_t len;
+  ProtoBytesGuard(std::uint8_t* d, std::uintptr_t l) : data(d), len(l) {}
   ~ProtoBytesGuard() { zerobus_free_proto_bytes(data, len); }
   ProtoBytesGuard(const ProtoBytesGuard&) = delete;
   ProtoBytesGuard& operator=(const ProtoBytesGuard&) = delete;

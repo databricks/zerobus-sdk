@@ -13,6 +13,19 @@
 
 #include "detail/ffi_util.hpp"
 
+#if defined(ZEROBUS_AVRO)
+#include <sstream>
+
+#include "avro/Compiler.hh"
+#include "avro/Decoder.hh"
+#include "avro/Encoder.hh"
+#include "avro/Generic.hh"
+#include "avro/Schema.hh"
+#include "avro/Specific.hh"
+#include "avro/Stream.hh"
+#include "avro/ValidSchema.hh"
+#endif
+
 namespace zerobus {
 
 namespace {
@@ -62,6 +75,49 @@ const std::uint8_t* ptr_or_sentinel(const std::uint8_t* data, std::size_t len) {
   return len == 0 ? &kEmptyPayloadSentinel : data;
 }
 
+// Encode JSON to Avro binary against the given schema.
+#if defined(ZEROBUS_AVRO)
+std::vector<std::uint8_t> encode_json_to_avro(const std::string& schema_json,
+                                              const std::string& json_record) {
+  try {
+    // Compile schema from JSON string.
+    avro::ValidSchema schema(avro::compileJsonSchemaFromString(schema_json));
+
+    // Parse JSON record using avro-cpp's JSON decoder.
+    auto json_input = avro::memoryInputStream(
+        reinterpret_cast<const uint8_t*>(json_record.data()),
+        json_record.size());
+    avro::DecoderPtr json_decoder = avro::jsonDecoder(schema);
+    json_decoder->init(*json_input);
+
+    avro::GenericDatum datum(schema.root());
+    avro::decode(*json_decoder, datum);
+
+    // Encode to Avro binary format.
+    auto binary_output = avro::memoryOutputStream();
+    avro::EncoderPtr binary_encoder = avro::binaryEncoder();
+    binary_encoder->init(*binary_output);
+    avro::encode(*binary_encoder, datum);
+    binary_encoder->flush();
+
+    // Extract buffer using InputStream created from the output.
+    auto binary_input = avro::memoryInputStream(*binary_output);
+    std::vector<uint8_t> buffer;
+    const uint8_t* chunk_data = nullptr;
+    size_t chunk_size = 0;
+    while (binary_input->next(&chunk_data, &chunk_size)) {
+      if (chunk_size > 0) {
+        buffer.insert(buffer.end(), chunk_data, chunk_data + chunk_size);
+      }
+    }
+    return buffer;
+  } catch (const std::exception& e) {
+    throw ZerobusException(
+        std::string("Failed to encode Avro JSON: ") + e.what(), false);
+  }
+}
+#endif
+
 // Build the parallel pointer/length arrays the batch FFI entry points expect.
 struct ProtoBatchView {
   std::vector<const std::uint8_t*> ptrs;
@@ -100,8 +156,9 @@ JsonBatchView make_json_batch(const std::vector<std::string>& records) {
 // if copying the records into owning UnackedRecords throws (e.g. std::bad_alloc
 // while growing the output vector) — not only on the straight-line return.
 struct RecordArrayGuard {
-  CRecordArray array;
+  CRecordArray array = {};
   ~RecordArrayGuard() { zerobus_free_record_array(array); }
+  RecordArrayGuard() = default;
   RecordArrayGuard(const RecordArrayGuard&) = delete;
   RecordArrayGuard& operator=(const RecordArrayGuard&) = delete;
 };
@@ -206,6 +263,61 @@ std::int64_t Stream::ingest_json_records(
   return checked_offset(offset);
 }
 
+#if defined(ZEROBUS_AVRO)
+std::int64_t Stream::ingest_avro_record(const std::uint8_t* data,
+                                        std::size_t len) {
+  ensure_open(handle_);
+  detail::ResultGuard guard;
+  std::int64_t offset = zerobus_stream_ingest_avro_record(
+      handle_, ptr_or_sentinel(data, len), len, guard.ptr());
+  guard.throw_if_error();
+  return checked_offset(offset);
+}
+
+std::int64_t Stream::ingest_avro_record(const std::vector<std::uint8_t>& data) {
+  return ingest_avro_record(ptr_or_sentinel(data), data.size());
+}
+
+std::int64_t Stream::ingest_avro_record(const std::string& json) {
+  ensure_open(handle_);
+  // Encode JSON to binary using avro-cpp against the writer schema.
+  std::vector<std::uint8_t> encoded =
+      encode_json_to_avro(avro_schema_json_, json);
+  // Ingest the encoded bytes.
+  return ingest_avro_record(encoded);
+}
+
+std::int64_t Stream::ingest_avro_records(
+    const std::vector<std::vector<std::uint8_t>>& records) {
+  ensure_open(handle_);
+  if (records.empty()) {
+    return -1;
+  }
+  ProtoBatchView v = make_proto_batch(records);
+  detail::ResultGuard guard;
+  std::int64_t offset = zerobus_stream_ingest_avro_records(
+      handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
+  guard.throw_if_error();
+  return checked_offset(offset);
+}
+
+std::int64_t Stream::ingest_avro_records(
+    const std::vector<std::string>& jsons) {
+  ensure_open(handle_);
+  if (jsons.empty()) {
+    return -1;
+  }
+  // Encode each JSON record to binary.
+  std::vector<std::vector<std::uint8_t>> encoded_records;
+  encoded_records.reserve(jsons.size());
+  for (const auto& json : jsons) {
+    encoded_records.push_back(encode_json_to_avro(avro_schema_json_, json));
+  }
+  // Ingest the encoded batch.
+  return ingest_avro_records(encoded_records);
+}
+#endif
+
 void Stream::wait_for_offset(std::int64_t offset) {
   ensure_open(handle_);
   // Reject negative offsets (e.g. the -1 from an empty batch) before the FFI.
@@ -238,7 +350,8 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
   // On error the array is empty; surface the error first.
   guard.throw_if_error();
   // Own the array before the copy, so it is freed even if a copy below throws.
-  RecordArrayGuard array_guard{array};
+  RecordArrayGuard array_guard;
+  array_guard.array = array;
 
   std::vector<UnackedRecord> out;
   if (array.records != nullptr && array.len > 0) {
