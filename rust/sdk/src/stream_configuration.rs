@@ -4,6 +4,12 @@ use crate::callbacks::AckCallback;
 use crate::stream_options::defaults;
 
 /// Record encoding of a JSON, Protocol Buffers, or Avro stream.
+///
+/// This replaces the generated wire-protocol enum, which is not public:
+///
+/// ```compile_fail
+/// let _ = databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType::Json;
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordType {
