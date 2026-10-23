@@ -537,13 +537,10 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set gRPC message compression (Arrow streams only).
     ///
-    /// Defaults to [`ArrowGrpcCompression::None`](crate::ArrowGrpcCompression::None).
-    /// [`Zstd`](crate::ArrowGrpcCompression::Zstd) compresses each whole Flight request
-    /// message, which is usually smaller than per-buffer IPC compression for wide or
-    /// sparse schemas, at more CPU. When enabled, [`ipc_compression`](Self::ipc_compression)
-    /// is ignored so payloads are never compressed twice. The server must accept zstd on
-    /// Arrow Flight. See
-    /// [`ArrowStreamConfigurationOptions::grpc_compression`].
+    /// Defaults to [`ArrowGrpcCompression::None`](crate::ArrowGrpcCompression::None). When
+    /// enabled, [`ipc_compression`](Self::ipc_compression) is ignored. See
+    /// [`ArrowStreamConfigurationOptions::grpc_compression`] for when to use it and the
+    /// server requirement.
     #[cfg(feature = "arrow-flight")]
     pub fn grpc_compression(mut self, compression: crate::ArrowGrpcCompression) -> Self {
         self.arrow_config.grpc_compression = compression;

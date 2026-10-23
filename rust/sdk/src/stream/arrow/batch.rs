@@ -269,14 +269,22 @@ pub(super) fn make_ipc_write_options(
 ) -> ZerobusResult<IpcWriteOptions> {
     match compression {
         None => Ok(IpcWriteOptions::default()),
-        Some(c) => IpcWriteOptions::try_new(COMPRESSED_IPC_ALIGNMENT, false, MetadataVersion::V5)
-            .and_then(|options| options.try_with_compression(Some(c)))
-            .map_err(|e| {
-                ZerobusError::InvalidArgument(format!(
-                    "Failed to enable Arrow IPC compression: {e}"
-                ))
-            }),
+        Some(c) => compact_ipc_write_options(Some(c)),
     }
+}
+
+/// Builds V5 [`IpcWriteOptions`] with [`COMPRESSED_IPC_ALIGNMENT`] and the given buffer codec.
+#[allow(clippy::result_large_err)]
+fn compact_ipc_write_options(
+    compression: Option<CompressionType>,
+) -> ZerobusResult<IpcWriteOptions> {
+    IpcWriteOptions::try_new(COMPRESSED_IPC_ALIGNMENT, false, MetadataVersion::V5)
+        .and_then(|options| options.try_with_compression(compression))
+        .map_err(|e| {
+            ZerobusError::InvalidArgument(format!(
+                "Failed to configure Arrow IPC write options: {e}"
+            ))
+        })
 }
 
 /// Builds the [`IpcWriteOptions`] a stream encodes its batches with.
@@ -291,15 +299,7 @@ pub(super) fn stream_ipc_write_options(
 ) -> ZerobusResult<IpcWriteOptions> {
     match options.grpc_compression {
         ArrowGrpcCompression::None => make_ipc_write_options(options.ipc_compression),
-        ArrowGrpcCompression::Zstd => {
-            IpcWriteOptions::try_new(COMPRESSED_IPC_ALIGNMENT, false, MetadataVersion::V5).map_err(
-                |e| {
-                    ZerobusError::InvalidArgument(format!(
-                        "Failed to configure Arrow IPC write options: {e}"
-                    ))
-                },
-            )
-        }
+        ArrowGrpcCompression::Zstd => compact_ipc_write_options(None),
     }
 }
 
