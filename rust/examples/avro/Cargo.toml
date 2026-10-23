@@ -24,9 +24,5 @@ apache-avro = "0.22"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["internal-proto", "testing"] }
-prost-types = "0.14"
-rcgen = "0.13"
-tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.14", features = ["tls-native-roots", "transport"] }
-tracing = "0.1"
+databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["testing"] }
+zerobus-test-support = { path = "../../test-support" }

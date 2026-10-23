@@ -29,8 +29,9 @@
 - Added a stateful persistent-stream mock and integration coverage for create,
   flush, resume offset continuity, and unknown stream IDs.
 
-- Added the unsupported `internal-proto` feature, which exposes the generated
-  gRPC types to the repository's mock gRPC server.
+- The mock gRPC server used by the repository's tests moved to an unpublished
+  `test-support` crate that generates its own server bindings, and the SDK no
+  longer generates gRPC server code.
 
 ### Breaking Changes
 

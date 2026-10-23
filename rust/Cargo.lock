@@ -3167,7 +3167,6 @@ dependencies = [
  "prost",
  "prost-reflect",
  "prost-types",
- "protoc-bin-vendored",
  "rcgen",
  "serde",
  "serde_json",
@@ -3178,11 +3177,11 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "tonic-types",
  "tracing",
  "tracing-subscriber",
  "zerobus-ffi",
+ "zerobus-test-support",
 ]
 
 [[package]]
@@ -4417,6 +4416,23 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tracing",
+ "zerobus-test-support",
+]
+
+[[package]]
+name = "zerobus-test-support"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "rcgen",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "tracing",
 ]
 

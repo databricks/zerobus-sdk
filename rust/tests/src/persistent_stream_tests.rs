@@ -1,14 +1,13 @@
-mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
-use mock_grpc::start_mock_server;
 use prost_types::DescriptorProto;
 use tokio::time::timeout;
 use utils::TestHeadersProvider;
+use zerobus_test_support::mock_grpc::start_mock_server;
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
