@@ -170,6 +170,7 @@ let stream = sdk
 
 - When it is enabled, `ipc_compression` is ignored: buffers are sent uncompressed with 8-byte alignment, because compressing already-compressed buffers again costs CPU without reducing size.
 - The Zerobus endpoint must accept zstd on Arrow Flight; otherwise `build_arrow()` fails with a non-retryable `Unimplemented` error. Reconnects fail the same way, so if a server stops accepting zstd (for example after a rollback), disable `grpc_compression` on clients first or their streams close.
+- The server's message size limit applies to the uncompressed message. Batches are split into small messages before sending, but a single row too large for the limit is rejected even if IPC compression would have made it fit.
 - Telemetry's `approximate_wire_bytes` is measured before gRPC compression, so it overstates the bytes sent when this is enabled.
 - Measure on your own data: for narrow, dense schemas, IPC compression may already be close.
 
