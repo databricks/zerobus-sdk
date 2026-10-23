@@ -569,6 +569,10 @@ fn grpc_compression_setter_applies_in_either_order() {
         .arrow_config;
     for config in [grpc_first, grpc_last] {
         assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
+        assert_eq!(
+            config.ipc_compression,
+            Some(arrow_ipc::CompressionType::LZ4_FRAME)
+        );
     }
 }
 

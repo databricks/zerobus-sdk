@@ -132,6 +132,10 @@ pub struct ArrowStreamConfigurationOptions {
     /// includes reconnects, so if a server stops accepting zstd (for example after a
     /// rollback), disable this on clients first or their streams close.
     ///
+    /// The server's message size limit then applies to the uncompressed message. Batches are
+    /// split into small messages before sending, but a single row too large for the limit is
+    /// rejected even if IPC compression would have made it fit.
+    ///
     /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
     /// gRPC compression, so they overstate the bytes sent when this is enabled.
     ///
