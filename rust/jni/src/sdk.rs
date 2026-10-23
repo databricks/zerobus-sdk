@@ -12,7 +12,6 @@ use crate::options::{
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE};
@@ -299,12 +298,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         }
     };
 
-    // Determine record type
-    let record_type = if is_json != JNI_FALSE {
-        RecordType::Json
-    } else {
-        RecordType::Proto
-    };
+    let json_records = is_json != JNI_FALSE;
 
     let extracted_options = if options.is_null() {
         None
@@ -346,30 +340,15 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 Some(provider) => base.headers_provider(provider),
                 None => base.oauth(credentials.0.clone(), credentials.1.clone()),
             };
-            let mut builder = match record_type {
-                RecordType::Proto => {
-                    let desc = descriptor_proto.ok_or_else(|| {
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Proto descriptor is required for Proto record type".to_string(),
-                        )
-                    })?;
-                    base.compiled_proto(desc)
-                }
-                RecordType::Json => base.json(),
-                RecordType::Avro => {
-                    return Err(
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Avro record type is not supported".to_string(),
-                        ),
-                    );
-                }
-                RecordType::Unspecified => {
-                    return Err(
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Record type is not specified".to_string(),
-                        ),
-                    );
-                }
+            let mut builder = if json_records {
+                base.json()
+            } else {
+                let desc = descriptor_proto.ok_or_else(|| {
+                    databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                        "Proto descriptor is required for Proto record type".to_string(),
+                    )
+                })?;
+                base.compiled_proto(desc)
             };
             if let Some(opts) = extracted_options {
                 builder = apply_stream_options(builder, opts);

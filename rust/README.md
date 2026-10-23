@@ -224,13 +224,18 @@ zerobus_rust_sdk/
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
-│   │   ├── mock_grpc.rs                # Mock Zerobus gRPC server
 │   │   ├── mock_arrow_flight.rs        # Mock Arrow Flight server
 │   │   ├── rust_tests.rs               # Core SDK test suite
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
 │   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
 │   │   └── utils.rs                    # Shared test utilities
+│   └── Cargo.toml
+│
+├── test-support/                       # Test-only crate shared by tests/, jni/ and examples/avro
+│   ├── src/
+│   │   ├── lib.rs                      # Server bindings generated from sdk/zerobus_service.proto
+│   │   └── mock_grpc.rs                # Mock Zerobus gRPC server
 │   ├── build.rs
 │   └── Cargo.toml
 │
@@ -1187,7 +1192,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
-| `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
+| `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (`Proto`, `Json`, or `Avro` with the `avro` feature); set by the stream builder |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments after the server signals close (`None` = the full server duration, `Some(0)` = do not wait, `Some(x)` = the smaller of `x` and the server duration). A bounded request/response drain still runs after the ACK wait. |
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **Ordinary JSON and Protocol Buffer gRPC streams only.** Optional callback for acknowledgment notifications. Multiplexed streams use the builder's `multiplexed_ack_callback` method; Arrow Flight does not support acknowledgment callbacks. |
 | `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **JSON and Protocol Buffer gRPC streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
@@ -1459,7 +1464,7 @@ match stream.close().await {
 
 Integration tests live in the `tests/` crate and run against a lightweight mock Zerobus gRPC server.
 
-- Mock server: `tests/src/mock_grpc.rs`
+- Mock server: `test-support/src/mock_grpc.rs`
 - Test suite: `tests/src/rust_tests.rs`
 
 Run tests with logs:

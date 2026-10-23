@@ -25,6 +25,10 @@
 - Added a stateful persistent-stream mock and integration coverage for create,
   flush, resume offset continuity, and unknown stream IDs.
 
+- The mock gRPC server used by the repository's tests moved to an unpublished
+  `test-support` crate that generates its own server bindings, and the SDK no
+  longer generates gRPC server code.
+
 ### Breaking Changes
 
 - Bumped the Arrow dependencies (`arrow-array`, `arrow-schema`, `arrow-ipc`, and
@@ -47,6 +51,18 @@
   over the records returned by `get_unacked_records()` or
   `get_unacked_batches()`.
 
+- The generated protobuf/gRPC types are no longer public:
+  `databricks_zerobus_ingest_sdk::databricks::zerobus` has been removed
+  ([#822](https://github.com/databricks/zerobus-sdk/issues/822)), so later
+  additions to the wire protocol aren't breaking changes.
+  `StreamConfigurationOptions::record_type` is now the SDK-owned `RecordType`
+  (`Proto`, `Json`, and `Avro` with the `avro` feature), which is
+  `#[non_exhaustive]` and has no `Unspecified` variant. Import
+  `databricks_zerobus_ingest_sdk::RecordType` instead. The stream builder API
+  and the other-language SDKs are unaffected.
+
 ### Deprecations
 
 ### API Changes
+
+- Added `RecordType`.

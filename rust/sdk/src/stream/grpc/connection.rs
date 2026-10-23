@@ -19,7 +19,7 @@ use super::transport::{
     self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
 };
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::databricks::zerobus::RecordType;
+use crate::RecordType;
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
 /// A freshly opened stream connection: the outbound sink, the inbound response

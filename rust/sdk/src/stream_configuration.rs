@@ -1,8 +1,38 @@
 use std::sync::Arc;
 
 use crate::callbacks::AckCallback;
-use crate::databricks::zerobus::RecordType;
 use crate::stream_options::defaults;
+
+/// Record encoding of a JSON, Protocol Buffers, or Avro stream.
+///
+/// This replaces the generated wire-protocol enum, which is not public:
+///
+/// ```compile_fail
+/// let _ = databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType::Json;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RecordType {
+    /// Protocol Buffers records.
+    Proto,
+    /// JSON records.
+    Json,
+    /// Avro records (requires the `avro` feature).
+    #[cfg(feature = "avro")]
+    Avro,
+}
+
+impl RecordType {
+    pub(crate) fn to_wire(self) -> crate::databricks::zerobus::RecordType {
+        use crate::databricks::zerobus::RecordType as Wire;
+        match self {
+            RecordType::Proto => Wire::Proto,
+            RecordType::Json => Wire::Json,
+            #[cfg(feature = "avro")]
+            RecordType::Avro => Wire::Avro,
+        }
+    }
+}
 
 /// Configuration options for stream creation, recovery of broken streams and flushing.
 ///
@@ -86,15 +116,9 @@ pub struct StreamConfigurationOptions {
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
 
-    /// Type of record to ingest.
+    /// Type of record to ingest. The stream builder sets this from the chosen format.
     ///
-    /// Supported values:
-    /// - RecordType::Proto
-    /// - RecordType::Json
-    /// - RecordType::Avro (requires the `avro` feature)
-    /// - RecordType::Unspecified
-    ///
-    /// Default: RecordType::Proto
+    /// Default: `RecordType::Proto`
     pub record_type: RecordType,
 
     /// Maximum time in milliseconds to wait during graceful stream close.

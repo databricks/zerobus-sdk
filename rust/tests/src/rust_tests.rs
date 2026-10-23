@@ -1,4 +1,3 @@
-mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
@@ -6,13 +5,13 @@ use std::sync::Arc;
 use databricks_zerobus_ingest_sdk::{
     message_descriptor, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
 };
-use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
     advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
     run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
+use zerobus_test_support::mock_grpc::{self, start_mock_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -59,6 +58,58 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         let stream = result.unwrap();
         assert_eq!(stream.stream_type, StreamType::Ephemeral);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_request_carries_builder_record_type(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use databricks_zerobus_ingest_sdk::RecordType;
+        use zerobus_test_support::databricks::zerobus::RecordType as WireRecordType;
+
+        setup_tracing();
+        info!("Starting test_create_request_carries_builder_record_type");
+
+        for (record_type, wire) in [
+            (RecordType::Json, WireRecordType::Json),
+            (RecordType::Proto, WireRecordType::Proto),
+        ] {
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockResponse::CreateStream {
+                        stream_id: format!("{record_type:?}_stream"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let builder = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()));
+            let stream = if record_type == RecordType::Json {
+                builder.json().recovery(false).build().await?
+            } else {
+                builder
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(false)
+                    .build()
+                    .await?
+            };
+
+            assert_eq!(stream.options.record_type, record_type);
+            let requests = mock_server.get_create_requests().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].record_type, Some(wire as i32));
+        }
 
         Ok(())
     }
