@@ -545,7 +545,7 @@ fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
 #[test]
 fn grpc_compression_defaults_off_and_keeps_ipc_default() {
     let sdk = test_sdk();
-    let config = arrow_test_builder(&sdk).resolved_arrow_config();
+    let config = arrow_test_builder(&sdk).arrow_config;
     assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::None);
     assert_eq!(
         config.ipc_compression,
@@ -555,34 +555,20 @@ fn grpc_compression_defaults_off_and_keeps_ipc_default() {
 
 #[cfg(feature = "arrow-flight")]
 #[test]
-fn grpc_compression_turns_off_default_ipc_compression() {
+fn grpc_compression_setter_applies_in_either_order() {
     let sdk = test_sdk();
-    let config = arrow_test_builder(&sdk)
-        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
-        .resolved_arrow_config();
-    assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
-    assert_eq!(config.ipc_compression, None);
-}
-
-#[cfg(feature = "arrow-flight")]
-#[test]
-fn grpc_compression_keeps_explicit_ipc_compression() {
-    let sdk = test_sdk();
-    // Order doesn't matter: an explicit ipc_compression call always wins.
-    let explicit_first = arrow_test_builder(&sdk)
-        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
-        .resolved_arrow_config();
-    let explicit_last = arrow_test_builder(&sdk)
+    // The builder records both settings as given; the stream ignores ipc_compression when
+    // gRPC compression is on (see stream_ipc_write_options).
+    let grpc_first = arrow_test_builder(&sdk)
         .grpc_compression(crate::ArrowGrpcCompression::Zstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .resolved_arrow_config();
-    for config in [explicit_first, explicit_last] {
+        .arrow_config;
+    let grpc_last = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+        .arrow_config;
+    for config in [grpc_first, grpc_last] {
         assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
-        assert_eq!(
-            config.ipc_compression,
-            Some(arrow_ipc::CompressionType::LZ4_FRAME)
-        );
     }
 }
 

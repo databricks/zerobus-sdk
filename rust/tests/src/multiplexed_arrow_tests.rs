@@ -179,3 +179,29 @@ async fn standalone_capacity_wait_rejects_when_close_starts() {
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].num_rows(), 1);
 }
+
+#[tokio::test]
+async fn grpc_compression_applies_to_every_lane_without_ipc_compression() {
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    let sdk = sdk(endpoint);
+    // IPC zstd is set explicitly to show that gRPC compression overrides it on mux lanes too.
+    let mut mux = builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+        .grpc_compression(databricks_zerobus_ingest_sdk::ArrowGrpcCompression::Zstd)
+        .multiplexed(2)
+        .build_arrow()
+        .await
+        .unwrap();
+    for i in 0..4 {
+        mux.ingest_batch(batch(&[i])).await.unwrap();
+    }
+    mux.flush().await.unwrap();
+    mux.close().await.unwrap();
+
+    assert_eq!(server.connection_count(), 2);
+    assert_eq!(server.get_total_records_received().await, 4);
+    let encodings = server.get_grpc_encodings().await;
+    assert_eq!(encodings.len(), 2);
+    assert!(encodings.iter().all(|e| e.as_deref() == Some("zstd")));
+    assert_eq!(server.get_zstd_compressed_record_batch_count().await, 0);
+}

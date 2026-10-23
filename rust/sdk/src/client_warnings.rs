@@ -46,21 +46,6 @@ pub(crate) fn warn_payload_limit_ignored_for_arrow() {
     );
 }
 
-/// Warns that both IPC compression and gRPC compression were set explicitly on an
-/// Arrow Flight stream. Compressing already-compressed IPC buffers again costs CPU on
-/// both ends without reducing the payload.
-#[cfg(feature = "arrow-flight")]
-pub(crate) fn warn_double_compression_for_arrow() {
-    if !warnings_enabled() {
-        return;
-    }
-    warn!(
-        "Zerobus SDK: both `ipc_compression` and `grpc_compression` are enabled for an Arrow \
-         Flight stream. Each payload is compressed twice, which costs CPU without reducing \
-         size. Call `.ipc_compression(None)` or leave it unset to use gRPC compression alone."
-    );
-}
-
 // ─── Stream churn monitor ─────────────────────────────────────────────────────
 
 /// Sliding window length in milliseconds.

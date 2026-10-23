@@ -15,9 +15,11 @@
   to Arrow Flight streams, set with `StreamBuilder::grpc_compression`. It
   compresses each whole gRPC request message, including the IPC header and
   alignment padding that IPC compression leaves raw, which sends fewer bytes
-  for wide or sparse schemas at more CPU. Enabling it turns IPC compression
-  off unless `ipc_compression` is also set. The server must accept zstd on
-  Arrow Flight. The default leaves the wire format unchanged.
+  for wide or sparse schemas at more CPU. When it is enabled,
+  `ipc_compression` is ignored and buffers are sent uncompressed with 8-byte
+  alignment, so payloads are never compressed twice. The server must accept
+  zstd on Arrow Flight; otherwise stream creation fails with a non-retryable
+  `Unimplemented` error. The default leaves the wire format unchanged.
 
 ### Bug Fixes
 

@@ -855,7 +855,15 @@ impl FlightService for MockFlightServer {
 /// Helper function to create a mock Flight server and return its address
 pub async fn start_mock_flight_server(
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
-    start_mock_flight_server_inner(None, "http", "127.0.0.1").await
+    start_mock_flight_server_inner(None, "http", "127.0.0.1", true).await
+}
+
+/// Starts a mock Flight server that, like a server without zstd support, rejects
+/// zstd-compressed requests.
+#[allow(dead_code)]
+pub async fn start_mock_flight_server_without_zstd(
+) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
+    start_mock_flight_server_inner(None, "http", "127.0.0.1", false).await
 }
 
 /// Starts the mock Flight server with a runtime-generated TLS identity.
@@ -868,7 +876,7 @@ pub async fn start_mock_tls_flight_server(
     let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
     let tls = ServerTlsConfig::new().identity(identity);
     let (server, server_url) =
-        start_mock_flight_server_inner(Some(tls), "https", "localhost").await?;
+        start_mock_flight_server_inner(Some(tls), "https", "localhost", true).await?;
     Ok((server, server_url, cert_pem.into_bytes()))
 }
 
@@ -876,6 +884,7 @@ async fn start_mock_flight_server_inner(
     tls: Option<ServerTlsConfig>,
     scheme: &str,
     endpoint_host: &str,
+    accept_zstd: bool,
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Arrow Flight server");
     let mock_server = MockFlightServer::new();
@@ -913,9 +922,13 @@ async fn start_mock_flight_server_inner(
     if let Some(tls) = tls {
         server = server.tls_config(tls)?;
     }
-    let router = server.add_service(
-        FlightServiceServer::new(server_clone).accept_compressed(CompressionEncoding::Zstd),
-    );
+    let service = FlightServiceServer::new(server_clone);
+    let service = if accept_zstd {
+        service.accept_compressed(CompressionEncoding::Zstd)
+    } else {
+        service
+    };
+    let router = server.add_service(service);
     tokio::spawn(async move {
         if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))

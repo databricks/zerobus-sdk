@@ -5701,7 +5701,7 @@ mod arrow_flight_tests {
         }
 
         /// Configures gRPC and IPC compression on a builder: `ipc` of `None` leaves IPC
-        /// compression unset so the builder's default applies.
+        /// compression at the builder's default.
         #[derive(Clone, Copy, Debug)]
         struct CompressionCase {
             grpc: databricks_zerobus_ingest_sdk::ArrowGrpcCompression,
@@ -5725,19 +5725,20 @@ mod arrow_flight_tests {
                     expected_grpc_encoding: None,
                     expected_ipc_zstd_batches: 2,
                 },
-                // gRPC zstd turns the default IPC compression off.
+                // gRPC zstd turns IPC compression off.
                 CompressionCase {
                     grpc: ArrowGrpcCompression::Zstd,
                     ipc: None,
                     expected_grpc_encoding: Some("zstd"),
                     expected_ipc_zstd_batches: 0,
                 },
-                // An explicit IPC choice is kept alongside gRPC zstd.
+                // gRPC zstd ignores an explicit IPC choice, so payloads are never
+                // compressed twice.
                 CompressionCase {
                     grpc: ArrowGrpcCompression::Zstd,
                     ipc: Some(Some(arrow_ipc::CompressionType::ZSTD)),
                     expected_grpc_encoding: Some("zstd"),
-                    expected_ipc_zstd_batches: 2,
+                    expected_ipc_zstd_batches: 0,
                 },
             ];
 
@@ -5810,6 +5811,55 @@ mod arrow_flight_tests {
                     "{case:?}",
                 );
             }
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_rejected_by_server_without_zstd(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_rejected_by_server_without_zstd");
+
+            let (mock_server, server_url) =
+                crate::mock_arrow_flight::start_mock_flight_server_without_zstd().await?;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Recovery is on to show the rejection is not retried: stream creation fails
+            // fast instead of backing off and reconnecting.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(create_test_arrow_schema())
+                    .recovery(true)
+                    .recovery_retries(5)
+                    .recovery_backoff_ms(1_000)
+                    .grpc_compression(ArrowGrpcCompression::Zstd)
+                    .build_arrow(),
+            )
+            .await
+            .expect("stream creation should fail fast, not retry");
+
+            let Err(err) = result else {
+                panic!("expected stream creation to fail");
+            };
+            assert!(!err.is_retryable(), "{err:?}");
+            match err {
+                ZerobusError::CreateStreamError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unimplemented);
+                }
+                other => panic!("expected CreateStreamError(Unimplemented), got {other:?}"),
+            }
+            // The server rejects the request before reaching the DoPut handler.
+            assert_eq!(mock_server.connection_count(), 0);
 
             Ok(())
         }

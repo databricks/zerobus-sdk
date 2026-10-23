@@ -110,8 +110,10 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Set to `None` to send uncompressed payloads.
     ///
-    /// Default: `Some(CompressionType::ZSTD)`, unless [`grpc_compression`] is enabled and
-    /// IPC compression was not set explicitly, in which case it defaults to `None`.
+    /// Ignored when [`grpc_compression`] is enabled: buffers are then sent uncompressed
+    /// with 8-byte alignment, because compressing them twice costs CPU without reducing size.
+    ///
+    /// Default: `Some(CompressionType::ZSTD)`
     ///
     /// [`grpc_compression`]: Self::grpc_compression
     pub ipc_compression: Option<CompressionType>,
@@ -123,9 +125,10 @@ pub struct ArrowStreamConfigurationOptions {
     /// and alignment padding. That helps most for wide or sparse schemas, whose messages are
     /// dominated by metadata. It costs more CPU, mostly to decompress on the server.
     ///
-    /// Enabling it changes the default of `ipc_compression` to `None`, since compressing
-    /// already-compressed buffers costs CPU without reducing size. The server must accept
-    /// zstd on Arrow Flight; otherwise requests fail with `Unimplemented`.
+    /// When enabled, [`ipc_compression`](Self::ipc_compression) is ignored and buffers are
+    /// sent uncompressed with 8-byte alignment, since compressing already-compressed buffers
+    /// costs CPU without reducing size. The server must accept zstd on Arrow Flight;
+    /// otherwise stream creation fails with a non-retryable `Unimplemented` error.
     ///
     /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
     /// gRPC compression, so they overstate the bytes sent when this is enabled.

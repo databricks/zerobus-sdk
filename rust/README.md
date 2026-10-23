@@ -1155,8 +1155,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
-| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable. Defaults to `None` when `grpc_compression` is enabled and this isn't set |
-| `grpc_compression` | `ArrowGrpcCompression` | `None` | Compression of each whole gRPC request message: `None` or `Zstd`. Often smaller than IPC compression for wide or sparse schemas, at more CPU; requires a server that accepts zstd on Arrow Flight. See the [Arrow example](examples/arrow/README.md#grpc-compression) |
+| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable. Ignored when `grpc_compression` is enabled |
+| `grpc_compression` | `ArrowGrpcCompression` | `None` | Compression of each whole gRPC request message: `None` or `Zstd`. Often smaller than IPC compression for wide or sparse schemas, at more CPU. When enabled, `ipc_compression` is ignored and buffers are sent uncompressed with 8-byte alignment. Requires a server that accepts zstd on Arrow Flight. See the [Arrow example](examples/arrow/README.md#grpc-compression) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust
