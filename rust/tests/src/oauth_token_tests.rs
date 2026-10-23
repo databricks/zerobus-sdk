@@ -13,7 +13,7 @@
 // The shared gRPC mock is only partially used here (stream creation and error
 // injection), so silence dead-code warnings for its unused response variants.
 #[allow(dead_code)]
-mod mock_grpc;
+use zerobus_mock_server::scripted as mock_grpc;
 mod mock_oauth;
 mod utils;
 

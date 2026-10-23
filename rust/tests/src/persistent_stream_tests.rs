@@ -1,4 +1,4 @@
-mod mock_grpc;
+use zerobus_mock_server::scripted as mock_grpc;
 mod utils;
 
 use std::sync::Arc;

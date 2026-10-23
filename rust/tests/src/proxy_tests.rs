@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 mod mock_arrow_flight;
-mod mock_grpc;
+use zerobus_mock_server::scripted as mock_grpc;
 mod utils;
 
 use std::ffi::OsString;

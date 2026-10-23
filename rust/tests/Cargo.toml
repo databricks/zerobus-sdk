@@ -46,6 +46,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "test-hooks", "arrow-flight", "internal-arrow-c-data", "zeroparser", "eos"] }
 zerobus-ffi = { path = "../ffi" }
+# The gRPC Zerobus mock lives in the conformance tree (single source of truth); the gRPC
+# tests import it instead of a local mock_grpc module.
+zerobus-mock-server = { path = "../../conformance/mock_server" }
 
 # Arrow Flight test dependencies
 arrow-flight.workspace = true

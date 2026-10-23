@@ -21,17 +21,23 @@ use tokio::task::JoinHandle;
 pub mod mock_admin;
 pub mod mock_flight;
 pub mod mock_zerobus;
+pub mod scripted;
 
 pub use mock_admin::MockAdmin;
 pub use mock_zerobus::MockZerobus;
+// Rich scripted gRPC mock, ported from rust/tests. The single source of truth: rust/tests
+// imports this instead of carrying its own copy.
+pub use scripted::{start_mock_server, start_mock_tls_server, MockResponse, MockZerobusServer};
 
 /// Generated protobuf/gRPC code.
 pub mod proto {
-    /// `databricks.zerobus` — the real Zerobus data-plane protocol.
+    /// `databricks.zerobus` — the real Zerobus data-plane protocol. Re-exported from the
+    /// SDK's generated module so the mock, the SDK, and rust/tests all share ONE set of
+    /// types (no second generated copy to drift).
     pub mod zerobus {
-        tonic::include_proto!("databricks.zerobus");
+        pub use databricks_zerobus_ingest_sdk::databricks::zerobus::*;
     }
-    /// `zerobus.conformance.mock` — the MockAdmin control plane.
+    /// `zerobus.conformance.mock` — the MockAdmin control plane (owned by this crate).
     pub mod mock {
         tonic::include_proto!("zerobus.conformance.mock");
     }

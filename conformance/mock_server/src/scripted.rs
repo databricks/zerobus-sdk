@@ -1,3 +1,12 @@
+//! Scripted Zerobus gRPC mock — the single source of truth, ported verbatim from the former
+//! `rust/tests/src/mock_grpc.rs`. `rust/tests` imports this module (see crate root re-exports).
+//!
+//! Response-sequence driven (`inject_responses` + `MockResponse`), with CloseStreamSignal,
+//! gated acks/errors, persistent-stream support, connection/write counters and TLS. It reuses
+//! the SDK's `databricks::zerobus` proto types (identical to what the tests use). The
+//! conformance orchestrator instead uses the reactive [`MockZerobus`](crate::MockZerobus) +
+//! [`MockAdmin`](crate::MockAdmin); both live in this one crate.
+
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::pin::Pin;
