@@ -1,4 +1,6 @@
 /* Unit tests for the SDK builder and SDK handle (sdk.c). */
+#include <string.h>
+
 #include "sdk.h"
 #include "test_common.h"
 
@@ -166,6 +168,28 @@ static void test_sdk_build_ok(void)
     zerobus_sdk_free(sdk);
 }
 
+/* The workspace id is the first label of the Zerobus endpoint's host. */
+static void test_sdk_workspace_id(void)
+{
+    const char *const endpoints[] = {
+        "https://6051921418418893.zerobus.us-west-2.cloud.databricks.com:443",
+        "http://localhost:50051",
+    };
+    const char *const ids[] = {"6051921418418893", "localhost"};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+        zerobus_sdk_builder_t *b = NULL;
+        zerobus_sdk_t *sdk = NULL;
+        CHECK_OK(zerobus_sdk_builder_new(&b, NULL));
+        CHECK_OK(zerobus_sdk_builder_set_endpoint(b, sv(endpoints[i]), NULL));
+        CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+            b, sv("https://ws.cloud.databricks.com"), NULL));
+        CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+        CHECK(sdk != NULL && strcmp(sdk->workspace_id, ids[i]) == 0);
+        zerobus_sdk_builder_free(b);
+        zerobus_sdk_free(sdk);
+    }
+}
+
 /* A rejected setter is transactional: it leaves the previous value in place. */
 static void test_sdk_setter_transactional(void)
 {
@@ -312,6 +336,7 @@ int main(void)
     test_sdk_builder_endpoint_rules();
     test_sdk_builder_edges();
     test_sdk_build_ok();
+    test_sdk_workspace_id();
     test_sdk_setter_transactional();
     test_sdk_free_null_safe();
     test_sdk_retained_reference();
