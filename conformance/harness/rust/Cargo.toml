@@ -14,7 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Real SDK, built from this checkout. `testing` provides `no_tls()` and `no_auth()`.
-databricks-zerobus-ingest-sdk = { path = "../../../rust/sdk", features = ["testing"] }
+# `avro` enables the Avro record format (Beta; needs Rust 1.88+).
+databricks-zerobus-ingest-sdk = { path = "../../../rust/sdk", features = ["testing", "avro"] }
+
+# Parses the AVRO writer schema and shapes record_json into Avro values. Same
+# version as the SDK's apache-avro, so the value types are the SDK's own.
+apache-avro = "0.22"
 
 # Protobuf / gRPC server for the TestHarness contract.
 prost = "0.14"

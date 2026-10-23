@@ -1,9 +1,10 @@
 """``TestHarness`` service: maps each contract RPC onto the Python Zerobus SDK.
 
-First slice: ``protocol=GRPC``, ``format=PROTO`` only. Every other combination
+Wired: ``protocol=GRPC`` with ``format=PROTO`` or ``format=AVRO``. Every other combination
 returns ``UNIMPLEMENTED`` with a TODO (see :func:`check_slice_supported`).
 """
 
+import functools
 import itertools
 import logging
 import threading
@@ -20,13 +21,15 @@ log = logging.getLogger("zerobus_harness")
 
 
 class _StreamEntry:
-    """One open SDK stream plus the message class its records are built against."""
+    """One open SDK stream plus the converter that turns logical JSON into its payload."""
 
-    def __init__(self, sdk, stream, message_class):
+    def __init__(self, sdk, stream, to_payload):
         # Keep the SDK alive for as long as the stream it created.
         self.sdk = sdk
         self.stream = stream
-        self.message_class = message_class
+        # record_json (str) -> what the SDK ingests: a protobuf message (PROTO) or a
+        # dict (AVRO). Either way the SDK does the encoding, never the harness.
+        self.to_payload = to_payload
         # Serializes per-stream RPCs (ingest / flush / close). Await does not take it,
         # so a slow wait cannot block ingest.
         self.lock = threading.Lock()
@@ -37,18 +40,12 @@ def check_slice_supported(protocol, fmt):
 
     Each TODO names the work that remains.
     """
-    if protocol == pb.GRPC and fmt == pb.PROTO:
+    if protocol == pb.GRPC and fmt in (pb.PROTO, pb.AVRO):
         return None
     if protocol == pb.GRPC and fmt == pb.JSON:
         return (
             grpc.StatusCode.UNIMPLEMENTED,
             "TODO(conformance): GRPC + JSON not implemented in the Python harness yet",
-        )
-    if protocol == pb.GRPC and fmt == pb.AVRO:
-        return (
-            grpc.StatusCode.UNIMPLEMENTED,
-            "TODO(conformance): GRPC + AVRO not implemented in the Python harness yet "
-            "(needs the SDK avro encoder wired into records.py)",
         )
     if protocol == pb.GRPC and fmt == pb.ARROW:
         return (
@@ -82,10 +79,21 @@ class HarnessService(pb_grpc.TestHarnessServicer):
         if err is not None:
             context.abort(*err)
 
-        try:
-            resolved = records.descriptor_from_bytes(request.descriptor_proto_bytes)
-        except ValueError as e:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        # Schema artifact per format. Both converters only build the SDK's input; the
+        # SDK does the encoding.
+        if request.format == pb.AVRO:
+            try:
+                to_payload = records.AvroRecordBuilder(request.avro_schema_json)
+            except ValueError as e:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            table_kwargs = {"avro_schema": request.avro_schema_json}
+        else:
+            try:
+                resolved = records.descriptor_from_bytes(request.descriptor_proto_bytes)
+            except ValueError as e:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            to_payload = functools.partial(records.record_from_json, resolved.message_class)
+            table_kwargs = {"descriptor_proto": resolved.file_descriptor_bytes}
 
         log.info("CreateStream endpoint=%s table=%s", request.server_endpoint, request.table_path)
         try:
@@ -100,10 +108,7 @@ class HarnessService(pb_grpc.TestHarnessServicer):
                 no_tls=True,
             )
             stream = sdk.create_stream(
-                table_properties=TableProperties(
-                    request.table_path,
-                    descriptor_proto=resolved.file_descriptor_bytes,
-                ),
+                table_properties=TableProperties(request.table_path, **table_kwargs),
                 no_auth=True,
             )
         except ValueError as e:
@@ -113,20 +118,20 @@ class HarnessService(pb_grpc.TestHarnessServicer):
 
         with self._streams_lock:
             stream_id = f"stream-{next(self._ids)}"
-            self._streams[stream_id] = _StreamEntry(sdk, stream, resolved.message_class)
+            self._streams[stream_id] = _StreamEntry(sdk, stream, to_payload)
         return pb.CreateStreamResponse(stream_id=stream_id)
 
     def IngestRecord(self, request, context):
         entry = self._entry(context, request.stream_id)
         with entry.lock:
             try:
-                message = records.record_from_json(entry.message_class, request.record_json)
+                payload = entry.to_payload(request.record_json)
             except ValueError as e:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
             try:
                 # Queue only. Returns once the SDK has enqueued the record, not once it
-                # is acknowledged. The SDK encodes the protobuf message itself.
-                offset = entry.stream.ingest_record_offset(message)
+                # is acknowledged. The SDK encodes the payload (protobuf or Avro) itself.
+                offset = entry.stream.ingest_record_offset(payload)
             except Exception as e:
                 context.abort(grpc.StatusCode.INTERNAL, f"ingest failed: {e}")
         return pb.IngestRecordResponse(offset=offset)

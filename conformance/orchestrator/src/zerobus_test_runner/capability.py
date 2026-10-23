@@ -49,6 +49,9 @@ CAPABILITIES = {
 # wired across SDKs in this slice; json/avro/arrow harness paths are still TODO.
 WIRED = frozenset(
     {(sdk, "grpc", "proto") for sdk in ("rust", "python", "typescript", "java", "cpp", "dotnet", "purego")}
+    # avro harness path wired for the SDKs that support it (rust via apache-avro core,
+    # python via its fastavro layer)
+    | {("rust", "grpc", "avro"), ("python", "grpc", "avro")}
 )
 
 
