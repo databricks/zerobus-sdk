@@ -47,6 +47,9 @@ set_target_properties(zerobus_protobuf_c PROPERTIES
   IMPORTED_LOCATION "${PROTOBUF_C_LIBRARY}"
   INTERFACE_INCLUDE_DIRECTORIES "${PROTOBUF_C_INCLUDE_DIR}")
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2>=1.40)
+
 # ---------------------------------------------------------------------------
 # Committed protobuf bindings
 # ---------------------------------------------------------------------------
@@ -69,6 +72,8 @@ set(ZEROBUS_SOURCES
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
   src/internal/proto/zerobus_service.c
+  src/internal/network/grpc.c
+  src/internal/network/grpc_utils.c
   src/internal/landing_zone.c
   src/error.c
   src/sdk.c
@@ -88,7 +93,7 @@ target_include_directories(zerobus_c
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
-target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c)
+target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c PkgConfig::NGHTTP2)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
@@ -101,7 +106,7 @@ target_include_directories(zerobus_c_testing
   PRIVATE "${GENERATED_DIR}")
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c_testing PRIVATE c_std_11)
-target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c)
+target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c PkgConfig::NGHTTP2)
 
 # ---------------------------------------------------------------------------
 # Sanitizers

@@ -83,7 +83,8 @@ enum {
     ZEROBUS_STATUS_UNAVAILABLE = 10,
     ZEROBUS_STATUS_UNIMPLEMENTED = 11,
     ZEROBUS_STATUS_OUT_OF_MEMORY = 12,
-    ZEROBUS_STATUS_INTERNAL = 13
+    ZEROBUS_STATUS_INTERNAL = 13,
+    ZEROBUS_STATUS_OUT_OF_RANGE = 14
 };
 
 /* A record's position within its stream: returned by ingest as a handle to
