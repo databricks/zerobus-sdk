@@ -66,6 +66,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 
 - `arrow-flight` — Arrow Flight support. Opt-in.
 - `avro` — Avro record format (Beta). Off by default; requires Rust 1.88 (via `apache-avro` 0.22). Select with `.avro(schema)`, then ingest `AvroRecord` (encoded against the writer schema) or pre-encoded `AvroBytes`. Ephemeral streams only; feature in development.
+- `eos` — Persistent streams (in development). Off by default. Create with `ZerobusSdk::persistent_stream_builder()`, then call `build()` or `resume(stream_id)`. JSON and compiled protobuf only: no Arrow, Avro, dynamic protobuf, multiplexing, or federated auth. Public API in `sdk/src/persistent_stream.rs` and `sdk/src/builder/persistent_stream_builder.rs`.
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.
