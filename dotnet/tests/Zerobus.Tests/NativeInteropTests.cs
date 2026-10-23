@@ -144,4 +144,65 @@ public class NativeInteropTests
         Assert.That(ex, Is.Not.Null);
         Assert.That(ex!.IsRetryable, Is.True);
     }
+
+    public enum BatchIngest
+    {
+        Json,
+        JsonAsync,
+        Proto,
+        ProtoAsync,
+    }
+
+    // Uses a null stream pointer: had the batch reached the native layer, it would
+    // fail there with a ZerobusException instead of the ArgumentNullException.
+    private static Action IngestBatchWithNullRecord(BatchIngest ingest, int nullIndex)
+    {
+        string[] json = ["{\"id\": 1}", "{\"id\": 2}", "{\"id\": 3}"];
+        byte[][] proto = [[0x08, 0x01], [0x08, 0x02], [0x08, 0x03]];
+        json[nullIndex] = null!;
+        proto[nullIndex] = null!;
+
+        return ingest switch
+        {
+            BatchIngest.Json => () => NativeInterop.StreamIngestJsonRecords(IntPtr.Zero, json),
+            BatchIngest.JsonAsync => () => NativeInterop.StreamIngestJsonRecordsAsync(IntPtr.Zero, json),
+            BatchIngest.Proto => () => NativeInterop.StreamIngestProtoRecords(IntPtr.Zero, proto),
+            BatchIngest.ProtoAsync => () => NativeInterop.StreamIngestProtoRecordsAsync(IntPtr.Zero, proto),
+            _ => throw new ArgumentOutOfRangeException(nameof(ingest)),
+        };
+    }
+
+    [Test]
+    public void IngestRecords_NullRecord_ThrowsBeforeNativeCall(
+        [Values] BatchIngest ingest,
+        [Values(0, 1, 2)] int nullIndex)
+    {
+        var ex = Assert.Throws<ArgumentNullException>(() => IngestBatchWithNullRecord(ingest, nullIndex)());
+
+        Assert.That(ex!.ParamName, Is.EqualTo("records"));
+        Assert.That(ex.Message, Does.Contain($"index {nullIndex}"));
+    }
+
+    [Test]
+    public void IngestRecordsAsync_NullRecord_DoesNotRetainCallback(
+        [Values(BatchIngest.JsonAsync, BatchIngest.ProtoAsync)] BatchIngest ingest)
+    {
+        // A leaked callback GCHandle keeps the delegate, its closure and the
+        // TaskCompletionSource alive: about 190 bytes per rejected call, so ~1.9 MB here.
+        const int calls = 10_000;
+        var ingestBatch = IngestBatchWithNullRecord(ingest, nullIndex: 1);
+
+        void RejectBatches(int count)
+        {
+            for (var i = 0; i < count; i++)
+                Assert.Throws<ArgumentNullException>(() => ingestBatch());
+        }
+
+        RejectBatches(100);
+        var before = GC.GetTotalMemory(forceFullCollection: true);
+        RejectBatches(calls);
+        var retained = GC.GetTotalMemory(forceFullCollection: true) - before;
+
+        Assert.That(retained, Is.LessThan(512 * 1024));
+    }
 }
