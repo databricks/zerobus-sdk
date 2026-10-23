@@ -110,8 +110,28 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Set to `None` to send uncompressed payloads.
     ///
-    /// Default: `Some(CompressionType::ZSTD)`
+    /// Default: `Some(CompressionType::ZSTD)`, unless [`grpc_compression`] is enabled and
+    /// IPC compression was not set explicitly, in which case it defaults to `None`.
+    ///
+    /// [`grpc_compression`]: Self::grpc_compression
     pub ipc_compression: Option<CompressionType>,
+
+    /// Compression applied to each whole gRPC request message.
+    ///
+    /// Unlike [`ipc_compression`](Self::ipc_compression), which compresses each Arrow buffer
+    /// separately, this compresses the full `FlightData` message, including the IPC header
+    /// and alignment padding. That helps most for wide or sparse schemas, whose messages are
+    /// dominated by metadata. It costs more CPU, mostly to decompress on the server.
+    ///
+    /// Enabling it changes the default of `ipc_compression` to `None`, since compressing
+    /// already-compressed buffers costs CPU without reducing size. The server must accept
+    /// zstd on Arrow Flight; otherwise requests fail with `Unimplemented`.
+    ///
+    /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
+    /// gRPC compression, so they overstate the bytes sent when this is enabled.
+    ///
+    /// Default: [`ArrowGrpcCompression::None`]
+    pub grpc_compression: ArrowGrpcCompression,
 
     /// Maximum time in milliseconds to wait for acknowledgments during server-initiated
     /// graceful stream rotation.
@@ -163,7 +183,21 @@ impl Default for ArrowStreamConfigurationOptions {
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
             ipc_compression: Some(CompressionType::ZSTD),
+            grpc_compression: ArrowGrpcCompression::None,
             stream_paused_max_wait_time_ms: None,
         }
     }
+}
+
+/// gRPC message compression for Arrow Flight requests.
+///
+/// See [`ArrowStreamConfigurationOptions::grpc_compression`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArrowGrpcCompression {
+    /// No gRPC message compression.
+    #[default]
+    None,
+    /// Compress each gRPC request message with zstd.
+    Zstd,
 }

@@ -36,7 +36,11 @@ use tonic::transport::Channel;
 
 use crate::callbacks::AckCallback;
 #[cfg(feature = "arrow-flight")]
-use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
+use crate::client_warnings::record_stream_creation;
+#[cfg(feature = "arrow-flight")]
+use crate::client_warnings::{
+    warn_double_compression_for_arrow, warn_payload_limit_ignored_for_arrow,
+};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
@@ -192,6 +196,10 @@ pub struct StreamBuilder<'a> {
     multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
+    /// Whether `ipc_compression` was called, so enabling gRPC compression only changes
+    /// the IPC default and never overrides an explicit choice.
+    #[cfg(feature = "arrow-flight")]
+    ipc_compression_explicit: bool,
     #[cfg(feature = "arrow-flight")]
     stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
 }
@@ -263,6 +271,8 @@ impl<'a> StreamBuilder<'a> {
             multiplexed_callback: None,
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "arrow-flight")]
+            ipc_compression_explicit: false,
             #[cfg(feature = "arrow-flight")]
             stats_exporter: None,
         }
@@ -527,10 +537,28 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the Arrow IPC compression type (Arrow streams only).
     ///
-    /// Defaults to `Some(CompressionType::ZSTD)`. Pass `None` to send uncompressed payloads.
+    /// Defaults to `Some(CompressionType::ZSTD)`, or to `None` when
+    /// [`grpc_compression`](Self::grpc_compression) is enabled. Pass `None` to send
+    /// uncompressed payloads.
     #[cfg(feature = "arrow-flight")]
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
         self.arrow_config.ipc_compression = compression;
+        self.ipc_compression_explicit = true;
+        self
+    }
+
+    /// Set gRPC message compression (Arrow streams only).
+    ///
+    /// Defaults to [`ArrowGrpcCompression::None`](crate::ArrowGrpcCompression::None).
+    /// [`Zstd`](crate::ArrowGrpcCompression::Zstd) compresses each whole Flight request
+    /// message, which is usually smaller than per-buffer IPC compression for wide or
+    /// sparse schemas, at more CPU. Unless [`ipc_compression`](Self::ipc_compression) is
+    /// also called, enabling it turns IPC compression off so payloads are not compressed
+    /// twice. The server must accept zstd on Arrow Flight. See
+    /// [`ArrowStreamConfigurationOptions::grpc_compression`].
+    #[cfg(feature = "arrow-flight")]
+    pub fn grpc_compression(mut self, compression: crate::ArrowGrpcCompression) -> Self {
+        self.arrow_config.grpc_compression = compression;
         self
     }
 
@@ -690,6 +718,7 @@ impl<'a> StreamBuilder<'a> {
         self.warn_arrow_ignored_options();
 
         let headers_provider = self.resolve_headers_provider()?;
+        let arrow_config = self.resolved_arrow_config();
 
         let table_properties = ArrowTableProperties {
             table_name: self.table_name,
@@ -703,7 +732,7 @@ impl<'a> StreamBuilder<'a> {
             self.sdk.connector_factory.clone(),
             table_properties,
             headers_provider,
-            self.arrow_config,
+            arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
             self.stats_exporter,
         )
@@ -746,6 +775,21 @@ impl<'a> StreamBuilder<'a> {
         }
 
         Ok(schema)
+    }
+
+    /// Applies option defaults that depend on other options: gRPC compression turns IPC
+    /// compression off unless the caller set it explicitly.
+    #[cfg(feature = "arrow-flight")]
+    fn resolved_arrow_config(&self) -> ArrowStreamConfigurationOptions {
+        let mut config = self.arrow_config.clone();
+        if config.grpc_compression != crate::ArrowGrpcCompression::None {
+            if !self.ipc_compression_explicit {
+                config.ipc_compression = None;
+            } else if config.ipc_compression.is_some() {
+                warn_double_compression_for_arrow();
+            }
+        }
+        config
     }
 
     #[cfg(feature = "arrow-flight")]

@@ -354,8 +354,9 @@ let mut stream = sdk
 let telemetry = tokio::spawn(async move {
     while let Some(stat) = stats_rx.recv().await {
         if let StreamStat::BatchSent { offset, attempt, stats } = stat {
-            // stats.approximate_wire_bytes: FlightData payload after IPC compression
-            //   (excludes transport overhead and schema; does not measure socket writes)
+            // stats.approximate_wire_bytes: FlightData payload after IPC compression and
+            //   before gRPC compression (excludes transport overhead and schema; does not
+            //   measure socket writes)
             // stats.uncompressed_bytes: emitted IPC buffer bytes before compression
             // stats.records: rows in this transmission; offset: the batch's ingest offset
             // attempt: 0 = first send, >0 = retransmit of the unacked suffix after reconnect
@@ -1154,7 +1155,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
-| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable |
+| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable. Defaults to `None` when `grpc_compression` is enabled and this isn't set |
+| `grpc_compression` | `ArrowGrpcCompression` | `None` | Compression of each whole gRPC request message: `None` or `Zstd`. Often smaller than IPC compression for wide or sparse schemas, at more CPU; requires a server that accepts zstd on Arrow Flight. See the [Arrow example](examples/arrow/README.md#grpc-compression) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust

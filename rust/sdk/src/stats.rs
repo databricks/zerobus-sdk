@@ -26,8 +26,9 @@ pub struct BatchStats {
     /// Rows in this transmission, which may be only an unacknowledged suffix on retry.
     pub records: u64,
     /// Approximate wire payload size: the batch's FlightData data messages
-    /// (`data_header + data_body + app_metadata`), after IPC compression when enabled.
-    /// Excludes protobuf field overhead, gRPC/HTTP2/TLS framing, the schema message,
+    /// (`data_header + data_body + app_metadata`), after IPC compression when enabled
+    /// and before gRPC message compression, so it overstates the bytes sent when
+    /// `grpc_compression` is enabled. Excludes protobuf field overhead, gRPC/HTTP2/TLS framing, the schema message,
     /// and the flight descriptor. Counts payload yielded to the transport, which may
     /// be discarded before reaching the network.
     pub approximate_wire_bytes: u64,

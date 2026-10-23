@@ -39,7 +39,7 @@ prost-reflect.workspace = true
 prost-types.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tokio-stream = { workspace = true, features = ["net"] }
-tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
+tonic = { workspace = true, features = ["tls-native-roots", "transport", "zstd"] }
 tonic-prost.workspace = true
 tonic-types.workspace = true
 tracing.workspace = true

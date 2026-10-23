@@ -18,6 +18,7 @@ use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::sleep;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
@@ -182,6 +183,8 @@ pub struct MockFlightServer {
     wire_ipc_schema_has_dictionary_encoding: Arc<Mutex<bool>>,
     /// Logical UTF-8 column values decoded from received record batches.
     decoded_utf8_columns: Arc<Mutex<Vec<Vec<Option<String>>>>>,
+    /// The `grpc-encoding` request header of each DoPut, in arrival order.
+    grpc_encodings: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl MockFlightServer {
@@ -203,6 +206,7 @@ impl MockFlightServer {
             record_batch_message_count: Arc::new(Mutex::new(0)),
             wire_ipc_schema_has_dictionary_encoding: Arc::new(Mutex::new(false)),
             decoded_utf8_columns: Arc::new(Mutex::new(Vec::new())),
+            grpc_encodings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -286,6 +290,11 @@ impl MockFlightServer {
         self.decoded_utf8_columns.lock().await.clone()
     }
 
+    /// The `grpc-encoding` request header of each DoPut received, in arrival order.
+    pub async fn get_grpc_encodings(&self) -> Vec<Option<String>> {
+        self.grpc_encodings.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -302,6 +311,7 @@ impl MockFlightServer {
         *self.zstd_compressed_record_batch_count.lock().await = 0;
         *self.dictionary_message_count.lock().await = 0;
         *self.record_batch_message_count.lock().await = 0;
+        self.grpc_encodings.lock().await.clear();
         *self.wire_ipc_schema_has_dictionary_encoding.lock().await = false;
         self.decoded_utf8_columns.lock().await.clear();
     }
@@ -374,6 +384,12 @@ impl FlightService for MockFlightServer {
             .to_string();
 
         info!("Received DoPut request for table: {}", table_name);
+        let grpc_encoding = request
+            .metadata()
+            .get("grpc-encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        self.grpc_encodings.lock().await.push(grpc_encoding);
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
@@ -884,6 +900,7 @@ async fn start_mock_flight_server_inner(
             &mock_server.wire_ipc_schema_has_dictionary_encoding,
         ),
         decoded_utf8_columns: Arc::clone(&mock_server.decoded_utf8_columns),
+        grpc_encodings: Arc::clone(&mock_server.grpc_encodings),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
@@ -896,7 +913,9 @@ async fn start_mock_flight_server_inner(
     if let Some(tls) = tls {
         server = server.tls_config(tls)?;
     }
-    let router = server.add_service(FlightServiceServer::new(server_clone));
+    let router = server.add_service(
+        FlightServiceServer::new(server_clone).accept_compressed(CompressionEncoding::Zstd),
+    );
     tokio::spawn(async move {
         if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
