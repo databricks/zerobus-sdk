@@ -223,13 +223,18 @@ zerobus_rust_sdk/
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
-│   │   ├── mock_grpc.rs                # Mock Zerobus gRPC server
 │   │   ├── mock_arrow_flight.rs        # Mock Arrow Flight server
 │   │   ├── rust_tests.rs               # Core SDK test suite
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
 │   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
 │   │   └── utils.rs                    # Shared test utilities
+│   └── Cargo.toml
+│
+├── test-support/                       # Test-only crate shared by tests/, jni/ and examples/avro
+│   ├── src/
+│   │   ├── lib.rs                      # Server bindings generated from sdk/zerobus_service.proto
+│   │   └── mock_grpc.rs                # Mock Zerobus gRPC server
 │   ├── build.rs
 │   └── Cargo.toml
 │
@@ -1408,7 +1413,7 @@ match stream.close().await {
 
 Integration tests live in the `tests/` crate and run against a lightweight mock Zerobus gRPC server.
 
-- Mock server: `tests/src/mock_grpc.rs`
+- Mock server: `test-support/src/mock_grpc.rs`
 - Test suite: `tests/src/rust_tests.rs`
 
 Run tests with logs:

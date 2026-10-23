@@ -8,6 +8,7 @@ members = [
     "examples/arrow",
     "tools/*",
     "tests",
+    "test-support",
 ]
 # Excluded until ffi/jni support Avro (#830). As a workspace member it would unify the sdk
 # `avro` feature onto ffi/jni, which don't handle Avro records yet. Build it standalone

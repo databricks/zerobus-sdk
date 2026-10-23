@@ -42,11 +42,7 @@ mod proto {
         }
     }
 }
-#[cfg(not(feature = "internal-proto"))]
 use proto::databricks;
-#[cfg(feature = "internal-proto")]
-#[doc(hidden)]
-pub use proto::databricks;
 
 mod builder;
 mod callbacks;

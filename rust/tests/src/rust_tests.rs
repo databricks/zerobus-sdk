@@ -1,4 +1,3 @@
-mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
@@ -6,13 +5,13 @@ use std::sync::Arc;
 use databricks_zerobus_ingest_sdk::{
     message_descriptor, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
 };
-use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
     advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
     run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
+use zerobus_test_support::mock_grpc::{self, start_mock_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -66,8 +65,8 @@ mod stream_initialization_and_basic_lifecycle_tests {
     #[tokio::test]
     async fn test_create_request_carries_builder_record_type(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as WireRecordType;
         use databricks_zerobus_ingest_sdk::RecordType;
+        use zerobus_test_support::databricks::zerobus::RecordType as WireRecordType;
 
         setup_tracing();
         info!("Starting test_create_request_carries_builder_record_type");

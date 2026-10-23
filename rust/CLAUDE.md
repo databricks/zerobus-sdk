@@ -20,6 +20,7 @@ rust/
 ├── jni/          # JNI crate — Java Native Interface bindings
 ├── examples/     # JSON, proto, Arrow Flight, and Avro ingestion examples
 ├── tests/        # Integration tests
+├── test-support/ # Mock gRPC server + its own generated server bindings (test-only)
 └── tools/        # Schema generation CLI
 ```
 
@@ -69,9 +70,6 @@ Any change to the Rust SDK's public API surface has cascading effects:
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.
-- `internal-proto` — Unsupported; exposes the generated gRPC types as `databricks::zerobus`
-  for the repository's mock gRPC server (`rust/tests`, jni dev-tests, `examples/avro`). Not
-  covered by semver.
 - `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
 - `testing` — Test utilities.
 
