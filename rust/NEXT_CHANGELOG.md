@@ -10,6 +10,10 @@
   of 8 bytes instead of 64. With compression, 64-byte alignment gives no
   benefit and only adds padding bytes to the payload. Uncompressed payloads
   keep 64-byte alignment.
+- Zeroparser's `MessageRegistry` is now aligned to 128 bytes. When threads
+  share one registry and clone its `Arc` for every record, the reference
+  counts were on the same cache line as the registry fields that the parser
+  reads, which made parsing several times slower on many threads.
 
 ### Bug Fixes
 
