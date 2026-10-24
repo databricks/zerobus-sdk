@@ -34,6 +34,65 @@ ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_set_oauth(
     zerobus_stream_builder_t *builder, zerobus_string_view_t client_id,
     zerobus_string_view_t client_secret, zerobus_error_t **out_error);
 
+/* Records queued or awaiting acknowledgement before ingest blocks. Must be a
+ * power of two from 4 to 2^30. Default 2^20. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_max_inflight_requests(
+    zerobus_stream_builder_t *builder, size_t max_inflight_requests,
+    zerobus_error_t **out_error);
+
+/* Whether the stream reconnects automatically after a retryable failure.
+ * Default true. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_recovery(zerobus_stream_builder_t *builder,
+                                    bool enabled, zerobus_error_t **out_error);
+
+/* Time limit for each recovery attempt. Default 15 seconds. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_recovery_timeout_ms(
+    zerobus_stream_builder_t *builder, uint64_t timeout_ms,
+    zerobus_error_t **out_error);
+
+/* Wait between recovery attempts. Default 2 seconds. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_recovery_backoff_ms(
+    zerobus_stream_builder_t *builder, uint64_t backoff_ms,
+    zerobus_error_t **out_error);
+
+/* Recovery attempts before the stream fails. Default 4. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_recovery_retries(zerobus_stream_builder_t *builder,
+                                            uint32_t retries,
+                                            zerobus_error_t **out_error);
+
+/* How long records may stay unacknowledged before the stream is treated as
+ * failed and recovery starts. Default 60 seconds. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(
+    zerobus_stream_builder_t *builder, uint64_t timeout_ms,
+    zerobus_error_t **out_error);
+
+/* Time limit for flush. Default 300 seconds. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_flush_timeout_ms(zerobus_stream_builder_t *builder,
+                                            uint64_t timeout_ms,
+                                            zerobus_error_t **out_error);
+
+/* After the server announces it will close the stream, how long to wait for
+ * in-flight acknowledgements, capped by the duration the server gives. 0 does
+ * not wait. Default UINT64_MAX, which waits the server's full duration. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_stream_paused_max_wait_time_ms(
+    zerobus_stream_builder_t *builder, uint64_t wait_ms,
+    zerobus_error_t **out_error);
+
+/* Largest record ingest accepts, in bytes. Default 10 MiB - 64 KiB, just under
+ * the server's request limit. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_max_ingest_payload_bytes(
+    zerobus_stream_builder_t *builder, size_t max_bytes,
+    zerobus_error_t **out_error);
+
 /*
  * Validates configuration and (once implemented) opens the initial
  * authenticated connection. The builder is not consumed and may be reused or

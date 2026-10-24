@@ -12,6 +12,13 @@ static bool utf8_ok(const char *s)
     return is_valid_utf8(s, strlen(s));
 }
 
+/* Whether trimming in leaves exactly want. */
+static bool trims_to(const char *in, const char *want)
+{
+    zerobus_string_view_t out = zb_trim_whitespace(sv(in));
+    return out.len == strlen(want) && memcmp(out.data, want, out.len) == 0;
+}
+
 static bool labels_ok(const char *s)
 {
     return host_labels_are_valid(s, strlen(s));
@@ -30,6 +37,28 @@ static void test_view_classification(void)
     CHECK(!zb_is_valid_string((zerobus_string_view_t){NULL, 0}));
     /* An embedded NUL makes an otherwise non-empty view invalid. */
     CHECK(!zb_is_valid_string((zerobus_string_view_t){"a\0b", 3}));
+
+    CHECK(zb_is_header_value(sv("my-app/1.0\tbeta"))); /* tab is allowed */
+    CHECK(zb_is_header_value(sv("caf\xC3\xA9")));      /* bytes from 0x80 up */
+    CHECK(zb_is_header_value((zerobus_string_view_t){NULL, 0}));
+    CHECK(!zb_is_header_value(sv("a\nb")));   /* other control characters */
+    CHECK(!zb_is_header_value(sv("a\177b"))); /* DEL */
+    CHECK(!zb_is_header_value((zerobus_string_view_t){"a\0b", 3}));
+}
+
+static void test_trim_whitespace(void)
+{
+    CHECK(trims_to(" \t\n\v\f\rapp \r\n", "app"));
+    CHECK(trims_to("my app", "my app"));       /* inner space kept */
+    CHECK(trims_to("\bapp\016", "\bapp\016")); /* just outside \t..\r */
+    CHECK(trims_to(" \t ", ""));
+    CHECK(trims_to("", ""));
+
+    /* NULL data is returned unchanged. */
+    zerobus_string_view_t out =
+        zb_trim_whitespace((zerobus_string_view_t){NULL, 3});
+    CHECK(out.data == NULL);
+    CHECK(out.len == 3);
 }
 
 static void test_utf8(void)
@@ -225,6 +254,7 @@ zb_cleanup:
 int main(void)
 {
     test_view_classification();
+    test_trim_whitespace();
     test_utf8();
     test_table_name();
     test_url_validate();

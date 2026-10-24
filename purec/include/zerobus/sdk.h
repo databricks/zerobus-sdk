@@ -31,6 +31,29 @@ zerobus_sdk_builder_set_unity_catalog_endpoint(
     zerobus_sdk_builder_t *builder,
     zerobus_string_view_t unity_catalog_endpoint, zerobus_error_t **out_error);
 
+/* Name of the calling application, appended to the user-agent header after the
+ * SDK's own "zerobus-sdk-c/<version>". Surrounding ASCII whitespace is
+ * trimmed, and a blank name clears it. Must not contain control characters
+ * other than tab. Default none. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_sdk_builder_set_application_name(zerobus_sdk_builder_t *builder,
+                                         zerobus_string_view_t application_name,
+                                         zerobus_error_t **out_error);
+
+/* Streams from this SDK share each table's OAuth token, which is refreshed once
+ * it is this close to expiring. Default 300 seconds. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_sdk_builder_set_token_refresh_buffer_ms(zerobus_sdk_builder_t *builder,
+                                                uint64_t buffer_ms,
+                                                zerobus_error_t **out_error);
+
+/* Whether each stream gets its own connection. When false, streams from this
+ * SDK share one connection. Default true. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_sdk_builder_set_connection_per_stream(zerobus_sdk_builder_t *builder,
+                                              bool enabled,
+                                              zerobus_error_t **out_error);
+
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                           zerobus_sdk_t **out_sdk, zerobus_error_t **out_error);

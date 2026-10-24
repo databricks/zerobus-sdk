@@ -275,6 +275,75 @@ static void test_stream_oauth_transactional(void)
     zerobus_sdk_free(sdk);
 }
 
+/* Every option setter accepts a value, max in-flight requests is checked
+ * against the landing zone's capacity rule, and the size limit carries over to
+ * the built stream. */
+static void test_stream_options(void)
+{
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_builder_t *stb = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+
+    sdk = make_sdk();
+    REQUIRE_OK(zerobus_stream_builder_new(sdk, &stb, NULL));
+    REQUIRE_OK(zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL));
+    REQUIRE_OK(
+        zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), NULL));
+
+    CHECK_OK(zerobus_stream_builder_set_max_inflight_requests(
+        stb, (size_t)1 << 30, NULL));
+    CHECK_OK(zerobus_stream_builder_set_max_inflight_requests(stb, 4, NULL));
+    CHECK_OK(zerobus_stream_builder_set_recovery(stb, false, NULL));
+    CHECK_OK(zerobus_stream_builder_set_recovery_timeout_ms(stb, 1, NULL));
+    CHECK_OK(zerobus_stream_builder_set_recovery_backoff_ms(stb, 1, NULL));
+    CHECK_OK(zerobus_stream_builder_set_recovery_retries(stb, 1, NULL));
+    CHECK_OK(
+        zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(stb, 1, NULL));
+    CHECK_OK(zerobus_stream_builder_set_flush_timeout_ms(stb, 1, NULL));
+    CHECK_OK(zerobus_stream_builder_set_stream_paused_max_wait_time_ms(stb, 0,
+                                                                       NULL));
+    CHECK_OK(zerobus_stream_builder_set_max_ingest_payload_bytes(stb, 4, NULL));
+
+    /* Not a power of two, or outside 4 to 2^30. */
+    static const size_t bad_inflight[] = {0, 2, 6, (size_t)1 << 31};
+    for (size_t i = 0; i < sizeof(bad_inflight) / sizeof(bad_inflight[0]);
+         ++i) {
+        CHECK_EQ_INT(zerobus_stream_builder_set_max_inflight_requests(
+                         stb, bad_inflight[i], &err),
+                     ZEROBUS_STATUS_INVALID_ARGUMENT);
+        CHECK(err != NULL);
+        zerobus_error_free(err);
+        err = NULL;
+    }
+
+    REQUIRE_OK(zerobus_stream_builder_build(stb, &stream, NULL));
+    CHECK_EQ_INT(
+        zerobus_stream_ingest_json_record(stream, sv("abcd"), NULL, &err),
+        ZEROBUS_STATUS_UNIMPLEMENTED);
+    CHECK_EQ_INT(
+        zerobus_stream_ingest_json_record(stream, sv("abcde"), NULL, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    zerobus_error_free(err);
+    err = NULL;
+
+    /* The argument checks every option setter shares. */
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_max_inflight_requests(NULL, 4, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    REQUIRE(err != NULL);
+    const zerobus_error_t *seeded = err;
+    CHECK_EQ_INT(zerobus_stream_builder_set_recovery(stb, true, &err),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(err == seeded);
+
+zb_cleanup:
+    zerobus_error_free(err);
+    zerobus_stream_free(stream);
+    zerobus_stream_builder_free(stb);
+    zerobus_sdk_free(sdk);
+}
+
 static void test_ingest_validation(void)
 {
     zerobus_sdk_t *sdk = NULL;
@@ -623,6 +692,7 @@ int main(void)
     test_stream_builder_validation();
     test_stream_builder_edges();
     test_stream_oauth_transactional();
+    test_stream_options();
     test_ingest_validation();
     test_flush_close_idempotent();
     test_stream_free_null_safe();

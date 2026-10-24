@@ -8,9 +8,14 @@
 #include "sdk.h"
 #include "zerobus/sdk.h"
 
+#define DEFAULT_TOKEN_REFRESH_BUFFER_MS 300000
+
 struct zerobus_sdk_builder {
-    char *endpoint;    /* zerobus endpoint, owned */
-    char *uc_endpoint; /* unity catalog endpoint, owned */
+    char *endpoint;         /* zerobus endpoint, owned */
+    char *uc_endpoint;      /* unity catalog endpoint, owned */
+    char *application_name; /* owned, NULL when unset */
+    uint64_t token_refresh_buffer_ms;
+    bool connection_per_stream;
 };
 
 struct zerobus_sdk {
@@ -18,6 +23,9 @@ struct zerobus_sdk {
     /* Independent copies of the validated configuration. */
     char *endpoint;
     char *uc_endpoint;
+    char *application_name;
+    uint64_t token_refresh_buffer_ms;
+    bool connection_per_stream;
 };
 
 /* ---- builder ----------------------------------------------------------- */
@@ -37,8 +45,24 @@ zerobus_status_t zerobus_sdk_builder_new(zerobus_sdk_builder_t **out_builder,
         ZB_ERROR("SDK builder allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
+    b->token_refresh_buffer_ms = DEFAULT_TOKEN_REFRESH_BUFFER_MS;
+    b->connection_per_stream = true;
     *out_builder = b;
     ZB_DEBUG("SDK builder created");
+    return ZEROBUS_STATUS_OK;
+}
+
+/* Argument checks shared by the builder setters. */
+static zerobus_status_t check_setter_args(const zerobus_sdk_builder_t *builder,
+                                          zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (builder == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "builder must not be NULL");
+    }
     return ZEROBUS_STATUS_OK;
 }
 
@@ -81,12 +105,9 @@ zerobus_sdk_builder_set_endpoint(zerobus_sdk_builder_t *builder,
                                  zerobus_string_view_t zerobus_endpoint,
                                  zerobus_error_t **out_error)
 {
-    if (out_error != NULL && *out_error != NULL) {
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
-    }
-    if (builder == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "builder must not be NULL");
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
     if (!zb_is_valid_string(zerobus_endpoint)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -106,12 +127,9 @@ zerobus_status_t zerobus_sdk_builder_set_unity_catalog_endpoint(
     zerobus_sdk_builder_t *builder,
     zerobus_string_view_t unity_catalog_endpoint, zerobus_error_t **out_error)
 {
-    if (out_error != NULL && *out_error != NULL) {
-        return ZEROBUS_STATUS_INVALID_ARGUMENT;
-    }
-    if (builder == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "builder must not be NULL");
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
     if (!zb_is_valid_string(unity_catalog_endpoint)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
@@ -126,6 +144,55 @@ zerobus_status_t zerobus_sdk_builder_set_unity_catalog_endpoint(
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t
+zerobus_sdk_builder_set_application_name(zerobus_sdk_builder_t *builder,
+                                         zerobus_string_view_t application_name,
+                                         zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    zerobus_string_view_t name = zb_trim_whitespace(application_name);
+    if (name.len == 0) {
+        free(builder->application_name);
+        builder->application_name = NULL;
+        return ZEROBUS_STATUS_OK;
+    }
+    if (!zb_is_valid_string(name) || !zb_is_header_value(name)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "application name must be valid UTF-8 with no control "
+                       "characters other than tab");
+    }
+    if (!zb_replace_string(&builder->application_name, name)) {
+        ZB_ERROR("SDK application name allocation failed");
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t
+zerobus_sdk_builder_set_token_refresh_buffer_ms(zerobus_sdk_builder_t *builder,
+                                                uint64_t buffer_ms,
+                                                zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->token_refresh_buffer_ms = buffer_ms;
+    }
+    return status;
+}
+
+zerobus_status_t zerobus_sdk_builder_set_connection_per_stream(
+    zerobus_sdk_builder_t *builder, bool enabled, zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status == ZEROBUS_STATUS_OK) {
+        builder->connection_per_stream = enabled;
+    }
+    return status;
 }
 
 zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
@@ -148,7 +215,7 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
                        "unity catalog endpoint is required");
     }
 
-    /* Endpoints were validated when set.
+    /* Endpoints and options were validated when set.
      * TODO: initialize shared TLS/OAuth/transport state. */
     zerobus_sdk_t *sdk = (zerobus_sdk_t *)calloc(1, sizeof(*sdk));
     if (sdk == NULL) {
@@ -158,7 +225,11 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     atomic_init(&sdk->ref_cnt, 1);
     sdk->endpoint = zb_strdup(builder->endpoint);
     sdk->uc_endpoint = zb_strdup(builder->uc_endpoint);
-    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL) {
+    sdk->application_name = zb_strdup(builder->application_name);
+    sdk->token_refresh_buffer_ms = builder->token_refresh_buffer_ms;
+    sdk->connection_per_stream = builder->connection_per_stream;
+    if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL ||
+        (builder->application_name != NULL && sdk->application_name == NULL)) {
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
@@ -176,6 +247,7 @@ void zerobus_sdk_builder_free(zerobus_sdk_builder_t *builder)
     }
     free(builder->endpoint);
     free(builder->uc_endpoint);
+    free(builder->application_name);
     free(builder);
     ZB_DEBUG("SDK builder freed");
 }
@@ -198,6 +270,7 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     /* TODO: tear down shared transport/auth resources (best-effort). */
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
+    free(sdk->application_name);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }
