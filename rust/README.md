@@ -1155,6 +1155,24 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
+| `compression` | `Option<ArrowCompression>` | `None` (uses `ipc_compression`) | Payload compression, set with `with_compression`: `IpcZstd`, `IpcLz4`, `GrpcZstd`, or `None`. `GrpcZstd` compresses each whole gRPC request message, which is often smaller than IPC compression for wide or sparse schemas, at more CPU; it requires a server that accepts zstd on Arrow Flight. See the [Arrow example](examples/arrow/README.md#compression) |
+| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Deprecated: use `compression`. Arrow IPC compression, used only when `compression` is `None` |
+| `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments after the server signals close (`None` = the full server duration, `Some(0)` = do not wait, `Some(x)` = the smaller of `x` and the server duration). A bounded request/response drain still runs after the ACK wait. |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **Ordinary JSON and Protocol Buffer gRPC streams only.** Optional callback for acknowledgment notifications. Multiplexed streams use the builder's `multiplexed_ack_callback` method; Arrow Flight does not support acknowledgment callbacks. |
+| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **JSON and Protocol Buffer gRPC streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+
+### ArrowStreamConfigurationOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_inflight_batches` | `usize` | 1,000 | Maximum accepted batches awaiting acknowledgment; bounds memory and applies backpressure |
+| `recovery` | `bool` | true | Reconnect and replay unacknowledged batch suffixes after retryable failures |
+| `recovery_timeout_ms` | `u64` | 15,000 | Timeout for one recovery attempt (ms) |
+| `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery attempts (ms) |
+| `recovery_retries` | `u32` | 4 | Maximum recovery attempts |
+| `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
+| `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
+| `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
 | `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable. Ignored when `grpc_compression` is enabled |
 | `grpc_compression` | `ArrowGrpcCompression` | `None` | Compression of each whole gRPC request message: `None` or `Zstd`. Often smaller than IPC compression for wide or sparse schemas, at more CPU. When enabled, `ipc_compression` is ignored and buffers are sent uncompressed with 8-byte alignment. Requires a server that accepts zstd on Arrow Flight; streams, including reconnects, fail with non-retryable `Unimplemented` otherwise, so disable it on clients before a server rollback. The server's message size limit then applies to uncompressed messages, so a single row too large for it is rejected. See the [Arrow example](examples/arrow/README.md#grpc-compression) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
@@ -1167,7 +1185,7 @@ let stream = sdk
     .arrow(schema)
     .max_inflight_batches(1_000)
     .connection_timeout_ms(30_000)
-    .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+    .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
     .build_arrow()
     .await?;
 ```

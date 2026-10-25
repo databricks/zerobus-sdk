@@ -528,22 +528,23 @@ impl<'a> StreamBuilder<'a> {
     /// Set the Arrow IPC compression type (Arrow streams only).
     ///
     /// Defaults to `Some(CompressionType::ZSTD)`. Pass `None` to send uncompressed payloads.
-    /// Ignored when [`grpc_compression`](Self::grpc_compression) is enabled.
+    /// Of this and [`with_compression`](Self::with_compression), the last call wins.
     #[cfg(feature = "arrow-flight")]
+    #[deprecated(since = "3.0.0", note = "Use `with_compression` instead")]
+    #[allow(deprecated)]
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
         self.arrow_config.ipc_compression = compression;
+        self.arrow_config.compression = None;
         self
     }
 
-    /// Set gRPC message compression (Arrow streams only).
+    /// Set the compression for Arrow Flight payloads (Arrow streams only).
     ///
-    /// Defaults to [`ArrowGrpcCompression::None`](crate::ArrowGrpcCompression::None). When
-    /// enabled, [`ipc_compression`](Self::ipc_compression) is ignored. See
-    /// [`ArrowStreamConfigurationOptions::grpc_compression`] for when to use it and the
-    /// server requirement.
+    /// Defaults to [`ArrowCompression::IpcZstd`](crate::ArrowCompression::IpcZstd). See
+    /// [`ArrowCompression`](crate::ArrowCompression) for the options.
     #[cfg(feature = "arrow-flight")]
-    pub fn grpc_compression(mut self, compression: crate::ArrowGrpcCompression) -> Self {
-        self.arrow_config.grpc_compression = compression;
+    pub fn with_compression(mut self, compression: crate::ArrowCompression) -> Self {
+        self.arrow_config.compression = Some(compression);
         self
     }
 

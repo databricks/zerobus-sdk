@@ -5579,7 +5579,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5628,7 +5628,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5681,7 +5681,8 @@ mod arrow_flight_tests {
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
                     .arrow(schema.clone());
                 if disable_compression {
-                    builder = builder.ipc_compression(None);
+                    builder = builder
+                        .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::None);
                 }
                 let stream = builder.build_arrow().await?;
 
@@ -5700,43 +5701,32 @@ mod arrow_flight_tests {
             Ok(())
         }
 
-        /// Configures gRPC and IPC compression on a builder: `ipc` of `None` leaves IPC
-        /// compression at the builder's default.
+        /// A compression setting and what the server should observe for it.
         #[derive(Clone, Copy, Debug)]
         struct CompressionCase {
-            grpc: databricks_zerobus_ingest_sdk::ArrowGrpcCompression,
-            ipc: Option<Option<arrow_ipc::CompressionType>>,
+            /// `None` leaves the builder's default.
+            compression: Option<databricks_zerobus_ingest_sdk::ArrowCompression>,
             expected_grpc_encoding: Option<&'static str>,
             expected_ipc_zstd_batches: u64,
         }
 
         #[tokio::test]
         async fn test_grpc_compression_wire_encoding() -> Result<(), Box<dyn std::error::Error>> {
-            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+            use databricks_zerobus_ingest_sdk::ArrowCompression;
 
             setup_tracing();
             info!("Starting test_grpc_compression_wire_encoding");
 
             let cases = [
-                // Default: no gRPC compression, IPC zstd.
+                // Default: IPC zstd, no gRPC compression.
                 CompressionCase {
-                    grpc: ArrowGrpcCompression::None,
-                    ipc: None,
+                    compression: None,
                     expected_grpc_encoding: None,
                     expected_ipc_zstd_batches: 2,
                 },
-                // gRPC zstd turns IPC compression off.
+                // gRPC zstd sends buffers without IPC compression.
                 CompressionCase {
-                    grpc: ArrowGrpcCompression::Zstd,
-                    ipc: None,
-                    expected_grpc_encoding: Some("zstd"),
-                    expected_ipc_zstd_batches: 0,
-                },
-                // gRPC zstd ignores an explicit IPC choice, so payloads are never
-                // compressed twice.
-                CompressionCase {
-                    grpc: ArrowGrpcCompression::Zstd,
-                    ipc: Some(Some(arrow_ipc::CompressionType::ZSTD)),
+                    compression: Some(ArrowCompression::GrpcZstd),
                     expected_grpc_encoding: Some("zstd"),
                     expected_ipc_zstd_batches: 0,
                 },
@@ -5774,10 +5764,9 @@ mod arrow_flight_tests {
                     .stream_builder()
                     .table(TABLE_NAME)
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
-                    .arrow(schema.clone())
-                    .grpc_compression(case.grpc);
-                if let Some(ipc) = case.ipc {
-                    builder = builder.ipc_compression(ipc);
+                    .arrow(schema.clone());
+                if let Some(compression) = case.compression {
+                    builder = builder.with_compression(compression);
                 }
                 let stream = builder.build_arrow().await?;
 
@@ -5818,7 +5807,7 @@ mod arrow_flight_tests {
         #[tokio::test]
         async fn test_grpc_compression_rejected_by_server_without_zstd(
         ) -> Result<(), Box<dyn std::error::Error>> {
-            use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
+            use databricks_zerobus_ingest_sdk::ArrowCompression;
 
             setup_tracing();
             info!("Starting test_grpc_compression_rejected_by_server_without_zstd");
@@ -5845,7 +5834,7 @@ mod arrow_flight_tests {
                     .recovery(true)
                     .recovery_retries(5)
                     .recovery_backoff_ms(recovery_backoff.as_millis() as u64)
-                    .grpc_compression(ArrowGrpcCompression::Zstd)
+                    .with_compression(ArrowCompression::GrpcZstd)
                     .build_arrow(),
             )
             .await

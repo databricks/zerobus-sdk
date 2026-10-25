@@ -543,10 +543,11 @@ fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
 
 #[cfg(feature = "arrow-flight")]
 #[test]
-fn grpc_compression_defaults_off_and_keeps_ipc_default() {
+#[allow(deprecated)]
+fn compression_defaults_to_deprecated_ipc_zstd() {
     let sdk = test_sdk();
     let config = arrow_test_builder(&sdk).arrow_config;
-    assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::None);
+    assert_eq!(config.compression, None);
     assert_eq!(
         config.ipc_compression,
         Some(arrow_ipc::CompressionType::ZSTD)
@@ -555,25 +556,27 @@ fn grpc_compression_defaults_off_and_keeps_ipc_default() {
 
 #[cfg(feature = "arrow-flight")]
 #[test]
-fn grpc_compression_setter_applies_in_either_order() {
+#[allow(deprecated)]
+fn last_compression_setter_wins() {
     let sdk = test_sdk();
-    // The builder records both settings as given; the stream ignores ipc_compression when
-    // gRPC compression is on (see stream_ipc_write_options).
-    let grpc_first = arrow_test_builder(&sdk)
-        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
+    let new_last = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .with_compression(crate::ArrowCompression::GrpcZstd)
+        .arrow_config;
+    assert_eq!(
+        new_last.compression,
+        Some(crate::ArrowCompression::GrpcZstd)
+    );
+
+    let deprecated_last = arrow_test_builder(&sdk)
+        .with_compression(crate::ArrowCompression::GrpcZstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .arrow_config;
-    let grpc_last = arrow_test_builder(&sdk)
-        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .grpc_compression(crate::ArrowGrpcCompression::Zstd)
-        .arrow_config;
-    for config in [grpc_first, grpc_last] {
-        assert_eq!(config.grpc_compression, crate::ArrowGrpcCompression::Zstd);
-        assert_eq!(
-            config.ipc_compression,
-            Some(arrow_ipc::CompressionType::LZ4_FRAME)
-        );
-    }
+    assert_eq!(deprecated_last.compression, None);
+    assert_eq!(
+        deprecated_last.ipc_compression,
+        Some(arrow_ipc::CompressionType::LZ4_FRAME)
+    );
 }
 
 #[cfg(feature = "arrow-flight")]

@@ -107,8 +107,8 @@ pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
 #[cfg(feature = "arrow-flight")]
 pub use stream::{
-    ArrowGrpcCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field,
-    RecordBatch, TimeUnit, ZerobusArrowStream,
+    ArrowCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch,
+    TimeUnit, ZerobusArrowStream,
 };
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]

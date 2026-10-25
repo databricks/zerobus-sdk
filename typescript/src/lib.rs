@@ -1210,7 +1210,7 @@ use arrow_ipc::writer::StreamWriter;
 use bytes::Bytes;
 #[cfg(feature = "arrow-flight")]
 use databricks_zerobus_ingest_sdk::{
-    ArrowSchema as RustArrowSchema, DataType as RustDataType, Field as RustField,
+    ArrowCompression, ArrowSchema as RustArrowSchema, DataType as RustDataType, Field as RustField,
     RecordBatch as RustRecordBatch, ZerobusArrowStream as RustZerobusArrowStream,
 };
 
@@ -1273,11 +1273,11 @@ pub struct ArrowStreamConfigurationOptions {
 // below.
 
 #[cfg(feature = "arrow-flight")]
-fn map_ipc_compression(value: Option<i32>) -> Option<arrow_ipc::CompressionType> {
+fn map_ipc_compression(value: Option<i32>) -> ArrowCompression {
     match value {
-        Some(0) => Some(arrow_ipc::CompressionType::LZ4_FRAME),
-        Some(1) => Some(arrow_ipc::CompressionType::ZSTD),
-        _ => None,
+        Some(0) => ArrowCompression::IpcLz4,
+        Some(1) => ArrowCompression::IpcZstd,
+        _ => ArrowCompression::None,
     }
 }
 
@@ -1721,7 +1721,7 @@ impl ZerobusSdk {
                 if let Some(v) = opts.connection_timeout_ms {
                     builder = builder.connection_timeout_ms(v as u64);
                 }
-                builder = builder.ipc_compression(ipc_compression);
+                builder = builder.with_compression(ipc_compression);
 
                 let stream = builder.build_arrow().await.map_err(|e| {
                     napi::Error::from_reason(format!("Failed to create arrow stream: {}", e))

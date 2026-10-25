@@ -184,10 +184,8 @@ async fn standalone_capacity_wait_rejects_when_close_starts() {
 async fn grpc_compression_applies_to_every_lane_without_ipc_compression() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();
     let sdk = sdk(endpoint);
-    // IPC zstd is set explicitly to show that gRPC compression overrides it on mux lanes too.
     let mut mux = builder(&sdk)
-        .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
-        .grpc_compression(databricks_zerobus_ingest_sdk::ArrowGrpcCompression::Zstd)
+        .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::GrpcZstd)
         .multiplexed(2)
         .build_arrow()
         .await

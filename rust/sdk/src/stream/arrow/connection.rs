@@ -28,8 +28,8 @@ use super::batch::stream_ipc_write_options;
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::stats_size::frame_stats;
 use super::{
-    configured_deadline, ArrowGrpcCompression, ArrowStreamConfigurationOptions,
-    ArrowTableProperties, BatchItem, FlightConnectionParameters, ZerobusArrowStream,
+    configured_deadline, ArrowCompression, ArrowStreamConfigurationOptions, ArrowTableProperties,
+    BatchItem, FlightConnectionParameters, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -425,11 +425,11 @@ impl ZerobusArrowStream {
             None => configured_endpoint.connect_lazy(),
         };
 
-        let inner = match options.grpc_compression {
-            ArrowGrpcCompression::None => FlightServiceClient::new(channel),
-            ArrowGrpcCompression::Zstd => {
-                FlightServiceClient::new(channel).send_compressed(CompressionEncoding::Zstd)
-            }
+        let inner = FlightServiceClient::new(channel);
+        let inner = if options.compression == Some(ArrowCompression::GrpcZstd) {
+            inner.send_compressed(CompressionEncoding::Zstd)
+        } else {
+            inner
         };
         let mut client = FlightClient::new_from_inner(inner);
 
@@ -889,7 +889,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions {
-                ipc_compression: None,
+                compression: Some(super::super::ArrowCompression::None),
                 ..ArrowStreamConfigurationOptions::default()
             },
             Some(exporter as Arc<dyn StatsExporter>),
@@ -1256,9 +1256,9 @@ mod tests {
     async fn make_request_stream_reports_split_batch_only_after_final_frame() {
         use arrow_array::Int32Array;
         use arrow_flight::encode::FlightDataEncoderBuilder;
-        use arrow_ipc::CompressionType;
         use arrow_schema::{DataType, Field};
 
+        use super::super::ArrowCompression;
         use crate::stats::{channel_exporter, StreamStat};
 
         const ROWS: usize = 1_100_000;
@@ -1280,19 +1280,19 @@ mod tests {
         .unwrap();
 
         for compression in [
-            None,
-            Some(CompressionType::LZ4_FRAME),
-            Some(CompressionType::ZSTD),
+            ArrowCompression::None,
+            ArrowCompression::IpcLz4,
+            ArrowCompression::IpcZstd,
         ] {
             let options = ArrowStreamConfigurationOptions {
-                ipc_compression: compression,
+                compression: Some(compression),
                 ..ArrowStreamConfigurationOptions::default()
             };
             // Establish the number of frames independently of telemetry. The real
             // request body below stops without polling past that final frame.
             let frame_count = FlightDataEncoderBuilder::new()
                 .with_schema(schema.clone())
-                .with_options(super::super::batch::make_ipc_write_options(compression).unwrap())
+                .with_options(super::super::batch::stream_ipc_write_options(&options).unwrap())
                 .build(futures::stream::iter([Ok(batch.clone())]))
                 .map(|frame| frame.unwrap())
                 .count()

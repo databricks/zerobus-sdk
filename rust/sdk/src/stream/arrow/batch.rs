@@ -14,7 +14,7 @@ use tokio::time::{Duration, Instant};
 use tracing::debug;
 
 use super::{
-    configured_deadline, ArrowGrpcCompression, ArrowStreamConfigurationOptions, OutboundBatch,
+    configured_deadline, ArrowCompression, ArrowStreamConfigurationOptions, OutboundBatch,
     RecordBatch,
 };
 use crate::errors::ZerobusError;
@@ -289,17 +289,21 @@ fn compact_ipc_write_options(
 
 /// Builds the [`IpcWriteOptions`] a stream encodes its batches with.
 ///
-/// With gRPC compression on, each whole message is compressed, so `ipc_compression` is
-/// ignored: compressing buffers twice costs CPU without reducing size. Those buffers also
-/// use [`COMPRESSED_IPC_ALIGNMENT`], because wider padding only adds bytes for the server
-/// to decompress.
+/// With gRPC compression, each whole message is compressed, so buffers are left raw:
+/// compressing them twice costs CPU without reducing size. They still use
+/// [`COMPRESSED_IPC_ALIGNMENT`], because wider padding only adds bytes for the server to
+/// decompress.
 #[allow(clippy::result_large_err)]
 pub(super) fn stream_ipc_write_options(
     options: &ArrowStreamConfigurationOptions,
 ) -> ZerobusResult<IpcWriteOptions> {
-    match options.grpc_compression {
-        ArrowGrpcCompression::None => make_ipc_write_options(options.ipc_compression),
-        ArrowGrpcCompression::Zstd => compact_ipc_write_options(None),
+    match options.compression {
+        #[allow(deprecated)]
+        None => make_ipc_write_options(options.ipc_compression),
+        Some(ArrowCompression::None) => make_ipc_write_options(None),
+        Some(ArrowCompression::IpcZstd) => make_ipc_write_options(Some(CompressionType::ZSTD)),
+        Some(ArrowCompression::IpcLz4) => make_ipc_write_options(Some(CompressionType::LZ4_FRAME)),
+        Some(ArrowCompression::GrpcZstd) => compact_ipc_write_options(None),
     }
 }
 
@@ -319,7 +323,7 @@ mod tests {
 
     use super::{
         make_ipc_write_options, oldest_pending_ack_deadline, rebuild_pending_for_replay,
-        refresh_pending_ack_deadlines, stream_ipc_write_options, ArrowGrpcCompression,
+        refresh_pending_ack_deadlines, stream_ipc_write_options, ArrowCompression,
         ArrowStreamConfigurationOptions, PendingBatch, RecordBatch,
     };
 
@@ -427,10 +431,10 @@ mod tests {
     }
 
     /// Encodes a small batch with a stream's IPC options and returns the record-batch
-    /// message's buffer offsets and whether it carries IPC compression.
+    /// message's buffer offsets and its IPC compression codec, if any.
     async fn encode_with_stream_options(
         options: &ArrowStreamConfigurationOptions,
-    ) -> (Vec<i64>, bool) {
+    ) -> (Vec<i64>, Option<CompressionType>) {
         let batch =
             RecordBatch::try_from_iter([("a", Arc::new(Int32Array::from(vec![1, 2, 3])) as _)])
                 .unwrap();
@@ -448,39 +452,77 @@ mod tests {
             .iter()
             .map(|b| b.offset())
             .collect();
-        (offsets, record_batch.compression().is_some())
+        (offsets, record_batch.compression().map(|c| c.codec()))
     }
 
     #[tokio::test]
-    async fn grpc_compression_overrides_ipc_compression_with_8_byte_alignment() {
-        for ipc_compression in [
-            None,
-            Some(CompressionType::ZSTD),
-            Some(CompressionType::LZ4_FRAME),
-        ] {
-            let options = ArrowStreamConfigurationOptions {
-                ipc_compression,
-                grpc_compression: ArrowGrpcCompression::Zstd,
-                ..Default::default()
-            };
-            let (offsets, ipc_compressed) = encode_with_stream_options(&options).await;
-            assert!(!ipc_compressed, "{ipc_compression:?} must be ignored");
-            assert!(offsets.iter().all(|o| o % 8 == 0));
-            assert!(offsets.iter().any(|o| o % 64 != 0));
+    #[allow(deprecated)]
+    async fn compression_overrides_deprecated_ipc_compression() {
+        let cases = [
+            (ArrowCompression::None, None),
+            (ArrowCompression::IpcZstd, Some(CompressionType::ZSTD)),
+            (ArrowCompression::IpcLz4, Some(CompressionType::LZ4_FRAME)),
+            (ArrowCompression::GrpcZstd, None),
+        ];
+        for (compression, expected_codec) in cases {
+            for ipc_compression in [
+                None,
+                Some(CompressionType::ZSTD),
+                Some(CompressionType::LZ4_FRAME),
+            ] {
+                let options = ArrowStreamConfigurationOptions {
+                    ipc_compression,
+                    compression: Some(compression),
+                    ..Default::default()
+                };
+                let (_, codec) = encode_with_stream_options(&options).await;
+                assert_eq!(
+                    codec, expected_codec,
+                    "{compression:?}, {ipc_compression:?}"
+                );
+            }
         }
     }
 
     #[tokio::test]
-    async fn without_grpc_compression_ipc_options_are_unchanged() {
-        let compressed = ArrowStreamConfigurationOptions::default();
-        assert!(encode_with_stream_options(&compressed).await.1);
+    async fn compressed_and_grpc_zstd_payloads_use_8_byte_alignment() {
+        for compression in [
+            ArrowCompression::IpcZstd,
+            ArrowCompression::IpcLz4,
+            ArrowCompression::GrpcZstd,
+        ] {
+            let options = ArrowStreamConfigurationOptions {
+                compression: Some(compression),
+                ..Default::default()
+            };
+            let (offsets, _) = encode_with_stream_options(&options).await;
+            assert!(offsets.iter().all(|o| o % 8 == 0), "{compression:?}");
+            assert!(offsets.iter().any(|o| o % 64 != 0), "{compression:?}");
+        }
+
+        let uncompressed = ArrowStreamConfigurationOptions {
+            compression: Some(ArrowCompression::None),
+            ..Default::default()
+        };
+        let (offsets, _) = encode_with_stream_options(&uncompressed).await;
+        assert!(offsets.iter().all(|o| o % 64 == 0));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn without_compression_deprecated_ipc_compression_applies() {
+        let default = ArrowStreamConfigurationOptions::default();
+        assert_eq!(
+            encode_with_stream_options(&default).await.1,
+            Some(CompressionType::ZSTD)
+        );
 
         let uncompressed = ArrowStreamConfigurationOptions {
             ipc_compression: None,
             ..Default::default()
         };
-        let (offsets, ipc_compressed) = encode_with_stream_options(&uncompressed).await;
-        assert!(!ipc_compressed);
+        let (offsets, codec) = encode_with_stream_options(&uncompressed).await;
+        assert_eq!(codec, None);
         assert!(offsets.iter().all(|o| o % 64 == 0));
     }
 }

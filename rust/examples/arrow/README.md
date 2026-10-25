@@ -127,51 +127,38 @@ rows were acknowledged, otherwise only the unacknowledged suffix. Earlier partia
 transmissions have no event, so the first observed event can have `attempt > 0`.
 See the [SDK telemetry docs](../../README.md#telemetry-beta) for aggregation limits.
 
-## IPC compression
+## Compression
 
-Arrow streams compress IPC payloads with `ZSTD` by default, which reduces bytes on the wire at the cost of CPU on the client. Use `ipc_compression` on the stream builder to choose a different codec or turn compression off.
-
-The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` sets the codec explicitly on the stream builder:
+Arrow streams compress each IPC buffer with zstd by default, which reduces bytes on the wire at the cost of client CPU. Use `with_compression` on the stream builder to choose another option. The example's `main.rs` sets the default explicitly:
 
 ```rust
-use arrow_ipc::CompressionType;
+use databricks_zerobus_ingest_sdk::ArrowCompression;
 
 let stream = sdk
     .stream_builder()
     .table(TABLE_NAME)
     .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
     .arrow(schema)
-    .ipc_compression(Some(CompressionType::ZSTD))  // default; or LZ4_FRAME, or None
+    .with_compression(ArrowCompression::IpcZstd)  // default
     .build_arrow()
     .await?;
 ```
 
-- `ZSTD` (default) — higher compression ratio, more CPU per batch.
-- `LZ4_FRAME` — fast, low CPU overhead, modest compression ratio.
+- `IpcZstd` (default): compresses each Arrow buffer with zstd. Higher compression ratio, more CPU per batch.
+- `IpcLz4`: compresses each Arrow buffer with LZ4. Fast, low CPU overhead, modest compression ratio.
+- `GrpcZstd`: compresses each whole gRPC request message with zstd (see below).
+- `None`: no compression. This can help when client CPU, rather than network bandwidth, limits throughput.
 
-To disable compression, pass `.ipc_compression(None)`. This can help when client CPU, rather than network bandwidth, limits throughput.
+`with_compression` replaces the deprecated `ipc_compression` setter.
 
-## gRPC compression
+### gRPC compression
 
-IPC compression compresses each Arrow buffer separately and leaves the IPC message header and alignment padding uncompressed. For wide or sparse schemas, with hundreds of columns or many mostly-null columns, those can make up most of each message. `grpc_compression` instead compresses each whole gRPC request message with zstd, which usually sends noticeably fewer bytes for such schemas. It costs more CPU, mostly to decompress on the server.
+IPC compression compresses each Arrow buffer separately and leaves the IPC message header and alignment padding uncompressed. For wide or sparse schemas, with hundreds of columns or many mostly-null columns, those can make up most of each message. `GrpcZstd` instead compresses each whole gRPC request message, which usually sends noticeably fewer bytes for such schemas. It costs more CPU, mostly to decompress on the server.
 
-```rust
-use databricks_zerobus_ingest_sdk::ArrowGrpcCompression;
-
-let stream = sdk
-    .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
-    .arrow(schema)
-    .grpc_compression(ArrowGrpcCompression::Zstd)
-    .build_arrow()
-    .await?;
-```
-
-- When it is enabled, `ipc_compression` is ignored: buffers are sent uncompressed with 8-byte alignment, because compressing already-compressed buffers again costs CPU without reducing size.
-- The Zerobus endpoint must accept zstd on Arrow Flight; otherwise `build_arrow()` fails with a non-retryable `Unimplemented` error. Reconnects fail the same way, so if a server stops accepting zstd (for example after a rollback), disable `grpc_compression` on clients first or their streams close.
-- The server's message size limit applies to the uncompressed message. Batches are split into small messages before sending, but a single row too large for the limit is rejected even if IPC compression would have made it fit.
-- Telemetry's `approximate_wire_bytes` is measured before gRPC compression, so it overstates the bytes sent when this is enabled.
+- Buffers are sent without IPC compression, with 8-byte alignment, because compressing already-compressed buffers again costs CPU without reducing size.
+- The Zerobus endpoint must accept zstd on Arrow Flight; otherwise `build_arrow()` fails with a non-retryable `Unimplemented` error. Reconnects fail the same way, so if a server stops accepting zstd (for example after a rollback), switch clients to another option first or their streams close.
+- The server's message size limit applies to the uncompressed message. Batches are split into messages of about 2 MiB by row count, so this rarely matters, but a message with very large rows is rejected even if IPC compression would have made it fit.
+- Telemetry's `approximate_wire_bytes` is measured before gRPC compression, so it overstates the bytes sent.
 - Measure on your own data: for narrow, dense schemas, IPC compression may already be close.
 
 ## Adapting for Your Custom Table
