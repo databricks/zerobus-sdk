@@ -37,6 +37,9 @@ use crate::stats::{BatchStats, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
+/// Target size of one Flight data message. arrow-flight's default is 2 MiB.
+const MAX_FLIGHT_DATA_SIZE: usize = 8 * 1024 * 1024;
+
 /// The batch currently being encoded: its offset and row count plus uncompressed
 /// buffer bytes and wire bytes accumulated across its FlightData frames.
 /// Held in a single slot (not a per-offset map)
@@ -505,6 +508,7 @@ impl ZerobusArrowStream {
             FlightDataEncoderBuilder::new()
                 .with_schema(schema)
                 .with_options(ipc_write_options)
+                .with_max_flight_data_size(MAX_FLIGHT_DATA_SIZE)
                 .build(batch_stream)
                 .enumerate()
                 .map(move |(idx, result)| {
@@ -1080,7 +1084,7 @@ mod tests {
 
         // Large enough to split into multiple FlightData frames. A transmission
         // must advance the counter once, regardless of how many frames it uses.
-        const ROWS: usize = 1_100_000;
+        const ROWS: usize = 4_400_000;
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
@@ -1248,7 +1252,7 @@ mod tests {
 
         use crate::stats::{channel_exporter, StreamStat};
 
-        const ROWS: usize = 1_100_000;
+        const ROWS: usize = 4_400_000;
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
@@ -1280,6 +1284,7 @@ mod tests {
             let frame_count = FlightDataEncoderBuilder::new()
                 .with_schema(schema.clone())
                 .with_options(super::make_ipc_write_options(compression).unwrap())
+                .with_max_flight_data_size(super::MAX_FLIGHT_DATA_SIZE)
                 .build(futures::stream::iter([Ok(batch.clone())]))
                 .map(|frame| frame.unwrap())
                 .count()
