@@ -105,7 +105,7 @@ renumbered from zero when pending work is rebuilt for replay.
 
 ### Physical Flight offsets
 
-`FlightDataEncoder` may split a large input batch into multiple physical
+The request stream may split a large input batch into multiple physical
 `FlightData` record-batch messages. Each physical message receives a sequential,
 connection-local wire offset in `FlightBatchMetadata`.
 

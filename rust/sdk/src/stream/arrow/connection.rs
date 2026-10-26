@@ -9,9 +9,12 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
-use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_array::cast::AsArray;
+use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, UnionArray};
+use arrow_flight::encode::{FlightDataEncoderBuilder, GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES};
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult};
+use arrow_schema::{ArrowError, DataType, SchemaRef, UnionMode};
 use futures::{stream::poll_fn, Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{timeout, timeout_at, Duration, Instant};
@@ -121,6 +124,79 @@ fn record_sent_frame(
         event
     };
     crate::stats::dispatch(exporter, event);
+}
+
+/// Splits a batch into row slices of about `max_flight_data_size` bytes each.
+///
+/// This is arrow-flight's `split_batch_for_grpc_response`, except that it counts the bytes
+/// that each column slice uses. Upstream arrow-flight counts buffer capacity, which is too
+/// large for batches decoded from IPC, sliced batches and builder output, so it splits them
+/// into many small messages (arrow-rs#9388). The vendored copy has the same fix, but the
+/// crates.io package of this crate depends on upstream arrow-flight.
+fn split_batch(batch: RecordBatch, max_flight_data_size: usize) -> Vec<RecordBatch> {
+    let size = batch
+        .columns()
+        .iter()
+        .map(|col| {
+            col.to_data()
+                .get_slice_memory_size()
+                .unwrap_or_else(|_| col.get_buffer_memory_size())
+        })
+        .sum::<usize>();
+
+    let n_batches =
+        (size / max_flight_data_size + usize::from(size % max_flight_data_size != 0)).max(1);
+    let num_rows = batch.num_rows();
+    let rows_per_batch = (num_rows / n_batches).max(1);
+    let mut offset = 0;
+    let mut batches = Vec::with_capacity(n_batches);
+
+    while offset < num_rows {
+        let length = rows_per_batch.min(num_rows - offset);
+        batches.push(batch.slice(offset, length));
+        offset += length;
+    }
+
+    batches
+}
+
+/// Expands dictionary columns to the value types in `schema`, the schema that the Flight
+/// encoder sends. Then [`split_batch`] measures the expanded data, and the encoder's own
+/// expansion finds the types already expanded and copies nothing.
+///
+/// This is arrow-flight's `hydrate_dictionaries`, which is private.
+fn hydrate_dictionaries(
+    batch: &RecordBatch,
+    schema: &SchemaRef,
+) -> Result<RecordBatch, ArrowError> {
+    let columns = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .map(|(field, column)| hydrate_dictionary(column, field.data_type()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    RecordBatch::try_new_with_options(Arc::clone(schema), columns, &options)
+}
+
+/// `cast` cannot convert unions, so the children of a sparse union are expanded one by one.
+fn hydrate_dictionary(array: &ArrayRef, data_type: &DataType) -> Result<ArrayRef, ArrowError> {
+    match (array.data_type(), data_type) {
+        (DataType::Union(_, UnionMode::Sparse), DataType::Union(fields, UnionMode::Sparse)) => {
+            let union = array.as_union();
+            let children = fields
+                .iter()
+                .map(|(type_id, field)| arrow_cast::cast(union.child(type_id), field.data_type()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Arc::new(UnionArray::try_new(
+                fields.clone(),
+                union.type_ids().clone(),
+                None,
+                children,
+            )?))
+        }
+        _ => arrow_cast::cast(array, data_type),
+    }
 }
 
 pub(super) type FlightResponseStream =
@@ -481,11 +557,17 @@ impl ZerobusArrowStream {
     ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
         let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
         let schema = Arc::clone(&table_properties.schema);
+        // The schema that the encoder sends, with dictionary fields expanded.
+        let hydrated_schema = FlightDataEncoderBuilder::new()
+            .with_schema(Arc::clone(&schema))
+            .build(futures::stream::empty::<Result<RecordBatch, FlightError>>())
+            .known_schema()
+            .expect("with_schema makes the encoder schema known");
         let pending: Arc<StdMutex<Option<EncodeInProgress>>> = Arc::new(StdMutex::new(None));
 
         let pending_in = stats_exporter.as_ref().map(|_| Arc::clone(&pending));
-        let batch_stream =
-            tokio_stream::wrappers::ReceiverStream::new(batch_rx).map(move |result| {
+        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx)
+            .map(move |result| {
                 let outbound = result?;
                 if let (Some(pending), Some(send_attempts)) = (&pending_in, outbound.send_attempts)
                 {
@@ -496,6 +578,19 @@ impl ZerobusArrowStream {
                     ));
                 }
                 Ok(outbound.batch)
+            })
+            .flat_map(move |result| {
+                let hydrated = result.and_then(|batch| {
+                    hydrate_dictionaries(&batch, &hydrated_schema).map_err(FlightError::from)
+                });
+                let batches: Vec<Result<RecordBatch, FlightError>> = match hydrated {
+                    Ok(batch) => split_batch(batch, GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES)
+                        .into_iter()
+                        .map(Ok)
+                        .collect(),
+                    Err(e) => vec![Err(e)],
+                };
+                futures::stream::iter(batches)
             });
         let offset_counter = Arc::new(AtomicI64::new(0));
         let offset_counter_clone = Arc::clone(&offset_counter);
@@ -505,6 +600,8 @@ impl ZerobusArrowStream {
             FlightDataEncoderBuilder::new()
                 .with_schema(schema)
                 .with_options(ipc_write_options)
+                // `batch_stream` already split the batches; see `split_batch`.
+                .with_max_flight_data_size(usize::MAX)
                 .build(batch_stream)
                 .enumerate()
                 .map(move |(idx, result)| {
@@ -1364,6 +1461,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Sends one batch through the request body and returns its number of data frames.
+    async fn data_frame_count(batch: super::super::RecordBatch) -> usize {
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: batch.schema(),
+        };
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(1);
+        let (request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            None,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 0,
+                send_attempts: None,
+                batch,
+            }))
+            .await
+            .unwrap();
+        drop(batch_tx);
+        // The first frame is the schema.
+        request_body.map(|frame| frame.unwrap()).count().await - 1
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_does_not_split_ipc_decoded_batch() {
+        use arrow_array::{ArrayRef, Int64Array};
+        use arrow_ipc::writer::StreamWriter;
+
+        // 256 KB of values. Each decoded column buffer reports the whole IPC body as its
+        // capacity, so the capacities add up to more than 8 MB.
+        let columns = (0..32).map(|i| {
+            let column: ArrayRef = Arc::new(Int64Array::from_iter_values(0..1000));
+            (i.to_string(), column)
+        });
+        let batch = super::super::RecordBatch::try_from_iter(columns).unwrap();
+        let mut writer = StreamWriter::try_new(Vec::new(), &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        let ipc = bytes::Bytes::from(writer.into_inner().unwrap());
+        let decoded = super::super::batch::materialize_ipc(&ipc).unwrap();
+
+        assert_eq!(data_frame_count(decoded).await, 1);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_does_not_split_batch_with_spare_capacity() {
+        use arrow_array::builder::Int64Builder;
+        use arrow_array::ArrayRef;
+
+        // 8 KB of values in an 8 MB buffer.
+        let mut builder = Int64Builder::with_capacity(1 << 20);
+        builder.append_slice(&[0; 1000]);
+        let column: ArrayRef = Arc::new(builder.finish());
+        let batch = super::super::RecordBatch::try_from_iter([("id", column)]).unwrap();
+
+        assert_eq!(data_frame_count(batch).await, 1);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_splits_dictionary_by_expanded_size() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::{ArrayRef, DictionaryArray, Int32Array, StringArray};
+
+        // One 1 KiB value in 6000 rows expands to about 6 MB: 3 frames of 2000 rows.
+        let values = StringArray::from(vec!["x".repeat(1024)]);
+        let keys = Int32Array::from(vec![0; 6000]);
+        let column: ArrayRef =
+            Arc::new(DictionaryArray::<Int32Type>::try_new(keys, Arc::new(values)).unwrap());
+        let batch = super::super::RecordBatch::try_from_iter([("d", column)]).unwrap();
+
+        assert_eq!(data_frame_count(batch).await, 3);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_encodes_sparse_union_with_dictionary() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::{ArrayRef, DictionaryArray, Int32Array, UnionArray};
+        use arrow_schema::{DataType, Field, UnionFields};
+
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let fields = UnionFields::from_fields([
+            Field::new("i", DataType::Int32, true),
+            Field::new("s", dictionary_type, true),
+        ]);
+        let strings: DictionaryArray<Int32Type> = ["a", "b"].into_iter().collect();
+        let children: Vec<ArrayRef> =
+            vec![Arc::new(Int32Array::from(vec![1, 2])), Arc::new(strings)];
+        let column: ArrayRef =
+            Arc::new(UnionArray::try_new(fields, vec![0, 1].into(), None, children).unwrap());
+        let batch = super::super::RecordBatch::try_from_iter([("u", column)]).unwrap();
+
+        assert_eq!(data_frame_count(batch).await, 1);
     }
 
     #[tokio::test]

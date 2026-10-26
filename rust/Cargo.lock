@@ -909,6 +909,7 @@ version = "2.12.0"
 dependencies = [
  "apache-avro",
  "arrow-array",
+ "arrow-cast",
  "arrow-flight",
  "arrow-ipc",
  "arrow-schema",

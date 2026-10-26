@@ -17,6 +17,15 @@
 
 ### Bug Fixes
 
+- Fixed Arrow Flight streams over-splitting batches in the crates.io release.
+  The fix from [#385](https://github.com/databricks/zerobus-sdk/pull/385) is in
+  the vendored `arrow-flight`, which only builds from this repository use:
+  `cargo publish` replaces it with the crates.io `arrow-flight`, which sizes a
+  batch by buffer capacity. The SDK now splits batches itself, by the bytes
+  that each column slice uses. Before, crates.io users sent batches decoded
+  from IPC, sliced batches, and batches with spare capacity as many small
+  messages.
+
 ### Documentation
 
 - Documented persistent streams (behind the `eos` feature) in the Rust README,
