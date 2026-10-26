@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from zerobus_test_runner.capability import CAPABILITIES, admits, valid_tuples
-from zerobus_test_runner.data.golden import GOLDEN_FORMATS, expected_bytes
+from zerobus_test_runner.data.golden import GOLDEN_FORMATS, check_golden_present, read_golden
 from zerobus_test_runner.data.schemas import load_schema, supported_formats
 from zerobus_test_runner.errors import InfraError
 
@@ -106,7 +106,7 @@ class RecordRef(_Ref):
 
 @dataclass(frozen=True, eq=False)
 class GoldenRef:
-    """Expected bytes, produced by the independent encoder in ``data.golden``."""
+    """Expected bytes: the committed, frozen golden .bin read via ``data.golden.read_golden``."""
 
     schema: str
     record: dict
@@ -433,9 +433,9 @@ def validate(sc: Scenario) -> list[str]:
                     bad_ref(eq, StreamRef, idx, "expected stream")
                 elif isinstance(eq, GoldenRef):
                     try:
-                        expected_bytes(load_schema(eq.schema), eq.record, eq.fmt)
+                        check_golden_present(eq.schema, eq.record, eq.fmt)
                     except Exception as e:  # report every bad golden, don't crash the load
-                        problems.append(f"step {idx}: golden({eq.schema!r}, {eq.fmt!r}) cannot be encoded: {e}")
+                        problems.append(f"step {idx}: golden({eq.schema!r}, {eq.fmt!r}) unavailable: {e}")
 
     if n_create == 0:
         problems.append("scenario never calls s.sdk.create_stream")
@@ -576,7 +576,7 @@ class Executor:
 
     def _resolve_expected(self, v: Any) -> Any:
         if isinstance(v, GoldenRef):
-            return expected_bytes(load_schema(v.schema), v.record, v.fmt)
+            return read_golden(v.schema, v.record, v.fmt)
         return self._resolve(v)
 
     def _stream(self, ref: StreamRef) -> str:

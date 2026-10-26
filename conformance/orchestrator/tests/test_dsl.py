@@ -97,7 +97,7 @@ def test_validator_catches_use_before_define_and_closed_ingest():
 
     assert any("no s.expect" in p for p in validate(_make(no_expect)))
 
-def test_validator_flags_dead_gate_and_unencodable_golden():
+def test_validator_flags_dead_gate_and_missing_golden():
     def dead(s):  # arrow is valid only on arrow_flight, so (grpc, arrow) can never run
         st = s.sdk.create_stream(schema="simple_record")
         s.expect(s.mock.call_count(), equals=0)
@@ -110,11 +110,11 @@ def test_validator_flags_dead_gate_and_unencodable_golden():
     def bad_golden(s):
         st = s.sdk.create_stream(schema="simple_record")
         s.sdk.flush(st)
-        # missing required field 'message' cannot be avro-encoded
+        # no committed golden exists for this record (only {"id":1,"message":"hello"} is frozen)
         s.expect(s.mock.call_count(), equals=golden("simple_record", {"id": 1}, "avro"))
 
     probs = validate(_make(bad_golden))
-    assert any("cannot be encoded" in p for p in probs), probs
+    assert any("unavailable" in p and "regen_goldens.py" in p for p in probs), probs
 
 def test_offset_ref_to_ingested_record_is_valid():
     def ok_then_bad(s):

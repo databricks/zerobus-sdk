@@ -219,12 +219,13 @@ artifact, both roles.
 - **Assertion = byte-exact against a committed golden.** All five tested SDKs encode through
   the *same Rust core* (Go=cgo, TS=NAPI, Python=PyO3, Java=JNI, Rust=native), so they emit
   identical bytes by construction — byte-exact can't produce spurious cross-SDK diffs.
-- **Expected bytes come from an independent encoder, not the SDK under test.** *First slice:*
-  the orchestrator derives them at runtime from the logical dict via independent Python
-  encoders (`protobuf`/`fastavro`) in `data/`. *Hardening (deferred):* generate once,
-  validate, and **freeze** as committed `conformance/schemas/<name>/golden/<record-id>.<format>.bin`
-  (DAT-style). Either way a mismatch is the signal you want: someone changed the encoding —
-  confirm it's intended, regenerate.
+- **Expected bytes come from an independent encoder, not the SDK under test.** The
+  independent Python encoders (`protobuf`/`fastavro`) in `data/` generate the bytes once. The
+  output is **frozen** as committed `conformance/schemas/<name>/golden/<fmt>/<sha1>.bin`, keyed by
+  the SHA-1 of the canonical record JSON, with `golden/MANIFEST.json` as the human-readable map.
+  `scripts/regen_goldens.py` regenerates them. The orchestrator only reads the committed files.
+  A mismatch is the signal you want: someone changed the encoding — confirm it's intended,
+  regenerate, and review the diff.
 - The **encoded-bytes scenarios are gated `format ∈ {proto, json, avro}`** — Arrow is excluded
   (its IPC alignment/compression make byte-exact version-sensitive), so no Arrow decision is
   needed here.
@@ -352,7 +353,7 @@ confidence. This applies to **any** dependency, any language (not just `arrow-fl
   to all members automatically). Either way the goal is one shared, authoritative pin.
 - **Fix (golden side): frozen committed golden bytes.** A committed `.bin` uses no live crate
   at test time, so the compare side is immune to dependency versions entirely (and it also
-  removes the python-avro fastavro-vs-fastavro circularity). See §6.3.
+  removes the python-avro fastavro-vs-fastavro circularity). See §6.3. Implemented.
 - **Automatic by default; explicit loud override; not a routine dimension.** Forgetting to use
   the patched copy yields a silently-green run against code we don't ship — the same cardinal
   sin as a silent-pass gate — so the default must be automatic (reuse each ecosystem's patch

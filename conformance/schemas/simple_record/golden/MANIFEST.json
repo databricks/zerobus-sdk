@@ -1,0 +1,22 @@
+[
+  {
+    "file": "avro/a40e61747c824c1f9a5420cf356249f7e525a9e4.bin",
+    "format": "avro",
+    "record": {
+      "id": 1,
+      "message": "hello"
+    },
+    "bytes": 7,
+    "hex": "02 0a 68 65 6c 6c 6f"
+  },
+  {
+    "file": "proto/a40e61747c824c1f9a5420cf356249f7e525a9e4.bin",
+    "format": "proto",
+    "record": {
+      "id": 1,
+      "message": "hello"
+    },
+    "bytes": 9,
+    "hex": "08 01 12 05 68 65 6c 6c 6f"
+  }
+]

@@ -12,13 +12,27 @@ conformance/schemas/<name>/
   schema.avsc             # authored: Avro record equivalent
   schema.arrow.json       # authored, only if a scenario needs Arrow (not yet present)
   build/<name>.desc       # generated, committed: serialized FileDescriptorSet
+  golden/<fmt>/<sha1>.bin # generated, committed: frozen expected wire bytes
+  golden/MANIFEST.json    # generated, committed: record, file and hex for each .bin
 ```
 
 The orchestrator loads a schema by name, reads `build/<name>.desc` for the
 `DescriptorProto` bytes it ships in `CreateStream`, and reads `schema.avsc` for Avro
-encoding. Golden bytes are not committed in this slice. They are computed at run time
-by the orchestrator's `data/` encoders (independent Python protobuf and fastavro) from
-the same logical record dict that is sent to the harness as `IngestRecord.record_json`.
+encoding. Golden bytes are frozen and committed. The orchestrator reads them and never
+encodes at assert time. They are generated once by
+`conformance/orchestrator/scripts/regen_goldens.py` (independent protobuf and fastavro
+encoders) and reviewed by a human before commit.
+
+Keying: `<sha1>` is the SHA-1 of the canonical JSON of the logical record (sorted keys,
+compact separators, UTF-8). `<fmt>` is the directory. `golden/MANIFEST.json` maps each
+file back to its record and shows its hex. To refresh after a schema or record change:
+
+```sh
+conformance/orchestrator/.venv/bin/python conformance/orchestrator/scripts/regen_goldens.py
+```
+
+Review the diff (the MANIFEST `hex` field is the quick check) and commit it. If a required
+`.bin` is missing, the scenario fails validation and names the file and this command.
 
 ## Schemas
 
@@ -47,6 +61,12 @@ Arrow-specific schema exists yet.
 
 JSON canonical conventions: int64 as a JSON number within 2^53 (a string beyond that),
 bytes as base64.
+
+## Regenerating goldens
+
+See "Layout" above. `regen_goldens.py` records every scenario, collects each `golden(...)`
+used in an expectation, writes the matching `.bin` files, and deletes `.bin` files that no
+scenario references any more.
 
 ## Regenerating descriptors
 
