@@ -54,6 +54,26 @@ def formats(*names: str) -> Gate:
     return Gate(formats=frozenset(names))
 
 
+def gate(*, formats=None, sdks=None, transports=None) -> Gate:
+    """Applicability gate over any dimension(s); unspecified dimensions are wildcards.
+
+    e.g. ``gate(formats=["arrow"], sdks=["rust", "python", "java"])``.
+    """
+    if formats is not None:
+        bad = [n for n in formats if n not in KNOWN_FORMATS]
+        if bad:
+            raise ScenarioError(f"unknown format(s) {bad}; known: {sorted(KNOWN_FORMATS)}")
+    if sdks is not None:
+        unknown = [s for s in sdks if s not in CAPABILITIES]
+        if unknown:
+            raise ScenarioError(f"unknown sdk(s) {unknown}; known: {sorted(CAPABILITIES)}")
+    return Gate(
+        formats=frozenset(formats) if formats is not None else None,
+        sdks=frozenset(sdks) if sdks is not None else None,
+        transports=frozenset(transports) if transports is not None else None,
+    )
+
+
 # --------------------------------------------------------------------------- refs
 
 
