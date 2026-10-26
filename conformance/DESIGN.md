@@ -327,3 +327,36 @@ conformance/
   L2 chaos generation) — the in-memory step list is already that IR; serialize only when
   needed.
 - Pinned released-version testing (local-only), CI wiring, Arrow byte-exact strategy.
+
+## 11. Dependency fidelity — test what ships (principle)
+
+The suite must exercise **exactly the implementation that ships**. When we vendor or patch a
+dependency, the patch *is* the behavior customers get — so the tests must use the patched
+copy, not the pristine upstream one. Testing against upstream when we ship a patch is false
+confidence. This applies to **any** dependency, any language (not just `arrow-flight`).
+
+- **SDK-under-test side — automatic.** Every harness is built from this checkout and uses the
+  SDK's own dependency resolution, so it already gets whatever the SDK vendors/patches. No
+  action needed; it is self-correcting.
+- **The gap is our *separate* build units** that resolve dependencies independently of the
+  SDK: the conformance Rust crates (`mock_server`, the rust harness) and the golden encoder.
+  Left alone these pull pristine copies from the public registry — the silent-wrong-copy trap.
+- **Fix (Rust): share the workspace's dependency resolution.** Make the conformance Rust
+  crates members of the Rust workspace and declare the shared deps as `{ workspace = true }`.
+  This repo pins vendored crates in `[workspace.dependencies]` (e.g. `arrow-flight = { path =
+  "third_party/arrow-flight", version = "60.0" }`), so a member that opts in with `.workspace =
+  true` gets the vendored/patched copy automatically — reusing the workspace's own pin list
+  (the authoritative record of *what we patched*), not a brittle scan of `third_party/`. Note:
+  workspace *membership alone* doesn't redirect a crates.io dep — the member must reference the
+  dep as `workspace = true` (or the workspace must use `[patch.crates-io]`, which *does* apply
+  to all members automatically). Either way the goal is one shared, authoritative pin.
+- **Fix (golden side): frozen committed golden bytes.** A committed `.bin` uses no live crate
+  at test time, so the compare side is immune to dependency versions entirely (and it also
+  removes the python-avro fastavro-vs-fastavro circularity). See §6.3.
+- **Automatic by default; explicit loud override; not a routine dimension.** Forgetting to use
+  the patched copy yields a silently-green run against code we don't ship — the same cardinal
+  sin as a silent-pass gate — so the default must be automatic (reuse each ecosystem's patch
+  mechanism). Allow a deliberate upstream run only as a named, *reported* mode (e.g.
+  `--deps upstream`) for investigating a patch's effect or forward-compat; never a silent
+  default. Do **not** make `(local | upstream)` a standing matrix axis — it doubles the matrix
+  to test a configuration we don't ship. Keep it a build config that defaults to shipping.

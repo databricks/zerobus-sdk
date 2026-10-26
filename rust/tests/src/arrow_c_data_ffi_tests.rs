@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod mock_arrow_flight;
+use zerobus_mock_server::scripted_flight as mock_arrow_flight;
 mod utils;
 
 use std::sync::Arc;

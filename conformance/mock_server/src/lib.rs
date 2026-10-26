@@ -22,12 +22,17 @@ pub mod mock_admin;
 pub mod mock_flight;
 pub mod mock_zerobus;
 pub mod scripted;
+pub mod scripted_flight;
 
 pub use mock_admin::MockAdmin;
 pub use mock_zerobus::MockZerobus;
 // Rich scripted gRPC mock, ported from rust/tests. The single source of truth: rust/tests
 // imports this instead of carrying its own copy.
 pub use scripted::{start_mock_server, start_mock_tls_server, MockResponse, MockZerobusServer};
+// Rich scripted Arrow-Flight mock, ported from rust/tests (single source of truth).
+pub use scripted_flight::{
+    start_mock_flight_server, start_mock_tls_flight_server, MockFlightResponse, MockFlightServer,
+};
 
 /// Generated protobuf/gRPC code.
 pub mod proto {

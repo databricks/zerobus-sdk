@@ -4436,11 +4436,18 @@ dependencies = [
 name = "zerobus-mock-server"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
  "databricks-zerobus-ingest-sdk",
+ "futures",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
  "rcgen",
+ "serde",
+ "serde_json",
  "time",
  "tokio",
  "tokio-stream",

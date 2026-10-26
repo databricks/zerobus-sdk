@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Conformance mock Zerobus server: Zerobus data plane + MockAdmin control plane"
-
-# Standalone crate: not a member of the rust/ workspace.
-[workspace]
+# This crate lives outside the rust/ directory, so point explicitly at the workspace root
+# (a sibling, not an ancestor) to inherit [workspace.dependencies] incl. vendored arrow-flight.
+workspace = "../../rust"
 
 [lib]
 name = "zerobus_mock_server"
@@ -18,21 +18,31 @@ path = "src/main.rs"
 
 [dependencies]
 # The Zerobus proto types are reused from the SDK (see src/lib.rs proto module) so the mock,
-# the SDK, and rust/tests all share one set of generated types.
+# the SDK, and rust/tests all share one set of generated types. As a workspace member, shared
+# crates use `workspace = true` so versions unify with rust/ (and arrow-flight resolves to the
+# vendored copy in rust/third_party, NOT crates.io).
 databricks-zerobus-ingest-sdk = { path = "../../rust/sdk" }
-prost = "0.14"
-prost-types = "0.14"
-tonic = { version = "0.14", features = ["transport", "codegen"] }
-tonic-prost = "0.14"
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "net", "signal", "time"] }
-tokio-stream = { version = "0.1.18", features = ["net"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Scripted mock's self-signed TLS certs (ported from rust/tests). `time` is pinned to match
+prost = { workspace = true }
+prost-types = { workspace = true }
+tonic = { workspace = true, features = ["transport", "codegen"] }
+tonic-prost = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "net", "signal", "time"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Arrow Flight mock (src/scripted_flight.rs) — vendored arrow-flight via the workspace.
+arrow-flight = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+# Scripted mocks' self-signed TLS certs (ported from rust/tests). `time` is pinned to match
 # rust/tests and avoid pulling a newer release that raises the Rust version floor.
 rcgen = "0.13"
 time = "=0.3.36"
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+tonic-prost-build = { workspace = true }
 protoc-bin-vendored = "3.0.0"
