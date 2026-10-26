@@ -1283,6 +1283,12 @@ pub struct ArrowStreamConfigurationOptions {
 
     /// Optional IPC compression type (0 = LZ4Frame, 1 = Zstd, undefined = no compression)
     pub ipc_compression: Option<i32>,
+
+    /// TESTING ONLY (conformance harness): send no authorization headers.
+    /// When true, `clientId`/`clientSecret` are ignored. Requires the Rust SDK `testing`
+    /// feature. Do not use against production.
+    /// Default: false
+    pub no_auth: Option<bool>,
 }
 
 // Rust SDK 2.0 `ArrowStreamConfigurationOptions` is `#[non_exhaustive]` and
@@ -1701,6 +1707,7 @@ impl ZerobusSdk {
             flush_timeout_ms: None,
             connection_timeout_ms: None,
             ipc_compression: None,
+            no_auth: None,
         });
         let ipc_compression = map_ipc_compression(opts.ipc_compression);
         let schema_for_stream = schema.clone();
@@ -1709,11 +1716,14 @@ impl ZerobusSdk {
 
         env.execute_tokio_future(
             async move {
-                let mut builder = sdk
-                    .stream_builder()
-                    .table(table_name)
-                    .oauth(client_id, client_secret)
-                    .arrow(schema.clone());
+                let builder = sdk.stream_builder().table(table_name);
+                // TESTING ONLY: `no_auth()` replaces `oauth()` (same pattern as the gRPC path).
+                let mut builder = if opts.no_auth.unwrap_or(false) {
+                    builder.no_auth()
+                } else {
+                    builder.oauth(client_id, client_secret)
+                }
+                .arrow(schema.clone());
 
                 if let Some(v) = opts.max_inflight_batches {
                     builder = builder.max_inflight_batches(v as usize);

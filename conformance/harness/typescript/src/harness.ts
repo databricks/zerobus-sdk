@@ -1,28 +1,33 @@
 // `TestHarness` service: maps each contract RPC onto the TypeScript Zerobus SDK.
 //
-// Slice: protocol=GRPC with format=PROTO or format=JSON. Every other combination returns
-// UNIMPLEMENTED with a TODO (see checkSliceSupported).
+// Supported: protocol=GRPC with format=PROTO or format=JSON, and protocol=ARROW_FLIGHT with
+// format=ARROW. Every other combination returns INVALID_ARGUMENT or UNIMPLEMENTED with a TODO
+// (see checkSliceSupported).
 
 import * as grpc from "@grpc/grpc-js";
 import {
   RecordType,
+  ZerobusArrowStream,
   ZerobusSdk,
   ZerobusStream,
 } from "@databricks/zerobus-ingest-sdk";
 import type * as protobuf from "protobufjs";
+import type * as arrow from "apache-arrow";
 import * as records from "./records";
 
-type RecordFormatName = "PROTO" | "JSON";
+type RecordFormatName = "PROTO" | "JSON" | "ARROW";
 
 /** One open SDK stream plus what its records are built against. */
 interface StreamEntry {
   /** Kept alive for as long as the stream it created. */
   sdk: ZerobusSdk;
-  /** null after Close. */
-  stream: ZerobusStream | null;
+  /** null after Close. GRPC streams are ZerobusStream; ARROW streams are ZerobusArrowStream. */
+  stream: ZerobusStream | ZerobusArrowStream | null;
   format: RecordFormatName;
   /** Only set for PROTO. */
   messageType: protobuf.Type | null;
+  /** Only set for ARROW. */
+  arrowSchema: arrow.Schema | null;
   /** Tail of the per-stream chain: RPCs on one stream run strictly in order. */
   chain: Promise<unknown>;
 }
@@ -38,13 +43,13 @@ function statusError(code: grpc.status, message: string): Error & { code: grpc.s
  */
 function checkSliceSupported(protocol: string, format: string): RecordFormatName {
   if (protocol === "ARROW_FLIGHT") {
-    throw statusError(
-      grpc.status.UNIMPLEMENTED,
-      "TODO(conformance): ARROW_FLIGHT protocol not implemented in the TypeScript harness yet",
-    );
+    if (format !== "ARROW") {
+      throw statusError(grpc.status.INVALID_ARGUMENT, "ARROW_FLIGHT carries only the ARROW format");
+    }
+    return "ARROW";
   }
   if (protocol !== "GRPC") {
-    throw statusError(grpc.status.INVALID_ARGUMENT, "protocol must be specified");
+    throw statusError(grpc.status.INVALID_ARGUMENT, "protocol and format must be specified");
   }
   switch (format) {
     case "PROTO":
@@ -57,8 +62,8 @@ function checkSliceSupported(protocol: string, format: string): RecordFormatName
       );
     case "ARROW":
       throw statusError(
-        grpc.status.UNIMPLEMENTED,
-        "TODO(conformance): GRPC + ARROW is not a valid pairing; ARROW rides ARROW_FLIGHT",
+        grpc.status.INVALID_ARGUMENT,
+        "GRPC + ARROW is not a valid pairing; ARROW rides ARROW_FLIGHT",
       );
     default:
       throw statusError(grpc.status.INVALID_ARGUMENT, "format must be specified");
@@ -129,10 +134,17 @@ export function buildHarnessImpl(triggerShutdown: () => void): grpc.UntypedServi
       }
 
       let messageType: protobuf.Type | null = null;
+      let arrowSchema: arrow.Schema | null = null;
       if (format === "PROTO") {
         const bytes = Buffer.from(req.descriptorProtoBytes ?? []);
         try {
           messageType = records.messageTypeFromDescriptor(bytes);
+        } catch (err) {
+          throw toStatusError(err, "");
+        }
+      } else if (format === "ARROW") {
+        try {
+          arrowSchema = records.arrowSchemaFromIpc(Buffer.from(req.arrowSchemaIpc ?? []));
         } catch (err) {
           throw toStatusError(err, "");
         }
@@ -145,22 +157,35 @@ export function buildHarnessImpl(triggerShutdown: () => void): grpc.UntypedServi
       // Rust SDK `testing` feature (see typescript/src/lib.rs, `noTls` / `noAuth`).
       const sdk = new ZerobusSdk(`http://${req.serverEndpoint}`, "", { noTls: true });
       try {
-        const stream = await sdk.createStream(
-          {
-            tableName: req.tablePath,
-            descriptorProto:
-              format === "PROTO" ? Buffer.from(req.descriptorProtoBytes).toString("base64") : undefined,
-          },
-          "",
-          "",
-          {
-            recordType: format === "PROTO" ? RecordType.Proto : RecordType.Json,
-            noAuth: true,
-          },
-        );
+        let stream: ZerobusStream | ZerobusArrowStream;
+        if (format === "ARROW") {
+          stream = await sdk.createArrowStream(
+            {
+              tableName: req.tablePath,
+              schemaFields: records.arrowFieldsFromSchema(arrowSchema!),
+            },
+            "",
+            "",
+            { noAuth: true },
+          );
+        } else {
+          stream = await sdk.createStream(
+            {
+              tableName: req.tablePath,
+              descriptorProto:
+                format === "PROTO" ? Buffer.from(req.descriptorProtoBytes).toString("base64") : undefined,
+            },
+            "",
+            "",
+            {
+              recordType: format === "PROTO" ? RecordType.Proto : RecordType.Json,
+              noAuth: true,
+            },
+          );
+        }
 
         const streamId = `ts-stream-${nextId++}`;
-        streams.set(streamId, { sdk, stream, format, messageType, chain: Promise.resolve() });
+        streams.set(streamId, { sdk, stream, format, messageType, arrowSchema, chain: Promise.resolve() });
         return { streamId };
       } catch (err) {
         throw toStatusError(err, "create_stream failed: ");
@@ -172,6 +197,17 @@ export function buildHarnessImpl(triggerShutdown: () => void): grpc.UntypedServi
       return serialize(entry, async () => {
         if (!entry.stream) {
           throw statusError(grpc.status.FAILED_PRECONDITION, "stream closed");
+        }
+        if (entry.format === "ARROW") {
+          let ipc: Buffer;
+          try {
+            ipc = records.arrowBatchIpcFromJson(entry.arrowSchema!, req.recordJson);
+          } catch (err) {
+            throw toStatusError(err, "");
+          }
+          // Queue only: ingestBatch resolves once the batch is enqueued, not once it is acked.
+          const offset = await (entry.stream as ZerobusArrowStream).ingestBatch(ipc);
+          return { offset: offset.toString() };
         }
         let payload: unknown;
         try {
@@ -187,7 +223,7 @@ export function buildHarnessImpl(triggerShutdown: () => void): grpc.UntypedServi
         }
         // Queue only: resolves once the SDK has enqueued the record, not once it is acked.
         // The SDK encodes the record itself.
-        const offset = await entry.stream.ingestRecordOffset(payload as any);
+        const offset = await (entry.stream as ZerobusStream).ingestRecordOffset(payload as any);
         return { offset: offset.toString() };
       });
     }),
