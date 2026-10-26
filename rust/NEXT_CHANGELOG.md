@@ -17,6 +17,13 @@
 
 ### Bug Fixes
 
+- Updated the locked `rustls-webpki` to 0.103.16 and `webpki-roots` to 1.0.11.
+  These releases stop trusting the compromised eMudhra (emSign) CAs:
+  rustls-webpki rejects chains through the emSign G3 issuing CAs, and the
+  bundled root set no longer includes the emSign G3, C3 and C1 roots.
+  Applications that depend on the crate pick up the fix with
+  `cargo update -p rustls-webpki -p webpki-roots`.
+
 ### Documentation
 
 - Documented persistent streams (behind the `eos` feature) in the Rust README,

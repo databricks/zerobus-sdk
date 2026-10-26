@@ -8,6 +8,8 @@
 
 ### Bug Fixes
 
+- The library is now built with `rustls-webpki` 0.103.16 and `webpki-roots`
+  1.0.11, which stop trusting the compromised eMudhra (emSign) CAs.
 - The `CRecordArray` returned by `encoded_records_to_c_array` is now allocated at
   exactly `len` records. It could previously have spare capacity, and
   `zerobus_free_record_array` then passed the wrong size when freeing it.

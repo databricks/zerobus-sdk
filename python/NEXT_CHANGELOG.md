@@ -13,9 +13,16 @@
 
 ### Bug Fixes
 
+- Updated the native extension's transitive `rustls-webpki` to 0.103.16 and
+  `webpki-roots` to 1.0.11, which stop trusting the compromised eMudhra (emSign)
+  CAs.
+
 ### Documentation
 
 ### Internal Changes
+
+- Updated `certifi` to 2026.10.19 and, on Python 3.10+, `pip` to 26.2.2 in
+  `requirements-dev.lock`; both drop the compromised eMudhra (emSign) roots.
 
 ### Breaking Changes
 
