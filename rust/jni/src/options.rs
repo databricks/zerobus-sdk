@@ -192,6 +192,6 @@ pub fn apply_arrow_stream_options<'a>(
         .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
         .flush_timeout_ms(opts.flush_timeout_ms)
         .connection_timeout_ms(opts.connection_timeout_ms)
-        .with_compression(opts.compression)
+        .compression(opts.compression)
         .stream_paused_max_wait_time_ms(opts.stream_paused_max_wait_time_ms)
 }

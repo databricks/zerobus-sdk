@@ -29,8 +29,8 @@ pub struct BatchStats {
     /// (`data_header + data_body + app_metadata`), after IPC compression when enabled
     /// and before gRPC message compression, so it overstates the bytes sent with
     /// `ArrowCompression::GrpcZstd`. Excludes protobuf field overhead, gRPC/HTTP2/TLS
-    /// framing, the schema message, and the flight descriptor. Counts payload yielded to the transport, which may
-    /// be discarded before reaching the network.
+    /// framing, the schema message, and the flight descriptor. Counts payload yielded
+    /// to the transport, which may be discarded before reaching the network.
     pub approximate_wire_bytes: u64,
     /// IPC buffer bytes before compression for this transmission, including
     /// dictionary buffers when emitted. Follows the encoder's treatment of

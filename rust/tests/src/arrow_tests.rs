@@ -5579,7 +5579,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5628,7 +5628,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5681,8 +5681,8 @@ mod arrow_flight_tests {
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
                     .arrow(schema.clone());
                 if disable_compression {
-                    builder = builder
-                        .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::None);
+                    builder =
+                        builder.compression(databricks_zerobus_ingest_sdk::ArrowCompression::None);
                 }
                 let stream = builder.build_arrow().await?;
 
@@ -5766,7 +5766,7 @@ mod arrow_flight_tests {
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
                     .arrow(schema.clone());
                 if let Some(compression) = case.compression {
-                    builder = builder.with_compression(compression);
+                    builder = builder.compression(compression);
                 }
                 let stream = builder.build_arrow().await?;
 
@@ -5834,7 +5834,7 @@ mod arrow_flight_tests {
                     .recovery(true)
                     .recovery_retries(5)
                     .recovery_backoff_ms(recovery_backoff.as_millis() as u64)
-                    .with_compression(ArrowCompression::GrpcZstd)
+                    .compression(ArrowCompression::GrpcZstd)
                     .build_arrow(),
             )
             .await

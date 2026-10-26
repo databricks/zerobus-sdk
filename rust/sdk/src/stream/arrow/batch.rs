@@ -290,9 +290,8 @@ fn compact_ipc_write_options(
 /// Builds the [`IpcWriteOptions`] a stream encodes its batches with.
 ///
 /// With gRPC compression, each whole message is compressed, so buffers are left raw:
-/// compressing them twice costs CPU without reducing size. They still use
-/// [`COMPRESSED_IPC_ALIGNMENT`], because wider padding only adds bytes for the server to
-/// decompress.
+/// compressing them twice doesn't reduce size. They still use [`COMPRESSED_IPC_ALIGNMENT`],
+/// because wider padding only adds bytes.
 #[allow(clippy::result_large_err)]
 pub(super) fn stream_ipc_write_options(
     options: &ArrowStreamConfigurationOptions,

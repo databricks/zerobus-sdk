@@ -153,7 +153,7 @@ fn apply_c_arrow_stream_options<'a>(
         .server_lack_of_ack_timeout_ms(c.server_lack_of_ack_timeout_ms)
         .flush_timeout_ms(c.flush_timeout_ms)
         .connection_timeout_ms(c.connection_timeout_ms)
-        .with_compression(c_to_compression(c.ipc_compression))
+        .compression(c_to_compression(c.ipc_compression))
         .stream_paused_max_wait_time_ms(c_to_stream_paused_ms(c.stream_paused_max_wait_time_ms))
 }
 

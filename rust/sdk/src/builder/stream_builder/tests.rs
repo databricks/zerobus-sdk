@@ -561,7 +561,7 @@ fn last_compression_setter_wins() {
     let sdk = test_sdk();
     let new_last = arrow_test_builder(&sdk)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .with_compression(crate::ArrowCompression::GrpcZstd)
+        .compression(crate::ArrowCompression::GrpcZstd)
         .arrow_config;
     assert_eq!(
         new_last.compression,
@@ -569,7 +569,7 @@ fn last_compression_setter_wins() {
     );
 
     let deprecated_last = arrow_test_builder(&sdk)
-        .with_compression(crate::ArrowCompression::GrpcZstd)
+        .compression(crate::ArrowCompression::GrpcZstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .arrow_config;
     assert_eq!(deprecated_last.compression, None);

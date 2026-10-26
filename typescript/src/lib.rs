@@ -1721,7 +1721,7 @@ impl ZerobusSdk {
                 if let Some(v) = opts.connection_timeout_ms {
                     builder = builder.connection_timeout_ms(v as u64);
                 }
-                builder = builder.with_compression(ipc_compression);
+                builder = builder.compression(ipc_compression);
 
                 let stream = builder.build_arrow().await.map_err(|e| {
                     napi::Error::from_reason(format!("Failed to create arrow stream: {}", e))

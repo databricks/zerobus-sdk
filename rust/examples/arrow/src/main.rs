@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .table(TABLE_NAME)
         .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
         .arrow(schema.clone())
-        .with_compression(ArrowCompression::IpcZstd)
+        .compression(ArrowCompression::IpcZstd)
         .max_inflight_batches(100)
         .stats_exporter(stats_exporter)
         .build_arrow()

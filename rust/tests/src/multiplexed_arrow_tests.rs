@@ -185,7 +185,7 @@ async fn grpc_compression_applies_to_every_lane_without_ipc_compression() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();
     let sdk = sdk(endpoint);
     let mut mux = builder(&sdk)
-        .with_compression(databricks_zerobus_ingest_sdk::ArrowCompression::GrpcZstd)
+        .compression(databricks_zerobus_ingest_sdk::ArrowCompression::GrpcZstd)
         .multiplexed(2)
         .build_arrow()
         .await

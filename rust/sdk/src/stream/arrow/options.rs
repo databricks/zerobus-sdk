@@ -182,7 +182,7 @@ impl Default for ArrowStreamConfigurationOptions {
 
 /// Compression for Arrow Flight payloads.
 ///
-/// Set with [`StreamBuilder::with_compression`](crate::StreamBuilder::with_compression).
+/// Set with [`StreamBuilder::compression`](crate::StreamBuilder::compression).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ArrowCompression {
@@ -197,18 +197,9 @@ pub enum ArrowCompression {
     ///
     /// IPC compression compresses each Arrow buffer separately and leaves the IPC header and
     /// alignment padding raw. This compresses the full `FlightData` message instead, which
-    /// helps most for wide or sparse schemas, whose messages are dominated by metadata. It
-    /// costs more CPU, mostly to decompress on the server. Buffers are sent uncompressed with
-    /// 8-byte alignment, because wider padding only adds bytes for the server to decompress.
-    ///
-    /// The server must accept zstd on Arrow Flight; otherwise stream creation fails with a
-    /// non-retryable `Unimplemented` error. That includes reconnects, so if a server stops
-    /// accepting zstd (for example after a rollback), switch clients away from this first or
-    /// their streams close.
-    ///
-    /// The server's message size limit applies to the uncompressed message. Batches are split
-    /// into messages of about 2 MiB by row count, so this rarely matters, but a message with
-    /// very large rows is rejected even if IPC compression would have made it fit.
+    /// helps most for wide or sparse schemas, whose messages are dominated by metadata.
+    /// Buffers are sent uncompressed with 8-byte alignment, because compressing them twice
+    /// doesn't reduce size and wider padding only adds bytes.
     ///
     /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
     /// gRPC compression, so they overstate the bytes sent.
