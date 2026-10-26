@@ -54,7 +54,7 @@ jobs:
       - name: Unshallow
         run: git fetch --prune --unshallow || true
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.pyVersion }}
 
@@ -101,7 +101,7 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
 
       # Install every supported version; the last one is the default `python`.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: |
             3.10
@@ -162,7 +162,7 @@ jobs:
       - name: Configure pip registry
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
@@ -197,7 +197,7 @@ jobs:
       - name: Configure pip registry
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
