@@ -365,7 +365,7 @@ impl ZerobusSdk {
             .user_agent(self.sdk_identifier.as_ref())
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-        let endpoint = self.tls_config.configure_endpoint(endpoint)?;
+        let endpoint = self.tls_config.tls_settings()?.apply(endpoint)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
         let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
         let channel = match proxy_connector {

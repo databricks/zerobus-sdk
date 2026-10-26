@@ -30,6 +30,7 @@ use super::{
     FlightConnectionParameters, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
+use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::OffsetId;
 use crate::proxy::{self, ConnectorFactory};
@@ -369,7 +370,7 @@ impl ZerobusArrowStream {
         })
         .await
         .map_err(|_| {
-            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
                 "Stream creation timed out",
             ))
         })?;
@@ -414,7 +415,7 @@ impl ZerobusArrowStream {
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
 
-        let configured_endpoint = tls_config.configure_endpoint(base_endpoint)?;
+        let configured_endpoint = tls_config.tls_settings()?.apply(base_endpoint)?;
         let host = configured_endpoint.uri().host().unwrap_or_default();
         let channel = match proxy::resolve_connector(host, connector_factory)? {
             Some(proxy_connector) => {
@@ -602,9 +603,9 @@ impl ZerobusArrowStream {
         let mut response_stream = client
             .do_put(flight_data_stream)
             .await
-            // `.into()` preserves the inner gRPC code; `Status::from_error` would
-            // flatten it to `Unknown` and break auth/retry classification.
-            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
+            // `from_flight_error` preserves the inner gRPC code; `Status::from_error`
+            // would flatten it to `Unknown` and break auth/retry classification.
+            .map_err(|e| ZerobusError::CreateStreamError(GrpcStatus::from_flight_error(e)))?;
 
         // Wait for server's "ready" signal to confirm setup succeeded.
         // The server sends ack_up_to_offset = -1 after successful auth, schema validation,
@@ -648,7 +649,7 @@ impl ZerobusArrowStream {
             Ok(None) => {
                 // Server closed the stream without sending anything.
                 error!(target: super::LOG_TARGET, "Server closed stream during setup without response");
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                return Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                     "Server closed stream during setup",
                 )));
             }
@@ -705,9 +706,9 @@ impl ZerobusArrowStream {
         let mut response_stream = flight_client
             .do_put(flight_data_stream)
             .await
-            // `.into()` preserves the inner gRPC code; `Status::from_error` would
-            // flatten it to `Unknown` and break auth/retry classification.
-            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
+            // `from_flight_error` preserves the inner gRPC code; `Status::from_error`
+            // would flatten it to `Unknown` and break auth/retry classification.
+            .map_err(|e| ZerobusError::CreateStreamError(GrpcStatus::from_flight_error(e)))?;
 
         let setup_timeout = Duration::from_millis(parameters.options.connection_timeout_ms);
         match timeout(setup_timeout, response_stream.next()).await {
@@ -741,7 +742,7 @@ impl ZerobusArrowStream {
             }
             Ok(None) => {
                 error!(target: super::LOG_TARGET, "Server closed stream during reconnect without response");
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                return Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                     "Server closed stream during reconnect",
                 )));
             }
@@ -786,11 +787,8 @@ mod tests {
     struct PassthroughTlsConfig;
 
     impl TlsConfig for PassthroughTlsConfig {
-        fn configure_endpoint(
-            &self,
-            endpoint: tonic::transport::Endpoint,
-        ) -> ZerobusResult<tonic::transport::Endpoint> {
-            Ok(endpoint)
+        fn tls_settings(&self) -> ZerobusResult<crate::TlsSettings> {
+            Ok(crate::TlsSettings::new())
         }
     }
 

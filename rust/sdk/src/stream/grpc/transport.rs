@@ -28,6 +28,7 @@ use crate::databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse, RecordType,
 };
+use crate::grpc_status::GrpcStatus;
 use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, ZerobusError, ZerobusResult};
 
 use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
@@ -143,9 +144,7 @@ impl OutboundSink {
     }
 
     fn open_failed() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::internal(
-            "Failed to send stream-open request",
-        ))
+        ZerobusError::StreamClosedError(GrpcStatus::internal("Failed to send stream-open request"))
     }
 
     /// Sends one ingest batch, mapping the SDK offset to the wire sequence for
@@ -178,7 +177,7 @@ impl OutboundSink {
     }
 
     fn ingest_failed() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::internal("Failed to send batch"))
+        ZerobusError::StreamClosedError(GrpcStatus::internal("Failed to send batch"))
     }
 
     fn next_wire_offset(&self, sdk_offset: OffsetId) -> OffsetId {
@@ -289,21 +288,23 @@ impl InboundStream {
     fn first_message<T>(result: Result<Option<T>, tonic::Status>) -> ZerobusResult<T> {
         match result {
             Ok(Some(msg)) => Ok(msg),
-            Ok(None) => Err(ZerobusError::CreateStreamError(tonic::Status::ok(
+            Ok(None) => Err(ZerobusError::CreateStreamError(GrpcStatus::ok(
                 "Stream closed gracefully by server",
             ))),
-            Err(status) => Err(ZerobusError::CreateStreamError(status)),
+            Err(status) => Err(ZerobusError::CreateStreamError(GrpcStatus::from_tonic(
+                &status,
+            ))),
         }
     }
 
     fn missing_stream_id() -> ZerobusError {
-        ZerobusError::CreateStreamError(tonic::Status::internal(
+        ZerobusError::CreateStreamError(GrpcStatus::internal(
             "Successfully opened a stream but stream_id is None",
         ))
     }
 
     fn unexpected_open<T: std::fmt::Debug>(payload: &T) -> ZerobusError {
-        ZerobusError::CreateStreamError(tonic::Status::internal(format!(
+        ZerobusError::CreateStreamError(GrpcStatus::internal(format!(
             "Unexpected response from server while opening stream: {payload:?}"
         )))
     }
@@ -364,10 +365,9 @@ pub(super) async fn open_rpc(
         OutboundConnection::Ephemeral { tx, requests } => {
             let mut req = tonic::Request::new(requests);
             *req.metadata_mut() = metadata;
-            let resp = channel
-                .ephemeral_stream(req)
-                .await
-                .map_err(ZerobusError::CreateStreamError)?;
+            let resp = channel.ephemeral_stream(req).await.map_err(|status| {
+                ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
+            })?;
             Ok((
                 OutboundSink::Ephemeral {
                     tx,
@@ -383,10 +383,9 @@ pub(super) async fn open_rpc(
         } => {
             let mut req = tonic::Request::new(requests);
             *req.metadata_mut() = metadata;
-            let resp = channel
-                .persistent_stream(req)
-                .await
-                .map_err(ZerobusError::CreateStreamError)?;
+            let resp = channel.persistent_stream(req).await.map_err(|status| {
+                ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
+            })?;
             Ok((
                 OutboundSink::Persistent {
                     tx,

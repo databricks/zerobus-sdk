@@ -46,6 +46,7 @@ mod client_warnings;
 mod default_token_factory;
 mod dynamic_proto;
 mod errors;
+mod grpc_status;
 mod headers_provider;
 mod landing_zone;
 mod multiplexed_stream;
@@ -76,6 +77,7 @@ pub use dynamic_proto::{
     MessageDescriptor, Value,
 };
 pub use errors::{SchemaValidationCause, ZerobusError};
+pub use grpc_status::{GrpcCode, GrpcStatus};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{
@@ -113,7 +115,7 @@ pub use stream::{
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
-pub use tls_config::{SecureTlsConfig, TlsConfig};
+pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;
