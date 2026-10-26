@@ -52,8 +52,9 @@ WIRED = frozenset(
     # avro harness path wired for the SDKs that support it (rust via apache-avro core,
     # python via its fastavro layer)
     | {("rust", "grpc", "avro"), ("python", "grpc", "avro")}
-    # arrow_flight transport wired for rust (other SDKs' arrow harnesses land later)
-    | {("rust", "arrow_flight", "arrow")}
+    # arrow_flight transport wired for rust/python/java (ts needs an SDK no-auth-for-arrow
+    # change + build:arrow; cpp needs Arrow C++ dev libs — both pending)
+    | {(sdk, "arrow_flight", "arrow") for sdk in ("rust", "python", "java")}
 )
 
 

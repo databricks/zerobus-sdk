@@ -1,7 +1,8 @@
 """``TestHarness`` service: maps each contract RPC onto the Python Zerobus SDK.
 
-Wired: ``protocol=GRPC`` with ``format=PROTO`` or ``format=AVRO``. Every other combination
-returns ``UNIMPLEMENTED`` with a TODO (see :func:`check_slice_supported`).
+Wired: ``protocol=GRPC`` with ``format=PROTO`` or ``format=AVRO``, and
+``protocol=ARROW_FLIGHT`` with ``format=ARROW``. Every other combination returns
+``UNIMPLEMENTED`` with a TODO (see :func:`check_slice_supported`).
 """
 
 import functools
@@ -11,6 +12,7 @@ import threading
 
 import grpc
 
+from zerobus.sdk.shared import HeadersProvider
 from zerobus.sdk.sync import TableProperties, ZerobusSdk
 
 from . import records
@@ -20,19 +22,44 @@ from ._generated import test_harness_pb2_grpc as pb_grpc
 log = logging.getLogger("zerobus_harness")
 
 
-class _StreamEntry:
-    """One open SDK stream plus the converter that turns logical JSON into its payload."""
+class _NoAuthHeadersProvider(HeadersProvider):
+    """Sends no authentication headers. The Python binding has no no-auth Arrow
+    constructor, so this stands in for it (same as the Rust core's NoAuthHeadersProvider)."""
 
-    def __init__(self, sdk, stream, to_payload):
+    def get_headers(self):
+        return []
+
+
+class _StreamEntry:
+    """One open SDK stream plus the converter and ingest call for its records."""
+
+    def __init__(self, sdk, stream, to_payload, ingest):
         # Keep the SDK alive for as long as the stream it created.
         self.sdk = sdk
         self.stream = stream
-        # record_json (str) -> what the SDK ingests: a protobuf message (PROTO) or a
-        # dict (AVRO). Either way the SDK does the encoding, never the harness.
+        # record_json (str) -> what the SDK ingests: a protobuf message (PROTO), a dict
+        # (AVRO), or a pyarrow.RecordBatch (ARROW). The SDK does the encoding, never the harness.
         self.to_payload = to_payload
+        # (stream, payload) -> offset. Queue-only; never waits for an ack.
+        self.ingest = ingest
         # Serializes per-stream RPCs (ingest / flush / close). Await does not take it,
         # so a slow wait cannot block ingest.
         self.lock = threading.Lock()
+
+
+def _create_sdk(server_endpoint):
+    """The mock is a local plaintext server that checks no credentials, so the SDK runs
+    with no TLS (http://) and no auth headers. Both are testing-only knobs; see
+    python/rust/Cargo.toml `testing` feature."""
+    return ZerobusSdk(f"http://{server_endpoint}", "", None, True, no_tls=True)
+
+
+def _ingest_row(stream, payload):
+    return stream.ingest_record_offset(payload)
+
+
+def _ingest_batch(stream, payload):
+    return stream.ingest_batch(payload)
 
 
 def check_slice_supported(protocol, fmt):
@@ -41,6 +68,8 @@ def check_slice_supported(protocol, fmt):
     Each TODO names the work that remains.
     """
     if protocol == pb.GRPC and fmt in (pb.PROTO, pb.AVRO):
+        return None
+    if protocol == pb.ARROW_FLIGHT and fmt == pb.ARROW:
         return None
     if protocol == pb.GRPC and fmt == pb.JSON:
         return (
@@ -53,10 +82,7 @@ def check_slice_supported(protocol, fmt):
             "TODO(conformance): GRPC + ARROW is not a valid pairing; ARROW rides ARROW_FLIGHT",
         )
     if protocol == pb.ARROW_FLIGHT:
-        return (
-            grpc.StatusCode.UNIMPLEMENTED,
-            "TODO(conformance): ARROW_FLIGHT protocol not implemented in the Python harness yet",
-        )
+        return (grpc.StatusCode.INVALID_ARGUMENT, "ARROW_FLIGHT carries only the ARROW format")
     return (grpc.StatusCode.INVALID_ARGUMENT, "protocol and format must be specified")
 
 
@@ -79,6 +105,23 @@ class HarnessService(pb_grpc.TestHarnessServicer):
         if err is not None:
             context.abort(*err)
 
+        log.info(
+            "CreateStream protocol=%s endpoint=%s table=%s",
+            pb.Protocol.Name(request.protocol),
+            request.server_endpoint,
+            request.table_path,
+        )
+        if request.protocol == pb.ARROW_FLIGHT:
+            entry = self._open_arrow_stream(request, context)
+        else:
+            entry = self._open_grpc_stream(request, context)
+
+        with self._streams_lock:
+            stream_id = f"stream-{next(self._ids)}"
+            self._streams[stream_id] = entry
+        return pb.CreateStreamResponse(stream_id=stream_id)
+
+    def _open_grpc_stream(self, request, context):
         # Schema artifact per format. Both converters only build the SDK's input; the
         # SDK does the encoding.
         if request.format == pb.AVRO:
@@ -95,18 +138,8 @@ class HarnessService(pb_grpc.TestHarnessServicer):
             to_payload = functools.partial(records.record_from_json, resolved.message_class)
             table_kwargs = {"descriptor_proto": resolved.file_descriptor_bytes}
 
-        log.info("CreateStream endpoint=%s table=%s", request.server_endpoint, request.table_path)
         try:
-            # The mock is a local plaintext server that checks no credentials, so the
-            # SDK runs with no TLS (http://) and no auth headers. Both are testing-only
-            # knobs; see python/rust/Cargo.toml `testing` feature.
-            sdk = ZerobusSdk(
-                f"http://{request.server_endpoint}",
-                "",
-                None,
-                True,
-                no_tls=True,
-            )
+            sdk = _create_sdk(request.server_endpoint)
             stream = sdk.create_stream(
                 table_properties=TableProperties(request.table_path, **table_kwargs),
                 no_auth=True,
@@ -115,11 +148,27 @@ class HarnessService(pb_grpc.TestHarnessServicer):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             context.abort(grpc.StatusCode.INTERNAL, f"create_stream failed: {e}")
+        return _StreamEntry(sdk, stream, to_payload, _ingest_row)
 
-        with self._streams_lock:
-            stream_id = f"stream-{next(self._ids)}"
-            self._streams[stream_id] = _StreamEntry(sdk, stream, to_payload)
-        return pb.CreateStreamResponse(stream_id=stream_id)
+    def _open_arrow_stream(self, request, context):
+        # The Arrow schema is the IPC schema message the orchestrator ships; batches are
+        # built against it. No-auth goes through a headers provider with no headers.
+        try:
+            schema = records.arrow_schema_from_ipc(request.arrow_schema_ipc)
+        except ValueError as e:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        to_payload = functools.partial(records.record_batch_from_json, schema)
+
+        try:
+            sdk = _create_sdk(request.server_endpoint)
+            stream = sdk.create_arrow_stream_with_headers_provider(
+                request.table_path, schema, _NoAuthHeadersProvider()
+            )
+        except ValueError as e:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            context.abort(grpc.StatusCode.INTERNAL, f"create_arrow_stream failed: {e}")
+        return _StreamEntry(sdk, stream, to_payload, _ingest_batch)
 
     def IngestRecord(self, request, context):
         entry = self._entry(context, request.stream_id)
@@ -130,8 +179,8 @@ class HarnessService(pb_grpc.TestHarnessServicer):
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
             try:
                 # Queue only. Returns once the SDK has enqueued the record, not once it
-                # is acknowledged. The SDK encodes the payload (protobuf or Avro) itself.
-                offset = entry.stream.ingest_record_offset(payload)
+                # is acknowledged. The SDK encodes the payload (protobuf, Avro, or Arrow) itself.
+                offset = entry.ingest(entry.stream, payload)
             except Exception as e:
                 context.abort(grpc.StatusCode.INTERNAL, f"ingest failed: {e}")
         return pb.IngestRecordResponse(offset=offset)

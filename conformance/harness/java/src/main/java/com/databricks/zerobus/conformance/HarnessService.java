@@ -1,6 +1,7 @@
 package com.databricks.zerobus.conformance;
 
 import com.databricks.zerobus.HeadersProvider;
+import com.databricks.zerobus.ZerobusArrowStream;
 import com.databricks.zerobus.ZerobusException;
 import com.databricks.zerobus.ZerobusProtoStream;
 import com.databricks.zerobus.ZerobusSdk;
@@ -14,6 +15,7 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -23,6 +25,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import zerobus.conformance.harness.TestHarnessGrpc;
@@ -42,8 +48,8 @@ import zerobus.conformance.harness.TestHarnessOuterClass.RecordFormat;
  * {@code TestHarness} service: maps each contract RPC onto the Java SDK. Mirrors {@code
  * conformance/harness/rust/src/harness.rs}.
  *
- * <p>First slice: {@code protocol=GRPC}, {@code format=PROTO} only. Every other combination returns
- * {@code UNIMPLEMENTED} with a TODO (see {@link #checkSliceSupported}).
+ * <p>Supported: {@code GRPC} with {@code PROTO}, and {@code ARROW_FLIGHT} with {@code ARROW}. Every
+ * other combination is rejected (see {@link #checkSliceSupported}).
  *
  * <p>Concurrency: the Java SDK is <b>not thread-safe</b>. Every RPC that touches a stream runs under
  * that stream's lock ({@link StreamEntry#lock}), which serializes ingest / await / flush / close per
@@ -77,18 +83,124 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
   private final AtomicLong nextStreamId = new AtomicLong();
   private final CountDownLatch shutdownRequested;
 
-  /** One open SDK stream plus the descriptor its records are built against. */
-  static final class StreamEntry {
+  /**
+   * One open SDK stream. Subclasses hold the SDK stream of their protocol and the schema its records
+   * are built against. Each method must be called with {@link #lock} held.
+   */
+  abstract static class StreamEntry {
     final ZerobusSdk sdk;
-    final ZerobusProtoStream stream;
-    final Descriptor descriptor;
     /** Serializes all SDK calls on this stream (the Java SDK is not thread-safe). */
     final Object lock = new Object();
 
-    StreamEntry(ZerobusSdk sdk, ZerobusProtoStream stream, Descriptor descriptor) {
+    StreamEntry(ZerobusSdk sdk) {
       this.sdk = sdk;
+    }
+
+    /** Queues one record (queue-only, no ack wait) and returns its offset. */
+    abstract long ingest(String recordJson) throws ZerobusException;
+
+    abstract void waitForOffset(long offset) throws ZerobusException;
+
+    abstract void flush() throws ZerobusException;
+
+    /** Closes the SDK stream and any Arrow resources it owns. Does not close {@link #sdk}. */
+    abstract void closeStream() throws ZerobusException;
+
+    /** Closes the stream, then the SDK handle (Java has no finalizers). Caller holds the lock. */
+    final void release() throws ZerobusException {
+      try {
+        closeStream();
+      } finally {
+        sdk.close();
+      }
+    }
+  }
+
+  /** {@code GRPC} + {@code PROTO}: records are dynamic messages encoded by the SDK. */
+  static final class ProtoStreamEntry extends StreamEntry {
+    final ZerobusProtoStream stream;
+    final Descriptor descriptor;
+
+    ProtoStreamEntry(ZerobusSdk sdk, ZerobusProtoStream stream, Descriptor descriptor) {
+      super(sdk);
       this.stream = stream;
       this.descriptor = descriptor;
+    }
+
+    @Override
+    long ingest(String recordJson) throws ZerobusException {
+      Message message;
+      try {
+        message = Records.toMessage(descriptor, recordJson);
+      } catch (InvalidProtocolBufferException e) {
+        throw new IllegalArgumentException(
+            "record_json does not match the schema: " + e.getMessage(), e);
+      }
+      // Queue only. This returns once the SDK has enqueued the record, not once it is
+      // acknowledged. The SDK encodes the message itself.
+      return stream.ingestRecordOffset(message);
+    }
+
+    @Override
+    void waitForOffset(long offset) throws ZerobusException {
+      stream.waitForOffset(offset);
+    }
+
+    @Override
+    void flush() throws ZerobusException {
+      stream.flush();
+    }
+
+    @Override
+    void closeStream() throws ZerobusException {
+      stream.close();
+    }
+  }
+
+  /**
+   * {@code ARROW_FLIGHT} + {@code ARROW}: each record is a one-row {@link VectorSchemaRoot}. The SDK
+   * serializes the batch to IPC synchronously inside {@code ingestBatch}, so the root is closed as
+   * soon as ingest returns.
+   */
+  static final class ArrowStreamEntry extends StreamEntry {
+    final ZerobusArrowStream stream;
+    final Schema schema;
+    /** Owns the batch buffers. Created per stream and closed with it. */
+    final BufferAllocator allocator = new RootAllocator();
+
+    ArrowStreamEntry(ZerobusSdk sdk, ZerobusArrowStream stream, Schema schema) {
+      super(sdk);
+      this.stream = stream;
+      this.schema = schema;
+    }
+
+    @Override
+    long ingest(String recordJson) throws ZerobusException {
+      try (VectorSchemaRoot batch = Records.oneRowBatch(schema, allocator, recordJson)) {
+        return stream
+            .ingestBatch(batch)
+            .orElseThrow(
+                () -> new IllegalStateException("ingestBatch returned no offset for a one-row batch"));
+      }
+    }
+
+    @Override
+    void waitForOffset(long offset) throws ZerobusException {
+      stream.waitForOffset(offset);
+    }
+
+    @Override
+    void flush() throws ZerobusException {
+      stream.flush();
+    }
+
+    @Override
+    void closeStream() throws ZerobusException {
+      try {
+        stream.close();
+      } finally {
+        allocator.close();
+      }
     }
   }
 
@@ -101,35 +213,26 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
     try {
       checkSliceSupported(req.getProtocol(), req.getFormat());
 
-      DescriptorProto descriptorProto = Records.descriptorProto(req.getDescriptorProtoBytes());
-      Descriptor descriptor = Records.messageDescriptor(descriptorProto);
-
-      logger.info("CreateStream endpoint={} table={}", req.getServerEndpoint(), req.getTablePath());
+      logger.info(
+          "CreateStream protocol={} endpoint={} table={}",
+          req.getProtocol(),
+          req.getServerEndpoint(),
+          req.getTablePath());
       // The mock is a local plaintext server, so no TLS (`http://`) and no auth headers.
       ZerobusSdk sdk = ZerobusSdk.forTestingNoTls("http://" + req.getServerEndpoint());
-      ZerobusProtoStream stream;
+      StreamEntry entry;
       try {
-        stream =
-            sdk.streamBuilder()
-                .table(req.getTablePath())
-                .headersProvider(NO_AUTH_HEADERS)
-                .compiledProto(descriptorProto)
-                .build()
-                .get();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
+        entry =
+            req.getProtocol() == Protocol.ARROW_FLIGHT
+                ? openArrowStream(sdk, req)
+                : openProtoStream(sdk, req);
+      } catch (Throwable t) {
         sdk.close();
-        throw Status.CANCELLED.withDescription("interrupted").asRuntimeException();
-      } catch (ExecutionException e) {
-        sdk.close();
-        throw toStatus(e.getCause());
-      } catch (RuntimeException e) {
-        sdk.close();
-        throw e;
+        throw t;
       }
 
       String streamId = "stream-" + nextStreamId.getAndIncrement();
-      streams.put(streamId, new StreamEntry(sdk, stream, descriptor));
+      streams.put(streamId, entry);
       out.onNext(CreateStreamResponse.newBuilder().setStreamId(streamId).build());
       out.onCompleted();
     } catch (Throwable t) {
@@ -137,24 +240,54 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
     }
   }
 
+  /** Parses the proto writer schema, then opens the gRPC stream. */
+  private static StreamEntry openProtoStream(ZerobusSdk sdk, CreateStreamRequest req)
+      throws Exception {
+    DescriptorProto descriptorProto = Records.descriptorProto(req.getDescriptorProtoBytes());
+    Descriptor descriptor = Records.messageDescriptor(descriptorProto);
+    ZerobusProtoStream stream =
+        awaitStream(
+            sdk.streamBuilder()
+                .table(req.getTablePath())
+                .headersProvider(NO_AUTH_HEADERS)
+                .compiledProto(descriptorProto)
+                .build());
+    return new ProtoStreamEntry(sdk, stream, descriptor);
+  }
+
+  /** Decodes the Arrow schema from IPC, then opens the Arrow Flight stream. */
+  private static StreamEntry openArrowStream(ZerobusSdk sdk, CreateStreamRequest req)
+      throws Exception {
+    Schema schema = Records.arrowSchema(req.getArrowSchemaIpc());
+    ZerobusArrowStream stream =
+        awaitStream(
+            sdk.streamBuilder()
+                .table(req.getTablePath())
+                .headersProvider(NO_AUTH_HEADERS)
+                .arrow(schema)
+                .build());
+    return new ArrowStreamEntry(sdk, stream, schema);
+  }
+
+  /** Blocks on a stream-creation future, mapping interrupt and SDK failure onto gRPC statuses. */
+  private static <T> T awaitStream(CompletableFuture<T> future) {
+    try {
+      return future.get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw Status.CANCELLED.withDescription("interrupted").asRuntimeException();
+    } catch (ExecutionException e) {
+      throw toStatus(e.getCause());
+    }
+  }
+
   @Override
   public void ingestRecord(IngestRecordRequest req, StreamObserver<IngestRecordResponse> out) {
     try {
       StreamEntry entry = lookup(req.getStreamId());
-      Message message;
-      try {
-        message = Records.toMessage(entry.descriptor, req.getRecordJson());
-      } catch (InvalidProtocolBufferException e) {
-        throw Status.INVALID_ARGUMENT
-            .withDescription("record_json does not match the schema: " + e.getMessage())
-            .asRuntimeException();
-      }
-
       long offset;
       synchronized (entry.lock) {
-        // Queue only. This returns once the SDK has enqueued the record, not once it is
-        // acknowledged. The SDK encodes the message itself.
-        offset = entry.stream.ingestRecordOffset(message);
+        offset = entry.ingest(req.getRecordJson());
       }
       out.onNext(IngestRecordResponse.newBuilder().setOffset(offset).build());
       out.onCompleted();
@@ -182,7 +315,7 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
     try {
       StreamEntry entry = lookup(req.getStreamId());
       synchronized (entry.lock) {
-        entry.stream.flush();
+        entry.flush();
       }
       out.onNext(Empty.getDefaultInstance());
       out.onCompleted();
@@ -203,12 +336,7 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
             .asRuntimeException();
       }
       synchronized (entry.lock) {
-        try {
-          entry.stream.close();
-        } finally {
-          // Java has no finalizers: the SDK handle must be released explicitly.
-          entry.sdk.close();
-        }
+        entry.release();
       }
       logger.info("stream closed: {}", req.getStreamId());
       out.onNext(Empty.getDefaultInstance());
@@ -236,11 +364,9 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
       }
       synchronized (e.getValue().lock) {
         try {
-          e.getValue().stream.close();
+          e.getValue().release();
         } catch (Throwable t) {
           logger.warn("closing stream {} failed: {}", e.getKey(), t.toString());
-        } finally {
-          e.getValue().sdk.close();
         }
       }
     }
@@ -278,7 +404,7 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
 
   private static String waitOrError(StreamEntry entry, long offset) {
     try {
-      entry.stream.waitForOffset(offset);
+      entry.waitForOffset(offset);
       return "";
     } catch (ZerobusException e) {
       return String.valueOf(e.getMessage());
@@ -296,11 +422,14 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
   }
 
   /**
-   * Rejects every protocol/format combination this slice does not implement. Each TODO names the
+   * Rejects every protocol/format combination this harness does not implement. Each TODO names the
    * work that remains.
    */
   static void checkSliceSupported(Protocol protocol, RecordFormat format) {
     if (protocol == Protocol.GRPC && format == RecordFormat.PROTO) {
+      return;
+    }
+    if (protocol == Protocol.ARROW_FLIGHT && format == RecordFormat.ARROW) {
       return;
     }
     if (protocol == Protocol.GRPC && format == RecordFormat.JSON) {
@@ -321,9 +450,8 @@ final class HarnessService extends TestHarnessGrpc.TestHarnessImplBase {
           .asRuntimeException();
     }
     if (protocol == Protocol.ARROW_FLIGHT) {
-      // TODO(conformance): ARROW_FLIGHT needs ZerobusArrowStream + an Arrow schema path here.
-      throw Status.UNIMPLEMENTED
-          .withDescription("TODO(conformance): ARROW_FLIGHT protocol not implemented in the Java harness yet")
+      throw Status.INVALID_ARGUMENT
+          .withDescription("ARROW_FLIGHT carries only the ARROW format")
           .asRuntimeException();
     }
     throw Status.INVALID_ARGUMENT

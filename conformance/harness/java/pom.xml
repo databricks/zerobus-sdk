@@ -38,6 +38,18 @@
       <artifactId>arrow-vector</artifactId>
       <version>${arrow.version}</version>
     </dependency>
+    <!-- Arrow's default allocator (RootAllocator). The SDK's README requires it for Arrow Flight. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-netty</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <!-- Strict-enough JSON parse tree for record_json on the Arrow path (mirrors serde_json). -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.11.0</version>
+    </dependency>
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
@@ -126,6 +138,11 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.databricks.zerobus.conformance.Main</mainClass>
+                  <!-- Arrow's netty allocator needs java.nio opened (JDK 9+). The orchestrator runs
+                       `java -jar` with no extra flags, so the manifest carries the opens. -->
+                  <manifestEntries>
+                    <Add-Opens>java.base/java.nio</Add-Opens>
+                  </manifestEntries>
                 </transformer>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
               </transformers>

@@ -9,6 +9,10 @@ protobuf message. The SDK serializes that message itself (it calls ``SerializeTo
 Avro pipeline: ``CreateStreamRequest.avro_schema_json`` -> :class:`AvroRecordBuilder`;
 ``IngestRecordRequest.record_json`` -> :meth:`AvroRecordBuilder.__call__` -> a plain dict.
 The harness never encodes Avro. The SDK's avro stream encodes the dict itself.
+
+Arrow pipeline: ``CreateStreamRequest.arrow_schema_ipc`` -> :func:`arrow_schema_from_ipc`
+-> ``pyarrow.Schema``; ``IngestRecordRequest.record_json`` -> :func:`record_batch_from_json`
+-> a one-row ``pyarrow.RecordBatch``. The SDK serializes the batch itself.
 """
 
 import base64
@@ -110,6 +114,52 @@ def _coerce(schema, value):
         except ValueError as e:
             raise ValueError(f"record_json integer field is not a number: {e}") from e
     return value
+
+
+def arrow_schema_from_ipc(data: bytes):
+    """Decode the Arrow IPC schema message (``CreateStreamRequest.arrow_schema_ipc``).
+
+    Returns a ``pyarrow.Schema``. Raises ValueError if the bytes are not an IPC stream.
+    """
+    import pyarrow as pa
+
+    try:
+        return pa.ipc.open_stream(data).schema
+    except Exception as e:
+        raise ValueError(f"arrow_schema_ipc is not a valid Arrow IPC stream: {e}") from e
+
+
+def record_batch_from_json(schema, record_json: str):
+    """Build a one-row ``pyarrow.RecordBatch`` from ``record_json``, shaped by ``schema``.
+
+    Unknown JSON keys are rejected; a missing key becomes null. Only the column types
+    the scenarios use are handled (int64, utf8, large_utf8); others fail loudly.
+    """
+    import pyarrow as pa
+
+    try:
+        value = json.loads(record_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"record_json is not valid JSON: {e}") from e
+    if not isinstance(value, dict):
+        raise ValueError("record_json must be a JSON object")
+    unknown = sorted(set(value) - set(schema.names))
+    if unknown:
+        raise ValueError(f"record_json has unknown field '{unknown[0]}'")
+
+    columns = []
+    for field in schema:
+        cell = value.get(field.name)
+        if field.type == pa.int64():
+            if cell is not None and (isinstance(cell, bool) or not isinstance(cell, int)):
+                raise ValueError(f"field '{field.name}': expected int64, got {cell!r}")
+        elif field.type in (pa.utf8(), pa.large_utf8()):
+            if cell is not None and not isinstance(cell, str):
+                raise ValueError(f"field '{field.name}': expected string, got {cell!r}")
+        else:
+            raise ValueError(f"field '{field.name}': arrow type {field.type} is not supported by the harness yet")
+        columns.append(pa.array([cell], type=field.type))
+    return pa.RecordBatch.from_arrays(columns, schema=schema)
 
 
 class AvroRecordBuilder:
