@@ -4439,9 +4439,14 @@ dependencies = [
 name = "zerobus-mock-server"
 version = "0.1.0"
 dependencies = [
+ "arrow-flight",
+ "arrow-schema",
+ "futures",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",

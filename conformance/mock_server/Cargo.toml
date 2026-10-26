@@ -29,6 +29,13 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ne
 tokio-stream = { workspace = true, features = ["net"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Arrow Flight data plane. arrow-flight resolves to the vendored copy in rust/third_party
+# via the workspace pin.
+arrow-flight = { workspace = true }
+arrow-schema = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

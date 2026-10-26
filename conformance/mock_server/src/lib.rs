@@ -1,5 +1,5 @@
-//! Conformance mock server: hosts the Zerobus gRPC data plane
-//! (`databricks.zerobus.Zerobus`) and the out-of-band `MockAdmin` control plane on one port.
+//! Conformance mock server: hosts the Zerobus gRPC and Arrow Flight data planes and the
+//! out-of-band `MockAdmin` control plane on one port.
 //!
 //! Counters, captured bytes and the ack gate live in [`MockState`], shared by both
 //! services behind an `Arc`. Counters are global per mock instance.
@@ -14,6 +14,7 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 pub mod mock_admin;
+pub mod mock_flight;
 pub mod mock_grpc;
 
 pub use mock_admin::MockAdmin;
@@ -228,6 +229,11 @@ impl MockState {
             .push((offset, bytes));
         self.captured_record_count.fetch_add(1, Ordering::SeqCst);
     }
+    /// Adds `n` captured records at once (the rows in an Arrow Flight batch, which are not
+    /// individually keyed by offset).
+    pub(crate) fn add_captured_records(&self, n: i64) {
+        self.captured_record_count.fetch_add(n, Ordering::SeqCst);
+    }
     /// Waits for an ack permit when acks are held; no-op otherwise.
     pub(crate) async fn await_ack_gate(&self) {
         if self.ack_gate_enabled.load(Ordering::SeqCst) {
@@ -253,6 +259,7 @@ pub async fn serve_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    use arrow_flight::flight_service_server::FlightServiceServer;
     use proto::mock::mock_admin_server::MockAdminServer;
     use proto::zerobus::zerobus_server::ZerobusServer;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -267,9 +274,11 @@ where
         }
     };
 
-    // Zerobus (native gRPC) data plane and the MockAdmin control plane, both on one port.
+    // Zerobus (native gRPC) + Arrow Flight data planes and the MockAdmin control plane,
+    // all on one port.
     tonic::transport::Server::builder()
         .add_service(ZerobusServer::new(MockGrpc::new(Arc::clone(&state))))
+        .add_service(FlightServiceServer::new(mock_flight::MockFlight::new(Arc::clone(&state))))
         .add_service(MockAdminServer::new(MockAdmin::new(Arc::clone(&state))))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
         .await
