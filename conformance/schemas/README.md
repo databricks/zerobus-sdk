@@ -1,8 +1,6 @@
 # Conformance shared schemas
 
 Language-agnostic record schemas referenced by name from conformance scenarios.
-See `conformance/DESIGN.md` §6 and `conformance/CONTRACTS.md` for the design and the
-interfaces this directory conforms to.
 
 ## Layout
 

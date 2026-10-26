@@ -51,7 +51,7 @@ message CreateStreamResponse {
 
 message IngestRecordRequest {
   string stream_id = 1;
-  // Canonical logical record as a JSON object string (see CONTRACTS.md §Record JSON).
+  // Canonical logical record as a JSON object string; the harness encodes it with the SDK.
   string record_json = 2;
 }
 

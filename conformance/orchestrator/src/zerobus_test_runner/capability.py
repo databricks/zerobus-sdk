@@ -22,7 +22,7 @@ VALID_FORMATS_BY_TRANSPORT = {
     "arrow_flight": frozenset({"arrow"}),
 }
 
-# Gate 2: static capability table (CONTRACTS.md). Pairs are the cross product of the
+# Gate 2: static capability table. Pairs are the cross product of the
 # transports and formats listed for each SDK.
 
 

@@ -1,3 +1,6 @@
+"""Ingest one record and assert the exact avro bytes captured on the wire match the
+committed golden. Gated to avro, so it lands only on SDKs that support it."""
+
 from zerobus_test_runner import scenario, formats, golden
 
 

@@ -1,3 +1,6 @@
+"""Baseline ingest: queue 5 records, flush once, and confirm the server received and
+acked all of them and closed cleanly. Runs on every valid + supported combination."""
+
 from zerobus_test_runner import scenario
 
 

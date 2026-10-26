@@ -1,7 +1,6 @@
 //! `zerobus.conformance.mock.MockAdmin` control plane (out-of-band, not Zerobus protocol).
 //!
-//! Counters are global: `StreamQuery.stream_id` is reserved and ignored in the first
-//! slice (see `conformance/CONTRACTS.md`).
+//! Counters are global: `StreamQuery.stream_id` is reserved and ignored in the first slice.
 
 use std::sync::Arc;
 

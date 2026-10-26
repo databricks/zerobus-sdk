@@ -1,6 +1,6 @@
 """Build, launch, endpoint-parse and tear down the mock and harness subprocesses.
 
-Protocol (CONTRACTS.md): each binary prints exactly one ``*_ENDPOINT=host:port`` line to stdout,
+Startup protocol: each binary prints exactly one ``*_ENDPOINT=host:port`` line to stdout,
 logs go to stderr, and both exit on the ``Shutdown`` RPC or SIGTERM/SIGINT.
 """
 
@@ -65,7 +65,7 @@ def _env(name: str, default: str) -> str:
 
 
 # Per-SDK harness launch recipes. The harness binaries/artifacts are built out of band (see
-# each SDK's build steps in conformance/harness/<sdk>/ and DESIGN.md); the orchestrator only
+# each SDK's build steps under conformance/harness/<sdk>/); the orchestrator only
 # launches the already-built artifact, except Rust which it cargo-builds (fast + cached).
 # Tool locations are overridable via env vars for portability across machines/CI.
 _PY_HARNESS = REPO_ROOT / "python" / ".venv" / "bin" / "python"

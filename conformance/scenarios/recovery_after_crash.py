@@ -1,16 +1,5 @@
-"""Unhappy path: a transient mid-stream crash must be recovered transparently.
-
-The mock acks records 0..2, then aborts the stream once with a retryable error. An SDK
-with recovery enabled (the default for the Rust-core SDKs) should reconnect, resend the
-unacked tail, and make every record durable.
-
-Asserting durability here is subtle: EPHEMERAL streams use a PER-STREAM offset space, so on
-recovery the SDK opens a new stream and resends the tail as that stream's offsets 0,1 (not
-the original 3,4). A global "ack watermark == last logical offset" check is therefore wrong
-across a recovery. Instead we assert durability the way the SDK guarantees it (waiting on the
-last offset succeeds) plus server-side evidence that the fault was real and the tail was
-resent (reconnect happened; the server received at least all records).
-"""
+"""Unhappy path: a transient mid-stream abort must recover transparently -- the SDK
+reconnects, resends the unacked tail, and makes every record durable."""
 
 from zerobus_test_runner import scenario
 
@@ -28,7 +17,9 @@ def recovery_after_crash(s):
     s.sdk.await_write(recs[-1], timeout_ms=10000)
     s.sdk.close(st)
 
-    # Server-side evidence (robust across the per-stream offset reset):
+    # Server-side evidence. Ephemeral streams use a per-stream offset space, so on recovery
+    # the tail is resent under a fresh stream's offsets -- an "ack == last offset" check is
+    # wrong across a recovery, hence these counters instead:
     s.expect(s.mock.call_count(), at_least=2)               # the crash forced a reconnect
     s.expect(s.mock.captured_record_count(st), at_least=5)  # server received all records incl. resent tail
     s.expect(s.mock.on_completed_count(st), equals=1)       # the recovered stream closed gracefully

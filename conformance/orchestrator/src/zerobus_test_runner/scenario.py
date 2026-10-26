@@ -1,8 +1,8 @@
 """Scenario builder DSL, load-time validator and step executor.
 
-Authoring (CONTRACTS.md "Python builder DSL surface"): a scenario function is run once, combo-blind,
-against a ``Recorder``. Action calls append steps and return refs; nothing talks to a server while
-recording. ``Executor`` later walks the recorded steps for one concrete (sdk, transport, format).
+Authoring: a scenario function is run once, combo-blind, against a ``Recorder``. Action calls
+append steps and return refs; nothing talks to a server while recording. ``Executor`` later
+walks the recorded steps for one concrete (sdk, transport, format).
 """
 
 from __future__ import annotations

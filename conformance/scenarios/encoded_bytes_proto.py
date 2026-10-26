@@ -1,3 +1,6 @@
+"""Ingest one record and assert the exact proto bytes captured on the wire match the
+committed golden -- the SDK's own encoder is what's under test here."""
+
 from zerobus_test_runner import scenario, formats, golden
 
 

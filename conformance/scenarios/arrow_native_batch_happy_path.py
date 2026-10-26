@@ -1,14 +1,6 @@
-"""Happy-path NATIVE-BATCH ingestion over Arrow Flight.
-
-Exercises the arrow path for the SDKs whose arrow ingest API takes a native in-memory
-RecordBatch that the SDK serializes to IPC internally — rust, python, java. Ingest 5 one-row
-batches, wait for the last to be durable, close; then assert the server received all 5
-records, acked up to the last offset, and closed cleanly.
-
-Scoped to the native-batch SDKs. The IPC-bytes SDKs (typescript, cpp, go-cgo) take a
-pre-serialized Arrow IPC stream instead; they belong to a separate IPC-bytes arrow scenario
-(TODO), so this one reports N-A for them.
-"""
+"""Happy-path ingest over Arrow Flight for the native-batch SDKs (rust, python, java), whose
+arrow API takes an in-memory RecordBatch the SDK serializes to IPC itself. The IPC-bytes SDKs
+(typescript, cpp, go-cgo) take a pre-serialized stream and belong to a separate scenario."""
 
 from zerobus_test_runner import scenario, gate
 
