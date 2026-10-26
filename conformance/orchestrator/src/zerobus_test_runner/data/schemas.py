@@ -29,7 +29,8 @@ class SchemaArtifacts:
     # Serialized FileDescriptorSet (with imports) for building message classes.
     file_descriptor_set_bytes: bytes
     avro_schema_json: str = ""
-    # TODO(arrow): arrow_schema_ipc is not produced yet; no arrow scenario needs it in the first slice.
+    # Arrow IPC-encoded schema (an IPC stream carrying just the schema), shipped to the
+    # harness for the arrow_flight transport. Built from schema.arrow.json via pyarrow.
     arrow_schema_ipc: bytes = b""
 
 
@@ -71,6 +72,42 @@ def _ensure_descriptor_set(name: str) -> Path:
     return out
 
 
+# Arrow type names allowed in schema.arrow.json → pyarrow types. Per the README mapping,
+# Delta STRING → Arrow LargeUtf8 and int64 → Int64.
+_ARROW_TYPES = {
+    "int64": "int64",
+    "int32": "int32",
+    "large_utf8": "large_utf8",
+    "utf8": "utf8",
+    "string": "large_utf8",
+    "bool": "bool_",
+    "float64": "float64",
+    "float32": "float32",
+    "binary": "binary",
+    "large_binary": "large_binary",
+}
+
+
+def _arrow_schema_ipc(name: str) -> bytes:
+    """Build the Arrow schema from schema.arrow.json and serialize it as an IPC stream
+    carrying just the schema (schema message + EOS, no batches)."""
+    import json
+
+    import pyarrow as pa
+
+    spec = json.loads((schema_dir(name) / "schema.arrow.json").read_text())
+    fields = []
+    for f in spec["fields"]:
+        factory = _ARROW_TYPES.get(f["type"])
+        if factory is None:
+            raise InfraError(f"schema '{name}': unknown arrow type '{f['type']}'")
+        fields.append(pa.field(f["name"], getattr(pa, factory)()))
+    schema = pa.schema(fields)
+    sink = pa.BufferOutputStream()
+    pa.ipc.new_stream(sink, schema).close()
+    return sink.getvalue().to_pybytes()
+
+
 @functools.lru_cache(maxsize=None)
 def load_schema(name: str) -> SchemaArtifacts:
     formats = supported_formats(name)
@@ -90,6 +127,7 @@ def load_schema(name: str) -> SchemaArtifacts:
     avro = ""
     if "avro" in formats:
         avro = (schema_dir(name) / "schema.avsc").read_text()
+    arrow_ipc = _arrow_schema_ipc(name) if "arrow" in formats else b""
     return SchemaArtifacts(
         name=name,
         formats=formats,
@@ -97,4 +135,5 @@ def load_schema(name: str) -> SchemaArtifacts:
         proto_full_name=proto_full_name,
         file_descriptor_set_bytes=fds_bytes,
         avro_schema_json=avro,
+        arrow_schema_ipc=arrow_ipc,
     )

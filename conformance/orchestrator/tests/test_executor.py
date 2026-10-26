@@ -88,7 +88,7 @@ def test_expansion_pins_and_enumerates_only_valid_tuples():
     ]
     states = {(p.transport, p.fmt): p.classification for p in unrestricted}
     assert states[("grpc", "proto")].runs
-    assert states[("arrow_flight", "arrow")].state is State.NA  # schema has no arrow artifact
+    assert states[("arrow_flight", "arrow")].runs  # arrow is wired for rust
 
     pinned_invalid = expand(sc, "rust", "arrow_flight", "avro")
     assert pinned_invalid[0].classification.state is State.INVALID

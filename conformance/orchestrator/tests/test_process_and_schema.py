@@ -63,10 +63,11 @@ def test_malformed_endpoint_is_rejected():
 
 def test_simple_record_schema_artifacts():
     s = load_schema("simple_record")
-    assert {"proto", "avro", "json"} <= set(s.formats) and "arrow" not in s.formats
+    assert {"proto", "avro", "json", "arrow"} <= set(s.formats)
     assert s.proto_full_name == "zerobus.conformance.fixtures.SimpleRecord"
     assert s.descriptor_proto_bytes  # DescriptorProto, not the FileDescriptorSet
     assert '"SimpleRecord"' in s.avro_schema_json
+    assert s.arrow_schema_ipc  # Arrow IPC schema for the arrow_flight path
 
 
 def test_unknown_schema_is_infra_error():

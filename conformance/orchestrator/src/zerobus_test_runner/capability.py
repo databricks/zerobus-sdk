@@ -37,9 +37,9 @@ CAPABILITIES = {
     "rust": Capability(frozenset({"grpc", "arrow_flight"}), frozenset({"proto", "json", "avro", "arrow"})),
     "python": Capability(frozenset({"grpc", "arrow_flight"}), frozenset({"proto", "json", "avro", "arrow"})),
     "go": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
-    "typescript": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
-    "java": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
-    "cpp": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
+    "typescript": Capability(frozenset({"grpc", "arrow_flight"}), frozenset({"proto", "json", "arrow"})),
+    "java": Capability(frozenset({"grpc", "arrow_flight"}), frozenset({"proto", "json", "arrow"})),
+    "cpp": Capability(frozenset({"grpc", "arrow_flight"}), frozenset({"proto", "json", "arrow"})),
     "dotnet": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
     "purego": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
 }
@@ -52,6 +52,8 @@ WIRED = frozenset(
     # avro harness path wired for the SDKs that support it (rust via apache-avro core,
     # python via its fastavro layer)
     | {("rust", "grpc", "avro"), ("python", "grpc", "avro")}
+    # arrow_flight transport wired for rust (other SDKs' arrow harnesses land later)
+    | {("rust", "arrow_flight", "arrow")}
 )
 
 

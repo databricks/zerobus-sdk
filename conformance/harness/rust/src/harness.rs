@@ -1,15 +1,19 @@
 //! `TestHarness` service: maps each contract RPC onto the Rust SDK.
 //!
-//! Supported: `protocol=GRPC` with `format=PROTO` or `format=AVRO`. Every other
+//! Supported: `GRPC` with `PROTO`/`AVRO`, and `ARROW_FLIGHT` with `ARROW`. Every other
 //! combination returns `UNIMPLEMENTED` with a TODO (see [`check_slice_supported`]).
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apache_avro::Schema as AvroSchema;
-use databricks_zerobus_ingest_sdk::{MessageDescriptor, ZerobusError, ZerobusSdk, ZerobusStream};
+use databricks_zerobus_ingest_sdk::{
+    ArrowSchema, MessageDescriptor, ZerobusArrowStream, ZerobusError, ZerobusSdk, ZerobusStream,
+};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -21,18 +25,29 @@ use crate::pb::{
 };
 use crate::records;
 
-/// The writer schema a stream's records are built against, by format.
+/// The writer schema a gRPC stream's records are built against, by format.
 enum RecordSchema {
     Proto(MessageDescriptor),
     Avro(AvroSchema),
 }
 
-/// One open SDK stream plus the schema its records are built against.
+/// An open SDK stream. The gRPC (row) and Arrow Flight (columnar) streams are distinct
+/// SDK types, so each variant also carries the schema its records are built against.
+enum StreamKind {
+    Grpc {
+        stream: ZerobusStream,
+        schema: RecordSchema,
+    },
+    Arrow {
+        stream: ZerobusArrowStream,
+        schema: Arc<ArrowSchema>,
+    },
+}
+
+/// One open stream plus the SDK that created it (kept alive alongside the stream).
 struct StreamEntry {
-    /// Kept alive for as long as the stream it created.
     _sdk: ZerobusSdk,
-    stream: ZerobusStream,
-    schema: RecordSchema,
+    kind: StreamKind,
 }
 
 pub struct HarnessService {
@@ -64,21 +79,22 @@ impl HarnessService {
     }
 }
 
-/// Reject every protocol/format combination this slice does not implement.
+/// Reject every protocol/format combination this harness does not implement.
 /// Each TODO names the work that remains.
 #[allow(clippy::result_large_err)]
 fn check_slice_supported(protocol: Protocol, format: RecordFormat) -> Result<(), Status> {
     match (protocol, format) {
         (Protocol::Grpc, RecordFormat::Proto) => Ok(()),
         (Protocol::Grpc, RecordFormat::Avro) => Ok(()),
+        (Protocol::ArrowFlight, RecordFormat::Arrow) => Ok(()),
         (Protocol::Grpc, RecordFormat::Json) => Err(Status::unimplemented(
             "TODO(conformance): GRPC + JSON not implemented in the Rust harness yet",
         )),
-        (Protocol::Grpc, RecordFormat::Arrow) => Err(Status::unimplemented(
-            "TODO(conformance): GRPC + ARROW is not a valid pairing; ARROW rides ARROW_FLIGHT",
+        (Protocol::Grpc, RecordFormat::Arrow) => Err(Status::invalid_argument(
+            "GRPC + ARROW is not a valid pairing; ARROW rides ARROW_FLIGHT",
         )),
-        (Protocol::ArrowFlight, _) => Err(Status::unimplemented(
-            "TODO(conformance): ARROW_FLIGHT protocol not implemented in the Rust harness yet",
+        (Protocol::ArrowFlight, _) => Err(Status::invalid_argument(
+            "ARROW_FLIGHT carries only the ARROW format",
         )),
         _ => Err(Status::invalid_argument(
             "protocol and format must be specified",
@@ -107,18 +123,6 @@ impl TestHarness for HarnessService {
         let req = request.into_inner();
         check_slice_supported(req.protocol(), req.format())?;
 
-        // Parse the writer schema for the requested format before touching the SDK.
-        let schema = match req.format() {
-            RecordFormat::Avro => RecordSchema::Avro(
-                records::avro_schema_from_json(&req.avro_schema_json)
-                    .map_err(Status::invalid_argument)?,
-            ),
-            _ => RecordSchema::Proto(
-                records::descriptor_from_bytes(&req.descriptor_proto_bytes)
-                    .map_err(Status::invalid_argument)?,
-            ),
-        };
-
         info!(endpoint = %req.server_endpoint, table = %req.table_path, "CreateStream");
 
         // The mock is a local plaintext server that checks no credentials, so the
@@ -129,27 +133,49 @@ impl TestHarness for HarnessService {
             .build()
             .map_err(to_status)?;
 
-        let builder = sdk.stream_builder().table(req.table_path).no_auth();
-        let builder = match &schema {
-            RecordSchema::Proto(descriptor) => builder.dynamic_proto(descriptor.clone()),
-            // The SDK re-parses the schema JSON and encodes records against it.
-            RecordSchema::Avro(_) => builder.avro(req.avro_schema_json.clone()),
+        let kind = if req.protocol() == Protocol::ArrowFlight {
+            // Arrow Flight (columnar): the SDK sends RecordBatches over DoPut.
+            let schema = records::arrow_schema_from_ipc(&req.arrow_schema_ipc)
+                .map_err(Status::invalid_argument)?;
+            let stream = sdk
+                .stream_builder()
+                .table(req.table_path)
+                .no_auth()
+                .arrow(Arc::clone(&schema))
+                .build_arrow()
+                .await
+                .map_err(to_status)?;
+            StreamKind::Arrow { stream, schema }
+        } else {
+            // gRPC (row): parse the writer schema for the requested format, then build.
+            let schema = match req.format() {
+                RecordFormat::Avro => RecordSchema::Avro(
+                    records::avro_schema_from_json(&req.avro_schema_json)
+                        .map_err(Status::invalid_argument)?,
+                ),
+                _ => RecordSchema::Proto(
+                    records::descriptor_from_bytes(&req.descriptor_proto_bytes)
+                        .map_err(Status::invalid_argument)?,
+                ),
+            };
+            let builder = sdk.stream_builder().table(req.table_path).no_auth();
+            let builder = match &schema {
+                RecordSchema::Proto(descriptor) => builder.dynamic_proto(descriptor.clone()),
+                // The SDK re-parses the schema JSON and encodes records against it.
+                RecordSchema::Avro(_) => builder.avro(req.avro_schema_json.clone()),
+            };
+            let stream = builder.build().await.map_err(to_status)?;
+            StreamKind::Grpc { stream, schema }
         };
-        let stream = builder.build().await.map_err(to_status)?;
 
         let stream_id = format!(
             "stream-{}",
             self.next_stream_id.fetch_add(1, Ordering::Relaxed)
         );
-        let entry = StreamEntry {
-            _sdk: sdk,
-            stream,
-            schema,
-        };
-        self.streams
-            .lock()
-            .expect("stream map poisoned")
-            .insert(stream_id.clone(), Arc::new(AsyncMutex::new(entry)));
+        self.streams.lock().expect("stream map poisoned").insert(
+            stream_id.clone(),
+            Arc::new(AsyncMutex::new(StreamEntry { _sdk: sdk, kind })),
+        );
 
         Ok(Response::new(CreateStreamResponse { stream_id }))
     }
@@ -162,25 +188,32 @@ impl TestHarness for HarnessService {
         let entry = self.entry(&req.stream_id)?;
         let guard = entry.lock().await;
 
-        // Queue only. This returns once the SDK has enqueued the record, not once
-        // it is acknowledged. In both formats the SDK does the encoding: we hand it
-        // a logical record (DynamicMessage for PROTO, Avro value for AVRO).
-        let offset = match &guard.schema {
-            RecordSchema::Proto(descriptor) => {
+        // Queue only. Returns once the SDK has enqueued the record, not once it is
+        // acknowledged. In every format the SDK does the encoding: we hand it a logical
+        // record (DynamicMessage / Avro value / RecordBatch).
+        let offset = match &guard.kind {
+            StreamKind::Grpc {
+                stream,
+                schema: RecordSchema::Proto(descriptor),
+            } => {
                 let message = records::record_from_json(descriptor, &req.record_json)
                     .map_err(Status::invalid_argument)?;
-                guard
-                    .stream
-                    .ingest_record_offset(records::sdk_input(message))
-                    .await
+                stream.ingest_record_offset(records::sdk_input(message)).await
             }
-            RecordSchema::Avro(schema) => {
+            StreamKind::Grpc {
+                stream,
+                schema: RecordSchema::Avro(schema),
+            } => {
                 let value = records::avro_value_from_json(schema, &req.record_json)
                     .map_err(Status::invalid_argument)?;
-                guard
-                    .stream
+                stream
                     .ingest_record_offset(records::avro_sdk_input(value))
                     .await
+            }
+            StreamKind::Arrow { stream, schema } => {
+                let batch = records::record_batch_from_json(schema, &req.record_json)
+                    .map_err(Status::invalid_argument)?;
+                stream.ingest_batch(batch).await
             }
         }
         .map_err(to_status)?;
@@ -196,9 +229,14 @@ impl TestHarness for HarnessService {
         let entry = self.entry(&req.stream_id)?;
         let guard = entry.lock().await;
 
-        // `wait_for_offset` has no timeout of its own, so the contract's
-        // `timeout_ms` is applied here. A value <= 0 waits with no deadline.
-        let wait = guard.stream.wait_for_offset(req.offset);
+        // `wait_for_offset` has no timeout of its own, so the contract's `timeout_ms`
+        // is applied here. The two stream types return different future types, so box
+        // to a common type before the shared timeout logic.
+        let wait: Pin<Box<dyn Future<Output = Result<(), ZerobusError>> + Send + '_>> =
+            match &guard.kind {
+                StreamKind::Grpc { stream, .. } => Box::pin(stream.wait_for_offset(req.offset)),
+                StreamKind::Arrow { stream, .. } => Box::pin(stream.wait_for_offset(req.offset)),
+            };
         let outcome = if req.timeout_ms > 0 {
             match tokio::time::timeout(Duration::from_millis(req.timeout_ms as u64), wait).await {
                 Ok(result) => result,
@@ -215,8 +253,8 @@ impl TestHarness for HarnessService {
             wait.await
         };
 
-        // Per the contract, a failed wait is reported in the response body, not as
-        // a gRPC error. Empty `error_message` means success.
+        // Per the contract, a failed wait is reported in the response body, not as a
+        // gRPC error. Empty `error_message` means success.
         Ok(Response::new(AwaitResponse {
             error_message: outcome.err().map(|e| e.to_string()).unwrap_or_default(),
         }))
@@ -226,7 +264,10 @@ impl TestHarness for HarnessService {
         let req = request.into_inner();
         let entry = self.entry(&req.stream_id)?;
         let guard = entry.lock().await;
-        guard.stream.flush().await.map_err(to_status)?;
+        match &guard.kind {
+            StreamKind::Grpc { stream, .. } => stream.flush().await.map_err(to_status)?,
+            StreamKind::Arrow { stream, .. } => stream.flush().await.map_err(to_status)?,
+        };
         Ok(Response::new(Empty {}))
     }
 
@@ -241,7 +282,10 @@ impl TestHarness for HarnessService {
             .remove(&req.stream_id)
             .ok_or_else(|| Status::not_found(format!("unknown stream_id '{}'", req.stream_id)))?;
         let mut guard = entry.lock().await;
-        guard.stream.close().await.map_err(to_status)?;
+        match &mut guard.kind {
+            StreamKind::Grpc { stream, .. } => stream.close().await.map_err(to_status)?,
+            StreamKind::Arrow { stream, .. } => stream.close().await.map_err(to_status)?,
+        };
         info!(stream_id = %req.stream_id, "stream closed");
         Ok(Response::new(Empty {}))
     }

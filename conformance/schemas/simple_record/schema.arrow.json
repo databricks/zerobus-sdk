@@ -1,0 +1,6 @@
+{
+  "fields": [
+    {"name": "id", "type": "int64"},
+    {"name": "message", "type": "large_utf8"}
+  ]
+}

@@ -13,6 +13,7 @@ dependencies = [
     # Generated stubs (_generated/) need a protobuf runtime new enough for protoc 5.x+ output.
     "protobuf>=5.29",
     "fastavro>=1.9",
+    "pyarrow>=17",
 ]
 
 [tool.setuptools.packages.find]

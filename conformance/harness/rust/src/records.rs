@@ -6,8 +6,13 @@
 //! [`record_from_json`] -> `DynamicMessage`; then [`sdk_input`] wraps it as
 //! `ProtoMessage` so the SDK's own encoder serializes it on ingest.
 
+use std::sync::Arc;
+
+use arrow_array::{ArrayRef, Int64Array, LargeStringArray, StringArray};
+use arrow_ipc::reader::StreamReader;
 use databricks_zerobus_ingest_sdk::{
-    message_descriptor, AvroRecord, DynamicMessage, MessageDescriptor, ProtoMessage,
+    message_descriptor, ArrowSchema, AvroRecord, DataType, DynamicMessage, MessageDescriptor,
+    ProtoMessage, RecordBatch,
 };
 use prost::Message as _;
 use prost_reflect::DeserializeOptions;
@@ -75,6 +80,81 @@ pub fn avro_value_from_json(
 /// schema on ingest (`AvroRecord` -> `PreparedInput::AvroObject`).
 pub fn avro_sdk_input(value: apache_avro::types::Value) -> AvroRecord {
     AvroRecord(value)
+}
+
+/// Decode the Arrow schema the orchestrator ships in `CreateStreamRequest.arrow_schema_ipc`
+/// (an Arrow IPC stream carrying just the schema). The SDK's `.arrow(schema)` needs it, and
+/// it's reused to shape each ingested RecordBatch.
+pub fn arrow_schema_from_ipc(bytes: &[u8]) -> Result<Arc<ArrowSchema>, String> {
+    let reader = StreamReader::try_new(std::io::Cursor::new(bytes.to_vec()), None)
+        .map_err(|e| format!("arrow_schema_ipc is not a valid Arrow IPC stream: {e}"))?;
+    Ok(reader.schema())
+}
+
+/// Build a one-row `RecordBatch` from `record_json`, shaped by `schema`. The SDK encodes
+/// and sends it over Arrow Flight on ingest. Unknown JSON keys are rejected. Only the
+/// column types the scenarios use are handled (int64, (large) utf8); others fail loudly.
+pub fn record_batch_from_json(
+    schema: &Arc<ArrowSchema>,
+    record_json: &str,
+) -> Result<RecordBatch, String> {
+    let value: serde_json::Value = serde_json::from_str(record_json)
+        .map_err(|e| format!("record_json is not valid JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "record_json must be a JSON object".to_string())?;
+    if let Some(unknown) = object
+        .keys()
+        .find(|k| schema.field_with_name(k).is_err())
+    {
+        return Err(format!("record_json has unknown field '{unknown}'"));
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let name = field.name();
+        let jv = object.get(name);
+        let column: ArrayRef = match field.data_type() {
+            DataType::Int64 => {
+                let v = match jv {
+                    Some(x) => Some(
+                        x.as_i64()
+                            .ok_or_else(|| format!("field '{name}': expected int64, got {x}"))?,
+                    ),
+                    None => None,
+                };
+                Arc::new(Int64Array::from(vec![v]))
+            }
+            DataType::LargeUtf8 => {
+                let v = string_cell(jv, name)?;
+                Arc::new(LargeStringArray::from(vec![v]))
+            }
+            DataType::Utf8 => {
+                let v = string_cell(jv, name)?;
+                Arc::new(StringArray::from(vec![v]))
+            }
+            other => {
+                return Err(format!(
+                    "field '{name}': arrow type {other:?} is not supported by the harness yet"
+                ))
+            }
+        };
+        columns.push(column);
+    }
+
+    RecordBatch::try_new(Arc::clone(schema), columns)
+        .map_err(|e| format!("failed to build RecordBatch: {e}"))
+}
+
+fn string_cell(jv: Option<&serde_json::Value>, name: &str) -> Result<Option<String>, String> {
+    match jv {
+        Some(x) => Ok(Some(
+            x.as_str()
+                .ok_or_else(|| format!("field '{name}': expected string, got {x}"))?
+                .to_string(),
+        )),
+        None => Ok(None),
+    }
 }
 
 /// Schema-directed JSON -> Avro value. `path` names the position for error messages.

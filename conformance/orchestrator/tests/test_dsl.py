@@ -7,6 +7,7 @@ from zerobus_test_runner.scenario import (
     CreateStream,
     Expect,
     Flush,
+    Gate,
     Ingest,
     Scenario,
     ScenarioError,
@@ -97,12 +98,13 @@ def test_validator_catches_use_before_define_and_closed_ingest():
     assert any("no s.expect" in p for p in validate(_make(no_expect)))
 
 def test_validator_flags_dead_gate_and_unencodable_golden():
-    def dead(s):  # simple_record ships no arrow artifact, so arrow can never run
+    def dead(s):  # arrow is valid only on arrow_flight, so (grpc, arrow) can never run
         st = s.sdk.create_stream(schema="simple_record")
         s.expect(s.mock.call_count(), equals=0)
         del st
 
-    probs = validate(_make(dead, applies=formats("arrow")))
+    dead_gate = Gate(formats=frozenset({"arrow"}), transports=frozenset({"grpc"}))
+    probs = validate(_make(dead, applies=dead_gate))
     assert any("dead or mistyped gate" in p for p in probs), probs
 
     def bad_golden(s):

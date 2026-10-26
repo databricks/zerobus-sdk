@@ -14,12 +14,20 @@ path = "src/main.rs"
 
 [dependencies]
 # Real SDK, built from this checkout. `testing` provides `no_tls()` and `no_auth()`.
-# `avro` enables the Avro record format (Beta; needs Rust 1.88+).
-databricks-zerobus-ingest-sdk = { path = "../../../rust/sdk", features = ["testing", "avro"] }
+# `avro` enables the Avro record format (Beta; needs Rust 1.88+). `arrow-flight`
+# enables the Arrow Flight columnar transport.
+databricks-zerobus-ingest-sdk = { path = "../../../rust/sdk", features = ["testing", "avro", "arrow-flight"] }
 
 # Parses the AVRO writer schema and shapes record_json into Avro values. Same
 # version as the SDK's apache-avro, so the value types are the SDK's own.
 apache-avro = "0.22"
+
+# Arrow Flight path: build 1-row RecordBatches and decode the IPC schema the
+# orchestrator ships. These are the SAME arrow 60.0 crates the SDK uses (arrow-array/
+# -ipc are crates.io in the rust workspace -- only arrow-flight itself is vendored, and
+# the SDK drives the Flight transport internally, so the harness never links it).
+arrow-array = { version = "60.0", default-features = false }
+arrow-ipc = { version = "60.0", default-features = false }
 
 # Protobuf / gRPC server for the TestHarness contract.
 prost = "0.14"
