@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerobus_test_runner"
+version = "0.1.0"
+description = "Layer-1 conformance test orchestrator for the Zerobus SDKs"
+requires-python = ">=3.10"
+# The scenario-authoring engine is pure Python. 
+# Runtime deps arrive with the layers that need them.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120
