@@ -80,6 +80,7 @@ set(ZEROBUS_SOURCES
   src/internal/network/channel.c
   src/internal/network/connection.c
   src/internal/network/io.c
+  src/internal/network/transport.c
   src/internal/landing_zone.c
   src/error.c
   src/headers_provider.c
