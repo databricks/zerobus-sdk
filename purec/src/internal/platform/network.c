@@ -273,6 +273,16 @@ zerobus_status_t zb_wakeup_drain(zb_wakeup_t *wakeup)
     return status;
 }
 
+bool zb_wakeup_pending(zb_wakeup_t *wakeup)
+{
+    if (!wakeup || zb_mutex_lock(&wakeup->mutex) != ZEROBUS_STATUS_OK) {
+        return false;
+    }
+    bool pending = wakeup->pending;
+    (void)zb_mutex_unlock(&wakeup->mutex);
+    return pending;
+}
+
 static int poll_timeout(zb_deadline_t deadline)
 {
     if (deadline == ZB_DEADLINE_INFINITE) {
