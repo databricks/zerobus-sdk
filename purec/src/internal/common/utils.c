@@ -88,6 +88,11 @@ bool zb_view_equals(zerobus_string_view_t value, const char *literal)
             (value.data != NULL && memcmp(value.data, literal, len) == 0));
 }
 
+bool zb_equals_ignore_case(const char *s, size_t len, const char *lower)
+{
+    return strlen(lower) == len && zb_starts_with(s, len, lower);
+}
+
 bool zb_is_header_value(zerobus_string_view_t view)
 {
     if (view.data == NULL) {

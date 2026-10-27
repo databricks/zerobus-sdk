@@ -5,7 +5,6 @@
 
 #include <nghttp2/nghttp2.h>
 #include <openssl/ssl.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -323,6 +322,7 @@ static void serve_http2(server_t *server)
 static void *serve(void *arg)
 {
     server_t *server = arg;
+    loopback_block_sigpipe();
     server->socket = accept(server->listener, NULL, NULL);
     if (server->socket < 0) {
         return NULL;
@@ -739,16 +739,14 @@ zb_cleanup:
 
 int main(void)
 {
-    /* The server writes to clients that may have left. */
-    signal(SIGPIPE, SIG_IGN);
-    SSL_CTX *tls = NULL;
-    if (!loopback_write_certificate(CERT_FILE, KEY_FILE) ||
-        zb_tls_ctx_new(CERT_FILE, &trusted) != ZEROBUS_STATUS_OK ||
-        (tls = loopback_server_tls(CERT_FILE, KEY_FILE, true)) == NULL) {
-        fprintf(stderr, "could not set up the test certificate\n");
-        zb_tls_ctx_free(trusted);
+    if (!loopback_write_certificate(CERT_FILE, KEY_FILE)) {
+        fprintf(stderr, "  FAIL: could not write the test certificate\n");
         return 1;
     }
+    SSL_CTX *tls = NULL;
+    REQUIRE_OK(zb_tls_ctx_new(CERT_FILE, &trusted));
+    tls = loopback_server_tls(CERT_FILE, KEY_FILE, true);
+    REQUIRE(tls != NULL);
     test_open_failures();
     test_calls(NULL);
     test_calls(tls);
@@ -759,6 +757,8 @@ int main(void)
     test_connection_end(NULL, ZEROBUS_STATUS_CANCELLED);
     test_goaway();
     test_concurrent_workers();
+
+zb_cleanup:
     SSL_CTX_free(tls);
     zb_tls_ctx_free(trusted);
     TEST_MAIN_RETURN();

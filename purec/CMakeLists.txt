@@ -70,17 +70,18 @@ endif()
 set(ZEROBUS_SOURCES
   src/internal/common/utils.c
   src/internal/common/queue.c
-  src/internal/network/tls.c
   src/internal/platform/concurrency.c
   src/internal/platform/log.c
   src/internal/platform/network.c
   src/internal/proto/zerobus_service.c
+  src/internal/network/tls.c
   src/internal/network/grpc.c
   src/internal/network/grpc_utils.c
   src/internal/network/channel.c
   src/internal/network/connection.c
   src/internal/network/io.c
   src/internal/network/transport.c
+  src/internal/network/http_client.c
   src/internal/landing_zone.c
   src/error.c
   src/headers_provider.c

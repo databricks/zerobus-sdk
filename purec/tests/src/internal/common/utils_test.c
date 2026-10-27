@@ -105,6 +105,16 @@ static void test_starts_with(void)
     CHECK(!zb_starts_with("ftp://x", 7, "https://"));
 }
 
+static void test_equals_ignore_case(void)
+{
+    CHECK(zb_equals_ignore_case("Content-Length", 14, "content-length"));
+    CHECK(!zb_equals_ignore_case("content-len", 11, "content-length"));
+    CHECK(!zb_equals_ignore_case("content-lengths", 15, "content-length"));
+    CHECK(!zb_equals_ignore_case("chunkey", 7, "chunked"));
+    /* Only len bytes are compared. */
+    CHECK(zb_equals_ignore_case("chunked, gzip", 7, "chunked"));
+}
+
 static void test_parse_u32(void)
 {
     uint32_t out = 0;
@@ -364,6 +374,7 @@ int main(void)
     test_trim_whitespace();
     test_utf8();
     test_starts_with();
+    test_equals_ignore_case();
     test_parse_u32();
     test_hex_value();
     test_view_equals();
