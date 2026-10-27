@@ -51,6 +51,18 @@
   over the records returned by `get_unacked_records()` or
   `get_unacked_batches()`.
 
+- `schema::UcColumn` and `schema::UcTableSchema` are now `#[non_exhaustive]`,
+  so they can no longer be built with struct literals outside the SDK. Use
+  `UcColumn::new(name, type_name)` with the `with_type_text`, `with_type_json`,
+  `with_nullable`, and `with_position` setters, and
+  `UcTableSchema::new(catalog_name, schema_name, name, columns)`. Fields stay
+  public for reading, and deserializing from the Unity Catalog API response is
+  unchanged. New Unity Catalog fields can now be added in minor releases.
+
 ### Deprecations
 
 ### API Changes
+
+- Added `UcColumn::new`, `UcColumn::with_type_text`, `UcColumn::with_type_json`,
+  `UcColumn::with_nullable`, `UcColumn::with_position`, and
+  `UcTableSchema::new`.
