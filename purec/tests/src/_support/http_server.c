@@ -4,8 +4,6 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <pthread.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -73,12 +71,7 @@ done:
 static void *serve(void *arg)
 {
     http_server_t *server = arg;
-    /* SIGPIPE goes to the thread that writes. Blocked here, a write to a client
-     * that has left fails with EPIPE instead of ending the test. */
-    sigset_t blocked;
-    sigemptyset(&blocked);
-    sigaddset(&blocked, SIGPIPE);
-    (void)pthread_sigmask(SIG_BLOCK, &blocked, NULL);
+    loopback_block_sigpipe();
     int socket;
     while ((socket = accept(server->listener, NULL, NULL)) >= 0) {
         ++server->served;
