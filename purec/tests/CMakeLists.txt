@@ -44,6 +44,7 @@ zerobus_add_test(internal/platform/network_test)
 zerobus_add_test(internal/proto/zerobus_service_test)
 zerobus_add_test(internal/network/grpc_test)
 zerobus_add_test(internal/network/grpc_utils_test)
+zerobus_add_test(internal/network/channel_test)
 zerobus_add_test(internal/network/connection_test)
 
 target_include_directories(internal_proto_zerobus_service_test PRIVATE
@@ -62,5 +63,5 @@ set_tests_properties(internal_network_tls_test internal_network_connection_test
 set_tests_properties(sdk_test stream_test internal_platform_concurrency_test
                      internal_common_queue_test internal_landing_zone_test
                      internal_network_grpc_test internal_platform_network_test
-                     internal_network_tls_test internal_network_connection_test
-                     PROPERTIES TIMEOUT 30)
+                     internal_network_tls_test internal_network_channel_test
+                     internal_network_connection_test PROPERTIES TIMEOUT 30)
