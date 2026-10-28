@@ -83,7 +83,7 @@ impl StreamOpenParams {
         CreateIngestStreamRequest {
             table_name: Some(self.table_name),
             descriptor_proto: self.descriptor_proto,
-            record_type: Some(self.record_type.to_wire().into()),
+            record_type: Some(self.record_type.to_wire()),
             avro_schema_json: self.avro_schema_json,
         }
     }
@@ -129,7 +129,7 @@ impl OutboundSink {
                         PersistentRequestPayload::ResumeStream(ResumeIngestStreamRequest {
                             identifier: Some(ResumeIdentifier::StreamId(stream_id.clone())),
                             descriptor_proto: params.descriptor_proto,
-                            record_type: Some(params.record_type.to_wire().into()),
+                            record_type: Some(params.record_type.to_wire()),
                         })
                     }
                 };

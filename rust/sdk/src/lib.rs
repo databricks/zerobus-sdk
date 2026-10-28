@@ -44,6 +44,15 @@ mod proto {
 }
 use proto::databricks;
 
+/// The generated wire-protocol module is private. Stable rustdoc doesn't check
+/// the pinned error code; nightly does.
+///
+/// ```compile_fail,E0603
+/// use databricks_zerobus_ingest_sdk::databricks;
+/// ```
+#[cfg(doctest)]
+struct GeneratedProtoIsPrivate;
+
 mod builder;
 mod callbacks;
 mod client_warnings;

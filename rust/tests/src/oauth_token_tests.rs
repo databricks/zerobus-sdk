@@ -10,9 +10,6 @@
 //! returned token and `mock_oauth`'s mint counter (how many times the SDK hit
 //! the endpoint rather than serving from cache).
 
-// The shared gRPC mock is only partially used here (stream creation and error
-// injection), so silence dead-code warnings for its unused response variants.
-#[allow(dead_code)]
 mod mock_oauth;
 mod utils;
 

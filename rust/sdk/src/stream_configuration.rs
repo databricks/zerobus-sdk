@@ -4,33 +4,23 @@ use crate::callbacks::AckCallback;
 use crate::stream_options::defaults;
 
 /// Record encoding of a JSON, Protocol Buffers, or Avro stream.
-///
-/// This replaces the generated wire-protocol enum, which is not public:
-///
-/// ```compile_fail
-/// let _ = databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType::Json;
-/// ```
+// The discriminants match the wire protocol's values, so `as i32` casts give
+// the same numbers as the generated enum this type replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordType {
     /// Protocol Buffers records.
-    Proto,
+    Proto = 1,
     /// JSON records.
-    Json,
+    Json = 2,
     /// Avro records (requires the `avro` feature).
     #[cfg(feature = "avro")]
-    Avro,
+    Avro = 4,
 }
 
 impl RecordType {
-    pub(crate) fn to_wire(self) -> crate::databricks::zerobus::RecordType {
-        use crate::databricks::zerobus::RecordType as Wire;
-        match self {
-            RecordType::Proto => Wire::Proto,
-            RecordType::Json => Wire::Json,
-            #[cfg(feature = "avro")]
-            RecordType::Avro => Wire::Avro,
-        }
+    pub(crate) fn to_wire(self) -> i32 {
+        self as i32
     }
 }
 
