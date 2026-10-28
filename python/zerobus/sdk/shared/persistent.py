@@ -19,9 +19,9 @@ _MAX_U32 = 2**32 - 1
 _MAX_I64 = 2**63 - 1
 
 
-def _non_negative(name: str, value: int, maximum: int = _MAX_I64) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
-        raise ValueError(f"{name} must be an integer between 0 and {maximum}")
+def _int_in_range(name: str, value: int, maximum: int = _MAX_I64, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
     return value
 
 
@@ -78,37 +78,37 @@ class _PersistentStreamBuilderBase:
 
     def recovery_timeout_ms(self, ms: int):
         """Set the timeout in milliseconds for each recovery attempt."""
-        self._settings["recovery_timeout_ms"] = _non_negative("recovery_timeout_ms", ms)
+        self._settings["recovery_timeout_ms"] = _int_in_range("recovery_timeout_ms", ms)
         return self
 
     def recovery_backoff_ms(self, ms: int):
         """Set the backoff time in milliseconds between recovery retries."""
-        self._settings["recovery_backoff_ms"] = _non_negative("recovery_backoff_ms", ms)
+        self._settings["recovery_backoff_ms"] = _int_in_range("recovery_backoff_ms", ms)
         return self
 
     def recovery_retries(self, n: int):
         """Set the maximum number of recovery retry attempts."""
-        self._settings["recovery_retries"] = _non_negative("recovery_retries", n, _MAX_U32)
+        self._settings["recovery_retries"] = _int_in_range("recovery_retries", n, _MAX_U32)
         return self
 
     def server_lack_of_ack_timeout_ms(self, ms: int):
         """Set the timeout in milliseconds for server acknowledgment."""
-        self._settings["server_lack_of_ack_timeout_ms"] = _non_negative("server_lack_of_ack_timeout_ms", ms)
+        self._settings["server_lack_of_ack_timeout_ms"] = _int_in_range("server_lack_of_ack_timeout_ms", ms)
         return self
 
     def flush_timeout_ms(self, ms: int):
         """Set the timeout in milliseconds for flush operations."""
-        self._settings["flush_timeout_ms"] = _non_negative("flush_timeout_ms", ms)
+        self._settings["flush_timeout_ms"] = _int_in_range("flush_timeout_ms", ms)
         return self
 
     def max_inflight_requests(self, n: int):
-        """Set the maximum number of in-flight requests."""
-        self._settings["max_inflight_requests"] = _non_negative("max_inflight_requests", n)
+        """Set the maximum number of in-flight requests. Must be at least 1."""
+        self._settings["max_inflight_requests"] = _int_in_range("max_inflight_requests", n, minimum=1)
         return self
 
     def max_ingest_payload_bytes(self, n: int):
         """Set the maximum total encoded record size in bytes for one ingest call."""
-        self._settings["max_ingest_payload_bytes"] = _non_negative("max_ingest_payload_bytes", n)
+        self._settings["max_ingest_payload_bytes"] = _int_in_range("max_ingest_payload_bytes", n)
         return self
 
     def ack_callback(self, callback):
@@ -119,7 +119,7 @@ class _PersistentStreamBuilderBase:
     def callback_max_wait_time_ms(self, ms: Optional[int]):
         """Set the maximum wait in milliseconds for callbacks after close. ``None`` waits without limit."""
         if ms is not None:
-            _non_negative("callback_max_wait_time_ms", ms)
+            _int_in_range("callback_max_wait_time_ms", ms)
         self._settings["callback_max_wait_time_ms_set"] = True
         self._settings["callback_max_wait_time_ms"] = ms
         return self

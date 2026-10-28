@@ -89,6 +89,12 @@ class TestBuilderValidation:
         with pytest.raises(ValueError, match=setter):
             getattr(sdk.persistent_stream_builder(), setter)(-1)
 
+    def test_max_inflight_requests_must_be_at_least_one(self, sdk):
+        # A budget of 0 gives the first ingest no permit, so ingestion would stall.
+        with pytest.raises(ValueError, match="max_inflight_requests"):
+            sdk.persistent_stream_builder().max_inflight_requests(0)
+        assert sdk.persistent_stream_builder().max_inflight_requests(1) is not None
+
     def test_numeric_setters_reject_values_beyond_native_range(self, sdk):
         with pytest.raises(ValueError, match="flush_timeout_ms"):
             sdk.persistent_stream_builder().flush_timeout_ms(2**70)
