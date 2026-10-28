@@ -558,7 +558,8 @@ impl ZerobusStream {
     ///
     /// # Errors
     ///
-    /// - Timeout if acknowledgment takes too long
+    /// - Timeout if acknowledgment takes too long. The stream then closes, so recreate it
+    ///   with `recreateStream()` instead of waiting again.
     /// - Server errors propagated immediately (no waiting for timeout)
     ///
     /// # Example
@@ -604,7 +605,8 @@ impl ZerobusStream {
     ///
     /// # Errors
     ///
-    /// - Timeout errors if flush takes longer than configured timeout
+    /// - Timeout errors if flush takes longer than configured timeout. The stream then closes,
+    ///   so recreate it with `recreateStream()` instead of flushing again.
     /// - Network errors if the connection fails during flush
     #[napi]
     pub async fn flush(&self) -> Result<()> {
@@ -629,6 +631,8 @@ impl ZerobusStream {
     ///
     /// - Returns an error if some records could not be acknowledged
     /// - Network errors during the close operation
+    /// - If the stream already failed, sends nothing and rejects with the error that made it
+    ///   fail. The first call releases the stream, so later calls resolve.
     #[napi]
     pub async fn close(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;
@@ -1513,6 +1517,8 @@ impl ZerobusArrowStream {
     /// Waits for a specific offset to be acknowledged by the server.
     ///
     /// Use this method with `ingestBatch()` to selectively wait for acknowledgments.
+    /// A timeout closes the stream, so recreate it with `recreateArrowStream()` instead of
+    /// waiting again.
     ///
     /// # Arguments
     ///
@@ -1539,6 +1545,9 @@ impl ZerobusArrowStream {
     }
 
     /// Flushes all pending batches and waits for acknowledgments.
+    ///
+    /// A timeout closes the stream, so recreate it with `recreateArrowStream()` instead of
+    /// flushing again.
     #[napi]
     pub async fn flush(&self) -> Result<()> {
         let guard = self.inner.lock().await;
@@ -1553,6 +1562,9 @@ impl ZerobusArrowStream {
     }
 
     /// Closes the stream gracefully.
+    ///
+    /// If the stream already failed, sends nothing and rejects with the error that made it
+    /// fail. The first call releases the stream, so later calls resolve.
     #[napi]
     pub async fn close(&self) -> Result<()> {
         let mut guard = self.inner.lock().await;

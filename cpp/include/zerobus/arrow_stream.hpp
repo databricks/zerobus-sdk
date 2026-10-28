@@ -72,10 +72,14 @@ class ArrowStream {
 
   /// Gracefully close the stream, flushing pending batches first. Idempotent.
   ///
+  /// If the stream already failed, for example after a flush timeout, `close()`
+  /// sends nothing and throws the stored error.
+  ///
   /// On success the stream becomes unusable. If the close fails it throws
   /// `ZerobusException` but keeps the handle alive, so the caller can still
-  /// recover buffered batches via `get_unacked_batches()` and/or retry
-  /// `close()`; the destructor frees the handle as a last resort.
+  /// recover buffered batches via `get_unacked_batches()`. A retried `close()`
+  /// throws the same stored error and sends nothing. The destructor frees the
+  /// handle as a last resort.
   void close();
 
   /// Whether the stream has been closed. Unlike `Stream::is_closed()` (a pure

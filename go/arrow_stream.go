@@ -186,7 +186,9 @@ func (st *ZerobusArrowStream) Flush() error {
 }
 
 // Close gracefully shuts down the stream after flushing all pending batches.
-// The stream must not be used after Close returns. Close is idempotent.
+// The stream must not be used after Close returns. Close is idempotent. If the
+// stream already failed, such as after a Flush timeout, the first Close returns the
+// stored error and sends nothing. Later calls return nil.
 func (st *ZerobusArrowStream) Close() error {
 	if st.ptr == nil {
 		return nil

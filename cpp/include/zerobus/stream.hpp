@@ -105,8 +105,8 @@ class Stream {
   /// Return all unacknowledged records from a closed or failed stream, for the
   /// caller to re-ingest on a fresh stream. Remains callable after a failed
   /// `close()` (which keeps the handle alive precisely so recovery is
-  /// possible). Calling on an active stream (e.g. after a flush timeout before
-  /// the stream has closed) throws ZerobusException.
+  /// possible). A flush or wait timeout closes the stream, so this call works
+  /// after it. Calling on an active stream throws ZerobusException.
   ///
   /// @return The records that were ingested but not acknowledged.
   /// @throws ZerobusException if the records cannot be retrieved.
@@ -115,16 +115,20 @@ class Stream {
   /// Gracefully close the stream, flushing pending records first. Idempotent:
   /// safe to call more than once.
   ///
+  /// If the stream already failed, for example after a flush timeout, `close()`
+  /// sends nothing and throws the stored error.
+  ///
   /// Blocks until the flush completes or the stream's `flush_timeout_ms`
   /// elapses (default 5 minutes), then drains any registered `ack_callback`
   /// task before returning, per `StreamOptions::callback_wait_policy`
   /// (`forever()` can block `close()` on a wedged callback). Call it at a
-  /// controlled point rather than leaving it to the destructor.
+  /// controlled point rather than leaving it to the destructor. A flush
+  /// timeout adds up to 1 s for the late-ack drain.
   ///
   /// On success the stream becomes unusable. If the close fails it keeps the
   /// stream handle alive, so the caller can still recover buffered data via
-  /// `get_unacked_records()` and/or retry `close()`; the destructor frees the
-  /// handle as a last resort.
+  /// `get_unacked_records()`. A retried `close()` throws the same stored error
+  /// and sends nothing. The destructor frees the handle as a last resort.
   ///
   /// @throws ZerobusException if the flush or close fails. The handle is kept
   ///         alive for recovery (see above).

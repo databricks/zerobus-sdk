@@ -689,7 +689,9 @@ const descriptorBase64 = loadDescriptorProto({
 
 ## Error Handling
 
-The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). `getUnackedBatches()` and `recreateStream()` succeed only after a terminal native-stream failure, which already closes the stream. An enqueue failure leaves the wrapper active, so those calls reject; rethrow the original error. Do not call `stream.close()` before `recreateStream()`, because close releases the native handle.
+The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). `getUnackedBatches()` and `recreateStream()` succeed only after a terminal native-stream failure, which already closes the stream. An enqueue failure on an open stream leaves the wrapper active, so those calls reject; rethrow the original error. Do not call `stream.close()` before `recreateStream()`, because close releases the native handle.
+
+A `flush()` or `waitForOffset()` timeout also closes the stream, and recovery stops. The SDK does not send the pending records again. Call `recreateStream()` (or `recreateArrowStream()` for Arrow streams) on the closed stream, which resends the unacknowledged batches. Do not retry `flush()` or `close()` on the same stream. An ingest call can also fail because the stream is closing or closed. That record was not admitted, so send it on the new stream. The server can already have accepted batches that were sent but not acknowledged, so a resend can duplicate those batches. A late acknowledgment can make `flush()` resolve, but the stream still closes. The timeout error can arrive up to 1 s after `flushTimeoutMs`.
 
 ```typescript
 let replacement;
@@ -725,7 +727,7 @@ try {
 ```
 
 **Best Practices:**
-- **Rely on automatic recovery** (default): The SDK will automatically retry transient failures
+- **Rely on automatic recovery** (default): The SDK will automatically retry transient failures. It does not retry a `flush()` or `waitForOffset()` timeout.
 - **Use `recreateStream()` for permanent failures**: Automatically recovers all unacknowledged batches
 - **Use `getUnackedRecords()` for inspection only**: Primarily for debugging or understanding failed records
 - Always close streams in a `finally` block to ensure proper cleanup
@@ -960,7 +962,7 @@ Flushes all pending records and waits for acknowledgments. This is the recommend
 async close(): Promise<void>
 ```
 
-Closes the stream gracefully, flushing all pending data. **Always call this in a finally block!**
+Closes the stream gracefully, flushing all pending data. **Always call this in a finally block!** If the stream already failed, `close()` sends nothing and rejects with the error that made it fail. The first call releases the stream, so later calls resolve.
 
 ```typescript
 async getUnackedRecords(): Promise<Buffer[]>
@@ -1063,9 +1065,9 @@ enum RecordType {
 ## Best Practices
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
-2. **Stream lifecycle**: Always close streams in a `finally` block to ensure all records are flushed
+2. **Stream lifecycle**: Always close streams in a `finally` block to ensure all records are flushed. After a failure, `close()` rejects and sends nothing.
 3. **Batch size**: Adjust `maxInflightRequests` based on your throughput requirements (default: 1,000,000)
-4. **Error handling**: The stream handles errors internally with automatic retry. Only use `recreateStream()` for persistent failures after internal retries are exhausted.
+4. **Error handling**: The stream handles errors internally with automatic retry. Use `recreateStream()` for persistent failures after internal retries are exhausted, and at once for a `flush()` or `waitForOffset()` timeout, which is not retried.
 5. **Use Protocol Buffers for production**: Protocol Buffers (the default) provides better performance and schema validation. Use JSON only when you need schema flexibility or for quick prototyping.
 6. **Store credentials securely**: Use environment variables, never hardcode credentials
 7. **Use batch ingestion**: For high-throughput scenarios, use `ingestRecordsOffset()` instead of individual `ingestRecordOffset()` calls

@@ -6,7 +6,8 @@ namespace Databricks.Zerobus;
 /// </summary>
 /// <remarks>
 /// The SDK automatically recovers from retryable errors when
-/// <see cref="StreamConfigurationOptions.Recovery"/> is enabled.
+/// <see cref="StreamConfigurationOptions.Recovery"/> is enabled, except after a
+/// <c>Flush()</c> or <c>WaitForOffset()</c> timeout, which closes the stream.
 /// Non-retryable errors require manual intervention (e.g. fixing permissions or schema).
 /// </remarks>
 public sealed class ZerobusException : Exception
@@ -26,7 +27,9 @@ public sealed class ZerobusException : Exception
     /// <summary>
     /// Whether this error is transient and the operation may succeed if retried.
     /// When <see cref="StreamConfigurationOptions.Recovery"/> is enabled the SDK
-    /// handles retryable errors automatically.
+    /// handles retryable errors automatically, except a <c>Flush()</c> or
+    /// <c>WaitForOffset()</c> timeout. That timeout closes the stream, so retry
+    /// on a new stream and do not repeat the call on the same stream.
     /// </summary>
     public bool IsRetryable { get; }
 

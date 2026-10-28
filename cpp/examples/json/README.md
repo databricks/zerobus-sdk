@@ -92,10 +92,11 @@ zerobus::Stream stream =
 transient disconnects. If a stream fails *terminally*, `flush()`/`close()`
 throws — and a failed `close()` keeps the handle alive so you can drain whatever
 was never acknowledged with `get_unacked_records()` and re-ingest it on a fresh
-stream. A flush timeout can leave the stream active; retrieval then throws, and
-those records cannot be recovered until the stream has actually closed. After a
-*successful* `close()` the handle is freed, so that call would throw instead —
-recovery belongs on the failure path only.
+stream. A flush or wait timeout closes the stream, so retrieval works after it.
+Do not retry `flush()` or `close()` on that stream. The server can already have
+accepted batches that were sent but not acknowledged, so re-ingesting can
+duplicate those batches. After a *successful* `close()` the handle is freed, so
+that call would throw instead — recovery belongs on the failure path only.
 
 ```cpp
 try {
@@ -106,7 +107,7 @@ try {
   try {
     unacked = stream.get_unacked_records();
   } catch (const zerobus::ZerobusException& retrieval) {
-    // Stream may still be active (for example a flush timeout).
+    // The unacknowledged records could not be read from this stream.
     throw;
   }
   zerobus::Stream retry = open_stream(...);

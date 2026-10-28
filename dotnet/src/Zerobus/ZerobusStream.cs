@@ -264,8 +264,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// }
     /// catch (ZerobusException)
     /// {
-    ///     // A flush timeout can leave the stream active. GetUnackedRecords
-    ///     // requires a closed or failed stream.
+    ///     // A flush timeout closes the stream, so GetUnackedRecords works here.
     ///     try
     ///     {
     ///         var unacked = stream.GetUnackedRecords();
@@ -299,6 +298,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <remarks>
     /// This method does not free native resources. Call <see cref="Dispose()"/>
     /// after you have finished any recovery operations.
+    /// <para>
+    /// If the stream is already closed, for example after a <see cref="Flush()"/> or
+    /// <see cref="WaitForOffset(long)"/> timeout, <c>Close()</c> returns without
+    /// reporting the stored error. <see cref="CloseAsync"/>, <see cref="Dispose()"/>,
+    /// and <see cref="DisposeAsync()"/> do not report it either. Use the error from
+    /// that failed call. <c>ZerobusSdk.RecreateStream(stream)</c> resends the
+    /// unacknowledged records on the new stream. A stream from <c>ZerobusSdk.CreateStream</c>
+    /// does not, so resend them yourself from <see cref="GetUnackedRecords"/>. The
+    /// server can already have accepted batches that were sent but not acknowledged,
+    /// so those batches can be sent twice.
+    /// </para>
     /// </remarks>
     /// <exception cref="ZerobusException">
     /// Thrown if flush or close fails.

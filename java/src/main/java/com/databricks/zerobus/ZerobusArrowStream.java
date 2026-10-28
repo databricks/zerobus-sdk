@@ -144,6 +144,9 @@ public class ZerobusArrowStream implements AutoCloseable {
   /**
    * Waits for a specific offset to be acknowledged by the server.
    *
+   * <p>If the wait times out, the stream closes. Recreate it with {@code recreateArrowStream} to
+   * resend the unacknowledged batches. Do not wait again on this stream.
+   *
    * @param offset the offset to wait for (as returned by {@link #ingestBatch})
    * @throws ZerobusException if an error occurs or the wait times out
    */
@@ -156,6 +159,9 @@ public class ZerobusArrowStream implements AutoCloseable {
    * Flushes all pending batches and waits for their acknowledgments.
    *
    * <p>Blocks until all batches that were ingested before this call are acknowledged by the server.
+   *
+   * <p>If the flush times out, the stream closes. Recreate it with {@code recreateArrowStream},
+   * which resends the unacknowledged batches. Do not flush this stream again.
    *
    * @throws ZerobusException if an error occurs or the flush times out
    */
@@ -172,6 +178,9 @@ public class ZerobusArrowStream implements AutoCloseable {
    *
    * <p>After closing, unacknowledged batches can still be retrieved via {@link
    * #getUnackedBatches()} for use in stream recreation.
+   *
+   * <p>If the stream already failed, this method sends nothing and throws the error that made it
+   * fail. The first call releases the stream, so later calls return without an error.
    *
    * @throws ZerobusException if an error occurs during close
    */

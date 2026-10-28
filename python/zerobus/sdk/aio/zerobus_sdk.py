@@ -162,7 +162,10 @@ class ZerobusStream:
         return await self._inner.flush()
 
     async def close(self):
-        """Close the stream."""
+        """Close the stream.
+
+        If the stream already failed, this raises the error that made it fail and sends no records.
+        """
         return await self._inner.close()
 
     async def get_unacked_records(self):
@@ -237,7 +240,10 @@ class ZerobusArrowStream:
         return await self._inner.flush()
 
     async def close(self):
-        """Close the stream gracefully."""
+        """Close the stream gracefully.
+
+        If the stream already failed, this raises the error that made it fail and sends no batches.
+        """
         return await self._inner.close()
 
     @property

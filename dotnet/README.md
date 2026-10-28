@@ -287,7 +287,7 @@ stream.Flush();
 
 #### `GetUnackedRecords`
 
-Retrieves unacknowledged records after stream failure (call after close/failure only). A flush timeout can leave the stream active, in which case `GetUnackedRecords()` throws until the stream closes.
+Retrieves unacknowledged records after stream failure (call after close/failure only). A flush timeout closes the stream, so `GetUnackedRecords()` works right after it.
 
 ```csharp
 try
@@ -296,8 +296,7 @@ try
 }
 catch (ZerobusException)
 {
-    // A flush timeout can leave the stream active. GetUnackedRecords
-    // requires a closed or failed stream.
+    // A flush timeout closes the stream, so GetUnackedRecords works here.
     try
     {
         var unacked = stream.GetUnackedRecords();
@@ -305,7 +304,7 @@ catch (ZerobusException)
     }
     catch (ZerobusException retrieval)
     {
-        Console.WriteLine($"Could not inspect unacked records (stream may still be active): {retrieval.Message}");
+        Console.WriteLine($"Could not inspect unacked records: {retrieval.Message}");
     }
 }
 ```
@@ -318,6 +317,8 @@ If you call `RecreateStream(stream)`, the original stream object is disposed and
 no longer usable.
 `Dispose()` frees native resources and should be called when recovery work is done.
 `using` calls `Dispose()` automatically.
+
+If the stream is already closed, for example after a `Flush()` timeout, `Close()` returns without reporting the stored error. `CloseAsync()`, `Dispose()`, and `DisposeAsync()` do not report it either. Use the error from the failed `Flush()` or `WaitForOffset()` call. Do not retry `Flush()` or `Close()` on that stream. To continue, call `RecreateStream(stream)`, which resends the unacknowledged records on the new stream. If you create a stream with `CreateStream()` instead, resend the records from `GetUnackedRecords()` yourself. The server can already have accepted batches that were sent but not acknowledged, so those batches can be sent twice. An ingest call can also fail because the stream is closing or closed. That record was not admitted, so send it on the new stream. A late acknowledgment can make `Flush()` return without an exception, but the stream still closes. The timeout error can arrive up to 1 s after `FlushTimeoutMs`.
 
 ```csharp
 stream.Close();
@@ -380,7 +381,7 @@ try
 }
 catch (ZerobusException ex) when (ex.IsRetryable)
 {
-    // Transient error — SDK auto-recovers when Recovery is enabled.
+    // The stream is closed: on a new stream, resend its unacknowledged records and this record.
     Console.WriteLine($"Retryable error: {ex.RawMessage}");
 }
 catch (ZerobusException ex)

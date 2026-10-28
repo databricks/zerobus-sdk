@@ -703,7 +703,7 @@ if err != nil {
     // Check if error is retryable
     if zerobusErr, ok := err.(*zerobus.ZerobusError); ok {
         if zerobusErr.Retryable() {
-            // Transient error, SDK will auto-recover if Recovery is enabled
+            // The stream is closed: on a new stream, resend its unacknowledged records and this record.
             log.Printf("Retryable error: %v", err)
         } else {
             // Fatal error, requires manual intervention
@@ -726,7 +726,7 @@ if err := stream.Close(); err != nil {
 }
 ```
 
-If Flush or ingest fails, inspect unacked records before Close(). Close() nils the stream handle and frees native resources, so GetUnackedRecords() cannot be called afterward.
+If Flush or ingest fails, inspect unacked records before Close(). Close() nils the stream handle and frees native resources, so GetUnackedRecords() cannot be called afterward. On a stream that already failed, `Close()` returns the stored error and sends nothing.
 
 ```go
 if err := stream.Flush(); err != nil {
@@ -779,6 +779,8 @@ Auto-recovered if `Recovery` is enabled:
 - Temporary server errors
 - Stream closed by server
 
+A `Flush()` or `WaitForOffset()` timeout is also retryable, but the SDK does not recover that stream. The stream closes and does not send the pending records again. Call `GetUnackedRecords()` (or `GetUnackedBatches()` for Arrow) before `Close()` to read those records. Then create a new stream and resend them there. Do not retry `Flush()` or `Close()` on the same stream. The server can already have accepted batches that were sent but not acknowledged, so resending can duplicate those batches. An ingest call can also fail because the stream is closing or closed. That record was not admitted, so send it on the new stream. A late acknowledgment can make `Flush()` return `nil`, but the stream still closes. The timeout error can arrive up to 1 s after `FlushTimeoutMs`.
+
 ### Non-Retryable Errors
 Require manual intervention:
 - Invalid OAuth credentials
@@ -794,7 +796,7 @@ offset, err := stream.IngestRecordOffset(data)
 if err != nil {
     if zerobusErr, ok := err.(*zerobus.ZerobusError); ok {
         if zerobusErr.Retryable() {
-            log.Printf("Retryable error, SDK will auto-recover: %v", err)
+            log.Printf("Retryable error, recreate the stream: %v", err)
             // Optionally implement custom retry logic
         } else {
             log.Fatalf("Fatal error, manual intervention needed: %v", err)
@@ -1333,6 +1335,8 @@ Gracefully shuts down the stream, first waiting for all pending records to be ac
 2. Closes the connection to the server
 3. Frees SDK resources
 
+If the stream already failed, for example after a `Flush()` timeout, `Close()` does not flush or wait for acknowledgments. It returns the stored error and sends nothing. Only the first call returns that error. Later calls return `nil`.
+
 Always use `defer stream.Close()` to ensure cleanup even if errors occur.
 
 ### `RecordAck` (Deprecated)
@@ -1428,7 +1432,7 @@ Returns the error message.
 func (e *ZerobusError) Retryable() bool
 ```
 
-Returns `true` if the error can be automatically recovered by the SDK.
+Returns `true` if the error can be automatically recovered by the SDK. After a `Flush()` or `WaitForOffset()` timeout, the SDK does not recover the stream. Create a new stream and resend the unacknowledged records instead. See [Error Handling](#error-handling).
 
 ### `ZerobusArrowStream`
 
@@ -1458,7 +1462,7 @@ Waits for all pending batches to be acknowledged.
 func (s *ZerobusArrowStream) Close() error
 ```
 
-Flushes and closes the stream.
+Flushes and closes the stream. If the stream already failed, returns the stored error and sends nothing. Later calls return `nil`.
 
 ```go
 func (s *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error)

@@ -134,7 +134,12 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
 ### Recovering Unacknowledged Batches
 
 ```java
-stream.close();
+try {
+    stream.close();
+} catch (ZerobusException e) {
+    // close() throws the error that failed the stream. The unacked batches remain available.
+    System.err.println("Stream failed: " + e.getMessage());
+}
 
 List<byte[]> unacked = stream.getUnackedBatches();
 if (!unacked.isEmpty()) {

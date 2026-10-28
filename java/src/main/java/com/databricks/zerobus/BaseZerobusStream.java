@@ -82,6 +82,9 @@ abstract class BaseZerobusStream implements AutoCloseable {
    * non-blocking progress tracking, register an {@link AckCallback}. (Calling this after every
    * record in a tight loop limits throughput to one record per round-trip.)
    *
+   * <p>If the wait times out, the stream closes. Recreate it with {@code recreateStream} to resend
+   * the unacknowledged records. Do not wait again on this stream.
+   *
    * @param offset the offset to wait for (typically the last offset returned by an ingest loop)
    * @throws ZerobusException if an error occurs or the wait times out
    */
@@ -97,6 +100,9 @@ abstract class BaseZerobusStream implements AutoCloseable {
    * once (after a bounded batch, or periodically for a long-running stream). It returns once
    * everything queued so far is acknowledged.
    *
+   * <p>If the flush times out, the stream closes. Recreate it with {@code recreateStream}, which
+   * resends the unacknowledged records. Do not flush this stream again.
+   *
    * @throws ZerobusException if an error occurs or the flush times out
    */
   public void flush() throws ZerobusException {
@@ -110,6 +116,9 @@ abstract class BaseZerobusStream implements AutoCloseable {
    *
    * <p>After closing, unacknowledged records can still be retrieved via subclass methods for use in
    * stream recreation.
+   *
+   * <p>If the stream already failed, this method sends nothing and throws the error that made it
+   * fail. The first call releases the stream, so later calls return without an error.
    *
    * @throws ZerobusException if an error occurs during close
    */

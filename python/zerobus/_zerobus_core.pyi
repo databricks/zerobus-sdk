@@ -344,7 +344,11 @@ class sync:
             ...
 
         def close(self) -> None:
-            """Close the stream gracefully."""
+            """
+            Close the stream gracefully.
+
+            If the stream already failed, this raises the error that made it fail and sends no records.
+            """
             ...
 
         def get_unacked_records(self) -> int:
@@ -533,7 +537,11 @@ class aio:
             ...
 
         async def close(self) -> None:
-            """Close the stream gracefully."""
+            """
+            Close the stream gracefully.
+
+            If the stream already failed, this raises the error that made it fail and sends no records.
+            """
             ...
 
         def get_unacked_records(self) -> int:
@@ -745,7 +753,11 @@ class arrow:
             ...
 
         def close(self) -> None:
-            """Close the stream gracefully."""
+            """
+            Close the stream gracefully.
+
+            If the stream already failed, this raises the error that made it fail and sends no batches.
+            """
             ...
 
         def get_unacked_batches(self) -> List[bytes]:
@@ -772,7 +784,11 @@ class arrow:
             ...
 
         async def close(self) -> None:
-            """Close the stream gracefully."""
+            """
+            Close the stream gracefully.
+
+            If the stream already failed, this raises the error that made it fail and sends no batches.
+            """
             ...
 
         async def get_unacked_batches(self) -> List[bytes]:

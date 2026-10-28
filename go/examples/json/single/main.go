@@ -68,7 +68,7 @@ func main() {
 			log.Printf("Failed to ingest record %d: %v", i, err)
 			// Check if error is retryable.
 			if zerobusErr, ok := err.(*zerobus.ZerobusError); ok && zerobusErr.Retryable() {
-				log.Printf("Error is retryable, could retry...")
+				log.Printf("Error is retryable: recreate the stream and resend the unacknowledged records and this record")
 			}
 			continue
 		}

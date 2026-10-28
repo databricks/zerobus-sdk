@@ -260,8 +260,9 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
 //
 // On failure the handle is deliberately *kept* (not freed, handle_ left
 // non-null) so the caller can still recover buffered data via
-// get_unacked_records() and retry close(); the destructor frees it as a last
-// resort. Only a successful close frees the handle and marks the stream closed.
+// get_unacked_records(); a retried close() throws the same stored error. The
+// destructor frees it as a last resort. Only a successful close frees the
+// handle and marks the stream closed.
 void Stream::close() {
   if (handle_ == nullptr) {
     return;

@@ -1013,11 +1013,13 @@ try {
     logger.error("Non-retriable error: " + e.getMessage());
     throw e;
 } catch (ZerobusException e) {
-    // Retriable error - can retry with backoff
+    // Retriable error - can retry with backoff. On a closed stream, recreate the stream instead.
     logger.warn("Retriable error: " + e.getMessage());
     // Implement retry logic
 }
 ```
+
+A `flush()` or `waitForOffset()` timeout also throws `ZerobusException`, but the stream closes at once. Recovery stops, and the SDK does not send the pending records again. Call `recreateStream()` or `recreateArrowStream()` on the closed stream. It resends the unacknowledged batches. Do not retry `flush()` or `close()` on the same stream. An ingest call can also fail because the stream is closing or closed. That record was not admitted, so send it on the new stream. The server can already have accepted batches that were sent but not acknowledged, so a resend can duplicate those batches. On a failed stream, the first `close()` throws the error that made it fail. Later calls return without an error. A late acknowledgment can make `flush()` return without error, but the stream still closes. The timeout error can arrive up to 1 s after `flushTimeoutMs`.
 
 ## API Reference
 

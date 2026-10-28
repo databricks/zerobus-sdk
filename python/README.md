@@ -419,7 +419,9 @@ The SDK raises two categories of exception. Handle them differently:
 
 - **Retriable** (`ZerobusException`): transient conditions such as network issues or
   temporary server errors. Safe to retry, ideally with backoff. The SDK's built-in
-  recovery already handles many of these for you.
+  recovery already handles many of these for you. This does not apply to a `flush()`
+  or `wait_for_offset()` timeout: the stream closes, so do not retry it on the same
+  stream. See [Handling Stream Failures](#handling-stream-failures).
 - **Non-retriable** (`NonRetriableException`): fatal conditions such as invalid
   credentials or a missing table. Retrying won't help. Fix the underlying problem.
 
@@ -435,7 +437,7 @@ except NonRetriableException as e:
     # Fatal: do not retry; fix the cause (credentials, table, schema)
     raise
 except ZerobusException as e:
-    # Transient: retry with backoff
+    # Transient: retry with backoff. On a closed stream, recreate the stream instead.
     ...
 ```
 
@@ -444,9 +446,20 @@ except ZerobusException as e:
 The SDK automatically handles retries for transient errors. Enqueue, flush, and close
 failures surface as `ZerobusException` or `NonRetriableException`. `get_unacked_records()`
 and `recreate_stream()` succeed only after the stream has already closed, which a terminal
-failure does. An enqueue failure leaves the stream active, so those calls fail; raise
-the original error and keep the stream. `recreate_stream()` re-queues records that were
-already accepted; it does not retry a payload that failed to enqueue.
+failure does. An enqueue failure on an open stream leaves the stream active, so those calls
+fail; raise the original error and keep the stream. An ingest call can also fail because
+the stream is closing or closed. That record was not admitted, so send it on the new
+stream. `recreate_stream()` re-queues records that were already accepted; it does not retry
+a payload that failed to enqueue.
+
+A `flush()` or `wait_for_offset()` timeout closes the stream, and recovery stops. The SDK
+does not send the pending records again. Call `recreate_stream()` (or
+`recreate_arrow_stream()` for Arrow streams) on the closed stream. It resends the
+unacknowledged records on the new stream. Do not retry `flush()` or `close()` on the same
+stream; a later `close()` raises the same error. The server can already have
+accepted batches that were sent but not acknowledged, so a resend can duplicate those
+batches. The timeout error can arrive up to 1 s after `flush_timeout_ms`. A late
+acknowledgment can make `flush()` return without error, but the stream still closes.
 
 ```python
 from zerobus.sdk.shared import ZerobusException
@@ -610,7 +623,7 @@ Acks are ordered, so waiting on the last offset returned confirms all prior reco
 ```python
 # Sync
 stream.flush()   # Wait for all pending records to be acknowledged
-stream.close()   # Flush and close gracefully (always call in finally)
+stream.close()   # Flush and close gracefully (always call in finally). On a failed stream, raises the error that failed it.
 
 # Async
 async def close_async(stream):

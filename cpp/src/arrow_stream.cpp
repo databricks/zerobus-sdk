@@ -150,10 +150,10 @@ std::vector<std::vector<std::uint8_t>> ArrowStream::get_unacked_batches() {
 // does not). Idempotent via the null-handle guard.
 //
 // On failure the handle is deliberately kept (not freed, handle_ left non-null)
-// so the caller can still recover buffered batches via get_unacked_batches()
-// and retry close(); the destructor frees it as a last resort. Only a
-// successful close frees the handle and marks the stream closed. (Mirrors
-// Stream::close().)
+// so the caller can still recover buffered batches via get_unacked_batches();
+// a retried close() throws the same stored error. The destructor frees it as a
+// last resort. Only a successful close frees the handle and marks the stream
+// closed. (Mirrors Stream::close().)
 void ArrowStream::close() {
   if (handle_ == nullptr) {
     return;

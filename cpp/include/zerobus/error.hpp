@@ -11,7 +11,9 @@ namespace zerobus {
 /// Mirrors the `CResult` carried across the C FFI boundary: a human-readable
 /// message plus a retryability flag. `is_retryable()` reflects the Rust core's
 /// `ZerobusError::is_retryable()` classification — callers may retry the
-/// operation when it returns `true`.
+/// operation when it returns `true`. After a `flush()` or `wait_for_offset()`
+/// timeout, a retry means a new stream that resends the unacknowledged records.
+/// Do not retry `flush()` or `close()` on the same stream.
 class ZerobusException : public std::runtime_error {
  public:
   ZerobusException(std::string message, bool is_retryable)

@@ -29,6 +29,19 @@
 
 ### Breaking Changes
 
+- A `flush()` or `wait_for_offset()` timeout now closes the stream. This change comes from
+  the Rust SDK 3.0.0 core. Recovery stops, and the SDK does not send the pending records
+  again. A later `close()` sends nothing and raises the timeout error. `close()` on a failed
+  record stream now raises the error that made it fail. Before, it returned without error.
+  If an `ack_callback` is set, a timeout calls its `on_error()` for each unacknowledged
+  offset.
+  Migration: call `recreate_stream()` (or `recreate_arrow_stream()` for Arrow streams) on
+  the closed stream. It resends the unacknowledged records from `get_unacked_batches()`.
+  Do not retry `flush()` or `close()` on the same stream. An ingest call that fails
+  because the stream is closing or closed did not admit its record. Send that record on
+  the new stream. The server can already have accepted batches that were sent but not
+  acknowledged, so a resend can duplicate those batches.
+
 ### Deprecations
 
 ### API Changes

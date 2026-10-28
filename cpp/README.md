@@ -270,10 +270,20 @@ zerobus::Stream stream = sdk.create_stream(table, provider, options);
 try {
   stream.ingest_json_record(record);
 } catch (const zerobus::ZerobusException& e) {
-  if (e.is_retryable()) { /* transient: back off and retry */ }
+  if (e.is_retryable()) { /* transient: back off and retry. On a closed stream, recreate the stream instead. */ }
   else { /* permanent failure: log and drop */ }
 }
 ```
+
+A `flush()` or `wait_for_offset()` timeout is retryable, but it closes the
+stream. Create a new stream and resend the records from `get_unacked_records()`
+(or `get_unacked_batches()` for Arrow). Do not retry `flush()` or `close()` on
+the same stream. The server can already have accepted batches that were sent but
+not acknowledged, so resending can duplicate those batches. An ingest call can
+also fail because the stream is closing or closed. That record was not admitted,
+so send it on the new stream. A late acknowledgment can make `flush()` return
+without an exception, but the stream still closes. The timeout error can arrive
+up to 1 s after `flush_timeout_ms`.
 
 ### Async ack callback
 

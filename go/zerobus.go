@@ -103,7 +103,7 @@
 //	if err != nil {
 //	    if zbErr, ok := err.(*zerobus.ZerobusError); ok {
 //	        if zbErr.Retryable() {
-//	            // Transient error, SDK will auto-recover
+//	            // The stream is closed: on a new stream, resend its unacknowledged records and this record.
 //	        } else {
 //	            // Fatal error, manual intervention needed
 //	        }
@@ -820,6 +820,10 @@ func (st *ZerobusStream) Flush() error {
 // Returns an error if:
 //   - Flush fails
 //   - Unable to close the gRPC connection
+//   - The stream already failed, for example after a Flush timeout. Close sends
+//     nothing and returns the stored error.
+//
+// Only the first call returns that error. Later calls on the same value return nil.
 //
 // Example:
 //
