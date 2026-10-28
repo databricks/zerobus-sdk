@@ -3,8 +3,11 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "internal/platform/log.h"
 
 struct zb_tls_ctx {
     /* Reference counted. */
@@ -90,6 +93,35 @@ static void socket_bio_init(void)
     socket_bio_method = method;
 }
 
+/* Writes OpenSSL's reason for a failure into reason, then clears its error
+ * queue. */
+static void take_reason(const SSL *session, char *reason, size_t size)
+{
+    char error[128];
+    /* Socket failures and closes leave no reason in the queue. */
+    const char *cause = session ? "connection failed" : "failed";
+    if (ERR_peek_error()) {
+        ERR_error_string_n(ERR_peek_error(), error, sizeof(error));
+        cause = error;
+    }
+    long verify = session ? SSL_get_verify_result(session) : X509_V_OK;
+    if (verify != X509_V_OK) {
+        snprintf(reason, size, "%s (certificate: %s)", cause,
+                 X509_verify_cert_error_string(verify));
+    } else {
+        snprintf(reason, size, "%s", cause);
+    }
+    ERR_clear_error();
+}
+
+/* Logs the failure's reason as the calling function. */
+#define LOG_FAILURE(level, session)                                            \
+    do {                                                                       \
+        char reason[256];                                                      \
+        take_reason(session, reason, sizeof(reason));                          \
+        ZB_LOG(level, "%s", reason);                                           \
+    } while (0)
+
 zerobus_status_t zb_tls_ctx_new(const char *ca_file, zb_tls_ctx_t **out_ctx)
 {
     if (!out_ctx || (ca_file && !ca_file[0])) {
@@ -138,6 +170,7 @@ zerobus_status_t zb_tls_ctx_new(const char *ca_file, zb_tls_ctx_t **out_ctx)
 
 fail:
     zb_tls_ctx_free(ctx);
+    LOG_FAILURE(ZB_LOG_WARN, NULL);
     return status;
 }
 
@@ -148,6 +181,22 @@ void zb_tls_ctx_free(zb_tls_ctx_t *ctx)
     }
     SSL_CTX_free(ctx->context);
     free(ctx);
+}
+
+/* Copies host into name without the DNS root dot at its end, which
+ * certificates and SNI leave out. Returns false if it doesn't fit. */
+static bool dns_name(const char *host, char *name, size_t size)
+{
+    size_t len = strlen(host);
+    if (len > 1 && host[len - 1] == '.') {
+        len--;
+    }
+    if (len >= size) {
+        return false;
+    }
+    memcpy(name, host, len);
+    name[len] = '\0';
+    return true;
 }
 
 zerobus_status_t zb_tls_new(const zb_tls_ctx_t *ctx, zb_socket_t socket,
@@ -198,9 +247,11 @@ zerobus_status_t zb_tls_new(const zb_tls_ctx_t *ctx, zb_socket_t socket,
         }
     } else {
         /* Host is a DNS name. */
+        char name[256];
         ERR_clear_error();
-        if (SSL_set1_host(tls->session, host) != 1 ||
-            SSL_set_tlsext_host_name(tls->session, host) != 1) {
+        if (!dns_name(host, name, sizeof(name)) ||
+            SSL_set1_host(tls->session, name) != 1 ||
+            SSL_set_tlsext_host_name(tls->session, name) != 1) {
             goto fail;
         }
     }
@@ -209,6 +260,7 @@ zerobus_status_t zb_tls_new(const zb_tls_ctx_t *ctx, zb_socket_t socket,
 
 fail:
     zb_tls_free(tls);
+    LOG_FAILURE(ZB_LOG_WARN, NULL);
     return ZEROBUS_STATUS_INTERNAL;
 }
 
@@ -242,7 +294,8 @@ static zerobus_status_t io_result(zb_tls_t *tls, int result, size_t bytes,
         return ZEROBUS_STATUS_OK;
     }
     if (SSL_get_verify_result(tls->session) != X509_V_OK) {
-        return ZEROBUS_STATUS_UNAUTHENTICATED;
+        /* The server's certificate failed, not our credentials. */
+        return ZEROBUS_STATUS_UNAVAILABLE;
     }
     if (tls->io_failure != ZEROBUS_STATUS_OK) {
         return tls->io_failure;
@@ -263,9 +316,11 @@ zerobus_status_t zb_tls_handshake(zb_tls_t *tls, unsigned *out_want,
     zerobus_status_t status =
         io_result(tls, SSL_connect(tls->session), 0, &progress);
     if (status != ZEROBUS_STATUS_OK) {
+        LOG_FAILURE(ZB_LOG_WARN, tls->session);
         return status;
     }
     if (progress.eof) {
+        ZB_WARN("closed by the server");
         return ZEROBUS_STATUS_UNAVAILABLE;
     }
     *out_want = progress.want;
@@ -275,9 +330,11 @@ zerobus_status_t zb_tls_handshake(zb_tls_t *tls, unsigned *out_want,
         unsigned len = 0;
         SSL_get0_alpn_selected(tls->session, &protocol, &len);
         if (SSL_get_verify_result(tls->session) != X509_V_OK) {
-            return ZEROBUS_STATUS_UNAUTHENTICATED;
+            LOG_FAILURE(ZB_LOG_WARN, tls->session);
+            return ZEROBUS_STATUS_UNAVAILABLE;
         }
         if (tls->http2 && (len != 2 || memcmp(protocol, "h2", 2) != 0)) {
+            ZB_WARN("server did not select HTTP/2");
             return ZEROBUS_STATUS_UNAVAILABLE;
         }
     }
@@ -294,7 +351,11 @@ zerobus_status_t zb_tls_read(zb_tls_t *tls, uint8_t *data, size_t len,
     tls->io_failure = ZEROBUS_STATUS_OK;
     size_t bytes = 0;
     int result = SSL_read_ex(tls->session, data, len, &bytes);
-    return io_result(tls, result, bytes, out);
+    zerobus_status_t status = io_result(tls, result, bytes, out);
+    if (status != ZEROBUS_STATUS_OK) {
+        LOG_FAILURE(ZB_LOG_DEBUG, tls->session);
+    }
+    return status;
 }
 
 zerobus_status_t zb_tls_write(zb_tls_t *tls, const uint8_t *data, size_t len,
@@ -315,6 +376,9 @@ zerobus_status_t zb_tls_write(zb_tls_t *tls, const uint8_t *data, size_t len,
         status = tls->io_failure != ZEROBUS_STATUS_OK
                      ? tls->io_failure
                      : ZEROBUS_STATUS_UNAVAILABLE;
+    }
+    if (status != ZEROBUS_STATUS_OK) {
+        LOG_FAILURE(ZB_LOG_DEBUG, tls->session);
     }
     return status;
 }

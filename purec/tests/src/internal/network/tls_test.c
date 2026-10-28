@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 
 #include <openssl/bio.h>
+#include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
@@ -173,6 +174,8 @@ static void test_arguments(void)
     /* A CA file must exist and hold at least one certificate. */
     CHECK_EQ_INT(zb_tls_ctx_new(ZB_TEST_DIR "/missing.pem", &ctx),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
+    /* Failures leave no errors behind on the caller's thread. */
+    CHECK(ERR_peek_error() == 0);
     CHECK_EQ_INT(zb_tls_ctx_new(KEY_FILE, &ctx),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(ctx == NULL);
@@ -321,19 +324,25 @@ static void test_host_check(void)
 
     /* The certificate names localhost and 127.0.0.1 only. */
     CHECK_EQ_INT(conn_open(&conn, CERT_FILE, "other.example", false, 0),
-                 ZEROBUS_STATUS_UNAUTHENTICATED);
+                 ZEROBUS_STATUS_UNAVAILABLE);
     conn_close(&conn);
     CHECK_OK(conn_open(&conn, CERT_FILE, "127.0.0.1", false, 0));
     /* An IP host is not sent as SNI. */
     CHECK(SSL_get_servername(conn.server, TLSEXT_NAMETYPE_host_name) == NULL);
     conn_close(&conn);
     CHECK_EQ_INT(conn_open(&conn, CERT_FILE, "127.0.0.2", false, 0),
-                 ZEROBUS_STATUS_UNAUTHENTICATED);
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    conn_close(&conn);
+    /* The DNS root dot is dropped for verification and SNI. */
+    CHECK_OK(conn_open(&conn, CERT_FILE, "localhost.", false, 0));
+    const char *name =
+        SSL_get_servername(conn.server, TLSEXT_NAMETYPE_host_name);
+    CHECK(name && strcmp(name, "localhost") == 0);
     conn_close(&conn);
 
     /* The system trust roots don't include the self-signed certificate. */
     CHECK_EQ_INT(conn_open(&conn, NULL, "localhost", false, 0),
-                 ZEROBUS_STATUS_UNAUTHENTICATED);
+                 ZEROBUS_STATUS_UNAVAILABLE);
     conn_close(&conn);
     /* SSL_CERT_FILE replaces the system's default roots file. */
     CHECK(setenv("SSL_CERT_FILE", CERT_FILE, 1) == 0);
