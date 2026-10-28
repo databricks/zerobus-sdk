@@ -15,13 +15,15 @@
   counts were on the same cache line as the registry fields that the parser
   reads, which made parsing several times slower on many threads.
 
-- Added `StreamBuilder::compression` and `ArrowCompression` (`IpcZstd` by
-  default, `IpcLz4`, `GrpcZstd`, or `None`) to choose Arrow Flight payload
+- Added `StreamBuilder::compression` and `ArrowCompression` (`IpcZstd`,
+  `IpcLz4`, `GrpcZstd`, or `Uncompressed`) to choose Arrow Flight payload
   compression with one setting. `GrpcZstd` compresses each whole gRPC request
   message, including the IPC header and alignment padding that IPC compression
   leaves raw, which sends fewer bytes for wide or sparse schemas. Its buffers
-  are sent without IPC compression and with 8-byte alignment. The default
-  leaves the wire format unchanged.
+  are sent without IPC compression and with 8-byte alignment, and it can use
+  more client CPU than `IpcZstd`. With it, `BatchStats::approximate_wire_bytes`
+  counts bytes after gRPC compression. The default leaves the wire format
+  unchanged.
 
 ### Bug Fixes
 
@@ -73,7 +75,8 @@
   `ArrowStreamConfigurationOptions::ipc_compression` field in favor of
   `StreamBuilder::compression` and the `compression` field. They keep working:
   of the two setters, the last call wins, and the deprecated field applies while
-  `compression` is `None`.
+  `compression` is `ArrowCompression::FallbackToLegacy`, its default. That
+  variant is deprecated too and will be removed with the field.
 
 ### API Changes
 

@@ -534,7 +534,7 @@ impl<'a> StreamBuilder<'a> {
     #[allow(deprecated)]
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
         self.arrow_config.ipc_compression = compression;
-        self.arrow_config.compression = None;
+        self.arrow_config.compression = crate::ArrowCompression::FallbackToLegacy;
         self
     }
 
@@ -544,7 +544,7 @@ impl<'a> StreamBuilder<'a> {
     /// [`ArrowCompression`](crate::ArrowCompression) for the options.
     #[cfg(feature = "arrow-flight")]
     pub fn compression(mut self, compression: crate::ArrowCompression) -> Self {
-        self.arrow_config.compression = Some(compression);
+        self.arrow_config.compression = compression;
         self
     }
 

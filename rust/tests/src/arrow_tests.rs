@@ -5676,8 +5676,8 @@ mod arrow_flight_tests {
                     .headers_provider(Arc::new(TestHeadersProvider::default()))
                     .arrow(schema.clone());
                 if disable_compression {
-                    builder =
-                        builder.compression(databricks_zerobus_ingest_sdk::ArrowCompression::None);
+                    builder = builder
+                        .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed);
                 }
                 let stream = builder.build_arrow().await?;
 
@@ -5795,6 +5795,93 @@ mod arrow_flight_tests {
                     "{case:?}",
                 );
             }
+
+            Ok(())
+        }
+
+        /// With gRPC compression, `BatchSent` reports the compressed size of the batch's
+        /// messages rather than their size before compression.
+        #[tokio::test]
+        async fn test_grpc_compression_batch_stats_count_compressed_bytes(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::{channel_exporter, ArrowCompression, StreamStat};
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_batch_stats_count_compressed_bytes");
+
+            const ROWS: i64 = 2_000;
+            let mut sent = Vec::new();
+            for compression in [ArrowCompression::Uncompressed, ArrowCompression::GrpcZstd] {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: ROWS as u64,
+                        }],
+                    )
+                    .await;
+                let (exporter, mut stats_rx) =
+                    channel_exporter(std::num::NonZeroUsize::new(32).unwrap());
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .compression(compression)
+                    .stats_exporter(exporter)
+                    .build_arrow()
+                    .await?;
+                let offset = stream
+                    .ingest_batch(create_test_record_batch(
+                        schema,
+                        (0..ROWS).collect(),
+                        vec![Some("the same message on every row"); ROWS as usize],
+                    ))
+                    .await?;
+                stream.flush().await?;
+
+                let stats = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if let Some(StreamStat::BatchSent {
+                            offset: sent_offset,
+                            stats,
+                            ..
+                        }) = stats_rx.recv().await
+                        {
+                            if sent_offset == offset {
+                                return stats;
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("the batch must emit send telemetry");
+                assert_eq!(stats.records, ROWS as u64, "{compression:?}");
+                sent.push(stats);
+            }
+
+            let (uncompressed, grpc_zstd) = (&sent[0], &sent[1]);
+            assert_eq!(
+                grpc_zstd.uncompressed_bytes,
+                uncompressed.uncompressed_bytes
+            );
+            assert!(grpc_zstd.approximate_wire_bytes > 0);
+            assert!(
+                grpc_zstd.approximate_wire_bytes * 4 < uncompressed.approximate_wire_bytes,
+                "gRPC zstd: {} bytes, uncompressed: {} bytes",
+                grpc_zstd.approximate_wire_bytes,
+                uncompressed.approximate_wire_bytes,
+            );
 
             Ok(())
         }

@@ -547,7 +547,10 @@ fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
 fn compression_defaults_to_deprecated_ipc_zstd() {
     let sdk = test_sdk();
     let config = arrow_test_builder(&sdk).arrow_config;
-    assert_eq!(config.compression, None);
+    assert_eq!(
+        config.compression,
+        crate::ArrowCompression::FallbackToLegacy
+    );
     assert_eq!(
         config.ipc_compression,
         Some(arrow_ipc::CompressionType::ZSTD)
@@ -563,16 +566,16 @@ fn last_compression_setter_wins() {
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .compression(crate::ArrowCompression::GrpcZstd)
         .arrow_config;
-    assert_eq!(
-        new_last.compression,
-        Some(crate::ArrowCompression::GrpcZstd)
-    );
+    assert_eq!(new_last.compression, crate::ArrowCompression::GrpcZstd);
 
     let deprecated_last = arrow_test_builder(&sdk)
         .compression(crate::ArrowCompression::GrpcZstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .arrow_config;
-    assert_eq!(deprecated_last.compression, None);
+    assert_eq!(
+        deprecated_last.compression,
+        crate::ArrowCompression::FallbackToLegacy
+    );
     assert_eq!(
         deprecated_last.ipc_compression,
         Some(arrow_ipc::CompressionType::LZ4_FRAME)

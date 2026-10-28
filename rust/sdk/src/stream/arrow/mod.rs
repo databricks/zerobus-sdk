@@ -44,6 +44,7 @@ pub(crate) mod c_data;
 mod acks;
 mod batch;
 mod close;
+mod compressed_sizes;
 mod connection;
 mod metadata;
 mod options;

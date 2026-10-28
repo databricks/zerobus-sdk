@@ -553,6 +553,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
+ "http-body",
  "hyper-http-proxy",
  "hyper-rustls",
  "hyper-util",

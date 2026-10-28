@@ -1277,7 +1277,7 @@ fn map_ipc_compression(value: Option<i32>) -> ArrowCompression {
     match value {
         Some(0) => ArrowCompression::IpcLz4,
         Some(1) => ArrowCompression::IpcZstd,
-        _ => ArrowCompression::None,
+        _ => ArrowCompression::Uncompressed,
     }
 }
 

@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 use std::sync::Mutex as StdMutex;
 
 use super::batch::stream_ipc_write_options;
+use super::compressed_sizes::{CompressedSizeChannel, CompressedSizes, SentFrame};
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::stats_size::frame_stats;
 use super::{
@@ -77,19 +78,37 @@ fn lock_slot(
     pending.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// With gRPC compression, batch stats wait for tonic to compress each message, so the
+/// request stream and the transport share a [`CompressedSizes`].
+fn compressed_sizes(parameters: &FlightConnectionParameters<'_>) -> Option<Arc<CompressedSizes>> {
+    match (&parameters.stats_exporter, parameters.options.compression) {
+        (Some(exporter), ArrowCompression::GrpcZstd) => {
+            Some(Arc::new(CompressedSizes::new(Arc::clone(exporter))))
+        }
+        _ => None,
+    }
+}
+
 /// Accounts for one data frame, emitting `BatchSent` and clearing the slot on the final frame.
+///
+/// With `compressed_sizes`, the frame is handed over instead, and `BatchSent` is emitted
+/// once the final frame's message has been compressed and measured.
 fn record_sent_frame(
     exporter: &dyn StatsExporter,
     pending: &StdMutex<Option<EncodeInProgress>>,
     frame: &FlightData,
+    compressed_sizes: Option<&CompressedSizes>,
 ) {
     let wire = (frame.data_header.len() + frame.data_body.len() + frame.app_metadata.len()) as u64;
     // IPC row counts identify the final split frame without decoding the body.
     // Dictionary messages contribute bytes but do not advance the row count.
     let parsed_stats = frame_stats(frame);
-    let event = {
+    let (offset, attempt, stats) = {
         let mut slot = lock_slot(pending);
         let Some(batch) = slot.as_mut() else {
+            if let Some(sizes) = compressed_sizes {
+                sizes.push_frame(SentFrame::Untracked);
+            }
             return;
         };
         let attempt = *batch
@@ -99,6 +118,9 @@ fn record_sent_frame(
             let offset = batch.offset;
             *slot = None;
             drop(slot);
+            if let Some(sizes) = compressed_sizes {
+                sizes.push_frame(SentFrame::Untracked);
+            }
             warn!(target: super::LOG_TARGET, offset, attempt,
                 "Failed to read Arrow IPC frame statistics; omitting BatchSent for this transmission"
             );
@@ -107,22 +129,40 @@ fn record_sent_frame(
         batch.wire += wire;
         batch.uncompressed += uncompressed;
         batch.remaining_records = batch.remaining_records.saturating_sub(records);
+        let offset = batch.offset;
         if batch.remaining_records != 0 {
+            if let Some(sizes) = compressed_sizes {
+                sizes.push_frame(SentFrame::Batch {
+                    offset,
+                    attempt,
+                    completed: None,
+                });
+            }
             return;
         }
-        let event = StreamStat::BatchSent {
-            offset: batch.offset,
-            attempt,
-            stats: BatchStats {
-                records: batch.records,
-                approximate_wire_bytes: batch.wire,
-                uncompressed_bytes: batch.uncompressed,
-            },
+        let stats = BatchStats {
+            records: batch.records,
+            approximate_wire_bytes: batch.wire,
+            uncompressed_bytes: batch.uncompressed,
         };
         *slot = None;
-        event
+        (offset, attempt, stats)
     };
-    crate::stats::dispatch(exporter, event);
+    match compressed_sizes {
+        Some(sizes) => sizes.push_frame(SentFrame::Batch {
+            offset,
+            attempt,
+            completed: Some(stats),
+        }),
+        None => crate::stats::dispatch(
+            exporter,
+            StreamStat::BatchSent {
+                offset,
+                attempt,
+                stats,
+            },
+        ),
+    }
 }
 
 pub(super) type FlightResponseStream =
@@ -347,6 +387,7 @@ impl ZerobusArrowStream {
         let attempt_deadline =
             configured_deadline(attempt_started, attempt_timeout, "recovery_timeout_ms")?;
         let result = timeout_at(attempt_deadline, async {
+            let compressed_sizes = compressed_sizes(parameters);
             let client = Self::create_flight_client(
                 parameters.endpoint,
                 parameters.tls_config,
@@ -355,6 +396,7 @@ impl ZerobusArrowStream {
                 parameters.options,
                 parameters.headers_provider,
                 parameters.sdk_identifier,
+                compressed_sizes.clone(),
             )
             .await?;
 
@@ -364,6 +406,7 @@ impl ZerobusArrowStream {
                 parameters.options,
                 parameters.request_bodies,
                 parameters.stats_exporter.clone(),
+                compressed_sizes,
                 #[cfg(feature = "test-hooks")]
                 Arc::clone(parameters.test_hooks),
             )
@@ -398,6 +441,7 @@ impl ZerobusArrowStream {
     }
 
     /// Creates a Flight client connected to the endpoint.
+    #[allow(clippy::too_many_arguments)]
     async fn create_flight_client(
         endpoint: &str,
         tls_config: &Arc<dyn TlsConfig>,
@@ -406,7 +450,8 @@ impl ZerobusArrowStream {
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
         sdk_identifier: &str,
-    ) -> ZerobusResult<FlightClient> {
+        compressed_sizes: Option<Arc<CompressedSizes>>,
+    ) -> ZerobusResult<FlightClient<CompressedSizeChannel>> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
         let base_endpoint = Channel::from_shared(endpoint.to_string())
@@ -425,8 +470,8 @@ impl ZerobusArrowStream {
             None => configured_endpoint.connect_lazy(),
         };
 
-        let inner = FlightServiceClient::new(channel);
-        let inner = if options.compression == Some(ArrowCompression::GrpcZstd) {
+        let inner = FlightServiceClient::new(CompressedSizeChannel::new(channel, compressed_sizes));
+        let inner = if options.compression == ArrowCompression::GrpcZstd {
             inner.send_compressed(CompressionEncoding::Zstd)
         } else {
             inner
@@ -485,6 +530,7 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         stats_exporter: Option<Arc<dyn StatsExporter>>,
+        compressed_sizes: Option<Arc<CompressedSizes>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
         let ipc_write_options = stream_ipc_write_options(options)?;
@@ -524,8 +570,15 @@ impl ZerobusArrowStream {
                                 flight_data.app_metadata = bytes.into();
                             }
                             if let Some(exporter) = &stats_out {
-                                record_sent_frame(exporter.as_ref(), &pending_out, &flight_data);
+                                record_sent_frame(
+                                    exporter.as_ref(),
+                                    &pending_out,
+                                    &flight_data,
+                                    compressed_sizes.as_deref(),
+                                );
                             }
+                        } else if let Some(sizes) = &compressed_sizes {
+                            sizes.push_frame(SentFrame::Untracked);
                         }
                         flight_data
                     })
@@ -584,11 +637,12 @@ impl ZerobusArrowStream {
     /// This allows setup errors to be detected during stream creation rather than
     /// later during batch ingestion.
     async fn start_stream_connection(
-        mut client: FlightClient,
+        mut client: FlightClient<CompressedSizeChannel>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         request_bodies: &RequestBodyRegistry,
         stats_exporter: Option<Arc<dyn StatsExporter>>,
+        compressed_sizes: Option<Arc<CompressedSizes>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<FlightConnection> {
         // Create channel for sending RecordBatches.
@@ -599,6 +653,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             stats_exporter,
+            compressed_sizes,
             #[cfg(feature = "test-hooks")]
             test_hooks,
         )?;
@@ -684,6 +739,7 @@ impl ZerobusArrowStream {
     pub(super) async fn reconnect_transport(
         parameters: &FlightConnectionParameters<'_>,
     ) -> ZerobusResult<FlightConnection> {
+        let compressed_sizes = compressed_sizes(parameters);
         let client = Self::create_flight_client(
             parameters.endpoint,
             parameters.tls_config,
@@ -692,6 +748,7 @@ impl ZerobusArrowStream {
             parameters.options,
             parameters.headers_provider,
             parameters.sdk_identifier,
+            compressed_sizes.clone(),
         )
         .await?;
 
@@ -702,6 +759,7 @@ impl ZerobusArrowStream {
             parameters.table_properties,
             parameters.options,
             parameters.stats_exporter.clone(),
+            compressed_sizes,
             #[cfg(feature = "test-hooks")]
             Arc::clone(parameters.test_hooks),
         )?;
@@ -846,6 +904,7 @@ mod tests {
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
             None,
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -889,10 +948,11 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions {
-                compression: Some(super::super::ArrowCompression::None),
+                compression: super::super::ArrowCompression::Uncompressed,
                 ..ArrowStreamConfigurationOptions::default()
             },
             Some(exporter as Arc<dyn StatsExporter>),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -1010,14 +1070,14 @@ mod tests {
                         channel_exporter(std::num::NonZeroUsize::new(8).unwrap());
 
                     if !invalid_first {
-                        record_sent_frame(exporter.as_ref(), &pending, &frame);
+                        record_sent_frame(exporter.as_ref(), &pending, &frame, None);
                         assert!(rx.try_recv().is_err(), "batch is still incomplete");
                     }
-                    record_sent_frame(exporter.as_ref(), &pending, &invalid_frame);
+                    record_sent_frame(exporter.as_ref(), &pending, &invalid_frame, None);
                     assert!(pending.lock().unwrap().is_none(), "discard invalid sample");
                     // Remaining frames cannot revive the sample or advance its attempt.
-                    record_sent_frame(exporter.as_ref(), &pending, &frame);
-                    record_sent_frame(exporter.as_ref(), &pending, &invalid_frame);
+                    record_sent_frame(exporter.as_ref(), &pending, &frame, None);
+                    record_sent_frame(exporter.as_ref(), &pending, &invalid_frame, None);
                     assert!(rx.try_recv().is_err(), "no incomplete or invalid stats");
                     assert_eq!(attempts.load(Ordering::Relaxed), 1);
 
@@ -1026,7 +1086,7 @@ mod tests {
                         [(8, Arc::new(AtomicU32::new(0)), 0), (7, attempts, 1)]
                     {
                         *pending.lock().unwrap() = Some(EncodeInProgress::new(offset, counter, 2));
-                        record_sent_frame(exporter.as_ref(), &pending, &frame);
+                        record_sent_frame(exporter.as_ref(), &pending, &frame, None);
                         match rx.try_recv().expect("valid transmission is reported") {
                             StreamStat::BatchSent {
                                 offset: actual_offset,
@@ -1070,6 +1130,7 @@ mod tests {
                 table_properties,
                 &ArrowStreamConfigurationOptions::default(),
                 Some(exporter),
+                None,
                 #[cfg(feature = "test-hooks")]
                 Arc::new(super::super::TestHooks::default()),
             )
@@ -1208,6 +1269,7 @@ mod tests {
                 table_properties,
                 &ArrowStreamConfigurationOptions::default(),
                 Some(exporter as Arc<dyn StatsExporter>),
+                None,
                 #[cfg(feature = "test-hooks")]
                 Arc::new(super::super::TestHooks::default()),
             )
@@ -1280,12 +1342,12 @@ mod tests {
         .unwrap();
 
         for compression in [
-            ArrowCompression::None,
+            ArrowCompression::Uncompressed,
             ArrowCompression::IpcLz4,
             ArrowCompression::IpcZstd,
         ] {
             let options = ArrowStreamConfigurationOptions {
-                compression: Some(compression),
+                compression,
                 ..ArrowStreamConfigurationOptions::default()
             };
             // Establish the number of frames independently of telemetry. The real
@@ -1308,6 +1370,7 @@ mod tests {
                     &table_properties,
                     &options,
                     Some(exporter),
+                    None,
                     #[cfg(feature = "test-hooks")]
                     Arc::new(super::super::TestHooks::default()),
                 )
@@ -1388,6 +1451,7 @@ mod tests {
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
             None,
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -1412,6 +1476,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             None,
             Arc::clone(&test_hooks),
         )
@@ -1460,6 +1525,7 @@ mod tests {
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
             None,
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -1480,9 +1546,10 @@ mod tests {
             schema: Arc::new(ArrowSchema::empty()),
         };
         let registry = RequestBodyRegistry::default();
-        let client = FlightClient::new(
+        let client = FlightClient::new(super::CompressedSizeChannel::new(
             tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy(),
-        );
+            None,
+        ));
         let options = ArrowStreamConfigurationOptions::default();
 
         {
@@ -1491,6 +1558,7 @@ mod tests {
                 &table_properties,
                 &options,
                 &registry,
+                None,
                 None,
                 #[cfg(feature = "test-hooks")]
                 Arc::new(super::super::TestHooks::default()),
@@ -1526,6 +1594,7 @@ mod tests {
             &ArrowStreamConfigurationOptions::default(),
             &headers_provider,
             "test-sdk",
+            None,
         )
         .await
         .unwrap();

@@ -298,11 +298,11 @@ pub(super) fn stream_ipc_write_options(
 ) -> ZerobusResult<IpcWriteOptions> {
     match options.compression {
         #[allow(deprecated)]
-        None => make_ipc_write_options(options.ipc_compression),
-        Some(ArrowCompression::None) => make_ipc_write_options(None),
-        Some(ArrowCompression::IpcZstd) => make_ipc_write_options(Some(CompressionType::ZSTD)),
-        Some(ArrowCompression::IpcLz4) => make_ipc_write_options(Some(CompressionType::LZ4_FRAME)),
-        Some(ArrowCompression::GrpcZstd) => compact_ipc_write_options(None),
+        ArrowCompression::FallbackToLegacy => make_ipc_write_options(options.ipc_compression),
+        ArrowCompression::Uncompressed => make_ipc_write_options(None),
+        ArrowCompression::IpcZstd => make_ipc_write_options(Some(CompressionType::ZSTD)),
+        ArrowCompression::IpcLz4 => make_ipc_write_options(Some(CompressionType::LZ4_FRAME)),
+        ArrowCompression::GrpcZstd => compact_ipc_write_options(None),
     }
 }
 
@@ -458,7 +458,7 @@ mod tests {
     #[allow(deprecated)]
     async fn compression_overrides_deprecated_ipc_compression() {
         let cases = [
-            (ArrowCompression::None, None),
+            (ArrowCompression::Uncompressed, None),
             (ArrowCompression::IpcZstd, Some(CompressionType::ZSTD)),
             (ArrowCompression::IpcLz4, Some(CompressionType::LZ4_FRAME)),
             (ArrowCompression::GrpcZstd, None),
@@ -471,7 +471,7 @@ mod tests {
             ] {
                 let options = ArrowStreamConfigurationOptions {
                     ipc_compression,
-                    compression: Some(compression),
+                    compression,
                     ..Default::default()
                 };
                 let (_, codec) = encode_with_stream_options(&options).await;
@@ -491,7 +491,7 @@ mod tests {
             ArrowCompression::GrpcZstd,
         ] {
             let options = ArrowStreamConfigurationOptions {
-                compression: Some(compression),
+                compression,
                 ..Default::default()
             };
             let (offsets, _) = encode_with_stream_options(&options).await;
@@ -500,7 +500,7 @@ mod tests {
         }
 
         let uncompressed = ArrowStreamConfigurationOptions {
-            compression: Some(ArrowCompression::None),
+            compression: ArrowCompression::Uncompressed,
             ..Default::default()
         };
         let (offsets, _) = encode_with_stream_options(&uncompressed).await;
@@ -509,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(deprecated)]
-    async fn without_compression_deprecated_ipc_compression_applies() {
+    async fn fallback_to_legacy_applies_deprecated_ipc_compression() {
         let default = ArrowStreamConfigurationOptions::default();
         assert_eq!(
             encode_with_stream_options(&default).await.1,

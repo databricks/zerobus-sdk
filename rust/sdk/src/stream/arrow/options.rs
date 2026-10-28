@@ -109,7 +109,7 @@ pub struct ArrowStreamConfigurationOptions {
     /// - `CompressionType::ZSTD` - Zstandard compression
     ///
     /// Set to `None` to send uncompressed payloads. Used only when
-    /// [`compression`](Self::compression) is `None`.
+    /// [`compression`](Self::compression) is [`ArrowCompression::FallbackToLegacy`].
     ///
     /// Default: `Some(CompressionType::ZSTD)`
     #[deprecated(since = "3.0.0", note = "Use `compression` instead")]
@@ -117,11 +117,10 @@ pub struct ArrowStreamConfigurationOptions {
 
     /// Compression for Arrow Flight payloads. See [`ArrowCompression`] for the options.
     ///
-    /// When `None`, the deprecated [`ipc_compression`](Self::ipc_compression) field applies,
-    /// which compresses each IPC buffer with zstd by default.
-    ///
-    /// Default: `None`
-    pub compression: Option<ArrowCompression>,
+    /// Default: [`ArrowCompression::FallbackToLegacy`], which applies the deprecated
+    /// [`ipc_compression`](Self::ipc_compression) field and so compresses each IPC buffer with
+    /// zstd unless that field is changed.
+    pub compression: ArrowCompression,
 
     /// Maximum time in milliseconds to wait for acknowledgments during server-initiated
     /// graceful stream rotation.
@@ -174,7 +173,7 @@ impl Default for ArrowStreamConfigurationOptions {
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
             ipc_compression: Some(CompressionType::ZSTD),
-            compression: None,
+            compression: ArrowCompression::FallbackToLegacy,
             stream_paused_max_wait_time_ms: None,
         }
     }
@@ -183,13 +182,12 @@ impl Default for ArrowStreamConfigurationOptions {
 /// Compression for Arrow Flight payloads.
 ///
 /// Set with [`StreamBuilder::compression`](crate::StreamBuilder::compression).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ArrowCompression {
     /// No compression.
-    None,
+    Uncompressed,
     /// Compress each Arrow IPC buffer with zstd.
-    #[default]
     IpcZstd,
     /// Compress each Arrow IPC buffer with LZ4 frame compression.
     IpcLz4,
@@ -201,7 +199,12 @@ pub enum ArrowCompression {
     /// Buffers are sent uncompressed with 8-byte alignment, because compressing them twice
     /// doesn't reduce size and wider padding only adds bytes.
     ///
-    /// Batch statistics such as `BatchStats::approximate_wire_bytes` are measured before
-    /// gRPC compression, so they overstate the bytes sent.
+    /// It can cost noticeably more client CPU than [`IpcZstd`](Self::IpcZstd), and on narrow,
+    /// dense schemas it saves few bytes. Measure on your own data before switching.
     GrpcZstd,
+    /// Apply the deprecated
+    /// [`ArrowStreamConfigurationOptions::ipc_compression`] field. This is the default until
+    /// that field is removed, when the default becomes [`IpcZstd`](Self::IpcZstd).
+    #[deprecated(since = "3.0.0", note = "Choose a compression explicitly")]
+    FallbackToLegacy,
 }

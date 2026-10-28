@@ -147,7 +147,7 @@ let stream = sdk
 - `IpcZstd` (default): compresses each Arrow buffer with zstd. Higher compression ratio, more CPU per batch.
 - `IpcLz4`: compresses each Arrow buffer with LZ4. Fast, low CPU overhead, modest compression ratio.
 - `GrpcZstd`: compresses each whole gRPC request message with zstd (see below).
-- `None`: no compression. This can help when client CPU, rather than network bandwidth, limits throughput.
+- `Uncompressed`: no compression. This can help when client CPU, rather than network bandwidth, limits throughput.
 
 `compression` replaces the deprecated `ipc_compression` setter.
 
@@ -155,9 +155,9 @@ let stream = sdk
 
 IPC compression compresses each Arrow buffer separately and leaves the IPC message header and alignment padding uncompressed. For wide or sparse schemas, with hundreds of columns or many mostly-null columns, those can make up most of each message. `GrpcZstd` instead compresses each whole gRPC request message, which usually sends noticeably fewer bytes for such schemas.
 
-- Buffers are sent without IPC compression, with 8-byte alignment, because compressing already-compressed buffers again doesn't reduce size.
-- Telemetry's `approximate_wire_bytes` is measured before gRPC compression, so it overstates the bytes sent.
-- Measure on your own data: for narrow, dense schemas, IPC compression may already be close.
+The trade-off is client CPU: `GrpcZstd` can use noticeably more of it than `IpcZstd`, and on narrow, dense schemas it saves few bytes. That's why `IpcZstd` stays the default. Measure on your own data before switching.
+
+Buffers are sent without IPC compression, with 8-byte alignment, because compressing already-compressed buffers again doesn't reduce size.
 
 ## Adapting for Your Custom Table
 

@@ -917,6 +917,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "http-body",
  "hyper-http-proxy",
  "hyper-rustls",
  "hyper-util",

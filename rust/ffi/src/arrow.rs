@@ -65,7 +65,7 @@ fn c_to_compression(value: i32) -> ArrowCompression {
     match value {
         0 => ArrowCompression::IpcLz4,
         1 => ArrowCompression::IpcZstd,
-        _ => ArrowCompression::None,
+        _ => ArrowCompression::Uncompressed,
     }
 }
 

@@ -138,7 +138,7 @@ pub fn extract_arrow_stream_options(
     let compression = match compression_name.as_str() {
         "LZ4_FRAME" => ArrowCompression::IpcLz4,
         "ZSTD" => ArrowCompression::IpcZstd,
-        _ => ArrowCompression::None,
+        _ => ArrowCompression::Uncompressed,
     };
 
     let stream_paused_max_wait_time_raw = env

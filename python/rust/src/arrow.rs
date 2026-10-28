@@ -109,7 +109,7 @@ impl IPCCompression {
 impl IPCCompression {
     fn to_rust(self) -> ArrowCompression {
         match self {
-            IPCCompression::Uncompressed => ArrowCompression::None,
+            IPCCompression::Uncompressed => ArrowCompression::Uncompressed,
             IPCCompression::LZ4Frame => ArrowCompression::IpcLz4,
             IPCCompression::Zstd => ArrowCompression::IpcZstd,
         }
