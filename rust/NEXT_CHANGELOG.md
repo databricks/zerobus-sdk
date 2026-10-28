@@ -17,6 +17,13 @@
 
 ### Bug Fixes
 
+- The crate now requires `rustls-webpki` 0.103.16 or later and `webpki-roots`
+  1.0.11 or later. These releases stop trusting the compromised eMudhra (emSign)
+  CAs: rustls-webpki rejects chains through the emSign G3 issuing CAs, and the
+  bundled root set no longer includes the emSign G3, C3 and C1 roots.
+  Upgrading the SDK is enough to pick up the fix. The crate does not use either
+  dependency directly; it declares them only to set the minimum versions.
+
 ### Documentation
 
 - Documented persistent streams (behind the `eos` feature) in the Rust README,
