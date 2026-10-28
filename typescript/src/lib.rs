@@ -63,7 +63,8 @@ pub struct StreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
+    /// Base delay in milliseconds of the exponential backoff between recovery attempts.
+    /// The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: Option<u32>,
 
@@ -88,7 +89,7 @@ pub struct StreamConfigurationOptions {
     /// When the server signals stream closure, this controls how long to wait
     /// for in-flight records to be acknowledged.
     /// - None (undefined): Wait for full server-specified duration
-    /// - Some(0): Immediately trigger recovery without waiting
+    /// - Some(0): Do not wait for acknowledgements; the reconnect may wait for the recovery backoff
     /// - Some(x): Wait up to min(x, server_duration) milliseconds
     /// Default: None (wait for full server duration)
     pub stream_paused_max_wait_time_ms: Option<u32>,
@@ -1243,7 +1244,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
+    /// Base delay in milliseconds of the exponential backoff between recovery attempts.
+    /// The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: Option<u32>,
 

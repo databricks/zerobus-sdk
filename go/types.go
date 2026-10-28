@@ -34,7 +34,9 @@ type StreamConfigurationOptions struct {
 	// Default: 15000 (15 seconds)
 	RecoveryTimeoutMs uint64
 
-	// Backoff delay between recovery attempts in milliseconds
+	// Base delay in milliseconds of the exponential backoff between recovery
+	// attempts. The delay doubles with each consecutive failure, up to
+	// 30 seconds, plus jitter.
 	// Default: 2000 (2 seconds)
 	RecoveryBackoffMs uint64
 
@@ -57,7 +59,7 @@ type StreamConfigurationOptions struct {
 	// Maximum time in milliseconds to wait during graceful stream close
 	// when server sends a CloseStreamSignal.
 	// - nil: Wait for the full server-specified duration (most graceful, default)
-	// - 0: Immediate recovery, close stream right away
+	// - 0: Do not wait for acknowledgements; the reconnect may wait for the recovery backoff
 	// - x: Wait up to min(x, server_duration) milliseconds
 	// Default: nil (wait for full server duration)
 	StreamPausedMaxWaitTimeMs *uint64

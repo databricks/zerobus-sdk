@@ -864,7 +864,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 | `maxInflightRecords` | 1000000 | Maximum number of unacknowledged records |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
+| `recoveryBackoffMs` | 2000 | Base delay of the exponential backoff between recovery attempts (ms). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter. |
 | `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
@@ -879,13 +879,13 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `maxInflightBatches` | 1000 | Maximum number of unacknowledged Arrow batches |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
+| `recoveryBackoffMs` | 2000 | Base delay of the exponential backoff between recovery attempts (ms). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter. |
 | `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `connectionTimeoutMs` | 30000 | Timeout for establishing a gRPC connection (ms) |
 | `ipcCompression` | `IPCCompressionType.NONE` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`) |
-| `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = immediate recovery, `>0` = `min(this, server_duration)` ms |
+| `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = do not wait for acknowledgements (the reconnect uses the recovery backoff), `>0` = `min(this, server_duration)` ms |
 
 `ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
 
@@ -1431,7 +1431,7 @@ Sets the recovery operation timeout in milliseconds (default: 15000).
 ```java
 StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs)
 ```
-Sets the delay between recovery attempts in milliseconds (default: 2000).
+Sets the base delay in milliseconds of the exponential backoff between recovery attempts (default: 2000). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
 
 ```java
 StreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries)

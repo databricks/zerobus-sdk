@@ -81,7 +81,8 @@ struct StreamOptions {
   bool recovery = true;
   /// Total time budget for a recovery attempt.
   std::uint64_t recovery_timeout_ms = 15'000;
-  /// Backoff between recovery retries.
+  /// Base delay of the exponential backoff between recovery attempts. The delay
+  /// doubles with each consecutive failure, up to 30 seconds, plus jitter.
   std::uint64_t recovery_backoff_ms = 2'000;
   /// Number of recovery retries before giving up.
   std::uint32_t recovery_retries = 4;
@@ -92,8 +93,9 @@ struct StreamOptions {
   /// Record wire format. Must match the stream's table (proto vs JSON).
   RecordType record_type = RecordType::Proto;
   /// Max time to wait during a server-initiated pause before recovering.
-  /// `nullopt` = wait the full server-specified duration; `0` = recover
-  /// immediately; `>0` = wait up to min(this, server duration).
+  /// `nullopt` = wait the full server-specified duration; `0` = do not wait
+  /// for acknowledgements (the reconnect may wait for the recovery backoff);
+  /// `>0` = wait up to min(this, server duration).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
   /// How long `close()` waits for the ack-callback task to drain. See
   /// `CallbackWaitPolicy`; defaults to the finite FFI budget.
@@ -127,7 +129,8 @@ struct ArrowStreamOptions {
   bool recovery = true;
   /// Total time budget for a recovery attempt.
   std::uint64_t recovery_timeout_ms = 15'000;
-  /// Backoff between recovery retries.
+  /// Base delay of the exponential backoff between recovery attempts. The delay
+  /// doubles with each consecutive failure, up to 30 seconds, plus jitter.
   std::uint64_t recovery_backoff_ms = 2'000;
   /// Number of recovery retries before giving up.
   std::uint32_t recovery_retries = 4;
@@ -140,7 +143,8 @@ struct ArrowStreamOptions {
   /// Arrow IPC compression codec.
   IpcCompression ipc_compression = IpcCompression::NoCompression;
   /// Max wait during a server-initiated pause before recovering. `nullopt` =
-  /// full server duration; `0` = recover immediately; `x` = min(x, server).
+  /// full server duration; `0` = do not wait for acknowledgements (the
+  /// reconnect uses the recovery backoff); `x` = min(x, server).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
 };
 

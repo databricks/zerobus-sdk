@@ -36,7 +36,8 @@ public sealed record StreamConfigurationOptions
     public ulong? RecoveryTimeoutMs { get; init; }
 
     /// <summary>
-    /// Backoff delay between recovery attempts in milliseconds.
+    /// Base delay in milliseconds of the exponential backoff between recovery attempts.
+    /// The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
     /// <c>null</c> uses the SDK default.
     /// Default: 2,000 (2 seconds).
     /// </summary>
@@ -77,7 +78,7 @@ public sealed record StreamConfigurationOptions
     /// when the server sends a CloseStreamSignal.
     /// <list type="bullet">
     ///   <item><c>null</c> — Wait for the full server-specified duration (most graceful, default).</item>
-    ///   <item><c>0</c> — Immediate recovery, close stream right away.</item>
+    ///   <item><c>0</c> — Do not wait for acknowledgements; the reconnect may wait for the recovery backoff.</item>
     ///   <item>A positive value — Wait up to <c>min(value, serverDuration)</c> milliseconds.</item>
     /// </list>
     /// Default: null.

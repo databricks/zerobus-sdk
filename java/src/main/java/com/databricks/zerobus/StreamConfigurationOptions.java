@@ -98,12 +98,12 @@ public class StreamConfigurationOptions {
   }
 
   /**
-   * Returns the backoff delay between recovery attempts.
+   * Returns the base delay of the exponential backoff between recovery attempts.
    *
-   * <p>This is the delay to wait between consecutive recovery attempts when automatic recovery is
-   * enabled.
+   * <p>When automatic recovery is enabled, the delay doubles with each consecutive failure, up to
+   * 30 seconds, plus jitter.
    *
-   * @return the recovery backoff delay in milliseconds
+   * @return the base recovery backoff delay in milliseconds
    */
   public int recoveryBackoffMs() {
     return this.recoveryBackoffMs;
@@ -283,12 +283,12 @@ public class StreamConfigurationOptions {
     }
 
     /**
-     * Sets the backoff delay between recovery attempts.
+     * Sets the base delay of the exponential backoff between recovery attempts.
      *
-     * <p>This is the delay to wait between consecutive recovery attempts when automatic recovery is
-     * enabled.
+     * <p>When automatic recovery is enabled, the delay doubles with each consecutive failure, up to
+     * 30 seconds, plus jitter.
      *
-     * @param recoveryBackoffMs the recovery backoff delay in milliseconds
+     * @param recoveryBackoffMs the base recovery backoff delay in milliseconds
      * @return this builder for method chaining
      */
     public StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs) {

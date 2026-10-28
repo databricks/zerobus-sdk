@@ -91,9 +91,11 @@ public class ArrowStreamConfigurationOptions {
   }
 
   /**
-   * Returns the backoff delay between recovery attempts.
+   * Returns the base delay of the exponential backoff between recovery attempts.
    *
-   * @return the recovery backoff delay in milliseconds
+   * <p>The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
+   *
+   * @return the base recovery backoff delay in milliseconds
    */
   public long recoveryBackoffMs() {
     return this.recoveryBackoffMs;
@@ -153,8 +155,9 @@ public class ArrowStreamConfigurationOptions {
    * <p>When the server sends a close stream signal, the SDK enters a "paused" state where it stops
    * sending new batches but continues processing acknowledgments for in-flight batches.
    *
-   * <p>Values: -1 = wait full server duration (default), 0 = immediate recovery, &gt;0 = wait up to
-   * min(this, server_duration) milliseconds.
+   * <p>Values: -1 = wait full server duration (default), 0 = do not wait for acknowledgements (the
+   * reconnect uses the recovery backoff), &gt;0 = wait up to min(this, server_duration)
+   * milliseconds.
    *
    * @return the stream paused max wait time in milliseconds, or -1 for full server duration
    */
@@ -251,9 +254,11 @@ public class ArrowStreamConfigurationOptions {
     }
 
     /**
-     * Sets the backoff delay between recovery attempts.
+     * Sets the base delay of the exponential backoff between recovery attempts.
      *
-     * @param recoveryBackoffMs the recovery backoff delay in milliseconds
+     * <p>The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
+     *
+     * @param recoveryBackoffMs the base recovery backoff delay in milliseconds
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setRecoveryBackoffMs(long recoveryBackoffMs) {
@@ -329,8 +334,9 @@ public class ArrowStreamConfigurationOptions {
     /**
      * Sets the maximum time in milliseconds to wait during graceful stream close.
      *
-     * <p>Values: -1 = wait full server duration (default), 0 = immediate recovery, &gt;0 = wait up
-     * to min(this, server_duration) milliseconds.
+     * <p>Values: -1 = wait full server duration (default), 0 = do not wait for acknowledgements
+     * (the reconnect uses the recovery backoff), &gt;0 = wait up to min(this, server_duration)
+     * milliseconds.
      *
      * @param streamPausedMaxWaitTimeMs the max wait time, or -1 for full server duration
      * @return this builder for method chaining

@@ -751,12 +751,12 @@ if err := stream.Close(); err != nil {
 | `MaxInflightRequests` | `uint64` | 1,000,000 | Maximum number of in-flight requests |
 | `Recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `RecoveryTimeoutMs` | `uint64` | 15,000 | Timeout for recovery operations (ms) |
-| `RecoveryBackoffMs` | `uint64` | 2,000 | Delay between recovery retry attempts (ms) |
+| `RecoveryBackoffMs` | `uint64` | 2,000 | Base delay of the exponential backoff between recovery attempts (ms). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter. |
 | `RecoveryRetries` | `uint32` | 4 | Maximum number of recovery attempts |
 | `FlushTimeoutMs` | `uint64` | 300,000 | Timeout for flush operations (ms) |
 | `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Timeout waiting for server acks (ms) |
 | `RecordType` | `int` | Proto | Record type: `RecordTypeProto` or `RecordTypeJson` |
-| `StreamPausedMaxWaitTimeMs` | `*uint64` | nil | Max time to wait during graceful close when server sends pause signal (`nil` = wait full server duration, `0` = immediate, `x` = min(x, server_duration)) |
+| `StreamPausedMaxWaitTimeMs` | `*uint64` | nil | Max time to wait during graceful close when server sends pause signal (`nil` = wait full server duration, `0` = do not wait for acknowledgements (the reconnect may wait for the recovery backoff), `x` = min(x, server_duration)) |
 
 **Example:**
 
@@ -918,7 +918,7 @@ if err := stream.Flush(); err != nil {
 | `MaxInflightBatches` | `uint64` | 1,000 | Maximum in-flight batches |
 | `Recovery` | `RecoverySetting` | RecoveryEnabled | Automatic recovery on failure |
 | `RecoveryTimeoutMs` | `uint64` | 15,000 | Timeout per recovery attempt (ms) |
-| `RecoveryBackoffMs` | `uint64` | 2,000 | Delay between recovery attempts (ms) |
+| `RecoveryBackoffMs` | `uint64` | 2,000 | Base delay of the exponential backoff between recovery attempts (ms). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter. |
 | `RecoveryRetries` | `uint32` | 4 | Maximum recovery attempts |
 | `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Server ack timeout (ms) |
 | `FlushTimeoutMs` | `uint64` | 300,000 | Flush timeout (ms) |

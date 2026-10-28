@@ -113,7 +113,8 @@ class StreamConfigurationOptions:
     """Timeout for stream recovery in milliseconds for one attempt (default: 15000)"""
 
     recovery_backoff_ms: int
-    """Backoff time in milliseconds between recovery attempts (default: 2000)"""
+    """Base delay in milliseconds of the exponential backoff between recovery attempts. The delay doubles with each
+    consecutive failure, up to 30 seconds, plus jitter (default: 2000)"""
 
     recovery_retries: int
     """Number of retries for stream recovery (default: 4)"""
@@ -157,7 +158,8 @@ class StreamConfigurationOptions:
             max_inflight_records: Maximum number of unacknowledged records (default: 1000000)
             recovery: Enable automatic stream recovery (default: True)
             recovery_timeout_ms: Recovery operation timeout in ms (default: 15000)
-            recovery_backoff_ms: Delay between recovery attempts in ms (default: 2000)
+            recovery_backoff_ms: Base delay in ms of the exponential backoff between recovery attempts; the delay
+                doubles with each consecutive failure, up to 30 seconds, plus jitter (default: 2000)
             recovery_retries: Maximum number of recovery attempts (default: 4)
             server_lack_of_ack_timeout_ms: Server acknowledgment timeout in ms (default: 60000)
             flush_timeout_ms: Flush operation timeout in ms (default: 300000)
@@ -685,7 +687,8 @@ class arrow:
         """Timeout per recovery attempt in milliseconds. Default: 15000"""
 
         recovery_backoff_ms: int
-        """Backoff between recovery attempts in milliseconds. Default: 2000"""
+        """Base delay in milliseconds of the exponential backoff between recovery attempts. The delay doubles with
+        each consecutive failure, up to 30 seconds, plus jitter. Default: 2000"""
 
         recovery_retries: int
         """Maximum recovery retry attempts. Default: 4"""

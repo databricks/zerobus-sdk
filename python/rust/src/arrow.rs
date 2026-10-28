@@ -150,7 +150,8 @@ pub struct ArrowStreamConfigurationOptions {
     pub ipc_compression: IPCCompression,
 
     /// Maximum time in milliseconds to wait during graceful stream close.
-    /// None = wait full server duration, 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+    /// None = wait full server duration, 0 = do not wait for acknowledgements (the reconnect
+    /// uses the recovery backoff), >0 = wait up to min(this, server_duration).
     #[pyo3(get, set)]
     pub stream_paused_max_wait_time_ms: Option<i64>,
 }

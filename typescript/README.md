@@ -617,7 +617,7 @@ const stream = await sdk.createStream(
 | `maxInflightRequests` | 1,000,000 | Maximum number of unacknowledged requests |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15,000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2,000 | Delay between recovery attempts (ms) |
+| `recoveryBackoffMs` | 2,000 | Base delay of the exponential backoff between recovery attempts (ms). The delay doubles with each consecutive failure, up to 30 seconds, plus jitter. |
 | `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `flushTimeoutMs` | 300,000 | Timeout for flush operations (ms) |
 | `serverLackOfAckTimeoutMs` | 60,000 | Server acknowledgment timeout (ms) |

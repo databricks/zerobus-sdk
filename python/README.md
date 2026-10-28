@@ -405,11 +405,11 @@ select the format but must match the inferred one, otherwise stream creation rai
 | `max_inflight_records`           | `int`           | `1000000`          | Maximum number of unacknowledged records                                                                             |
 | `recovery`                       | `bool`          | `True`             | Enable automatic stream recovery                                                                                     |
 | `recovery_timeout_ms`            | `int`           | `15000`            | Timeout for recovery operations (ms)                                                                                 |
-| `recovery_backoff_ms`            | `int`           | `2000`             | Delay between recovery attempts (ms)                                                                                 |
+| `recovery_backoff_ms`            | `int`           | `2000`             | Base delay of the exponential backoff between recovery attempts (ms); doubles per failure up to 30 s, plus jitter    |
 | `recovery_retries`               | `int`           | `4`                | Maximum number of recovery attempts                                                                                  |
 | `flush_timeout_ms`               | `int`           | `300000`           | Timeout for flush operations (ms)                                                                                    |
 | `server_lack_of_ack_timeout_ms`  | `int`           | `60000`            | Server acknowledgment timeout (ms)                                                                                   |
-| `stream_paused_max_wait_time_ms` | `Optional[int]` | `None`             | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
+| `stream_paused_max_wait_time_ms` | `Optional[int]` | `None`             | Max wait during graceful stream close. `None` = full server duration, `0` = do not wait for acknowledgements (the reconnect may wait for the recovery backoff), `x` = min(x, server_duration) |
 | `callback_max_wait_time_ms`      | `Optional[int]` | `5000`             | Max wait for callbacks after `close()`. `None` = wait forever                                                        |
 | `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked once per successfully queued ingest submission that later acknowledges or fails                     |
 

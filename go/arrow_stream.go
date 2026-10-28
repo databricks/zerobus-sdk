@@ -50,7 +50,9 @@ type ArrowStreamConfigurationOptions struct {
 	// Default: 15,000
 	RecoveryTimeoutMs uint64
 
-	// Backoff delay between recovery attempts in milliseconds.
+	// Base delay in milliseconds of the exponential backoff between recovery
+	// attempts. The delay doubles with each consecutive failure, up to
+	// 30 seconds, plus jitter.
 	// Default: 2,000
 	RecoveryBackoffMs uint64
 
@@ -75,7 +77,8 @@ type ArrowStreamConfigurationOptions struct {
 	IPCCompression IPCCompressionType
 
 	// Maximum time in milliseconds to wait during graceful stream close.
-	// nil = wait full server duration, 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+	// nil = wait full server duration, 0 = do not wait for acknowledgements (the reconnect
+	// uses the recovery backoff), >0 = wait up to min(this, server_duration).
 	// Default: nil (wait full server duration)
 	StreamPausedMaxWaitTimeMs *uint64
 }

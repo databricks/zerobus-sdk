@@ -21,7 +21,6 @@ This .NET SDK wraps the Zerobus Rust SDK, which includes the following open sour
 
 - **prost**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
 - **prost-types**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
-- **tokio-retry**: Copyright 2018, App-Tech-Crew (https://github.com/app-tech-crew/tokio-retry)
 - **reqwest**: Copyright (c) 2016-2021, Sean McArthur (https://github.com/seanmonstar/reqwest)
 - **serde_json**: Copyright (c) 2014-2021, David Tolnay (https://github.com/serde-rs/json)
 - **thiserror**: Copyright (c) 2019-2021, David Tolnay (https://github.com/dtolnay/thiserror)

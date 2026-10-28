@@ -115,9 +115,11 @@ public final class StreamBuilder {
   }
 
   /**
-   * Sets the backoff delay between recovery attempts.
+   * Sets the base delay of the exponential backoff between recovery attempts.
    *
-   * @param recoveryBackoffMs the recovery backoff delay in milliseconds
+   * <p>The delay doubles with each consecutive failure, up to 30 seconds, plus jitter.
+   *
+   * @param recoveryBackoffMs the base recovery backoff delay in milliseconds
    * @return this builder for method chaining
    * @throws IllegalArgumentException if {@code recoveryBackoffMs} is negative
    */
