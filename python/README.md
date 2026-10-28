@@ -395,7 +395,7 @@ builder = sdk.persistent_stream_builder().table("catalog.schema.events").oauth(c
 saved_id = os.getenv("ZEROBUS_PERSISTENT_STREAM_ID")
 if saved_id:
     stream = builder.resume(saved_id)  # use the same table and record format
-    print(stream.resume_watermark)  # offset the server had committed
+    print(stream.resume_watermark)  # offset the server had committed, or None if none
 else:
     stream = builder.build()
     print(f"Save this stream_id to resume later: {stream.stream_id}")
@@ -407,7 +407,8 @@ stream.close()  # ends this connection only; the stream stays available to resum
 ```
 
 Run the program once with no stream ID. Save the printed `stream_id`. After a restart, run it
-again with the saved ID. `resume_watermark` is `None` for a new stream.
+again with the saved ID. `resume_watermark` is `None` when the server has committed nothing
+yet. This is always the case for a new stream, and it can also be the case after `resume()`.
 
 In the async SDK, `build()` and `resume()` are coroutines, and the stream methods are awaited.
 
@@ -420,8 +421,10 @@ A persistent stream has no `get_unacked_records()` and no `recreate_stream()`. T
 follow these steps:
 
 1. Call `resume(stream_id)` with the same table and record format.
-2. Read `resume_watermark`. This is the last offset the server committed.
-3. Send again every record that your source holds after that offset.
+2. Read `resume_watermark`. This is the last offset the server committed, or `None` if it
+   committed nothing.
+3. Send again every record that your source holds after that offset. If `resume_watermark` is
+   `None`, send again every record.
 
 The SDK does not store your records. Your application must know which of its records
 match which offsets, for example by storing its own source position with each batch.

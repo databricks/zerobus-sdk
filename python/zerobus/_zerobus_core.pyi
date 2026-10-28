@@ -170,10 +170,6 @@ class StreamConfigurationOptions:
 
     def __repr__(self) -> str: ...
 
-# =============================================================================
-# EXCEPTIONS
-# =============================================================================
-
 class PersistentStreamSettings:
     """Settings collected by ``PersistentStreamBuilder``. Internal; not for direct use."""
 
@@ -194,6 +190,10 @@ class PersistentStreamSettings:
         callback_max_wait_time_ms_set: bool = False,
         callback_max_wait_time_ms: Optional[int] = None,
     ) -> None: ...
+
+# =============================================================================
+# EXCEPTIONS
+# =============================================================================
 
 class ZerobusException(Exception):
     """Base class for all exceptions in the Zerobus SDK.
@@ -386,7 +386,8 @@ class sync:
 
         @property
         def resume_watermark(self) -> Optional[int]:
-            """The offset the server had committed when the stream opened, or ``None`` for a new stream."""
+            """The offset the server had committed when the stream opened, or ``None`` if nothing
+            was committed yet (always ``None`` for a new stream)."""
             ...
 
         @property
@@ -626,7 +627,8 @@ class aio:
 
         @property
         def resume_watermark(self) -> Optional[int]:
-            """The offset the server had committed when the stream opened, or ``None`` for a new stream."""
+            """The offset the server had committed when the stream opened, or ``None`` if nothing
+            was committed yet (always ``None`` for a new stream)."""
             ...
 
         @property

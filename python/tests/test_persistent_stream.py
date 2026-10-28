@@ -6,6 +6,7 @@ resume round trip against a server is covered by the Rust core tests.
 """
 
 import asyncio
+import inspect
 import json
 
 import pytest
@@ -49,12 +50,22 @@ class TestBuilderValidation:
         with pytest.raises(ValueError, match="authentication is required"):
             _open(mode, builder.build)
 
-    def test_build_rejects_both_auth_methods(self, sdk, mode):
-        builder = (
-            sdk.persistent_stream_builder().table("c.s.t").oauth("id", "secret").headers_provider(_Headers()).json()
-        )
-        with pytest.raises(ValueError, match="authentication is required"):
-            _open(mode, builder.build)
+    def test_last_auth_setter_wins(self, sdk):
+        # Same as the Rust builder: the later setter replaces the earlier one.
+        builder = sdk.persistent_stream_builder().table("c.s.t").json()
+        builder.oauth("id", "secret").headers_provider(_Headers())
+        assert builder._client_id is None and builder._client_secret is None
+        assert builder._headers_provider is not None
+        builder._native_args()  # passes validation
+
+        builder.oauth("id", "secret")
+        assert builder._headers_provider is None
+        builder._native_args()
+
+    @pytest.mark.parametrize("value", ["false", 0, 1, None])
+    def test_recovery_rejects_non_bool(self, sdk, value):
+        with pytest.raises(ValueError, match="recovery must be a bool"):
+            sdk.persistent_stream_builder().recovery(value)
 
     def test_build_requires_format(self, sdk, mode):
         builder = sdk.persistent_stream_builder().table("c.s.t").oauth("id", "secret")
@@ -67,7 +78,7 @@ class TestBuilderValidation:
             with pytest.raises(ValueError, match="stream_id"):
                 _open(mode, lambda bad=bad: builder.resume(bad))
 
-    def test_resume_requires_same_settings_as_build(self, sdk, mode):
+    def test_resume_requires_table(self, sdk, mode):
         builder = sdk.persistent_stream_builder().oauth("id", "secret").json()
         with pytest.raises(ValueError, match="table is required"):
             _open(mode, lambda: builder.resume("stream-1"))
@@ -212,11 +223,20 @@ class TestNativeValidation:
 class TestPublicSurface:
     def test_exports(self, mode):
         module = sync if mode == "sync" else aio
-        assert module.PersistentStream is getattr(core, mode).PersistentStream
         assert module.PersistentStreamBuilder.__name__ == "PersistentStreamBuilder"
+        if mode == "sync":
+            assert module.PersistentStream is core.sync.PersistentStream
+        else:
+            # The async stream is a Python wrapper over the native class.
+            assert module.PersistentStream is not core.aio.PersistentStream
+
+    def test_async_stream_methods_are_coroutine_functions(self):
+        # The native methods return futures, which asyncio.create_task rejects.
+        for name in ("ingest_record_offset", "ingest_records_offset", "wait_for_offset", "flush", "close"):
+            assert inspect.iscoroutinefunction(getattr(aio.PersistentStream, name)), name
 
     def test_stream_exposes_resume_api(self, mode):
-        cls = getattr(core, mode).PersistentStream
+        cls = (sync if mode == "sync" else aio).PersistentStream
         for name in (
             "stream_id",
             "resume_watermark",
@@ -230,6 +250,6 @@ class TestPublicSurface:
             assert hasattr(cls, name), name
 
     def test_stream_has_no_unsupported_methods(self, mode):
-        cls = getattr(core, mode).PersistentStream
+        cls = (sync if mode == "sync" else aio).PersistentStream
         for name in ("ingest_record", "ingest_record_nowait", "ingest_records_nowait", "get_unacked_records"):
             assert not hasattr(cls, name), name

@@ -44,14 +44,16 @@ class _PersistentStreamBuilderBase:
         return self
 
     def oauth(self, client_id: str, client_secret: str):
-        """Authenticate with OAuth client credentials."""
+        """Authenticate with OAuth client credentials. Replaces an earlier ``headers_provider()``."""
         self._client_id = client_id
         self._client_secret = client_secret
+        self._headers_provider = None
         return self
 
     def headers_provider(self, provider):
-        """Authenticate with a custom ``HeadersProvider``."""
+        """Authenticate with a custom ``HeadersProvider``. Replaces an earlier ``oauth()``."""
         self._headers_provider = provider
+        self._client_id = self._client_secret = None
         return self
 
     def json(self):
@@ -73,7 +75,9 @@ class _PersistentStreamBuilderBase:
 
     def recovery(self, enabled: bool):
         """Enable or disable automatic stream recovery."""
-        self._settings["recovery"] = bool(enabled)
+        if not isinstance(enabled, bool):
+            raise ValueError("recovery must be a bool")
+        self._settings["recovery"] = enabled
         return self
 
     def recovery_timeout_ms(self, ms: int):

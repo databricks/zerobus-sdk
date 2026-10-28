@@ -48,7 +48,7 @@ from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
 # Import base Rust stream class
 _RustZerobusStream = _core.aio.ZerobusStream
 _RustAsyncZerobusArrowStream = _core.arrow.AsyncZerobusArrowStream
-PersistentStream = _core.aio.PersistentStream
+_RustPersistentStream = _core.aio.PersistentStream
 
 
 class ZerobusStream:
@@ -265,6 +265,57 @@ class ZerobusArrowStream:
         return [_deserialize_batch(ipc_bytes) for ipc_bytes in ipc_list]
 
 
+class PersistentStream:
+    """
+    A durable, recoverable ingestion stream (Eos).
+
+    Create or resume one with ``ZerobusSdk.persistent_stream_builder()``. Ingest in a loop,
+    then ``await flush()`` once to confirm the batch.
+
+    This wrapper makes every method a coroutine function, so ``asyncio.create_task(stream.flush())``
+    works. The native methods return futures, which ``create_task`` rejects.
+    """
+
+    def __init__(self, rust_stream: _RustPersistentStream):
+        self._inner = rust_stream
+
+    @property
+    def stream_id(self) -> Optional[str]:
+        """The durable stream identity. Persist it to resume the stream later."""
+        return self._inner.stream_id
+
+    @property
+    def resume_watermark(self) -> Optional[int]:
+        """The offset the server had committed when the stream opened, or ``None`` if nothing
+        was committed yet (always ``None`` for a new stream)."""
+        return self._inner.resume_watermark
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the stream is closed. A close that is in progress counts as closed."""
+        return self._inner.is_closed
+
+    async def ingest_record_offset(self, payload: Any) -> int:
+        """Queue a record and return its offset. Does not wait for the acknowledgment."""
+        return await self._inner.ingest_record_offset(payload)
+
+    async def ingest_records_offset(self, payloads) -> Optional[int]:
+        """Queue a batch and return one offset for it, or ``None`` for an empty batch."""
+        return await self._inner.ingest_records_offset(payloads)
+
+    async def wait_for_offset(self, offset: int) -> None:
+        """Wait until the server acknowledges ``offset``."""
+        await self._inner.wait_for_offset(offset)
+
+    async def flush(self) -> None:
+        """Wait until the server acknowledges all pending records."""
+        await self._inner.flush()
+
+    async def close(self) -> None:
+        """Flush pending records and close the stream."""
+        await self._inner.close()
+
+
 class PersistentStreamBuilder(_PersistentStreamBuilderBase):
     """Fluent builder that creates or resumes a persistent (Eos) stream.
 
@@ -289,7 +340,7 @@ class PersistentStreamBuilder(_PersistentStreamBuilderBase):
             ValueError: If the table, authentication, or record format is not set.
         """
         table_properties, settings = self._native_args()
-        return await self._sdk.open_persistent_stream(table_properties, settings)
+        return PersistentStream(await self._sdk.open_persistent_stream(table_properties, settings))
 
     async def resume(self, stream_id: str) -> PersistentStream:
         """Reconnect to an existing persistent stream by its ``stream_id``.
@@ -301,7 +352,9 @@ class PersistentStreamBuilder(_PersistentStreamBuilderBase):
             ValueError: If the table, authentication, or record format is not set.
         """
         table_properties, settings = self._native_args()
-        return await self._sdk.open_persistent_stream(table_properties, settings, self._check_stream_id(stream_id))
+        return PersistentStream(
+            await self._sdk.open_persistent_stream(table_properties, settings, self._check_stream_id(stream_id))
+        )
 
 
 class ZerobusSdk:

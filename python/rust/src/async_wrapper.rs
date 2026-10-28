@@ -324,7 +324,8 @@ impl PersistentStream {
         self.stream_id.clone()
     }
 
-    /// The offset the server had committed when the stream opened, or `None` for a new stream.
+    /// The offset the server had committed when the stream opened, or `None` if nothing was
+    /// committed yet (always `None` for a new stream).
     #[getter]
     fn resume_watermark(&self) -> Option<i64> {
         self.resume_watermark
