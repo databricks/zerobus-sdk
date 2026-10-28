@@ -9,9 +9,9 @@ use databricks_zerobus_ingest_sdk::{
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
-    advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
-    run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
-    HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
+    advance_tokio_time_near_instant_limit, advance_until_header_calls,
+    create_test_descriptor_proto, run_with_paused_time_watchdog, setup_tracing,
+    CountingHeadersProvider, HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -3385,12 +3385,283 @@ mod failure_scenarios_tests {
             );
 
             assert!(
-                duration.as_millis() >= 400,
-                "Expected retries to take at least 500ms (recovery_timeout_ms), but took {:?}",
+                duration.as_millis() >= 1_500,
+                "Expected the doubling backoff waits (100 + 200 + 400 + 800 ms), but took {:?}",
                 duration
             );
 
             Ok(())
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_recovery_waits_for_server_retry_delay(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use tonic_types::{ErrorDetails, StatusExt};
+
+            const BACKOFF_MS: u64 = 2_000;
+            const SERVER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_throttled".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::with_error_details(
+                                tonic::Code::ResourceExhausted,
+                                "server overloaded",
+                                ErrorDetails::with_retry_info(Some(SERVER_RETRY_DELAY)),
+                            ),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_recovered".to_string(),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .build()
+                    .await?;
+
+                let ingested_at = tokio::time::Instant::now();
+                stream.ingest_record_offset(b"rejected".to_vec()).await?;
+                advance_until_header_calls(&provider, 2).await;
+
+                let waited = ingested_at.elapsed();
+                assert!(
+                    waited >= SERVER_RETRY_DELAY,
+                    "reconnected {waited:?} after the rejected ingest, before the server retry delay"
+                );
+                Ok(())
+            })
+            .await
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_recovery_backoff_keeps_growing_after_successful_reconnect(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const BACKOFF_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_first".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("first failure"),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_second".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("second failure"),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_third".to_string(),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .build()
+                    .await?;
+
+                stream.ingest_record_offset(b"rejected twice".to_vec()).await?;
+                advance_until_header_calls(&provider, 2).await;
+                let first_reconnect_at = tokio::time::Instant::now();
+                advance_until_header_calls(&provider, 3).await;
+
+                // A count that reset on the successful reconnect would wait at most 1.5 times
+                // the base delay.
+                let second_wait = first_reconnect_at.elapsed();
+                assert!(
+                    second_wait >= std::time::Duration::from_millis(2 * BACKOFF_MS),
+                    "second reconnect came {second_wait:?} after the first, without the doubled delay"
+                );
+                Ok(())
+            })
+            .await
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_close_signal_on_unhealthy_connection_waits_for_backoff(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            // Well above the 500 ms drains on the close path, so they cannot hide a missing
+            // backoff.
+            const BACKOFF_MS: u64 = 2_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_rotated".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CloseStreamSignal {
+                            duration_seconds: 1,
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_recovered".to_string(),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .stream_paused_max_wait_time_ms(Some(0))
+                    .build()
+                    .await?;
+
+                let ingested_at = tokio::time::Instant::now();
+                stream
+                    .ingest_record_offset(b"unacknowledged".to_vec())
+                    .await?;
+                advance_until_header_calls(&provider, 2).await;
+
+                let waited = ingested_at.elapsed();
+                assert!(
+                    waited >= std::time::Duration::from_millis(BACKOFF_MS),
+                    "reconnected {waited:?} after the close signal, without the backoff"
+                );
+                Ok(())
+            })
+            .await
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_close_signal_on_healthy_connection_reconnects_at_once(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const BACKOFF_MS: u64 = 2_000;
+            // A connection must stay up this long to count as healthy.
+            const HEALTHY_UPTIME_MS: u64 = 30_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_healthy".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                        MockResponse::CloseStreamSignal {
+                            duration_seconds: 1,
+                            delay_ms: HEALTHY_UPTIME_MS,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_rotated".to_string(),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .stream_paused_max_wait_time_ms(Some(0))
+                    .build()
+                    .await?;
+
+                stream.ingest_record_offset(b"acknowledged".to_vec()).await?;
+                let ingested_at = tokio::time::Instant::now();
+                stream
+                    .ingest_record_offset(b"unacknowledged".to_vec())
+                    .await?;
+                advance_until_header_calls(&provider, 2).await;
+
+                // The close signal comes HEALTHY_UPTIME_MS after this ingest, and a backoff
+                // would add at least BACKOFF_MS.
+                let waited = ingested_at.elapsed();
+                assert!(
+                    waited < std::time::Duration::from_millis(HEALTHY_UPTIME_MS + BACKOFF_MS),
+                    "reconnected {waited:?} after the second ingest, not at once after the healthy connection"
+                );
+                Ok(())
+            })
+            .await
         }
 
         #[tokio::test]
@@ -4081,7 +4352,9 @@ mod graceful_close_tests {
                 .headers_provider(provider.clone())
                 .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
                 .max_inflight_requests(100)
-                .recovery(true);
+                .recovery(true)
+                // The connection is not healthy yet, so the close signal would wait for the backoff.
+                .recovery_backoff_ms(0);
             if let Some(client_max_wait_ms) = client_max_wait_ms {
                 builder = builder.stream_paused_max_wait_time_ms(Some(client_max_wait_ms));
             }
@@ -4177,6 +4450,8 @@ mod graceful_close_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
             .recovery(true)
+            // The connection is not healthy yet, so the close signal would wait for the backoff.
+            .recovery_backoff_ms(0)
             .stream_paused_max_wait_time_ms(Some(0))
             .build()
             .await?;
@@ -4250,6 +4525,8 @@ mod graceful_close_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
             .recovery(true)
+            // The connection is not healthy yet, so the close signal would wait for the backoff.
+            .recovery_backoff_ms(0)
             // Fail fast on a regression.
             .flush_timeout_ms(2_000)
             .stream_paused_max_wait_time_ms(Some(0))
@@ -4317,6 +4594,8 @@ mod graceful_close_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
             .recovery(true)
+            // The connection is not healthy yet, so the close signal would wait for the backoff.
+            .recovery_backoff_ms(0)
             // Fail fast on a regression.
             .flush_timeout_ms(2_000)
             .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
@@ -4394,6 +4673,8 @@ mod graceful_close_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
             .recovery(true)
+            // The connection is not healthy yet, so the close signal would wait for the backoff.
+            .recovery_backoff_ms(0)
             .stream_paused_max_wait_time_ms(Some(0))
             .build()
             .await?;
@@ -4524,6 +4805,8 @@ mod graceful_close_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
             .recovery(true)
+            // The connection is not healthy yet, so the close signal would wait for the backoff.
+            .recovery_backoff_ms(0)
             .server_lack_of_ack_timeout_ms(5000)
             .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
             .build()

@@ -392,12 +392,23 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the backoff time in milliseconds between recovery retries.
+    /// Set the base delay in milliseconds of the exponential backoff between recovery
+    /// attempts.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
         self.grpc_config.recovery_backoff_ms = ms;
         #[cfg(feature = "arrow-flight")]
         {
             self.arrow_config.recovery_backoff_ms = ms;
+        }
+        self
+    }
+
+    /// Set the maximum delay in milliseconds of the recovery backoff, before jitter.
+    pub fn recovery_backoff_max_ms(mut self, ms: u64) -> Self {
+        self.grpc_config.recovery_backoff_max_ms = ms;
+        #[cfg(feature = "arrow-flight")]
+        {
+            self.arrow_config.recovery_backoff_max_ms = ms;
         }
         self
     }

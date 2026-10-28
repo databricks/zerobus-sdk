@@ -56,12 +56,36 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
 
-    /// Backoff time in milliseconds between stream recovery retry attempts.
+    /// Base delay in milliseconds of the exponential backoff before stream recovery
+    /// attempts.
     ///
-    /// The SDK will wait this duration before attempting another recovery after a failure.
+    /// After the n-th consecutive failure, the delay is `recovery_backoff_ms * 2^(n-1)`,
+    /// capped at `recovery_backoff_max_ms`. The SDK waits the delay plus a random jitter of
+    /// up to half of the delay. If the server rejects the stream with a retry delay
+    /// (`google.rpc.RetryInfo`), the SDK waits at least that long, up to the same cap. The
+    /// jitter does not apply to the server retry delay. With `recovery_backoff_ms = 0`, a
+    /// server retry delay is still the minimum wait.
+    ///
+    /// A failure is a failed connection attempt, or an active connection that ends because
+    /// of an error or a server-requested rotation. A connection that stayed up for at least
+    /// 30 seconds and either received an acknowledgement or had no sent batches left
+    /// unacknowledged when it ended resets the count first, so the wait after it is
+    /// `recovery_backoff_ms` plus jitter again. A successful reconnect does not reset the
+    /// count.
+    ///
+    /// Initial stream creation uses the same backoff. With the defaults, `build_arrow()`
+    /// against an unavailable server waits 30 to 45 seconds in total (2, 4, 8, and 16
+    /// seconds, plus jitter) before it returns the error.
     ///
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: u64,
+
+    /// Maximum delay in milliseconds of the recovery backoff, before jitter.
+    ///
+    /// A value no larger than `recovery_backoff_ms` keeps the delay fixed at `recovery_backoff_ms`.
+    ///
+    /// Default: 30,000 (30 seconds)
+    pub recovery_backoff_max_ms: u64,
 
     /// Maximum number of recovery retry attempts before giving up.
     ///
@@ -158,6 +182,7 @@ impl Default for ArrowStreamConfigurationOptions {
             recovery: defaults::RECOVERY,
             recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
             recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
+            recovery_backoff_max_ms: defaults::RECOVERY_BACKOFF_MAX_MS,
             recovery_retries: defaults::RECOVERY_RETRIES,
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,

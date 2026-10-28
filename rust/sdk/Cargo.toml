@@ -29,12 +29,11 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync"] }
-tokio-retry.workspace = true
 tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
-tonic-types = { workspace = true, optional = true }
+tonic-types.workspace = true
 tracing.workspace = true
 hyper-http-proxy.workspace = true
 hyper-rustls.workspace = true
@@ -76,7 +75,7 @@ default = []
 # Avro record format (Beta), opt-in. Requires Rust 1.88 (apache-avro 0.22).
 avro = ["dep:apache-avro"]
 # Arrow Flight support
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tonic-types"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
 internal-arrow-c-data = [
     "arrow-flight",

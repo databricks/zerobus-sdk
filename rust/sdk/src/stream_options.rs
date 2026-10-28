@@ -10,8 +10,10 @@ pub mod defaults {
     pub const RECOVERY: bool = true;
     /// Default: 15 seconds per recovery attempt
     pub const RECOVERY_TIMEOUT_MS: u64 = 15_000;
-    /// Default: 2 seconds backoff between retries
+    /// Default: 2 seconds base delay of the recovery backoff
     pub const RECOVERY_BACKOFF_MS: u64 = 2_000;
+    /// Default: 30 seconds maximum delay of the recovery backoff, before jitter
+    pub const RECOVERY_BACKOFF_MAX_MS: u64 = 30_000;
     /// Default: 4 retry attempts
     pub const RECOVERY_RETRIES: u32 = 4;
     /// Default: 60 seconds lack of ack timeout

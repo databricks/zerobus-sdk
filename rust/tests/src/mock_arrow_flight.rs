@@ -897,9 +897,13 @@ async fn start_mock_flight_server_inner(
         server = server.tls_config(tls)?;
     }
     let router = server.add_service(FlightServiceServer::new(server_clone));
+    // `serve_with_incoming` ignores the builder's TCP_NODELAY default. Without it, Nagle can
+    // hold a small reply until a delayed TCP ACK, which paused-time tests count as virtual time.
     tokio::spawn(async move {
         if let Err(e) = router
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .serve_with_incoming(
+                tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true)),
+            )
             .await
         {
             error!("Mock Flight server error: {}", e);

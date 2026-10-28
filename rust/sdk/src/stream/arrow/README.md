@@ -211,7 +211,11 @@ Only the supervisor reconnects or publishes a replacement sender.
 On a retryable active failure:
 
 1. Pause ingestion sends and detach the failed sender under `ingest_mutex`.
-2. Wait the configured backoff unless explicit close interrupts it.
+2. Wait the recovery backoff unless explicit close interrupts it. The delay
+   doubles with each consecutive failure, a rotation included, and a server
+   retry delay raises it. Only the end of a connection that stayed up for 30
+   seconds and either received an acknowledgement or had no sent batch
+   left unacknowledged resets the count.
 3. Establish a replacement DoPut exchange and wait for READY.
 4. Rebuild pending ranges from the durable record watermark.
 5. Replay every unacknowledged suffix and any batches buffered during replay.

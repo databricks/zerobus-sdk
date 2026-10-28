@@ -8,6 +8,7 @@
 
 #[cfg(feature = "arrow-flight")]
 mod arrow;
+mod backoff;
 mod grpc;
 
 #[cfg(feature = "internal-arrow-c-data")]

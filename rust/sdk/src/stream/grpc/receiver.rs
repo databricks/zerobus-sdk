@@ -142,7 +142,7 @@ impl ZerobusStream {
                             {
                                 None => server_duration_ms,
                                 Some(0) => {
-                                    // Immediate recovery
+                                    // No ACK wait; the reconnect may wait for the recovery backoff.
                                     info!("Server will close the stream in {}ms. Triggering stream recovery.", server_duration_ms);
                                     break 'recv_loop;
                                 }
@@ -151,7 +151,7 @@ impl ZerobusStream {
 
                             if wait_duration_ms == 0 {
                                 info!(
-                                    "Server will close the stream. Triggering immediate recovery."
+                                    "Server will close the stream. Triggering recovery without waiting for acknowledgements."
                                 );
                                 break 'recv_loop;
                             }

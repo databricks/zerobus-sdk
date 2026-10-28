@@ -7,13 +7,11 @@
 //! sender/receiver tasks, and uses `ZerobusClient<Channel>`). Future work
 //! to share this with Arrow Flight should abstract the transport seams.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio::time::Duration;
-use tokio_retry::strategy::FixedInterval;
-use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Channel;
@@ -24,6 +22,7 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
+use crate::stream::backoff::RecoveryBackoff;
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -73,6 +72,10 @@ impl ZerobusStream {
         // stale credential after an auth rejection. Reconnect iterations never consume it,
         // so mid-stream auth behavior is unchanged. Auth errors stay globally non-retryable.
         let mut initial_auth_retry_available = options.recovery_retries > 0;
+        let mut backoff =
+            RecoveryBackoff::new(options.recovery_backoff_ms, options.recovery_backoff_max_ms);
+        // Set when a connection ends, so that the next recovery waits before it reconnects.
+        let mut reconnect_backoff: Option<Duration> = None;
 
         loop {
             debug!("Supervisor task loop");
@@ -90,14 +93,22 @@ impl ZerobusStream {
                 );
             }
 
+            if let Some(delay) = reconnect_backoff.take() {
+                info!(
+                    backoff_ms = delay.as_millis(),
+                    "Waiting before reconnecting"
+                );
+                if !sleep_unless_cancelled(delay, &cancellation_token).await {
+                    debug!("Supervisor task cancelled during recovery backoff, exiting");
+                    return Ok(());
+                }
+            }
+
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
 
             // 1. Create a stream.
-            let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-                .take(options.recovery_retries as usize);
-
             // Initial setup may refresh one stale credential (auth rejection consumes the
             // one-shot budget); reconnect keeps the plain `recovery && is_retryable()` rule
             // so mid-stream behavior is unchanged. Both connection paths invalidate on auth
@@ -108,18 +119,15 @@ impl ZerobusStream {
             // stream but its response is lost, retrying can create an orphaned stream. Resumes
             // are idempotent because they use the already-minted stream id.
             let is_initial = initial_stream_creation;
-            let attempt = AtomicUsize::new(0);
             let create_attempt = || {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
-                let attempt = &attempt;
                 let kind = &kind;
 
                 async move {
-                    let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
-                    let result = if is_initial {
+                    if is_initial {
                         Self::create_initial_stream_connection(
                             channel,
                             &table_properties,
@@ -147,21 +155,10 @@ impl ZerobusStream {
                             ))
                         })
                         .and_then(|res| res)
-                    };
-                    if let Err(ref e) = result {
-                        warn!(
-                            attempt = attempt_no,
-                            max_attempts = options.recovery_retries + 1,
-                            retryable = e.is_retryable(),
-                            backoff_ms = options.recovery_backoff_ms,
-                            "Stream creation attempt failed: {}",
-                            e
-                        );
                     }
-                    result
                 }
             };
-            let should_retry = |e: &ZerobusError| {
+            let mut should_retry = |e: &ZerobusError| {
                 if is_initial {
                     should_retry_initial_connection(
                         e,
@@ -172,7 +169,31 @@ impl ZerobusStream {
                     options.recovery && e.is_retryable()
                 }
             };
-            let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
+            let mut attempt: u32 = 0;
+            let creation = loop {
+                attempt = attempt.saturating_add(1);
+                let e = match create_attempt().await {
+                    Ok(connection) => break Ok(connection),
+                    Err(e) => e,
+                };
+                let backoff_delay = (should_retry(&e) && attempt <= options.recovery_retries)
+                    .then(|| backoff.next_delay(Some(&e)));
+                warn!(
+                    attempt,
+                    max_attempts = options.recovery_retries + 1,
+                    retryable = e.is_retryable(),
+                    backoff_ms = backoff_delay.map(|delay| delay.as_millis()),
+                    "Stream creation attempt failed: {}",
+                    e
+                );
+                let Some(backoff_delay) = backoff_delay else {
+                    break Err(e);
+                };
+                if !sleep_unless_cancelled(backoff_delay, &cancellation_token).await {
+                    debug!("Supervisor task cancelled during recovery backoff, exiting");
+                    return Ok(());
+                }
+            };
 
             let connection = match creation {
                 Ok(connection) => connection,
@@ -183,7 +204,7 @@ impl ZerobusStream {
                         }
                     } else {
                         error!(
-                            attempts = attempt.load(Ordering::Relaxed),
+                            attempts = attempt,
                             max_attempts = options.recovery_retries + 1,
                             table_name = %table_properties.table_name,
                             "Recovery failed; giving up stream re-creation: {}",
@@ -267,6 +288,14 @@ impl ZerobusStream {
                 );
             }
 
+            let connected_at = tokio::time::Instant::now();
+            // The constructor publishes a resumed watermark concurrently; it is not an
+            // acknowledgement on this connection.
+            let acked_before = std::cmp::max(
+                *logical_last_received_offset_id_tx.borrow(),
+                last_committed_offset,
+            );
+
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
 
@@ -344,6 +373,10 @@ impl ZerobusStream {
                 }
             };
 
+            let acknowledged = *logical_last_received_offset_id_tx.borrow() > acked_before;
+            let pending = !landing_zone.is_observed_empty();
+            let healthy = backoff.connection_ended(connected_at.elapsed(), acknowledged, pending);
+
             // 5. Handle errors.
             if let Err(error) = result {
                 error!(stream_id = %stream_id, "Stream failure detected: {}", error);
@@ -379,7 +412,11 @@ impl ZerobusStream {
                     }
                     return Err(error);
                 }
+                reconnect_backoff = Some(backoff.next_delay(Some(&error)));
                 let _ = server_error_tx.send(Some(error));
+            } else if !healthy {
+                // A server close signal reconnects at once only after a healthy connection.
+                reconnect_backoff = Some(backoff.next_delay(None));
             }
         }
     }
@@ -502,6 +539,16 @@ impl ZerobusStream {
                 ));
             }
         }
+    }
+}
+
+/// Sleeps for `delay` unless the stream is cancelled first, so that close does not wait
+/// for the backoff. Returns `false` on cancellation.
+async fn sleep_unless_cancelled(delay: Duration, cancellation_token: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancellation_token.cancelled() => false,
+        _ = tokio::time::sleep(delay) => true,
     }
 }
 

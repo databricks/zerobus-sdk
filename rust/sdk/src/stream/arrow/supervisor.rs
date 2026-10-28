@@ -25,6 +25,7 @@ use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::ConnectorFactory;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
+use crate::stream::backoff::RecoveryBackoff;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -106,11 +107,16 @@ impl Supervisor {
         }
     }
 
-    pub(super) fn spawn(self, initial_connection: FlightConnection) -> SupervisorTaskHandle {
+    /// `backoff` carries the failure count of initial stream creation into recovery.
+    pub(super) fn spawn(
+        self,
+        initial_connection: FlightConnection,
+        backoff: RecoveryBackoff,
+    ) -> SupervisorTaskHandle {
         let (response_stream, request_body) = initial_connection.into_supervisor_io();
         let close = self.close.clone();
         let finalizer = self.close_finalizer.clone();
-        let worker = spawn(self.run(response_stream, request_body));
+        let worker = spawn(self.run(response_stream, request_body, backoff));
         let worker_abort = worker.abort_handle();
         // The detached reaper owns the JoinHandle so cancelling a close caller cannot
         // lose observation of an abnormal supervisor exit.
@@ -207,12 +213,14 @@ impl Supervisor {
         self,
         initial_response_stream: FlightResponseStream,
         initial_request_body: RequestBodyControl,
+        mut backoff: RecoveryBackoff,
     ) -> ZerobusResult<()> {
         let mut response_stream = Some(initial_response_stream);
         let mut request_body = Some(initial_request_body);
         let mut pending_error: Option<ZerobusError> = None;
         let mut reconnect_auth_retry = false;
         let mut close_rx = self.close.subscribe();
+        let mut connected_at = Instant::now();
 
         loop {
             if self.is_closed.load(Ordering::Relaxed) {
@@ -230,7 +238,7 @@ impl Supervisor {
                 let active_request = request_body
                     .as_ref()
                     .expect("request body present outside recovery");
-                match self
+                let reason = match self
                     .ack_processor
                     .process_active(active_response, active_request, &mut close_rx, true)
                     .await
@@ -249,7 +257,12 @@ impl Supervisor {
                     }
                     // Live failures return before draining; retryability is checked below.
                     Err(error) => ReconnectReason::TransientFailure(error),
-                }
+                };
+                // Replay resets both counts, so they cover only this connection.
+                let acked_records = self.last_acked_records.load(Ordering::Acquire);
+                let pending = self.submitted_records.load(Ordering::Acquire) > acked_records;
+                backoff.connection_ended(connected_at.elapsed(), acked_records > 0, pending);
+                reason
             };
             // Preserve failures for retry gating and finalization; a clean rotation
             // uses the retryable rotation sentinel.
@@ -312,9 +325,11 @@ impl Supervisor {
                         return self.finish(Err(error.clone())).await;
                     }
 
+                    let backoff_delay = backoff.next_delay(Some(&error));
                     info!(target: super::LOG_TARGET,
                         attempt = attempts + 1,
                         max_retries = self.options.recovery_retries,
+                        backoff_ms = backoff_delay.as_millis(),
                         error = %error,
                         "Supervisor: Attempting recovery after retriable error"
                     );
@@ -331,7 +346,7 @@ impl Supervisor {
                     let close_during_backoff = tokio::select! {
                         biased;
                         request = self.close.wait_for_request(&mut close_rx) => request.is_some(),
-                        _ = sleep(Duration::from_millis(self.options.recovery_backoff_ms)) => false,
+                        _ = sleep(backoff_delay) => false,
                     };
                     if close_during_backoff {
                         return self.finish(Err(recovery_error)).await;
@@ -374,6 +389,7 @@ impl Supervisor {
                         Some(Ok(Some(connection))) => {
                             info!(target: super::LOG_TARGET, "Supervisor: Recovery successful, resuming");
                             self.recovery_attempts.store(0, Ordering::Relaxed);
+                            connected_at = Instant::now();
                             if let Some(exporter) = &self.stats_exporter {
                                 crate::stats::dispatch(
                                     exporter.as_ref(),

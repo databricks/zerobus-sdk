@@ -100,6 +100,19 @@ impl HeadersProvider for CountingHeadersProvider {
     }
 }
 
+/// Advances paused time in 10 ms steps until the provider has seen `calls` connection
+/// attempts. Each step lets the runtime poll I/O, so no SDK timer fires early. A timer
+/// can fire up to one step late, which only makes a measured wait longer.
+pub async fn advance_until_header_calls(provider: &CountingHeadersProvider, calls: usize) {
+    while provider
+        .get_headers_calls
+        .load(std::sync::atomic::Ordering::SeqCst)
+        < calls
+    {
+        tokio::time::advance(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// A headers provider whose invalidation never completes, for verifying that a custom
 /// provider cannot stall Arrow recovery indefinitely.
 #[derive(Default)]

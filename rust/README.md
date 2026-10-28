@@ -1187,7 +1187,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight. For a mux, this is divided evenly across sub-streams using integer division. |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
-| `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
+| `recovery_backoff_ms` | `u64` | 2,000 | Base delay of the exponential backoff between recovery attempts (ms). See [Recovery backoff](#recovery-backoff). |
+| `recovery_backoff_max_ms` | `u64` | 30,000 | Maximum backoff delay, before jitter (ms) |
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
@@ -1203,7 +1204,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `max_inflight_batches` | `usize` | 1,000 | Maximum accepted batches awaiting acknowledgment; bounds memory and applies backpressure |
 | `recovery` | `bool` | true | Reconnect and replay unacknowledged batch suffixes after retryable failures |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for one recovery attempt (ms) |
-| `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery attempts (ms) |
+| `recovery_backoff_ms` | `u64` | 2,000 | Base delay of the exponential backoff before recovery attempts (ms). See [Recovery backoff](#recovery-backoff). |
+| `recovery_backoff_max_ms` | `u64` | 30,000 | Maximum backoff delay, before jitter (ms) |
 | `recovery_retries` | `u32` | 4 | Maximum recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
@@ -1261,6 +1263,37 @@ let stream = sdk
     .build()
     .await?;
 ```
+
+### Recovery backoff
+
+Before each recovery attempt, the SDK waits with exponential backoff and jitter.
+The only exception is a server-requested rotation after a healthy JSON or
+Protocol Buffer connection, described below. After the n-th consecutive failure,
+the delay is `recovery_backoff_ms * 2^(n-1)`, capped at
+`recovery_backoff_max_ms`. The SDK waits the delay plus a random jitter of up
+to half of the delay. If the server rejects the stream with a retry delay
+(`google.rpc.RetryInfo`), the SDK waits at least that long, up to the same cap.
+The jitter does not apply to the server retry delay. Apart from the exception,
+no wait is shorter than `recovery_backoff_ms`.
+
+A failed connection attempt and a connection that ends with an error each add
+one failure. `recovery_retries` still applies to each recovery; only the backoff
+exponent continues across successful reconnects. It resets when a healthy
+connection ends: a connection that stayed up for at least 30 seconds and either
+received an acknowledgement or had no sent records or batches left
+unacknowledged when it ended. A server-requested rotation also adds a failure,
+with one difference between the transports. After a healthy connection, a JSON
+or Protocol Buffer stream does not count the rotation and reconnects at once. An
+Arrow Flight stream counts every rotation, so after a healthy connection it
+waits `recovery_backoff_ms` plus jitter.
+
+Stream creation uses the same backoff. With the defaults, `build()` or
+`build_arrow()` against an unavailable server waits 30 to 45 seconds in total
+(2, 4, 8, and 16 seconds, plus jitter) before it returns the error. With the
+defaults, a recovery that keeps failing waits at least 30 seconds in total
+before the stream fails, or at least 60 seconds for a JSON or Protocol Buffer
+stream after a connection error. To keep the delay before jitter fixed, set
+`recovery_backoff_max_ms` to a value no larger than `recovery_backoff_ms`.
 
 ## Proxy Configuration
 

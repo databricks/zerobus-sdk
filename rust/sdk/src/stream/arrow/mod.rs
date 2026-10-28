@@ -17,9 +17,7 @@ use std::sync::Arc;
 use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
-use tokio::time::{timeout, Duration, Instant};
-use tokio_retry::strategy::FixedInterval;
-use tokio_retry::RetryIf;
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{debug, error, info, instrument, warn};
 
 pub use arrow_array::RecordBatch;
@@ -35,6 +33,7 @@ use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::ConnectorFactory;
 use crate::stats::StatsExporter;
+use crate::stream::backoff::RecoveryBackoff;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -262,7 +261,7 @@ impl ZerobusArrowStream {
     /// Creates a new Arrow Flight stream.
     ///
     /// If `recovery` is enabled in options, initial connection will be retried
-    /// up to `recovery_retries` times with `recovery_backoff_ms` delay between attempts.
+    /// up to `recovery_retries` times, with the recovery backoff between attempts.
     /// One available retry may refresh credentials after an authentication rejection;
     /// a second authentication rejection remains terminal.
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
@@ -367,8 +366,8 @@ impl ZerobusArrowStream {
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
         let request_bodies = stream.request_bodies.clone();
-        let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-            .take(options.recovery_retries as usize);
+        let mut backoff =
+            RecoveryBackoff::new(options.recovery_backoff_ms, options.recovery_backoff_max_ms);
 
         let create_attempt = || {
             let endpoint = endpoint.clone();
@@ -403,10 +402,21 @@ impl ZerobusArrowStream {
         // Keep auth errors globally non-retryable, but let initial setup refresh one
         // stale credential when recovery has at least one retry in its budget.
         let mut auth_retry_available = options.recovery_retries > 0;
-        let should_retry = |e: &ZerobusError| {
+        let mut should_retry = |e: &ZerobusError| {
             should_retry_initial_connection(e, options.recovery, &mut auth_retry_available)
         };
-        let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
+        let mut attempt: u32 = 0;
+        let creation = loop {
+            attempt = attempt.saturating_add(1);
+            let e = match create_attempt().await {
+                Ok(connection) => break Ok(connection),
+                Err(e) => e,
+            };
+            if !should_retry(&e) || attempt > options.recovery_retries {
+                break Err(e);
+            }
+            sleep(backoff.next_delay(Some(&e))).await;
+        };
 
         let connection = match creation {
             Ok(result) => result,
@@ -423,7 +433,7 @@ impl ZerobusArrowStream {
         }
 
         // Spawn the supervisor task.
-        let task = Supervisor::new(&stream).spawn(connection);
+        let task = Supervisor::new(&stream).spawn(connection, backoff);
 
         {
             let mut supervisor_task = stream.supervisor_task.lock().await;

@@ -510,6 +510,7 @@ fn shared_setters_write_to_arrow_config() {
         .recovery(false)
         .recovery_timeout_ms(5_000)
         .recovery_backoff_ms(500)
+        .recovery_backoff_max_ms(8_000)
         .recovery_retries(2)
         .server_lack_of_ack_timeout_ms(10_000)
         .flush_timeout_ms(20_000)
@@ -517,6 +518,7 @@ fn shared_setters_write_to_arrow_config() {
     assert!(!builder.arrow_config.recovery);
     assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
     assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
+    assert_eq!(builder.arrow_config.recovery_backoff_max_ms, 8_000);
     assert_eq!(builder.arrow_config.recovery_retries, 2);
     assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
     assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);

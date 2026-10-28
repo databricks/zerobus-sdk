@@ -19,10 +19,11 @@ mod arrow_flight_tests {
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
     use crate::utils::{
-        advance_tokio_time_near_instant_limit, create_test_arrow_schema,
-        create_test_dict_record_batch, create_test_dict_schema, create_test_record_batch,
-        record_batch_to_ipc_bytes, run_with_paused_time_watchdog, setup_tracing,
-        CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
+        advance_tokio_time_near_instant_limit, advance_until_header_calls,
+        create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
+        create_test_record_batch, record_batch_to_ipc_bytes, run_with_paused_time_watchdog,
+        setup_tracing, CountingHeadersProvider, HangingInvalidationHeadersProvider,
+        TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -4404,6 +4405,133 @@ mod arrow_flight_tests {
             );
 
             Ok(())
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_recovery_backoff_continues_from_stream_creation(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const BACKOFF_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::FailSetup {
+                            status: tonic::Status::unavailable("setup failed"),
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("connection lost"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let build = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .arrow(schema.clone())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .build_arrow();
+                let (stream, ()) = tokio::join!(build, advance_until_header_calls(&provider, 2));
+                let stream = stream?;
+
+                let ingested_at = tokio::time::Instant::now();
+                let batch = create_test_record_batch(schema, vec![1], vec![Some("lost")]);
+                stream.ingest_batch(batch).await?;
+                advance_until_header_calls(&provider, 3).await;
+
+                // A count that started again in the supervisor would wait at most 1.5 times
+                // the base delay.
+                let waited = ingested_at.elapsed();
+                assert!(
+                    waited >= std::time::Duration::from_millis(2 * BACKOFF_MS),
+                    "reconnected {waited:?} after the failed ingest, without the doubled delay"
+                );
+                Ok(())
+            })
+            .await
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_healthy_connection_resets_recovery_backoff(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const BACKOFF_MS: u64 = 4_000;
+            // A connection must stay up this long to count as healthy.
+            const HEALTHY_UPTIME_MS: u64 = 30_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::FailSetup {
+                            status: tonic::Status::unavailable("setup failed"),
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("connection lost"),
+                            delay_ms: HEALTHY_UPTIME_MS,
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(CountingHeadersProvider::default());
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let build = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider.clone())
+                    .arrow(schema.clone())
+                    .recovery(true)
+                    .recovery_backoff_ms(BACKOFF_MS)
+                    .build_arrow();
+                let (stream, ()) = tokio::join!(build, advance_until_header_calls(&provider, 2));
+                let stream = stream?;
+
+                let acked = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
+                stream.ingest_batch(acked).await?;
+                let ingested_at = tokio::time::Instant::now();
+                let lost = create_test_record_batch(schema, vec![2], vec![Some("lost")]);
+                stream.ingest_batch(lost).await?;
+                advance_until_header_calls(&provider, 3).await;
+
+                // The error comes HEALTHY_UPTIME_MS after this ingest. A count that kept the
+                // stream creation failure would wait at least twice the base delay.
+                let waited = ingested_at.elapsed();
+                assert!(
+                    waited < std::time::Duration::from_millis(HEALTHY_UPTIME_MS + 2 * BACKOFF_MS),
+                    "reconnected {waited:?} after the failed ingest, without the backoff reset"
+                );
+                Ok(())
+            })
+            .await
         }
 
         /// End-to-end: when the table schema changes mid-stream, the *reconnect*
