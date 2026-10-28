@@ -441,6 +441,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rand 0.9.3",
  "reqwest",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",

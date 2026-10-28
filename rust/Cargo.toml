@@ -33,6 +33,8 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-types = "0.14"
+# PEM parsing for `TlsSettings` validation. `pem` support starts at 1.9.
+rustls-pki-types = "1.9"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime

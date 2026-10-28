@@ -52,14 +52,14 @@
   `get_unacked_batches()`.
 
 - Removed `tonic` types from the public API. `tonic` is pre-1.0, and each 0.x
-  release is a breaking change, so a `tonic` upgrade no longer breaks the SDK
-  API. Two parts of the API named `tonic` types:
+  minor release is a breaking change, so a `tonic` upgrade no longer breaks the
+  SDK API. Two parts of the API named `tonic` types:
 
   - `ZerobusError::CreateStreamError` and `ZerobusError::StreamClosedError` now
     carry a `GrpcStatus` instead of a `tonic::Status`. `GrpcStatus::code()`
     returns a `GrpcCode` (`#[non_exhaustive]`, 17 gRPC status codes) and
     `GrpcStatus::message()` returns the message. The `Display` output is the
-    same as the output of `tonic::Status`, so error strings do not change.
+    same as the output of `tonic::Status` today, so error strings do not change.
     Retry and authentication classification do not change. The status no longer
     exposes `tonic::Status` details and metadata.
 
@@ -84,6 +84,14 @@
     behavior. A `TlsConfig` can no longer change settings of the gRPC endpoint
     that are not TLS settings.
     You no longer need a `tonic` dependency to implement `TlsConfig`.
+
+    The SDK now checks the TLS settings when it applies them. With
+    `without_native_roots()`, it rejects a CA entry that holds no PEM
+    certificate, because the channel would otherwise trust no server. It also
+    reports a CA or a client identity that it cannot use as
+    `ZerobusError::InvalidArgument`, which is not retryable, so recovery does
+    not retry the mistake. `FailedToEstablishTlsConnectionError` is still the
+    error for other TLS setup failures.
 
 ### Deprecations
 

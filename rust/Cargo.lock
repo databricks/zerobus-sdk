@@ -929,6 +929,7 @@ dependencies = [
  "rand 0.9.2",
  "reqwest",
  "rstest",
+ "rustls-pki-types",
  "self_cell",
  "serde",
  "serde_json",

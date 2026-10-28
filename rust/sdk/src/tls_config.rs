@@ -9,6 +9,7 @@
 
 use crate::errors::ZerobusError;
 use crate::ZerobusResult;
+use rustls_pki_types::{pem::PemObject, CertificateDer};
 use std::fmt;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
@@ -145,8 +146,9 @@ impl TlsSettings {
     /// Stops the channel from trusting the operating system's CA certificates.
     ///
     /// Add at least one CA certificate with
-    /// [`with_ca_certificate_pem`](Self::with_ca_certificate_pem). Without one,
-    /// the channel trusts no server and the SDK rejects the settings.
+    /// [`with_ca_certificate_pem`](Self::with_ca_certificate_pem). Without a CA
+    /// certificate that the SDK can read as PEM, the channel trusts no server
+    /// and the SDK rejects the settings.
     pub fn without_native_roots(mut self) -> Self {
         self.native_roots = false;
         self
@@ -189,9 +191,12 @@ impl TlsSettings {
             TlsMode::Plaintext => return Ok(endpoint),
         }
 
-        if !self.native_roots && self.ca_certificates.is_empty() {
+        // tonic skips PEM data that holds no certificate, for example a private
+        // key or a DER file. Without this check, such a CA gives an empty root
+        // store and the channel trusts no server.
+        if !self.native_roots && !self.ca_certificates.iter().any(|pem| has_certificate(pem)) {
             return Err(ZerobusError::InvalidArgument(
-                "TLS settings trust no CA certificates: add one with \
+                "TLS settings trust no CA certificates: add a PEM certificate with \
                  `with_ca_certificate_pem` or keep the native roots"
                     .to_string(),
             ));
@@ -212,10 +217,28 @@ impl TlsSettings {
             tls_config = tls_config.domain_name(domain_name.clone());
         }
 
-        endpoint
-            .tls_config(tls_config)
-            .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)
+        // A CA or a client identity that the caller supplied and tonic rejects
+        // fails the same way on every attempt. Report it as `InvalidArgument`, which
+        // is not retryable, so recovery does not retry the mistake until its budget
+        // runs out.
+        let custom_material = !self.ca_certificates.is_empty() || self.client_identity.is_some();
+        endpoint.tls_config(tls_config).map_err(|err| {
+            if custom_material {
+                // The `Display` of the tonic error only says "transport error".
+                // The reason is in `source()`.
+                let reason = std::error::Error::source(&err)
+                    .map_or_else(|| err.to_string(), |source| source.to_string());
+                ZerobusError::InvalidArgument(format!("invalid TLS settings: {reason}"))
+            } else {
+                ZerobusError::FailedToEstablishTlsConnectionError
+            }
+        })
     }
+}
+
+/// Reports whether the PEM data holds at least one well-formed certificate section.
+fn has_certificate(pem: &[u8]) -> bool {
+    CertificateDer::pem_slice_iter(pem).any(|cert| cert.is_ok())
 }
 
 impl fmt::Debug for TlsSettings {
@@ -295,6 +318,21 @@ impl TlsConfig for NoTlsConfig {
 mod tests {
     use super::*;
 
+    /// A self-signed CA certificate (CN=zerobus-test-ca). It holds no private key.
+    const TEST_CA_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBizCCATGgAwIBAgIUQKpKxM/JogrsAiBjTBW9zZNn7aAwCgYIKoZIzj0EAwIw
+GjEYMBYGA1UEAwwPemVyb2J1cy10ZXN0LWNhMCAXDTI2MTAyODExMzYxMFoYDzIx
+MjYxMDA0MTEzNjEwWjAaMRgwFgYDVQQDDA96ZXJvYnVzLXRlc3QtY2EwWTATBgcq
+hkjOPQIBBggqhkjOPQMBBwNCAASKmMpvY8kCrxbut0kDNV0tJckwqGi7meFlyKcp
+GXVgp0QtxYsP6A8qw3cImCxu+PRYIQVEGexsQE3gQiL+eQMQo1MwUTAdBgNVHQ4E
+FgQUGxeLAn9I200zjQ0xgH9K72mu440wHwYDVR0jBBgwFoAUGxeLAn9I200zjQ0x
+gH9K72mu440wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiA/XPyA
+2ppG9BVyn/QaRXweTlxsrMoD6v5+2a6337qDNQIhAJSkTaw0wxqIOYyzluxwa9hv
+OXAXnIE7l91w/88HcoR0
+-----END CERTIFICATE-----
+";
+
     const KEY_MARKER: &str = "PRIVATE-KEY-MARKER";
     const CERT_MARKER: &str = "CLIENT-CERT-MARKER";
     const CA_MARKER: &str = "CA-CERT-MARKER";
@@ -363,8 +401,15 @@ mod tests {
     fn apply_with_custom_ca_and_domain_name_succeeds() {
         let settings = TlsSettings::new()
             .without_native_roots()
-            .with_ca_certificate_pem("not-checked-until-connect")
+            .with_ca_certificate_pem(TEST_CA_PEM)
             .with_domain_name("localhost");
+
+        assert!(settings.apply(endpoint()).is_ok());
+    }
+
+    #[test]
+    fn apply_with_native_roots_and_custom_ca_succeeds() {
+        let settings = TlsSettings::new().with_ca_certificate_pem(TEST_CA_PEM);
 
         assert!(settings.apply(endpoint()).is_ok());
     }
@@ -378,6 +423,59 @@ mod tests {
 
         assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
         assert!(!err.is_retryable());
+    }
+
+    /// tonic skips PEM data that holds no certificate. A CA entry like that
+    /// leaves an empty root store, so the SDK must reject it.
+    #[test]
+    fn apply_rejects_a_ca_that_holds_no_certificate_when_native_roots_are_off() {
+        let not_certificates: [&[u8]; 4] = [
+            b"not a certificate",
+            b"",
+            // A PEM section of another type, such as a public key file.
+            b"-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+            // Binary data, such as a DER file.
+            &[0x30, 0x82, 0x01, 0x0a, 0x02, 0x82, 0x01, 0x01, 0x00],
+        ];
+
+        for pem in not_certificates {
+            let err = TlsSettings::new()
+                .without_native_roots()
+                .with_ca_certificate_pem(pem)
+                .apply(endpoint())
+                .unwrap_err();
+
+            assert!(
+                matches!(err, ZerobusError::InvalidArgument(_)),
+                "{pem:?}: {err:?}"
+            );
+            assert!(!err.is_retryable(), "{pem:?}");
+        }
+    }
+
+    #[test]
+    fn apply_accepts_one_certificate_among_unusable_ca_entries() {
+        let settings = TlsSettings::new()
+            .without_native_roots()
+            .with_ca_certificate_pem("not a certificate")
+            .with_ca_certificate_pem(TEST_CA_PEM);
+
+        assert!(settings.apply(endpoint()).is_ok());
+    }
+
+    /// A client identity that tonic rejects fails the same way on every attempt,
+    /// so it must not be retryable.
+    #[test]
+    fn apply_reports_an_unusable_client_identity_as_not_retryable() {
+        let err = TlsSettings::new()
+            .with_client_identity_pem("not a certificate", "not a key")
+            .apply(endpoint())
+            .unwrap_err();
+
+        assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
+        assert!(!err.is_retryable());
+        // The message carries the reason from tonic's `source()`.
+        assert!(err.to_string().contains("private key"), "{err}");
     }
 
     #[cfg(feature = "testing")]

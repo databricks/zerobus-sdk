@@ -602,7 +602,9 @@ let sdk = ZerobusSdk::builder()
     .build()?;
 ```
 
-Call `without_native_roots()` to trust only the CA certificates that you add. Use `with_domain_name(...)` to check the server certificate against a different domain name.
+Call `without_native_roots()` to trust only the CA certificates that you add. You must add at least one PEM certificate. The SDK rejects a CA entry that holds no certificate, such as a private key file. Use `with_domain_name(...)` to check the server certificate against a different domain name.
+
+If the SDK cannot use a CA certificate or a client identity that you set, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
 
 To read the certificates again for each new channel, for example to rotate them, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel:
 
