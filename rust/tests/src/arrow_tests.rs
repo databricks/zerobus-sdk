@@ -1419,6 +1419,67 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// A running close can still acknowledge the target, so a flush that starts during
+        /// another caller's close must wait and return `Ok(())` when the ack arrives.
+        #[tokio::test(start_paused = true)]
+        async fn test_flush_during_running_close_returns_ok_on_ack(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const ACK_DELAY_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            // Real tonic setup under paused time needs a ready task to prevent Tokio from
+            // auto-advancing connection deadlines while kernel I/O is still pending.
+            let _auto_advance_guard = PausedTimeAutoAdvanceGuard::start();
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: ACK_DELAY_MS,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+            let delayed_ack_armed = mock_server.delayed_ack_armed();
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("acked")]);
+            stream.ingest_batch(batch).await?;
+            // The server holds the ack until the paused clock advances.
+            run_with_paused_time_watchdog(delayed_ack_armed.notified()).await;
+
+            let close = stream.close_concurrently_for_test();
+            tokio::pin!(close);
+            assert!(futures::poll!(&mut close).is_pending());
+            let flush = stream.flush();
+            tokio::pin!(flush);
+            assert!(
+                futures::poll!(&mut flush).is_pending(),
+                "a flush during a running close must wait for the close"
+            );
+
+            tokio::time::advance(std::time::Duration::from_millis(ACK_DELAY_MS)).await;
+            run_with_paused_time_watchdog(flush).await?;
+            run_with_paused_time_watchdog(close).await?;
+
+            Ok(())
+        }
     }
 
     mod error_handling_tests {
@@ -2850,6 +2911,166 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// A flush timeout closes the stream: `get_unacked_batches()` returns the
+        /// unacknowledged batch before `close()`, and `close()` returns the timeout.
+        #[tokio::test]
+        async fn test_flush_timeout_retains_unacked_batch() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            // The server never acknowledges the batch. Its error at request EOF ends the
+            // drain early, so finalization does not race the waiter's 1 s bound.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::ErrorAfterRequestEof {
+                        status: tonic::Status::unavailable("no acknowledgement"),
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(100)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("unacked")]);
+            stream.ingest_batch(batch).await?;
+
+            let error = stream
+                .flush()
+                .await
+                .expect_err("the withheld acknowledgement must time out");
+            assert!(
+                matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+                "expected the flush timeout, got {error:?}"
+            );
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            assert_eq!(unacked, vec![vec![1]]);
+            let close_error = stream
+                .close()
+                .await
+                .expect_err("close must return the terminal error");
+            assert!(
+                matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+                "expected the terminal timeout from close, got {close_error:?}"
+            );
+
+            Ok(())
+        }
+
+        /// An acknowledgement that the server sends during the post-timeout drain still
+        /// completes the timed-out flush.
+        #[tokio::test]
+        async fn test_late_ack_in_drain_completes_timed_out_flush(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckAfterRequestEof {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(100)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("late")]);
+            stream.ingest_batch(batch).await?;
+
+            stream.flush().await?;
+            assert!(stream.get_unacked_batches().await?.is_empty());
+
+            Ok(())
+        }
+
+        /// A flush that times out after another timed-out flush started the close waits for
+        /// that close, so the late acknowledgement completes both flushes.
+        #[tokio::test(start_paused = true)]
+        async fn test_concurrent_timed_out_flushes_complete_on_late_ack(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const FLUSH_TIMEOUT_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            // Real tonic setup under paused time needs a ready task to prevent Tokio from
+            // auto-advancing connection deadlines while kernel I/O is still pending.
+            let _auto_advance_guard = PausedTimeAutoAdvanceGuard::start();
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckAfterRequestEof {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(FLUSH_TIMEOUT_MS)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("late")]);
+            stream.ingest_batch(batch).await?;
+
+            // Both flushes time out at the same instant, and the first one polled starts
+            // the close.
+            let flushes = async { tokio::join!(stream.flush(), stream.flush()) };
+            tokio::pin!(flushes);
+            assert!(futures::poll!(&mut flushes).is_pending());
+            tokio::time::advance(std::time::Duration::from_millis(FLUSH_TIMEOUT_MS)).await;
+            let (first, second) = run_with_paused_time_watchdog(flushes).await;
+            first?;
+            second?;
+
+            Ok(())
+        }
     }
 
     mod lifecycle_tests {
@@ -4253,6 +4474,80 @@ mod arrow_flight_tests {
                 Some("close during backoff must retain only the exact unacknowledged suffix"),
             )
             .await?;
+            Ok(())
+        }
+
+        /// A flush timeout during the recovery backoff ends recovery and stores the timeout
+        /// instead of the recovery trigger, so a retried flush cannot reconnect and replay the
+        /// batch, and returns the timeout.
+        #[tokio::test(start_paused = true)]
+        async fn test_flush_timeout_opens_no_new_connection(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const RECOVERY_BACKOFF_MS: u64 = 60_000;
+            const FLUSH_TIMEOUT_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            // Real tonic setup under paused time needs a ready task to prevent Tokio from
+            // auto-advancing connection deadlines while kernel I/O is still pending.
+            let _auto_advance_guard = PausedTimeAutoAdvanceGuard::start();
+            let schema = create_test_arrow_schema();
+            let request_ended = Arc::new(tokio::sync::Notify::new());
+            // A replacement connection would acknowledge the replayed batch.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::ErrorThenAwaitRequestEnd {
+                        status: tonic::Status::unavailable("active transport failed"),
+                        request_ended: Arc::clone(&request_ended),
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(RECOVERY_BACKOFF_MS)
+                .recovery_retries(1)
+                .flush_timeout_ms(FLUSH_TIMEOUT_MS)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("unacked")]);
+            stream.ingest_batch(batch).await?;
+
+            let flush = stream.flush();
+            tokio::pin!(flush);
+            assert!(futures::poll!(&mut flush).is_pending());
+            // The client ends the request when the supervisor drops the failed connection
+            // and enters the recovery backoff.
+            run_with_paused_time_watchdog(request_ended.notified()).await;
+            tokio::time::advance(std::time::Duration::from_millis(FLUSH_TIMEOUT_MS)).await;
+            run_with_paused_time_watchdog(flush)
+                .await
+                .expect_err("the flush must time out");
+
+            tokio::time::advance(std::time::Duration::from_millis(RECOVERY_BACKOFF_MS)).await;
+            let retry = run_with_paused_time_watchdog(stream.flush()).await;
+            assert_eq!(
+                mock_server.connection_count(),
+                1,
+                "the timeout must end recovery before it reconnects"
+            );
+            assert!(
+                matches!(&retry, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
+                "a retried flush must return the stored timeout, got {retry:?}"
+            );
+
             Ok(())
         }
 

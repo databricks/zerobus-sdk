@@ -4,7 +4,7 @@ mod utils;
 use std::sync::Arc;
 use std::time::Duration;
 
-use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
 use mock_grpc::start_mock_server;
 use prost_types::DescriptorProto;
 use tokio::time::timeout;
@@ -332,7 +332,14 @@ async fn lost_ack_fails_when_recovery_is_disabled() {
         .expect("failure propagation timed out");
     assert!(result.is_err());
     assert!(stream.is_closed());
-    stream.close().await.expect("close remains idempotent");
+    let close_error = stream
+        .close()
+        .await
+        .expect_err("close must return the terminal error");
+    assert!(
+        matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::Unavailable),
+        "expected the terminal disconnect from close, got {close_error:?}"
+    );
 }
 
 #[tokio::test]

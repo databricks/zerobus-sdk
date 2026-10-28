@@ -88,6 +88,22 @@ pub enum ZerobusError {
     #[error("Specified UC token is in invalid format: {0}.")]
     InvalidUCTokenError(String),
     /// Returned when the stream is closed.
+    ///
+    /// When a stream call returns this error, the stream is terminal. Recovery has
+    /// stopped, and the stream does not send its unacknowledged records again, not even
+    /// on a later `close()`. A `flush()` or `wait_for_offset()` timeout
+    /// (`Code::DeadlineExceeded`) also makes the stream terminal. The stream first drains
+    /// its connection, so the timeout error can arrive up to 1 s after the configured
+    /// timeout. On an ephemeral gRPC stream or an Arrow Flight stream, a late
+    /// acknowledgement of the target during that drain makes the call return `Ok(())`, but
+    /// the stream stays closed: `close()` returns the timeout error, and later ingests
+    /// fail. Get the unacknowledged records with `get_unacked_batches()` or
+    /// `get_unacked_records()`, after `close()`, and resend them on a new stream. On a
+    /// persistent stream, resume by `stream_id` instead. A rejected ingest call did not
+    /// admit its record, so that record is not in the returned set.
+    ///
+    /// The server can already have accepted batches that were sent but not acknowledged,
+    /// so a resend can duplicate those batches.
     #[error("Stream is closed: {0}")]
     StreamClosedError(tonic::Status),
     /// Returned when the client provided an invalid argument.
@@ -194,6 +210,10 @@ impl ZerobusError {
     /// Retryable errors typically indicate transient issues like network failures or
     /// temporary server problems. Non-retryable errors indicate permanent issues like
     /// authentication failures or invalid configurations that require manual intervention.
+    ///
+    /// When a stream call returns a retryable [`ZerobusError::StreamClosedError`], the
+    /// stream has already stopped recovery, so resend its unacknowledged records on a new
+    /// stream instead of repeating the call.
     ///
     /// # Returns
     ///

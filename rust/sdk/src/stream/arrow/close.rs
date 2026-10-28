@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
@@ -11,7 +11,7 @@ use crate::ZerobusResult;
 use super::batch::PendingBatch;
 use super::{BatchSender, RecordBatch, ZerobusArrowStream};
 
-/// The immutable target and deadline selected by the first `close()` call.
+/// The immutable target and deadline selected by the first `close()` call or a timed-out wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CloseRequest {
     pub(super) target_offset: Option<OffsetId>,
@@ -39,6 +39,8 @@ impl CloseState {
 pub(super) struct CloseCoordinator {
     state_tx: watch::Sender<CloseState>,
     ack_state: Arc<StdMutex<CloseAckState>>,
+    /// Set when a timed-out wait starts the close; that timeout made the stream terminal first.
+    wait_timeout_error: Arc<OnceLock<ZerobusError>>,
 }
 
 #[derive(Default)]
@@ -54,6 +56,7 @@ impl CloseCoordinator {
         Self {
             state_tx,
             ack_state: Arc::new(StdMutex::new(CloseAckState::default())),
+            wait_timeout_error: Arc::new(OnceLock::new()),
         }
     }
 
@@ -91,6 +94,13 @@ impl CloseCoordinator {
                 false
             }
         });
+    }
+
+    /// Publishes the close that a timed-out wait starts, and keeps its error as the final
+    /// result. The caller holds `ingest_mutex` and has seen an open, admitting stream.
+    pub(super) fn publish_wait_timeout(&self, request: CloseRequest, error: ZerobusError) {
+        let _ = self.wait_timeout_error.set(error);
+        self.publish(request);
     }
 
     /// Records when a durable ACK was fully applied and latches timely target completion.
@@ -203,6 +213,11 @@ impl CloseFinalizer {
             *self.batch_tx.lock().await = None;
         }
 
+        // A timed-out wait that started the close made the stream terminal first.
+        let outcome = match self.close.wait_timeout_error.get() {
+            Some(error) => Err(error.clone()),
+            None => outcome,
+        };
         self.server_error_tx
             .send_replace(outcome.as_ref().err().cloned());
 

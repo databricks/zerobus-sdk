@@ -166,7 +166,9 @@ Open -> Requested(target, deadline) -> Finalized(result)
 The direct `Open -> Finalized` edge is used by background terminal failures that
 occur without an explicit close request. The first request and final result are
 sticky. Cancelling a caller's `close()` future does not cancel supervisor-owned
-teardown; calling `close()` again waits for the same result.
+teardown; calling `close()` again waits for the same result. A `flush()` or
+`wait_for_offset()` timeout publishes the same request with an immediate deadline
+(see [Wait timeouts](#wait-timeouts)).
 
 ## Acknowledgment processing
 
@@ -263,7 +265,8 @@ close/free operation.
 
 ## Explicit close and terminal finalization
 
-The first `close()` call snapshots its target offset and deadline under
+The first `close()` call or a timed-out wait snapshots its target offset and
+deadline under
 `ingest_mutex`, atomically with ingest admission and replacement-sender
 publication.
 
@@ -278,13 +281,35 @@ inspect `get_unacked_batches()` after an error; the returned set may be empty.
 `CloseFinalizer`:
 
 1. Closes admission and detaches the sender under `ingest_mutex`.
-2. Publishes the selected terminal error for waiters.
+2. Publishes the selected terminal error for waiters. When a wait timeout started
+   the close, its timeout error replaces the selected one.
 3. Moves unacknowledged pending suffixes into `failed_batches`.
 4. Publishes the sticky `CloseState::Finalized` result.
 
 The supervisor worker has a detached reaper that owns its `JoinHandle`. If the
 worker panics or is aborted before finalization, the reaper performs terminal
 finalization and wakes close waiters.
+
+### Wait timeouts
+
+A caller that retries after a timeout resends `get_unacked_batches()` on a new
+stream, so the timed-out stream must never send those batches again (see
+[After a stream closes](../../../../README.md#after-a-stream-closes)). When
+`flush()` or `wait_for_offset()` times out and its target is still unacknowledged,
+the waiter publishes a close request with an immediate deadline under
+`ingest_mutex`, the same way `close()` does. Recovery and replay stop. The
+supervisor half-closes the transport and reads late acknowledgements until the
+500 ms drain deadline. Finalization then moves every unacknowledged batch into
+`failed_batches` and stores the waiter's timeout as the sticky result, so a later
+`close()` sends nothing and returns it. The waiter waits up to 1 s for
+finalization and returns `Ok(())` only if a late acknowledgement covers its target
+by then.
+
+A running close does not end a wait, because that close can still acknowledge the
+target; the waiter waits for finalization within its own timeout. If the timeout
+fires before the deadline of an explicit `close()` that another caller started, the
+waiter returns the timeout error without waiting for that close. Otherwise, it waits
+up to 1 s for finalization, the same as the waiter that started the close.
 
 ## Concurrency invariants
 
@@ -293,7 +318,7 @@ finalization and wakes close waiters.
 - logical offset and pending-range assignment or rollback;
 - pause and sender detachment;
 - replay rebuilding and replacement-sender publication;
-- explicit-close target publication;
+- explicit-close and wait-timeout close target publication;
 - terminal admission and finalization.
 
 Important invariants:

@@ -329,7 +329,9 @@ into several wire messages. Durability is tracked through the cumulative
 
 Recovery reconnects and replays only unacknowledged batch suffixes. After a failed
 `close()`, call `get_unacked_batches()` to inspect the retained work; the returned
-set can be empty when every record was already durable.
+set can be empty when every record was already durable. A `flush()` or
+`wait_for_offset()` timeout also closes the stream; see
+[After a stream closes](#after-a-stream-closes).
 
 #### Telemetry *(Beta)*
 
@@ -802,7 +804,8 @@ global order. A `MessageId` must only be used with the mux that created it.
 
 Retryable failures follow each sub-stream's configured recovery policy. If one
 sub-stream reaches a terminal failure observed by a mux operation, the mux is
-poisoned and stops accepting records. Healthy lanes remain active until
+poisoned and stops accepting records. A `flush()` or `wait_for_message_id()`
+timeout on a sub-stream is a terminal failure. Healthy lanes remain active until
 explicit close or drop. `flush()` waits for every lane's flush attempt;
 `close()` flushes once and then closes all lanes concurrently. `get_unacked_records()`
 and `get_unacked_batches()` aggregate recoverable records across streams but
@@ -845,7 +848,9 @@ batches on each lane, with any remainder unused. The budget must cover all lanes
 
 Retryable failures recover within the affected lane. An observed terminal lane
 failure poisons new ingestion, while `wait_for_message_id()` remains lane-specific
-and `flush()` still waits for every lane's flush attempt. A stored terminal error
+and `flush()` still waits for every lane's flush attempt. A `flush()` or
+`wait_for_message_id()` timeout on a lane is a terminal lane failure. A stored
+terminal error
 takes precedence. `close()` closes lanes concurrently using Arrow's existing
 supervisor, preserving each lane's flush deadline and interrupting active recovery.
 A cancelled close can be resumed. An existing mux failure takes precedence;
@@ -935,6 +940,7 @@ How offsets and resume work:
 - The stream does not keep records across a restart. After a restart, replay records from your own source, starting above the watermark. If you ingest a record that the server already committed, the server writes it as a new row.
 - Inside one process, the SDK recovers from transient failures on its own. It reconnects with the same `stream_id` and resends only the records that the server has not committed.
 - `close()` flushes pending records and ends the connection. The stream stays available, and you can resume it later.
+- A `flush()` or `wait_for_offset()` timeout ends the connection, and `close()` then returns the timeout error. Resume by `stream_id` and replay the records above the new `resume_watermark()`.
 - `PersistentStream` does not provide `get_unacked_records()`. Use the watermark and your own source to replay.
 
 Arrow Flight, Avro, dynamic Protocol Buffers, multiplexing, and federated authentication are not available on persistent streams.
@@ -1312,6 +1318,34 @@ credentials and spend at most one recovery retry on another setup attempt. A sec
 authentication rejection is terminal. This one-shot setup exception does not change
 reconnect behavior.
 
+### After a stream closes
+
+The SDK recovers retryable failures inside the stream. When a call returns
+`StreamClosedError` to you, the stream is closed: recovery has stopped, and the
+stream does not send its unacknowledged records again, not even on a later
+`close()`.
+
+- A `flush()` or `wait_for_offset()` timeout (`flush_timeout_ms`,
+  `Code::DeadlineExceeded`) also closes the stream. The stream first drains its
+  connection, so the error can arrive up to 1 s after the timeout. On an ephemeral
+  gRPC stream or an Arrow Flight stream, if a late acknowledgement covers the target
+  during that drain, the call returns `Ok(())`, but the stream stays closed:
+  `close()` returns the timeout error, and later ingests fail.
+- `is_retryable()` stays `true` for a timeout. For a retryable error, call `close()`,
+  which returns the same terminal error, then resend `get_unacked_batches()` or
+  `get_unacked_records()` on a new stream, for example with `recreate_stream()` or
+  `recreate_arrow_stream()`. Do not retry `flush()` or `close()` on the same stream.
+- An ingest call can return this error while the stream closes. The rejected
+  record is not admitted, so it is not in the unacknowledged set.
+- On a multiplexed stream, a timeout on one sub-stream poisons the whole mux.
+  `close()` still closes the healthy sub-streams gracefully. Resend the mux's
+  `get_unacked_batches()`.
+- On a persistent stream, resume by `stream_id` and replay the records above the new
+  `resume_watermark()`.
+
+The server can already have accepted batches that were sent but not acknowledged,
+so a resend can duplicate those batches.
+
 ### Schema Mismatch (Arrow Flight)
 
 (Requires `features = ["arrow-flight"]`.)
@@ -1402,7 +1436,7 @@ match stream.ingest_record_offset(payload).await {
         stream.wait_for_offset(offset).await?;
     }
     Err(e) if e.is_retryable() => {
-        eprintln!("Retryable error, SDK will auto-recover: {}", e);
+        eprintln!("Retryable error, recreate the stream and resend this record: {}", e);
     }
     Err(e) => {
         eprintln!("Fatal error, manual intervention needed: {}", e);
@@ -1549,22 +1583,22 @@ Ingests multiple records as a batch with all-or-nothing semantics. The entire ba
 ```rust
 pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
 ```
-Waits for acknowledgment of a specific logical offset. Use this method with offsets returned from `ingest_record_offset()` or `ingest_records_offset()` to explicitly wait for server acknowledgment.
+Waits for acknowledgment of a specific logical offset. Use this method with offsets returned from `ingest_record_offset()` or `ingest_records_offset()` to explicitly wait for server acknowledgment. A timeout closes the stream; see [After a stream closes](#after-a-stream-closes).
 
 ```rust
 pub async fn flush(&self) -> ZerobusResult<()>
 ```
-Flushes all pending records and waits for acknowledgment.
+Flushes all pending records and waits for acknowledgment. A timeout closes the stream; see [After a stream closes](#after-a-stream-closes).
 
 ```rust
 pub async fn close(&mut self) -> ZerobusResult<()>
 ```
-Flushes and closes the stream gracefully.
+Flushes and closes the stream gracefully. On a stream that already failed or timed out, returns the error that made it terminal, on every call; see [After a stream closes](#after-a-stream-closes).
 
 ```rust
 pub async fn get_unacked_records(&self) -> ZerobusResult<impl Iterator<Item = EncodedRecord>>
 ```
-Returns an iterator over all unacknowledged records as individual `EncodedRecord` items. This flattens batches into individual records. Only call after stream failure.
+Returns an iterator over all unacknowledged records as individual `EncodedRecord` items. This flattens batches into individual records. Only call after stream failure. See [After a stream closes](#after-a-stream-closes).
 
 ```rust
 pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>>
@@ -1573,7 +1607,7 @@ Returns unacknowledged records grouped by batch, preserving the original batch s
 - Each `ingest_record_offset()` call creates a batch containing one record
 - Each `ingest_records_offset()` call creates a batch containing multiple records
 
-Only call after stream failure.
+Only call after stream failure. See [After a stream closes](#after-a-stream-closes).
 
 `EncodedRecord` and `EncodedBatch` are `#[non_exhaustive]`. The `Avro` variants exist only with the `avro` feature, and later releases may add record formats, so a `match` on either needs a `_` arm:
 
@@ -1640,13 +1674,13 @@ Queue one record or one batch and return its offset. Each call uses one offset.
 pub async fn flush(&self) -> ZerobusResult<()>
 pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()>
 ```
-Wait for the server to acknowledge all pending records, or one offset.
+Wait for the server to acknowledge all pending records, or one offset. A timeout closes the stream; see [After a stream closes](#after-a-stream-closes).
 
 ```rust
 pub async fn close(&mut self) -> ZerobusResult<()>
 pub fn is_closed(&self) -> bool
 ```
-Flush and end the connection, or check whether the stream is closed. A closed stream can be resumed with `resume()`.
+Flush and end the connection, or check whether the stream is closed. On a stream that already failed or timed out, `close()` returns the error that made it terminal; see [After a stream closes](#after-a-stream-closes). A closed stream can be resumed with `resume()`.
 
 ### `MultiplexedStream`
 
@@ -1717,7 +1751,7 @@ Error type for all SDK operations.
 ```rust
 pub fn is_retryable(&self) -> bool
 ```
-Returns `true` if the error can be automatically recovered by the SDK.
+Returns `true` if the error can be automatically recovered by the SDK. When a stream call returns a retryable `StreamClosedError`, the stream is already closed; see [After a stream closes](#after-a-stream-closes).
 
 ## Language Bindings
 

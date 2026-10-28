@@ -1133,9 +1133,12 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let _close_result = stream.close().await;
         assert!(stream.is_closed(), "Stream should be closed after close()");
 
-        // Second close should also work.
+        // Second close returns the terminal error.
         let second_close = stream.close().await;
-        assert!(second_close.is_ok(), "Second close should be idempotent");
+        assert!(
+            matches!(&second_close, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::Internal),
+            "Second close should return the terminal error, got {second_close:?}"
+        );
         assert!(
             stream.is_closed(),
             "Stream should still be closed after second close()"
@@ -2301,20 +2304,14 @@ mod standard_operation_and_state_management_tests {
         info!("Starting test_flush_timeout");
 
         let (mock_server, server_url) = start_mock_server().await?;
-
+        // The server never acknowledges the records.
         mock_server
             .inject_responses(
                 TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "test_stream_1".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 4,
-                        delay_ms: 300,
-                    },
-                ],
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_1".to_string(),
+                    delay_ms: 0,
+                }],
             )
             .await;
 
@@ -2354,6 +2351,121 @@ mod standard_operation_and_state_management_tests {
                 flush_result
             );
         }
+
+        Ok(())
+    }
+
+    /// A flush timeout retains the unacknowledged record, reports it to the ack callback,
+    /// and makes `close()` return the timeout.
+    #[tokio::test]
+    async fn test_flush_timeout_retains_unacked_record() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        // The server never acknowledges the record.
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_withheld_ack".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let callback = Arc::new(TestCallback::new());
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .flush_timeout_ms(100)
+            .ack_callback(callback.clone())
+            .build()
+            .await?;
+
+        stream.ingest_record_offset(b"unacked".to_vec()).await?;
+
+        let error = stream
+            .flush()
+            .await
+            .expect_err("the withheld acknowledgement must time out");
+        assert!(
+            matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+            "expected the flush timeout, got {error:?}"
+        );
+        let unacked: Vec<_> = stream.get_unacked_records().await?.collect();
+        assert!(
+            matches!(unacked.as_slice(), [databricks_zerobus_ingest_sdk::EncodedRecord::Proto(payload)] if payload == b"unacked"),
+            "expected the unacknowledged record, got {unacked:?}"
+        );
+        let close_error = stream
+            .close()
+            .await
+            .expect_err("close must return the terminal error");
+        assert!(
+            matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+            "expected the terminal timeout from close, got {close_error:?}"
+        );
+        let errors = callback.get_errors();
+        assert!(
+            matches!(errors.as_slice(), [(0, _)]),
+            "the timeout must report offset 0 to on_error(), got {errors:?}"
+        );
+
+        Ok(())
+    }
+
+    /// An acknowledgement that the server sends during the post-timeout drain completes the
+    /// timed-out flush, but the stream stays closed.
+    #[tokio::test]
+    async fn test_late_ack_in_drain_completes_timed_out_flush(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_late_ack_after_timeout".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+        // The server acknowledges the record only after the client half-closes.
+        mock_server.ack_on_half_close(0).await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .flush_timeout_ms(100)
+            .build()
+            .await?;
+
+        stream.ingest_record_offset(b"late".to_vec()).await?;
+
+        stream.flush().await?;
+        let close_error = stream
+            .close()
+            .await
+            .expect_err("close must return the terminal error");
+        assert!(
+            matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+            "expected the terminal timeout from close, got {close_error:?}"
+        );
 
         Ok(())
     }
@@ -3535,6 +3647,83 @@ mod failure_scenarios_tests {
             }
 
             Ok(())
+        }
+
+        /// A flush timeout during recovery makes the stream terminal, so `close()` returns
+        /// the terminal error without another flush wait.
+        #[tokio::test(start_paused = true)]
+        async fn test_close_returns_at_once_after_timeout_during_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const FLUSH_TIMEOUT_MS: u64 = 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_before_recovery".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("original stream lost"),
+                            delay_ms: 0,
+                        },
+                        // The recovery attempt waits on the server past the flush timeout.
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("recovery stalled"),
+                            delay_ms: 60_000,
+                        },
+                    ],
+                )
+                .await;
+            let delayed_setup_armed = mock_server.delayed_setup_armed();
+
+            run_with_paused_time_watchdog(async {
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url)
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let mut stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                    .recovery(true)
+                    .recovery_timeout_ms(120_000)
+                    .flush_timeout_ms(FLUSH_TIMEOUT_MS)
+                    .build()
+                    .await?;
+
+                stream.ingest_record_offset(b"unacked".to_vec()).await?;
+                delayed_setup_armed.notified().await;
+
+                {
+                    let flush = stream.flush();
+                    tokio::pin!(flush);
+                    assert!(futures::poll!(&mut flush).is_pending());
+                    tokio::time::advance(std::time::Duration::from_millis(FLUSH_TIMEOUT_MS))
+                        .await;
+                    flush
+                        .await
+                        .expect_err("the flush must time out during recovery");
+                }
+
+                // The watchdog stops paused time, so a close that waits on a timer fails here.
+                let error = stream
+                    .close()
+                    .await
+                    .expect_err("close must return the terminal error");
+                assert!(
+                    matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::DeadlineExceeded),
+                    "expected the terminal timeout from close, got {error:?}"
+                );
+                Ok(())
+            })
+            .await
         }
 
         #[tokio::test]

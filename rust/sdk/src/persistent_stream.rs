@@ -94,14 +94,19 @@ impl PersistentStream {
 
     /// Flushes all currently pending records and waits for their acknowledgments.
     ///
-    /// See [`ZerobusStream::flush`].
+    /// See [`ZerobusStream::flush`]. After a timeout, resume the stream by
+    /// [`stream_id`](Self::stream_id) and replay the records above the new
+    /// [`resume_watermark`](Self::resume_watermark); see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn flush(&self) -> ZerobusResult<()> {
         self.inner.flush().await
     }
 
     /// Waits for server acknowledgment of a specific logical offset.
     ///
-    /// See [`ZerobusStream::wait_for_offset`].
+    /// See [`ZerobusStream::wait_for_offset`]. A timeout closes the stream, the same as a
+    /// [`flush`](Self::flush) timeout; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()> {
         self.inner.wait_for_offset(offset).await
     }

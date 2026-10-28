@@ -66,6 +66,40 @@
   public for reading, and deserializing from the Unity Catalog API response is
   unchanged. New Unity Catalog fields can now be added in minor releases.
 
+- A `flush()` or `wait_for_offset()` timeout now closes the stream. Before, the
+  timed-out batches stayed pending, so recovery or a later graceful `close()` could
+  still deliver them, and a caller that resent them on a new stream got duplicate
+  rows. Now, whenever a stream returns `StreamClosedError`, recovery and replay
+  stop, every unacknowledged batch goes to `get_unacked_batches()` /
+  `get_unacked_records()`, and the stream never sends it again. This applies to
+  Arrow Flight and gRPC streams and to multiplexed sub-streams. A persistent stream
+  also closes; the migration step below tells how to resume it. `is_retryable()`
+  stays `true`. The behavior changes:
+  - A retried `flush()` on a timed-out stream fails unless every record was
+    acknowledged, and a later `close()` sends nothing and returns the timeout error.
+  - gRPC `close()` on a stream that failed returns the error that made the stream
+    terminal first, on every call, instead of `Ok(())`.
+  - gRPC `close()` on an already-closed stream now waits for supervisor shutdown
+    and the callback drain (`callback_max_wait_time_ms`).
+  - The stream drains its connection before it closes, so a timeout error can
+    arrive up to 1 s after `flush_timeout_ms`. On an ephemeral gRPC stream or an
+    Arrow Flight stream, a late acknowledgement of the target makes the call return
+    `Ok(())`, but the stream stays closed: `close()` returns the timeout error, and
+    later ingests fail.
+  - An Arrow Flight `flush()` or `wait_for_offset()` during a running `close()` now
+    waits for finalization within its own timeout, instead of failing at once.
+  - If an `ack_callback` is set on a gRPC stream, a timeout calls its `on_error()`
+    for each unacknowledged offset.
+  - A timeout on one sub-stream poisons the whole multiplexed stream.
+
+  Migration: after a `StreamClosedError`, call `close()`, then resend
+  `get_unacked_batches()` or `get_unacked_records()` on a new stream, for example
+  with `recreate_stream()` or `recreate_arrow_stream()`. Resume a persistent stream
+  by `stream_id` and replay the records above the resumed stream's
+  `resume_watermark()`. Do not retry `flush()` or `close()` on the same stream.
+  The server can already have accepted batches that were sent but not
+  acknowledged, so a resend can duplicate those batches.
+
 ### Deprecations
 
 ### API Changes

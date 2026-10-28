@@ -14,7 +14,7 @@ use crate::{ZerobusError, ZerobusResult};
 
 /// Maximum time to wait for the supervisor task to finish during stream
 /// teardown.
-const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
+pub(super) const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 /// Give cooperative tasks a chance to acknowledge abort, without waiting on
 /// synchronous user code that Tokio cannot interrupt.
 const ABORT_WAIT_TIMEOUT_MS: u64 = 100;
@@ -27,11 +27,14 @@ impl ZerobusStream {
 
     /// Closes the stream after a flush attempt.
     ///
-    /// If already closed, returns immediately without flushing or awaiting cleanup.
-    /// Otherwise, calls `flush()`, then requests task shutdown even if flushing fails.
+    /// If already closed, skips the flush but still shuts down the tasks and drains
+    /// callbacks. A terminal stream sends nothing and returns its stored terminal error on
+    /// every call; see [`ZerobusError::StreamClosedError`]. Otherwise, calls `flush()`,
+    /// then requests task shutdown even if flushing fails.
     /// Supervisor shutdown waits up to one second, then at most 100 ms after abort.
     /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
-    /// These waits are separate from the flush timeout.
+    /// These waits are separate from the flush timeout. A flush timeout adds a wait of up
+    /// to 1 s for the late-ack drain.
     ///
     /// On a standard stream, if records are still unacknowledged after the flush, the SDK
     /// also reads late acknowledgments from the server for up to 500 ms. This read removes
@@ -40,7 +43,10 @@ impl ZerobusStream {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the stream was already closed or flushing succeeded. Task shutdown
+    /// `Ok(())` if flushing succeeded within `flush_timeout_ms` and the stream was not
+    /// terminal when the flush ended. A repeated call after a successful `close()` returns
+    /// `Ok(())` too, unless the stream failed terminally while the first call shut down the
+    /// tasks; then it returns that error. Task shutdown
     /// errors are not returned. Blocked synchronous user code can outlive the teardown
     /// waits, so `Ok(())` does not guarantee all tasks have exited or resources are released.
     ///
@@ -61,7 +67,14 @@ impl ZerobusStream {
     /// ```
     pub async fn close(&mut self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
-            return Ok(());
+            // A timeout or failure closes the stream but leaves its tasks running, and no
+            // callback may run after close() returns.
+            let _ = self.shutdown_supervisor().await;
+            self.shutdown_callbacks().await;
+            return match self.terminal_error.get() {
+                Some(error) => Err(Self::normalize_wait_error(error.clone())),
+                None => Ok(()),
+            };
         }
         if let Some(stream_id) = self.stream_id.as_deref() {
             info!(stream_id = %stream_id, "Closing stream");
@@ -69,6 +82,12 @@ impl ZerobusStream {
             error!("Stream ID is None during closing");
         }
         let flush_result = self.flush().await;
+        // A flush timeout makes the stream terminal, even when a late acknowledgement
+        // then completes the flush.
+        let flush_result = match self.terminal_error.get() {
+            Some(error) => Err(Self::normalize_wait_error(error.clone())),
+            None => flush_result,
+        };
         self.is_closed.store(true, Ordering::Relaxed);
         self.terminal_token.cancel();
         let _ = self.shutdown_supervisor().await;
@@ -205,6 +224,7 @@ mod tests {
             is_closed: Arc::new(AtomicBool::new(false)),
             sync_mutex: Arc::new(Mutex::new(())),
             terminal_token: CancellationToken::new(),
+            terminal_error: Default::default(),
             server_error_rx: error_rx,
             cancellation_token: CancellationToken::new(),
             callback_handler_task: callback,
@@ -291,6 +311,28 @@ mod tests {
                 matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied)
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_on_terminal_stream_waits_for_callbacks() {
+        let (release_callback, callback_gate) = oneshot::channel();
+        let callback = tokio::spawn(async { callback_gate.await.unwrap() });
+        let (mut stream, _error_tx) = test_stream(tokio::spawn(async { Ok(()) }), Some(callback));
+        // Model a stream that a flush timeout already closed.
+        let _ = stream.terminal_error.set(ZerobusError::StreamClosedError(
+            tonic::Status::deadline_exceeded("Flush timed out"),
+        ));
+        stream.is_closed.store(true, Ordering::Relaxed);
+
+        let close = stream.close();
+        tokio::pin!(close);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut close)
+            .await
+            .is_err());
+        release_callback.send(()).unwrap();
+        assert!(
+            matches!(close.await, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -206,8 +206,8 @@ impl<S: MuxLane> MuxCore<S> {
         }
     }
 
-    // Payload errors and wait timeouts leave the lane alive; only terminal
-    // lane errors poison the mux.
+    // Payload errors leave the lane alive; terminal lane errors, including wait
+    // timeouts, poison the mux.
     async fn handle_lane_error(&self, idx: usize, e: ZerobusError) -> ZerobusError {
         if self.streams[idx].is_terminal() {
             let cause = self.lane_terminal_error(idx, e).await;
@@ -217,6 +217,16 @@ impl<S: MuxLane> MuxCore<S> {
             warn!(stream_index = idx, error = %e, "Sub-stream operation errored but lane remains alive");
             e
         }
+    }
+
+    // A late ack can complete a timed-out lane wait, but the timeout closed the lane.
+    async fn poison_terminal_lane(&self, idx: usize) {
+        let fallback = ZerobusError::InvalidStateError(format!(
+            "{} sub-stream {idx} is closed",
+            S::STREAM_NAME
+        ));
+        let cause = self.lane_terminal_error(idx, fallback).await;
+        self.shutdown_on_failure(idx, &cause);
     }
 
     pub(super) async fn flush(&self) -> ZerobusResult<()> {
@@ -241,6 +251,7 @@ impl<S: MuxLane> MuxCore<S> {
         let results = join_all(self.streams.iter().map(MuxLane::flush_lane)).await;
         let mut first_error: Option<ZerobusError> = None;
         let mut first_terminal: Option<(usize, ZerobusError)> = None;
+        let mut first_terminal_ok: Option<usize> = None;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
                 if self.streams[i].is_terminal() && first_terminal.is_none() {
@@ -256,6 +267,8 @@ impl<S: MuxLane> MuxCore<S> {
                         "Additional sub-stream flush error"
                     );
                 }
+            } else if self.streams[i].is_terminal() && first_terminal_ok.is_none() {
+                first_terminal_ok = Some(i);
             }
         }
         if let Some((i, error)) = first_terminal {
@@ -263,11 +276,17 @@ impl<S: MuxLane> MuxCore<S> {
         } else if let Some(error) = &first_error {
             warn!(error = %error, "flush errored but sub-streams still alive");
         }
-        self.failure
+        let result = self
+            .failure
             .get()
             .cloned()
             .or(first_error)
-            .map_or(Ok(()), Err)
+            .map_or(Ok(()), Err);
+        // Poison after taking the result: a late-acked lane flush still succeeds.
+        if let Some(i) = first_terminal_ok {
+            self.poison_terminal_lane(i).await;
+        }
+        result
     }
 
     pub(super) async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
@@ -282,7 +301,12 @@ impl<S: MuxLane> MuxCore<S> {
             .wait_for_local_offset(message_id.sub_offset())
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if self.streams[idx].is_terminal() {
+                    self.poison_terminal_lane(idx).await;
+                }
+                Ok(())
+            }
             Err(e) => Err(self.handle_lane_error(idx, e).await),
         }
     }

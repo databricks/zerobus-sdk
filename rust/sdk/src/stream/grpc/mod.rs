@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -140,6 +140,8 @@ pub struct ZerobusStream {
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Persistent signal that wakes capacity waiters when the stream becomes terminal.
     terminal_token: CancellationToken,
+    /// First error that made the stream terminal. A later `close()` returns it.
+    terminal_error: Arc<OnceLock<ZerobusError>>,
     /// Watch channel for last error received from the server.
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
@@ -279,6 +281,7 @@ impl ZerobusStream {
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
         let terminal_token = CancellationToken::new();
+        let terminal_error = Arc::new(OnceLock::new());
         let callback_cancellation_token = CancellationToken::new();
         // Create callback channel and spawn callback handler task only if callback is defined
         let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
@@ -305,6 +308,7 @@ impl ZerobusStream {
             Arc::clone(&is_closed),
             Arc::clone(&sync_mutex),
             terminal_token.clone(),
+            Arc::clone(&terminal_error),
             Arc::clone(&failed_records),
             stream_init_result_tx,
             server_error_tx,
@@ -366,6 +370,7 @@ impl ZerobusStream {
             is_closed,
             sync_mutex,
             terminal_token,
+            terminal_error,
             server_error_rx,
             cancellation_token,
             callback_handler_task,

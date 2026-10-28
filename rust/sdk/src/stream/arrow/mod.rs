@@ -52,6 +52,10 @@ mod supervisor;
 
 const LOG_TARGET: &str = module_path!();
 
+/// Maximum time that a timed-out `flush()` or `wait_for_offset()` waits for a draining
+/// close to finalize. It is the same bound as on gRPC streams.
+const FINALIZE_WAIT_TIMEOUT_SECS: u64 = 1;
+
 /// One item on the encoder channel: a batch paired with its SDK offset and optional
 /// transmission counter, shared with the pending batch across reconnects.
 pub(super) struct OutboundBatch {
@@ -201,7 +205,8 @@ pub struct ZerobusArrowStream {
     is_closed: Arc<AtomicBool>,
     /// Rejects new ingests once terminal finalization or a failed enqueue owns admission.
     admission_closed: Arc<AtomicBool>,
-    /// Coordinates one resumable explicit-close request with the recovery supervisor.
+    /// Coordinates one resumable close request, from `close()` or a timed-out wait, with
+    /// the recovery supervisor.
     close: CloseCoordinator,
     /// Supervisor worker and reaper ownership, consumed once by terminal shutdown.
     supervisor_task: Arc<Mutex<Option<SupervisorTaskHandle>>>,
@@ -751,11 +756,12 @@ impl ZerobusArrowStream {
                     );
                 }
 
-                // Only after confirming the target isn't acked, honor terminal/teardown
+                // Only after confirming the target isn't acked, honor the closed
                 // state. Re-read first because the watermark can be published between the
                 // read above and observing that state. Otherwise prefer the real terminal
-                // error over a generic one.
-                if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
+                // error over a generic one. A running close can still acknowledge the
+                // target, so only finalization ends the wait.
+                if self.is_closed.load(Ordering::Relaxed) {
                     if let Some(ack_offset) = *offset_rx.borrow_and_update() {
                         if ack_offset >= offset_to_wait {
                             return Ok(());
@@ -787,13 +793,79 @@ impl ZerobusArrowStream {
             }
         };
 
-        timeout(flush_timeout, wait_future).await.map_err(|_| {
-            error!(target: LOG_TARGET, "{} timed out", operation_name);
-            ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded(format!(
-                "{} timed out",
-                operation_name
-            )))
-        })?
+        let error = match timeout(flush_timeout, wait_future).await {
+            Ok(result) => return result,
+            Err(_) => {
+                error!(target: LOG_TARGET, "{} timed out", operation_name);
+                ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded(format!(
+                    "{} timed out",
+                    operation_name
+                )))
+            }
+        };
+        self.close_after_wait_timeout(offset_to_wait, error).await
+    }
+
+    /// Makes the stream terminal after a wait timeout. A caller then resends
+    /// `get_unacked_batches()` on a new stream, so this stream must not send them again.
+    async fn close_after_wait_timeout(
+        &self,
+        offset_to_wait: OffsetId,
+        error: ZerobusError,
+    ) -> ZerobusResult<()> {
+        let is_acknowledged = || {
+            self.last_ack_tx
+                .borrow()
+                .is_some_and(|ack_offset| ack_offset >= offset_to_wait)
+        };
+        if is_acknowledged() {
+            return Ok(());
+        }
+
+        let wait_for_close = {
+            let _guard = self.ingest_mutex.lock().await;
+            match self.close.state() {
+                CloseState::Open if !self.admission_closed.load(Ordering::Acquire) => {
+                    // An immediate deadline skips the ACK wait; the supervisor still reads
+                    // late acknowledgements while it drains the transport.
+                    self.close.publish_wait_timeout(
+                        CloseRequest {
+                            target_offset: self.offset_generator.last(),
+                            deadline: Instant::now(),
+                        },
+                        error.clone(),
+                    );
+                    true
+                }
+                // An explicit close() keeps its own deadline, which can be later than this
+                // wait's timeout. In every other case, finalization follows without an ACK
+                // wait.
+                CloseState::Requested(request) => request.deadline <= Instant::now(),
+                CloseState::Open | CloseState::Finalized(_) => true,
+            }
+        };
+        if wait_for_close {
+            // The watermark only increases, so a late ACK counts even if finalization is late.
+            let finalized = timeout(
+                Duration::from_secs(FINALIZE_WAIT_TIMEOUT_SECS),
+                self.wait_for_terminal_outcome(),
+            )
+            .await;
+            if is_acknowledged() {
+                return Ok(());
+            }
+            match finalized {
+                // The first terminal cause stays the stream's error, as on gRPC streams.
+                Ok(Err(terminal)) => return Err(terminal),
+                Ok(Ok(())) => {}
+                Err(_) => warn!(
+                    target: LOG_TARGET,
+                    "Stream did not finalize within {}s after a wait timeout",
+                    FINALIZE_WAIT_TIMEOUT_SECS
+                ),
+            }
+        }
+        Err(error)
     }
 
     /// Waits after terminal admission is claimed but before finalization publishes its result.
@@ -824,7 +896,11 @@ impl ZerobusArrowStream {
     /// # Errors
     ///
     /// Returns the terminal stream/recovery error when the target remains unacknowledged,
-    /// or `StreamClosedError` when teardown starts or the wait times out.
+    /// or `StreamClosedError` when the wait times out. When a target is pending during a
+    /// running close, this waits for the close to finish, within its own timeout.
+    ///
+    /// A timeout closes the stream, so this stream does not send its unacknowledged
+    /// batches again; see [`ZerobusError::StreamClosedError`].
     ///
     /// # Examples
     ///
@@ -893,7 +969,10 @@ impl ZerobusArrowStream {
     /// # Errors
     ///
     /// Returns the terminal stream/recovery error while the target remains unacknowledged,
-    /// or `StreamClosedError` when teardown starts or the wait times out.
+    /// or `StreamClosedError` when the wait times out. When a target is pending during a
+    /// running close, this waits for the close to finish, within its own timeout. A timeout
+    /// closes the stream, the same as a `flush()` timeout; see
+    /// [`ZerobusError::StreamClosedError`].
     ///
     /// # Examples
     ///
@@ -940,6 +1019,9 @@ impl ZerobusArrowStream {
     /// server rotation or an uncommitted recovery attempt, it instead returns that attempt's
     /// trigger even when the close target is durable. Teardown still completes; use
     /// `get_unacked_batches()` to retrieve unacknowledged batches.
+    ///
+    /// After a timeout closes the stream, `close()` sends nothing and returns the stored
+    /// terminal error; see [`ZerobusError::StreamClosedError`].
     ///
     /// # Cancellation safety
     ///
@@ -1019,6 +1101,9 @@ impl ZerobusArrowStream {
     /// already-persisted records. The call drains any still-pending batches into the
     /// failed set and returns the consolidated snapshot; repeated calls return the same
     /// snapshot (idempotent).
+    ///
+    /// After a `flush()` or `wait_for_offset()` timeout, this returns exactly the batches
+    /// that the stream did not get acknowledged; see [`ZerobusError::StreamClosedError`].
     ///
     /// # Errors
     ///

@@ -90,7 +90,9 @@ impl MessageId {
     ///
     /// Only round-trip values from `raw()`: a fabricated id pointing at an
     /// offset that was never ingested makes `wait_for_message_id` wait until
-    /// the flush timeout (indefinitely if none is configured).
+    /// the flush timeout (indefinitely if none is configured). That timeout also
+    /// closes the sub-stream and poisons the mux; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub fn from_raw(raw: i64) -> Self {
         Self(raw)
     }
@@ -227,6 +229,9 @@ impl MultiplexedStream {
     /// flush attempt. A stored terminal mux failure takes precedence;
     /// otherwise the first flush error is returned. Additional errors are
     /// logged.
+    /// If a lane flush times out and a late acknowledgment then completes it,
+    /// that lane counts as flushed, but the mux is still poisoned; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn flush(&self) -> ZerobusResult<()> {
         self.core.flush().await
     }
@@ -237,6 +242,9 @@ impl MultiplexedStream {
     ///
     /// Only the lane that owns this message can complete or fail the wait; a
     /// failure on another lane does not make an acknowledged record retryable.
+    /// If the wait times out and a late acknowledgment then covers the message,
+    /// this returns `Ok(())` but still poisons the mux; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
         self.core.wait_for_message_id(message_id).await
     }

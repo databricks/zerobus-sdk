@@ -85,12 +85,18 @@ impl MultiplexedArrowStream {
 
     /// Waits for all lanes' flush attempts, including healthy lanes after poison.
     /// A stored terminal mux failure takes precedence over other flush errors.
+    /// If a lane flush times out and a late acknowledgment then completes it,
+    /// that lane counts as flushed, but the mux is still poisoned; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn flush(&self) -> ZerobusResult<()> {
         self.core.flush().await
     }
 
     /// Waits for this message's lane only. A sibling failure does not fail the wait.
     /// IDs must belong to this mux; IDs have no global ordering.
+    /// If the wait times out and a late acknowledgment then covers the message,
+    /// this returns `Ok(())` but still poisons the mux; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     pub async fn wait_for_message_id(&self, id: MessageId) -> ZerobusResult<()> {
         self.core.wait_for_message_id(id).await
     }

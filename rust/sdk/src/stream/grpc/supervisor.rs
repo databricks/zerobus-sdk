@@ -8,7 +8,7 @@
 //! to share this with Arrow Flight should abstract the transport seams.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 use tokio::time::Duration;
@@ -61,6 +61,7 @@ impl ZerobusStream {
         is_closed: Arc<AtomicBool>,
         sync_mutex: Arc<tokio::sync::Mutex<()>>,
         terminal_token: CancellationToken,
+        terminal_error: Arc<OnceLock<ZerobusError>>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<StreamInitInfo>>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
@@ -78,6 +79,23 @@ impl ZerobusStream {
             debug!("Supervisor task loop");
 
             if cancellation_token.is_cancelled() {
+                // A wait timeout stores the terminal error before it cancels the supervisor.
+                if let Some(error) = terminal_error.get() {
+                    Self::fail_stream(
+                        sync_mutex.as_ref(),
+                        is_closed.as_ref(),
+                        &terminal_token,
+                        &terminal_error,
+                        &server_error_tx,
+                        landing_zone.clone(),
+                        oneshot_map.clone(),
+                        failed_records.clone(),
+                        error,
+                        &callback_tx,
+                    )
+                    .await;
+                    return Err(error.clone());
+                }
                 debug!("Supervisor task cancelled, exiting");
                 return Ok(());
             }
@@ -172,7 +190,12 @@ impl ZerobusStream {
                     options.recovery && e.is_retryable()
                 }
             };
-            let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
+            let creation = tokio::select! {
+                biased;
+                // RetryIf does not observe cancellation, and a wait timeout must stop recovery.
+                _ = cancellation_token.cancelled() => continue,
+                creation = RetryIf::spawn(strategy, create_attempt, should_retry) => creation,
+            };
 
             let connection = match creation {
                 Ok(connection) => connection,
@@ -193,6 +216,7 @@ impl ZerobusStream {
                             sync_mutex.as_ref(),
                             is_closed.as_ref(),
                             &terminal_token,
+                            &terminal_error,
                             &server_error_tx,
                             landing_zone.clone(),
                             oneshot_map.clone(),
@@ -362,6 +386,7 @@ impl ZerobusStream {
                         sync_mutex.as_ref(),
                         is_closed.as_ref(),
                         &terminal_token,
+                        &terminal_error,
                         &server_error_tx,
                         landing_zone.clone(),
                         oneshot_map.clone(),
@@ -444,6 +469,7 @@ impl ZerobusStream {
         sync_mutex: &tokio::sync::Mutex<()>,
         is_closed: &AtomicBool,
         terminal_token: &CancellationToken,
+        terminal_error: &OnceLock<ZerobusError>,
         server_error_tx: &tokio::sync::watch::Sender<Option<ZerobusError>>,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
@@ -460,6 +486,8 @@ impl ZerobusStream {
         let mut failed = failed_records.write().await;
         let mut map = oneshot_map.lock().await;
 
+        // The error that made the stream terminal first stays its error.
+        let error = terminal_error.get_or_init(|| error.clone());
         is_closed.store(true, Ordering::Relaxed);
         let _ = server_error_tx.send(Some(error.clone()));
         terminal_token.cancel();
@@ -529,6 +557,7 @@ mod tests {
         let sync_mutex = tokio::sync::Mutex::new(());
         let is_closed = AtomicBool::new(false);
         let terminal_token = CancellationToken::new();
+        let terminal_error = OnceLock::new();
         let (server_error_tx, _) = tokio::sync::watch::channel(None);
         let landing_zone = Arc::new(LandingZone::new(1));
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(OneshotMap::new()));
@@ -547,6 +576,7 @@ mod tests {
             &sync_mutex,
             &is_closed,
             &terminal_token,
+            &terminal_error,
             &server_error_tx,
             Arc::clone(&landing_zone),
             Arc::clone(&oneshot_map),
@@ -597,6 +627,7 @@ mod tests {
             &sync_mutex,
             &is_closed,
             &terminal_token,
+            &terminal_error,
             &server_error_tx,
             Arc::clone(&landing_zone),
             Arc::clone(&oneshot_map),

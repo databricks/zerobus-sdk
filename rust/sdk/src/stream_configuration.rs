@@ -82,6 +82,8 @@ pub struct StreamConfigurationOptions {
     /// Timeout in milliseconds for flush operations.
     ///
     /// If a flush() call cannot complete within this time, it will return a timeout error.
+    /// A timeout closes the stream; see
+    /// [`ZerobusError::StreamClosedError`](crate::ZerobusError::StreamClosedError).
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,

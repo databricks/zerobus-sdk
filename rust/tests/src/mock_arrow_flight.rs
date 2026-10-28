@@ -125,6 +125,13 @@ pub enum MockFlightResponse {
     HoldResponseAfterRequestEof,
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
+    /// Error response sent when a batch arrives. The mock keeps the request open and
+    /// notifies `request_ended` when the client ends it, as recovery does when it drops
+    /// the failed connection.
+    ErrorThenAwaitRequestEnd {
+        status: Status,
+        request_ended: Arc<Notify>,
+    },
     /// Reject a connection's setup: send this error instead of the ready signal on the
     /// first (schema) message, simulating a failed reconnect. Consumes its scripted slot,
     /// so schedule it as the response the target (reconnect) connection reaches.
@@ -656,6 +663,21 @@ impl FlightService for MockFlightServer {
                                 indices.insert(table_name.clone(), response_index);
                             }
                             let _ = tx.send(Err(status.clone())).await;
+                            return;
+                        }
+                        MockFlightResponse::ErrorThenAwaitRequestEnd {
+                            status,
+                            request_ended,
+                        } => {
+                            info!("Sending error response: {:?}", status);
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status.clone())).await;
+                            while let Ok(Some(_)) = stream.message().await {}
+                            request_ended.notify_one();
                             return;
                         }
                         MockFlightResponse::FailSetup { status } => {

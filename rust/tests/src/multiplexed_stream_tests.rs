@@ -940,9 +940,9 @@ mod failure_tests {
         .await
         .expect("both mock responses should be armed");
 
-        // Lane 0's flush times out before its gated terminal error arrives.
-        // Lane 1 keeps the aggregate flush pending long enough for lane 0 to
-        // become terminal, so the mux must re-read the final PermissionDenied.
+        // Lane 0's flush times out before its gated terminal error arrives, and
+        // the timeout makes lane 0 terminal. Lane 1 keeps the aggregate flush
+        // pending until its ack arrives, and the flush returns lane 0's timeout.
         let mut flush = Box::pin(mux.flush());
         assert!(matches!(poll!(&mut flush), Poll::Pending));
         tokio::time::pause();
@@ -964,8 +964,8 @@ mod failure_tests {
             .await
             .expect("flush should finish after the healthy lane acknowledges");
         assert!(
-            matches!(&flush_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
-            "Expected terminal PermissionDenied from flush, got {flush_result:?}"
+            matches!(&flush_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
+            "Expected the terminal lane timeout from flush, got {flush_result:?}"
         );
         assert!(
             mux.is_closed(),
@@ -974,7 +974,7 @@ mod failure_tests {
 
         let ingest_after = mux.ingest_record(b"data".to_vec()).await;
         assert!(
-            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
             "Expected terminal error after poison, got {:?}",
             ingest_after
         );
@@ -983,9 +983,9 @@ mod failure_tests {
     }
 
     #[tokio::test]
-    async fn test_wait_timeout_does_not_poison_mux() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_wait_timeout_poisons_mux() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        info!("Starting test_wait_timeout_does_not_poison_mux");
+        info!("Starting test_wait_timeout_poisons_mux");
 
         let (mock_server, server_url) = start_mock_server().await?;
         // Ack arrives well after our short flush_timeout_ms expires.
@@ -1001,10 +1001,6 @@ mod failure_tests {
                         ack_up_to_offset: 0,
                         delay_ms: 2_000,
                     },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 1,
-                        delay_ms: 0,
-                    },
                 ],
             )
             .await;
@@ -1019,13 +1015,61 @@ mod failure_tests {
 
         let offset = mux.ingest_record(b"slow".to_vec()).await?;
 
-        // First wait times out before the ack arrives; sub-stream is still alive.
+        // The wait times out before the ack arrives, which makes the lane terminal.
         let result = mux.wait_for_message_id(offset).await;
-        assert!(result.is_err(), "Expected timeout error");
-        assert!(!mux.is_closed(), "Mux should NOT be poisoned by timeout");
+        assert!(
+            matches!(&result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
+            "Expected timeout error, got {result:?}"
+        );
+        assert!(mux.is_closed(), "A lane timeout must poison the mux");
 
-        // Further ingest should still succeed.
-        let _ = mux.ingest_record(b"next".to_vec()).await?;
+        // Further ingest returns the stored terminal error.
+        let ingest_after = mux.ingest_record(b"next".to_vec()).await;
+        assert!(
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
+            "Expected the terminal timeout after poison, got {ingest_after:?}"
+        );
+
+        Ok(())
+    }
+
+    /// A late acknowledgement completes a timed-out lane flush, but the timeout closed the
+    /// lane, so the mux is poisoned.
+    #[tokio::test]
+    async fn test_late_ack_after_flush_timeout_poisons_mux(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![MockResponse::CreateStream {
+                    stream_id: "late_ack".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+        // The server acknowledges the record only after the client half-closes.
+        mock_server.ack_on_half_close(0).await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = TestOpts {
+            flush_timeout_ms: Some(100),
+            ..default_options()
+        };
+        let s = create_test_stream(&sdk, TABLE_OK, opts).await?;
+        let mux = MultiplexedStream::new(vec![s]);
+
+        mux.ingest_record(b"late".to_vec()).await?;
+
+        mux.flush().await?;
+        assert!(mux.is_closed(), "The timed-out lane must poison the mux");
+        let ingest_after = mux.ingest_record(b"next".to_vec()).await;
+        assert!(
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded),
+            "Expected the lane timeout after poison, got {ingest_after:?}"
+        );
 
         Ok(())
     }
