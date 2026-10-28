@@ -930,6 +930,7 @@ dependencies = [
  "rand 0.9.2",
  "reqwest",
  "rstest",
+ "rustls-webpki",
  "self_cell",
  "serde",
  "serde_json",
@@ -947,6 +948,7 @@ dependencies = [
  "tonic-types",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]

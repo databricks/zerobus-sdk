@@ -441,6 +441,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rand 0.9.3",
  "reqwest",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2",
@@ -455,6 +456,7 @@ dependencies = [
  "tonic-prost-build",
  "tonic-types",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

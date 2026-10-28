@@ -16,6 +16,9 @@
 - Updated the native extension's transitive `rustls-webpki` to 0.103.16 and
   `webpki-roots` to 1.0.11, which stop trusting the compromised eMudhra (emSign)
   CAs.
+- The package now requires `certifi>=2026.10.19`. `generate_proto` sends OAuth
+  client credentials through `requests`, which trusts the installed `certifi`
+  bundle. This version drops the compromised eMudhra (emSign) roots.
 
 ### Documentation
 
