@@ -525,6 +525,18 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Split Arrow Flight batches so that each message is at most `bytes` (Arrow streams only).
+    ///
+    /// Batches are split by encoded size into as few messages as the limit allows. Without
+    /// this setting, batches are split by row count into messages of about 2 MiB. See
+    /// [`ArrowStreamConfigurationOptions::max_message_size_bytes`] for the exact semantics,
+    /// including single rows larger than the limit. Must be greater than zero.
+    #[cfg(feature = "arrow-flight")]
+    pub fn max_message_size_bytes(mut self, bytes: usize) -> Self {
+        self.arrow_config.max_message_size_bytes = Some(bytes);
+        self
+    }
+
     /// Set the Arrow IPC compression type (Arrow streams only).
     ///
     /// Defaults to `Some(CompressionType::ZSTD)`. Pass `None` to send uncompressed payloads.
@@ -742,6 +754,11 @@ impl<'a> StreamBuilder<'a> {
         if self.arrow_config.max_inflight_batches == 0 {
             return Err(ZerobusError::InvalidArgument(
                 "max_inflight_batches must be greater than 0".into(),
+            ));
+        }
+        if self.arrow_config.max_message_size_bytes == Some(0) {
+            return Err(ZerobusError::InvalidArgument(
+                "max_message_size_bytes must be greater than 0".into(),
             ));
         }
 

@@ -6987,6 +6987,137 @@ mod arrow_flight_tests {
             Ok(())
         }
     }
+
+    mod message_size_tests {
+        use super::*;
+        use arrow_array::{Int64Array, RecordBatch, StringArray};
+        use arrow_schema::{Field, Schema as ArrowSchema};
+
+        /// A batch of `rows` rows, each with a `payload_bytes` string, so the encoded size is
+        /// about `rows * payload_bytes`.
+        fn payload_batch(rows: usize, payload_bytes: usize) -> (Arc<ArrowSchema>, RecordBatch) {
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("payload", DataType::Utf8, false),
+            ]));
+            let payload = "p".repeat(payload_bytes);
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(0..rows as i64)),
+                    Arc::new(StringArray::from_iter_values(
+                        (0..rows).map(|_| payload.as_str()),
+                    )),
+                ],
+            )
+            .unwrap();
+            (schema, batch)
+        }
+
+        async fn ingest_with_limit(
+            server_url: String,
+            schema: Arc<ArrowSchema>,
+            batch: RecordBatch,
+            max_message_size_bytes: usize,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .max_message_size_bytes(max_message_size_bytes)
+                .build_arrow()
+                .await?;
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_batch_split_into_messages_within_limit(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            // About 4 MiB of payload: 1 MiB messages need at least 4, and fewer than 6 when packed.
+            let (schema, batch) = payload_batch(4_000, 1_024);
+
+            ingest_with_limit(server_url, schema, batch, 1 << 20).await?;
+
+            let messages = mock_server.get_record_batch_message_count().await;
+            assert!(
+                (4..=6).contains(&messages),
+                "got {messages} record batch messages"
+            );
+            assert_eq!(mock_server.get_total_records_received().await, 4_000);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_default_split_is_row_based_and_unchanged(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            // Without a byte cap the row-count split targets about 2 MiB per message.
+            let (schema, batch) = payload_batch(4_000, 1_024);
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
+                .await?;
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+            stream.close().await?;
+
+            let messages = mock_server.get_record_batch_message_count().await;
+            assert!(messages >= 2, "got {messages} record batch messages");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_zero_max_message_size_is_rejected_at_build(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let (schema, _batch) = payload_batch(1, 1);
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .max_message_size_bytes(0)
+                .build_arrow()
+                .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("a zero message size limit must be rejected"),
+            };
+            assert!(
+                matches!(&error, ZerobusError::InvalidArgument(m) if m.contains("max_message_size_bytes")),
+                "{error:?}"
+            );
+            Ok(())
+        }
+    }
 }
 
 mod multiplexed_arrow_tests;

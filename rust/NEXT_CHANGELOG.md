@@ -15,6 +15,12 @@
   counts were on the same cache line as the registry fields that the parser
   reads, which made parsing several times slower on many threads.
 
+- Added `StreamBuilder::max_message_size_bytes` to split Arrow Flight batches by
+  encoded size instead of by row count. Each message is kept within the limit
+  (measured before gRPC compression), so a batch is sent in as few messages as the
+  limit allows. The default is unchanged. A single row larger than the limit is
+  sent as its own message over the limit, because rows are not split.
+
 ### Bug Fixes
 
 - The crate now requires `rustls-webpki` 0.103.16 or later and `webpki-roots`

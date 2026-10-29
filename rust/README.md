@@ -1242,6 +1242,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
 | `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
+| `max_message_size_bytes` | `Option<usize>` | `None` | Opt-in cap on each Flight message's size before gRPC compression; batches are split by encoded size to stay within it. `None` keeps the row-count split. A single row larger than the cap is sent alone and exceeds it |
 
 ```rust
 let stream = sdk

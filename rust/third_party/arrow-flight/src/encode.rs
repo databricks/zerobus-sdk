@@ -20,6 +20,7 @@ use std::{collections::VecDeque, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
 use crate::{FlightData, FlightDescriptor, SchemaAsIpc, error::Result};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, UnionArray};
+use arrow_data::ArrayData;
 use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteContext, IpcWriteOptions};
 
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, UnionMode};
@@ -157,6 +158,9 @@ pub struct FlightDataEncoderBuilder {
     /// Deterimines how `DictionaryArray`s are encoded for transport.
     /// See [`DictionaryHandling`] for more information.
     dictionary_handling: DictionaryHandling,
+    /// Whether `max_flight_data_size` is a hard limit (see
+    /// [`FlightDataEncoderBuilder::with_enforced_max_flight_data_size`]).
+    enforce_max_flight_data_size: bool,
 }
 
 /// Default target size for encoded [`FlightData`].
@@ -174,6 +178,7 @@ impl Default for FlightDataEncoderBuilder {
             schema: None,
             descriptor: None,
             dictionary_handling: DictionaryHandling::Hydrate,
+            enforce_max_flight_data_size: false,
         }
     }
 }
@@ -196,6 +201,24 @@ impl FlightDataEncoderBuilder {
     /// overhead on top of the underlying data buffers themselves.
     pub fn with_max_flight_data_size(mut self, max_flight_data_size: usize) -> Self {
         self.max_flight_data_size = max_flight_data_size;
+        self.enforce_max_flight_data_size = false;
+        self
+    }
+
+    /// Like [`Self::with_max_flight_data_size`], but treats the size as a hard limit.
+    ///
+    /// The `data_header` plus `data_body` of every [`FlightData`] message holding more than
+    /// one row is at most `max_flight_data_size`. Batches are split by estimated size and
+    /// any message that still exceeds the limit is split further, so the estimate only
+    /// affects how many re-encodes happen, not whether the limit holds. A single row cannot
+    /// be split, so a row larger than the limit is sent as one message over the limit.
+    ///
+    /// Only applies with [`DictionaryHandling::Hydrate`] (the default); with
+    /// [`DictionaryHandling::Resend`] this falls back to the approximate limit, because
+    /// re-encoding a discarded message would lose its dictionary messages.
+    pub fn with_enforced_max_flight_data_size(mut self, max_flight_data_size: usize) -> Self {
+        self.max_flight_data_size = max_flight_data_size;
+        self.enforce_max_flight_data_size = true;
         self
     }
 
@@ -249,9 +272,10 @@ impl FlightDataEncoderBuilder {
             schema,
             descriptor,
             dictionary_handling,
+            enforce_max_flight_data_size,
         } = self;
 
-        FlightDataEncoder::new(
+        let mut encoder = FlightDataEncoder::new(
             input.boxed(),
             schema,
             max_flight_data_size,
@@ -259,7 +283,9 @@ impl FlightDataEncoderBuilder {
             app_metadata,
             descriptor,
             dictionary_handling,
-        )
+        );
+        encoder.enforce_max_flight_data_size = enforce_max_flight_data_size;
+        encoder
     }
 }
 
@@ -287,6 +313,9 @@ pub struct FlightDataEncoder {
     /// Deterimines how `DictionaryArray`s are encoded for transport.
     /// See [`DictionaryHandling`] for more information.
     dictionary_handling: DictionaryHandling,
+    /// Whether `max_flight_data_size` is enforced per message
+    /// (see [`FlightDataEncoderBuilder::with_enforced_max_flight_data_size`]).
+    enforce_max_flight_data_size: bool,
 }
 
 impl FlightDataEncoder {
@@ -312,6 +341,7 @@ impl FlightDataEncoder {
             done: false,
             descriptor,
             dictionary_handling,
+            enforce_max_flight_data_size: false,
         };
 
         // If schema is known up front, enqueue it immediately
@@ -373,6 +403,12 @@ impl FlightDataEncoder {
             DictionaryHandling::Hydrate => hydrate_dictionaries(&batch, schema)?,
         };
 
+        if self.enforce_max_flight_data_size
+            && self.dictionary_handling == DictionaryHandling::Hydrate
+        {
+            return self.encode_batch_within_limit(batch);
+        }
+
         let batches = split_batch_for_grpc_response(batch, self.max_flight_data_size);
         let last = batches.len().saturating_sub(1); // handle empty batches
         for (i, batch) in batches.into_iter().enumerate() {
@@ -380,6 +416,39 @@ impl FlightDataEncoder {
                 .ipc_write_context
                 .set_reserve_scratch(i != last);
             let (flight_dictionaries, flight_batch) = self.encoder.encode_batch(&batch)?;
+            for dict in flight_dictionaries {
+                self.queue_message(dict);
+            }
+            self.queue_message(flight_batch);
+        }
+
+        Ok(())
+    }
+
+    /// Encodes `batch` so that each message holding more than one row is within
+    /// `max_flight_data_size`. See [`FlightDataEncoderBuilder::with_enforced_max_flight_data_size`].
+    ///
+    /// A message that is too large is discarded and its rows are re-encoded in two halves.
+    /// Discarding is safe only because hydrated batches emit no dictionary messages, so
+    /// the encoder's dictionary state is unchanged.
+    fn encode_batch_within_limit(&mut self, batch: RecordBatch) -> Result<()> {
+        let max = self.max_flight_data_size;
+        let mut pending = split_batch_within_limit(batch, max);
+        // Pop from the end, so reverse to encode pieces in row order.
+        pending.reverse();
+        while let Some(piece) = pending.pop() {
+            self.encoder
+                .ipc_write_context
+                .set_reserve_scratch(!pending.is_empty());
+            let (flight_dictionaries, flight_batch) = self.encoder.encode_batch(&piece)?;
+            let encoded_size = flight_batch.data_header.len() + flight_batch.data_body.len();
+            let rows = piece.num_rows();
+            if encoded_size > max && rows > 1 {
+                let half = rows / 2;
+                pending.push(piece.slice(half, rows - half));
+                pending.push(piece.slice(0, half));
+                continue;
+            }
             for dict in flight_dictionaries {
                 self.queue_message(dict);
             }
@@ -662,6 +731,242 @@ fn prepare_schema_for_flight(
     Schema::new(fields).with_metadata(schema.metadata().clone())
 }
 
+/// Bytes of column data that `batch` spans, excluding IPC framing.
+///
+/// DATABRICKS PATCH (arrow-rs#9388 / #5352): use a slice-aware memory size.
+/// `get_buffer_memory_size` reports each buffer's full allocation capacity, so a
+/// batch decoded zero-copy from Arrow IPC (every column slicing one shared
+/// allocation) is over-estimated ~Nx, causing the splitters to over-split it into
+/// many tiny FlightData messages and defeating IPC compression. `get_slice_memory_size`
+/// counts only the bytes the slice actually spans.
+fn slice_memory_size(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
+        .iter()
+        .map(|col| {
+            col.to_data()
+                .get_slice_memory_size()
+                .unwrap_or_else(|_| col.get_buffer_memory_size())
+        })
+        .sum()
+}
+
+/// Fixed IPC framing per message: the flatbuffer header and its tables.
+const IPC_MESSAGE_FIXED_OVERHEAD: usize = 512;
+/// Flatbuffer bytes per `FieldNode` (length and null count).
+const IPC_FIELD_NODE_BYTES: usize = 16;
+/// Flatbuffer bytes per `Buffer` entry (offset and length).
+const IPC_BUFFER_ENTRY_BYTES: usize = 16;
+/// Worst-case padding per buffer at the default 64-byte IPC alignment.
+const IPC_MAX_BUFFER_PADDING_BYTES: usize = 64;
+
+/// Estimates the IPC framing bytes that `batch` adds to its column data in one message.
+///
+/// This does not depend on the row count, so it is a fixed cost per message. It is an
+/// estimate, not a bound: [`FlightDataEncoder::encode_batch_within_limit`] checks the
+/// encoded size.
+fn ipc_message_overhead(batch: &RecordBatch) -> usize {
+    fn count(data: &ArrayData, nodes: &mut usize, buffers: &mut usize) {
+        *nodes += 1;
+        *buffers += data.buffers().len();
+        for child in data.child_data() {
+            count(child, nodes, buffers);
+        }
+    }
+
+    let (mut nodes, mut buffers) = (0, 0);
+    for column in batch.columns() {
+        count(&column.to_data(), &mut nodes, &mut buffers);
+    }
+    IPC_MESSAGE_FIXED_OVERHEAD
+        + nodes * IPC_FIELD_NODE_BYTES
+        + buffers * (IPC_BUFFER_ENTRY_BYTES + IPC_MAX_BUFFER_PADDING_BYTES)
+}
+
+/// Running per-row cost of a column tree, in eighths of a byte so validity bits stay exact.
+struct RowCosts {
+    /// Cost every row pays regardless of its value: fixed-width values, offsets, validity bits.
+    fixed_bits: u64,
+    /// Extra cost that differs per row (string bytes, list contents); allocated on first use.
+    variable_bits: Option<Vec<u64>>,
+    rows: usize,
+}
+
+impl RowCosts {
+    fn new(rows: usize) -> Self {
+        Self {
+            fixed_bits: 0,
+            variable_bits: None,
+            rows,
+        }
+    }
+
+    fn variable_mut(&mut self) -> &mut [u64] {
+        let rows = self.rows;
+        self.variable_bits.get_or_insert_with(|| vec![0; rows])
+    }
+}
+
+/// Reads offset `index` (relative to the array's logical start) of an offsets buffer.
+fn offset_at(data: &ArrayData, index: usize, width: usize) -> usize {
+    let at = (data.offset() + index) * width;
+    let bytes = &data.buffers()[0].as_slice()[at..at + width];
+    match width {
+        4 => i32::from_ne_bytes(bytes.try_into().unwrap()).max(0) as usize,
+        _ => i64::from_ne_bytes(bytes.try_into().unwrap()).max(0) as usize,
+    }
+}
+
+/// Adds the estimated IPC body cost of logical rows `start..start + len` of `data` to `costs`.
+///
+/// Children of structs are visited with the same row window, so a mostly-null struct costs
+/// one pass over its fields' offsets and nothing per row for fixed-width fields. Types
+/// without a dedicated rule (unions, dictionaries, views, ...) spread their slice size
+/// evenly over the rows; the post-encode check in
+/// [`FlightDataEncoder::encode_batch_within_limit`] covers any estimate error.
+fn add_row_costs(data: &ArrayData, start: usize, len: usize, costs: &mut RowCosts) {
+    if len == 0 {
+        return;
+    }
+    if data.nulls().is_some() {
+        costs.fixed_bits += 1;
+    }
+    match data.data_type() {
+        DataType::Null => {}
+        DataType::Boolean => costs.fixed_bits += 1,
+        DataType::Struct(_) => {
+            for child in data.child_data() {
+                add_row_costs(child, data.offset() + start, len, costs);
+            }
+        }
+        DataType::Utf8 | DataType::Binary | DataType::LargeUtf8 | DataType::LargeBinary => {
+            let width = if matches!(data.data_type(), DataType::Utf8 | DataType::Binary) {
+                4
+            } else {
+                8
+            };
+            costs.fixed_bits += 8 * width as u64;
+            let variable = costs.variable_mut();
+            for (i, slot) in variable.iter_mut().enumerate() {
+                let bytes =
+                    offset_at(data, start + i + 1, width) - offset_at(data, start + i, width);
+                *slot += 8 * bytes as u64;
+            }
+        }
+        DataType::List(_) | DataType::LargeList(_) | DataType::Map(..) => {
+            let width = if matches!(data.data_type(), DataType::LargeList(_)) {
+                8
+            } else {
+                4
+            };
+            costs.fixed_bits += 8 * width as u64;
+            let first = offset_at(data, start, width);
+            let end = offset_at(data, start + len, width);
+            add_nested_costs(&data.child_data()[0], first, end - first, costs, |i| {
+                (
+                    offset_at(data, start + i, width) - first,
+                    offset_at(data, start + i + 1, width) - first,
+                )
+            });
+        }
+        DataType::FixedSizeList(_, n) => {
+            let n = (*n).max(0) as usize;
+            let first = (data.offset() + start) * n;
+            add_nested_costs(&data.child_data()[0], first, len * n, costs, |i| {
+                (i * n, (i + 1) * n)
+            });
+        }
+        dt => match dt.primitive_width() {
+            Some(width) => costs.fixed_bits += 8 * width as u64,
+            None => {
+                let total = data
+                    .slice(start, len)
+                    .get_slice_memory_size()
+                    .unwrap_or_else(|_| data.get_buffer_memory_size());
+                costs.fixed_bits += (8 * total).div_ceil(len) as u64;
+            }
+        },
+    }
+}
+
+/// Folds the cost of a list's child rows `start..start + len` into its parent rows.
+/// `bounds(i)` gives parent row `i`'s child range, relative to `start`.
+fn add_nested_costs(
+    child: &ArrayData,
+    start: usize,
+    len: usize,
+    costs: &mut RowCosts,
+    bounds: impl Fn(usize) -> (usize, usize),
+) {
+    let mut child_costs = RowCosts::new(len);
+    add_row_costs(child, start, len, &mut child_costs);
+    // Running sum of the child's variable cost, so each parent row is two lookups.
+    let prefix: Vec<u64> = child_costs
+        .variable_bits
+        .iter()
+        .flatten()
+        .scan(0, |sum, v| {
+            *sum += v;
+            Some(*sum)
+        })
+        .collect();
+    let prefix_at = |i: usize| {
+        if i == 0 || prefix.is_empty() {
+            0
+        } else {
+            prefix[i - 1]
+        }
+    };
+    let parent_rows = costs.rows;
+    let variable = costs.variable_mut();
+    for (i, slot) in variable.iter_mut().enumerate().take(parent_rows) {
+        let (lo, hi) = bounds(i);
+        *slot += child_costs.fixed_bits * (hi - lo) as u64 + prefix_at(hi) - prefix_at(lo);
+    }
+}
+
+/// Cumulative estimated cost in eighths of a byte: entry `i` is the cost of rows `0..i`.
+fn row_cost_prefix_bits(batch: &RecordBatch) -> Vec<u64> {
+    let rows = batch.num_rows();
+    let mut costs = RowCosts::new(rows);
+    for column in batch.columns() {
+        add_row_costs(&column.to_data(), 0, rows, &mut costs);
+    }
+    let mut prefix = Vec::with_capacity(rows + 1);
+    let mut sum = 0;
+    prefix.push(sum);
+    for i in 0..rows {
+        sum += costs.fixed_bits + costs.variable_bits.as_ref().map_or(0, |v| v[i]);
+        prefix.push(sum);
+    }
+    prefix
+}
+
+/// Splits `batch` into pieces, in row order, that each fit within `max_flight_data_size`
+/// by estimate. A piece is always at least one row, so a single row larger than the limit
+/// yields a piece over the limit.
+///
+/// Per-row costs are computed once (linear in rows and field nodes) and pieces are cut
+/// greedily from their prefix sums, so the cost does not grow with the number of pieces.
+fn split_batch_within_limit(batch: RecordBatch, max_flight_data_size: usize) -> Vec<RecordBatch> {
+    let num_rows = batch.num_rows();
+    let prefix = row_cost_prefix_bits(&batch);
+    let budget = 8 * max_flight_data_size.saturating_sub(ipc_message_overhead(&batch)) as u64;
+    if num_rows == 0 || prefix[num_rows] <= budget {
+        return vec![batch];
+    }
+    let mut batches = Vec::new();
+    let mut offset = 0;
+    while offset < num_rows {
+        // `prefix` is non-decreasing, so the piece ends at the last entry within budget.
+        let limit = prefix[offset].saturating_add(budget);
+        let end = (prefix.partition_point(|&p| p <= limit) - 1).clamp(offset + 1, num_rows);
+        batches.push(batch.slice(offset, end - offset));
+        offset = end;
+    }
+    batches
+}
+
 /// Split [`RecordBatch`] so it hopefully fits into a gRPC response.
 ///
 /// Data is zero-copy sliced into batches.
@@ -672,24 +977,9 @@ fn split_batch_for_grpc_response(
     batch: RecordBatch,
     max_flight_data_size: usize,
 ) -> Vec<RecordBatch> {
-    // DATABRICKS PATCH (arrow-rs#9388 / #5352): use a slice-aware memory size.
-    // `get_buffer_memory_size` reports each buffer's full allocation capacity, so a
-    // batch decoded zero-copy from Arrow IPC (every column slicing one shared
-    // allocation) is over-estimated ~Nx, causing this function to over-split it into
-    // many tiny FlightData messages and defeating IPC compression. `get_slice_memory_size`
-    // counts only the bytes the slice actually spans.
-    let size = batch
-        .columns()
-        .iter()
-        .map(|col| {
-            col.to_data()
-                .get_slice_memory_size()
-                .unwrap_or_else(|_| col.get_buffer_memory_size())
-        })
-        .sum::<usize>();
+    let size = slice_memory_size(&batch);
 
-    let n_batches =
-        (size / max_flight_data_size + usize::from(size % max_flight_data_size != 0)).max(1);
+    let n_batches = size.div_ceil(max_flight_data_size).max(1);
     let num_rows = batch.num_rows();
     let rows_per_batch = (num_rows / n_batches).max(1);
     let mut offset = 0;
@@ -809,6 +1099,7 @@ mod tests {
     use arrow_ipc::{CompressionType, MetadataVersion};
     use arrow_schema::{UnionFields, UnionMode};
     use builder::MapBuilder;
+    use futures::TryStreamExt;
     use std::collections::HashMap;
 
     use super::*;
@@ -2228,6 +2519,320 @@ mod tests {
         assert_eq!(
             allowed_overage, max_overage_seen,
             "Specified overage was too high"
+        );
+    }
+
+    /// Encodes `batch` with an enforced per-message limit and checks the messages.
+    ///
+    /// Asserts that every message holding more than one row fits within `max`, and that the
+    /// rows decode back to `batch` in order. Returns `(rows, header + body bytes)` for each
+    /// record batch message.
+    async fn assert_enforced_split(batch: RecordBatch, max: usize) -> Vec<(usize, usize)> {
+        let messages: Vec<FlightData> = FlightDataEncoderBuilder::new()
+            .with_enforced_max_flight_data_size(max)
+            .with_options(IpcWriteOptions::try_new(8, false, MetadataVersion::V5).unwrap())
+            .build(futures::stream::iter([Ok(batch.clone())]))
+            .try_collect()
+            .await
+            .unwrap();
+
+        let (schema, data) = messages.split_first().unwrap();
+        let mut sizes = Vec::new();
+        for (i, message) in data.iter().enumerate() {
+            let size = message.data_header.len() + message.data_body.len();
+            // Decode the message alone, after the schema, to count its rows.
+            let decoded_rows: usize = FlightDataDecoder::new(futures::stream::iter(
+                [schema, message].map(|m| Ok(m.clone())),
+            ))
+            .filter_map(|d| async move {
+                match d.unwrap().payload {
+                    DecodedPayload::RecordBatch(b) => Some(b.num_rows()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+            .iter()
+            .sum();
+            assert!(
+                decoded_rows == 1 || size <= max,
+                "message {i} holds {decoded_rows} rows in {size} bytes, over the limit {max}"
+            );
+            sizes.push((decoded_rows, size));
+        }
+
+        let decoded: Vec<RecordBatch> =
+            FlightDataDecoder::new(futures::stream::iter(messages.into_iter().map(Ok)))
+                .filter_map(|d| async move {
+                    match d.unwrap().payload {
+                        DecodedPayload::RecordBatch(b) => Some(b),
+                        _ => None,
+                    }
+                })
+                .collect()
+                .await;
+        assert_eq!(
+            pretty_format_batches(&decoded).unwrap().to_string(),
+            pretty_format_batches(&[batch]).unwrap().to_string(),
+        );
+
+        sizes
+    }
+
+    /// Encodes `batch` as one message with no limit, for comparing against split output.
+    async fn unsplit_message_size(batch: RecordBatch) -> usize {
+        let messages: Vec<FlightData> = FlightDataEncoderBuilder::new()
+            .with_max_flight_data_size(usize::MAX)
+            .with_options(IpcWriteOptions::try_new(8, false, MetadataVersion::V5).unwrap())
+            .build(futures::stream::iter([Ok(batch)]))
+            .try_collect()
+            .await
+            .unwrap();
+        messages[1..]
+            .iter()
+            .map(|d| d.data_header.len() + d.data_body.len())
+            .sum()
+    }
+
+    /// A batch of `struct_columns` nested structs with about six IPC field nodes each, and
+    /// mostly null values.
+    fn wide_sparse_batch(rows: usize, struct_columns: usize) -> RecordBatch {
+        use arrow_buffer::NullBuffer;
+
+        let inner_fields = Fields::from(vec![
+            Field::new("d", DataType::Int32, true),
+            Field::new("e", DataType::Float64, true),
+        ]);
+        let mut fields = Vec::new();
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        for c in 0..struct_columns {
+            let present: Vec<bool> = (0..rows).map(|r| (r + c) % 50 == 0).collect();
+            let a = Int64Array::from_iter((0..rows).map(|r| present[r].then_some(r as i64)));
+            let b = StringArray::from_iter(
+                (0..rows).map(|r| present[r].then(|| format!("value-{c}-{r}"))),
+            );
+            let d = Int32Array::from_iter((0..rows).map(|r| present[r].then_some(r as i32)));
+            let e = Float64Array::from_iter((0..rows).map(|r| present[r].then_some(r as f64)));
+            let inner = StructArray::new(
+                inner_fields.clone(),
+                vec![Arc::new(d) as ArrayRef, Arc::new(e) as ArrayRef],
+                Some(NullBuffer::from(present.clone())),
+            );
+            let outer = StructArray::new(
+                Fields::from(vec![
+                    Field::new("a", DataType::Int64, true),
+                    Field::new("b", DataType::Utf8, true),
+                    Field::new("c", DataType::Struct(inner_fields.clone()), true),
+                ]),
+                vec![
+                    Arc::new(a) as ArrayRef,
+                    Arc::new(b) as ArrayRef,
+                    Arc::new(inner) as ArrayRef,
+                ],
+                Some(NullBuffer::from(present)),
+            );
+            fields.push(Field::new(format!("s{c}"), outer.data_type().clone(), true));
+            columns.push(Arc::new(outer));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    #[tokio::test]
+    async fn enforced_split_wide_sparse_schema() {
+        // 384 structs of 6 field nodes each, plus the outer struct column.
+        let batch = wide_sparse_batch(500, 384);
+        let total = unsplit_message_size(batch.clone()).await;
+
+        for max in [1 << 20, 4 << 20] {
+            let sizes = assert_enforced_split(batch.clone(), max).await;
+            // Greedy packing leaves at most one partly filled message beyond the total size.
+            assert!(
+                sizes.len() <= total.div_ceil(max) + 1,
+                "{} messages for {total} bytes at limit {max}",
+                sizes.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn row_cost_prefix_tracks_encoded_size_for_nested_sparse_structs() {
+        let batch = wide_sparse_batch(500, 40);
+        let prefix = row_cost_prefix_bits(&batch);
+        assert_eq!(prefix.len(), 501);
+        assert!(prefix.windows(2).all(|w| w[0] <= w[1]));
+
+        let estimate = (prefix[500] / 8) as usize + ipc_message_overhead(&batch);
+        let actual = unsplit_message_size(batch.clone()).await;
+        let ratio = estimate as f64 / actual as f64;
+        assert!(
+            (0.9..1.15).contains(&ratio),
+            "estimate {estimate}, actual {actual}"
+        );
+
+        // A window of the batch is costed by its own rows, not the whole allocation.
+        let window = batch.slice(100, 200);
+        let window_bits = *row_cost_prefix_bits(&window).last().unwrap();
+        let expected_bits = prefix[300] - prefix[100];
+        assert!(window_bits.abs_diff(expected_bits) <= expected_bits / 20);
+    }
+
+    #[test]
+    fn row_cost_prefix_charges_variable_rows_and_lists() {
+        // Row 1 carries nearly all the bytes, directly and through a list.
+        let strings = StringArray::from_iter_values(["a", &"x".repeat(1000), "c", "d"]);
+        let list = ListArray::from_iter_primitive::<Int64Type, _, _>([
+            Some(vec![]),
+            Some((0..100).map(Some).collect::<Vec<_>>()),
+            None,
+            Some(vec![Some(1)]),
+        ]);
+        let batch = RecordBatch::try_from_iter(vec![
+            ("s", Arc::new(strings) as ArrayRef),
+            ("l", Arc::new(list) as ArrayRef),
+        ])
+        .unwrap();
+        let prefix = row_cost_prefix_bits(&batch);
+        let cost = |row: usize| (prefix[row + 1] - prefix[row]) / 8;
+        assert!(cost(1) >= 1000 + 800, "{}", cost(1));
+        assert!(cost(0) < 64 && cost(2) < 64 && cost(3) < 64);
+        assert!(cost(3) > cost(2));
+    }
+
+    #[tokio::test]
+    async fn enforced_split_narrow_dense_schema() {
+        let rows = 4_000;
+        let columns: Vec<ArrayRef> = (0..150)
+            .map(|c| -> ArrayRef {
+                if c % 2 == 0 {
+                    Arc::new(Int64Array::from_iter_values(
+                        (0..rows).map(|r| (r * (c + 1)) as i64),
+                    ))
+                } else {
+                    Arc::new(StringArray::from_iter_values(
+                        (0..rows).map(|r| format!("row-{r}-col-{c}")),
+                    ))
+                }
+            })
+            .collect();
+        let fields: Vec<Field> = (0..150)
+            .map(|c| {
+                let dt = if c % 2 == 0 {
+                    DataType::Int64
+                } else {
+                    DataType::Utf8
+                };
+                Field::new(format!("c{c}"), dt, false)
+            })
+            .collect();
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let total = unsplit_message_size(batch.clone()).await;
+
+        let max = 1 << 20;
+        let sizes = assert_enforced_split(batch, max).await;
+        assert!(sizes.len() <= total.div_ceil(max) + 1);
+    }
+
+    #[tokio::test]
+    async fn enforced_split_single_row_larger_than_limit() {
+        // The middle row cannot be split, so it is sent alone and over the limit.
+        let huge = "x".repeat(3 << 20);
+        let array = StringArray::from_iter_values(["small-a".to_string(), huge, "small-c".into()]);
+        let batch = RecordBatch::try_from_iter(vec![("s", Arc::new(array) as ArrayRef)]).unwrap();
+
+        let sizes = assert_enforced_split(batch, 1 << 20).await;
+        assert_eq!(sizes.len(), 3, "{sizes:?}");
+        assert!(sizes[1].1 > 1 << 20, "{sizes:?}");
+        assert!(sizes[0].1 <= 1 << 20 && sizes[2].1 <= 1 << 20, "{sizes:?}");
+    }
+
+    #[tokio::test]
+    async fn enforced_split_sliced_and_shared_buffers() {
+        let rows = 20_000;
+        let ids = Int64Array::from_iter_values(0..rows);
+        let names = StringArray::from_iter_values((0..rows).map(|r| format!("name-{r}")));
+        let big = RecordBatch::try_from_iter(vec![
+            ("id", Arc::new(ids) as ArrayRef),
+            ("name", Arc::new(names) as ArrayRef),
+        ])
+        .unwrap();
+
+        // A window of a larger batch: every column spans only part of its allocation.
+        let window = big.slice(3_000, 9_000);
+        assert_enforced_split(window, 64 << 10).await;
+
+        // Columns that are slices of one shared allocation, as zero-copy decoding produces.
+        let shared = Int64Array::from_iter_values(0..rows);
+        let shared_batch = RecordBatch::try_from_iter(vec![
+            ("lo", Arc::new(shared.slice(0, 10_000)) as ArrayRef),
+            ("hi", Arc::new(shared.slice(10_000, 10_000)) as ArrayRef),
+        ])
+        .unwrap();
+        assert_enforced_split(shared_batch, 16 << 10).await;
+    }
+
+    #[tokio::test]
+    async fn enforced_split_dictionary_nested_and_empty_struct() {
+        let rows = 3_000;
+        let values: Vec<Option<String>> = (0..rows)
+            .map(|r| (r % 7 != 0).then(|| format!("dict-{}", r % 13)))
+            .collect();
+        let dict: DictionaryArray<Int32Type> = values.iter().map(|v| v.as_deref()).collect();
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(
+            (0..rows).map(|r| (r % 5 != 0).then(|| (0..(r % 9)).map(Some).collect::<Vec<_>>())),
+        );
+        let empty = StructArray::new_empty_fields(rows as usize, None);
+        let batch = RecordBatch::try_from_iter(vec![
+            ("dict", Arc::new(dict) as ArrayRef),
+            ("list", Arc::new(list) as ArrayRef),
+            ("empty", Arc::new(empty) as ArrayRef),
+        ])
+        .unwrap();
+
+        assert_enforced_split(batch, 8 << 10).await;
+    }
+
+    #[tokio::test]
+    async fn enforced_split_resend_still_round_trips() {
+        // Resend cannot discard messages safely, so the limit is only approximate here.
+        let values: Vec<String> = (0..1_000).map(|r| format!("value-{}", r % 17)).collect();
+        let dict: DictionaryArray<Int32Type> = values.iter().map(|v| Some(v.as_str())).collect();
+        let batch = RecordBatch::try_from_iter(vec![("d", Arc::new(dict) as ArrayRef)]).unwrap();
+        let expected = pretty_format_batches(std::slice::from_ref(&batch))
+            .unwrap()
+            .to_string();
+
+        let decoded: Vec<RecordBatch> = FlightDataDecoder::new(
+            FlightDataEncoderBuilder::new()
+                .with_enforced_max_flight_data_size(4 << 10)
+                .with_dictionary_handling(DictionaryHandling::Resend)
+                .build(futures::stream::iter([Ok(batch)])),
+        )
+        .filter_map(|d| async move {
+            match d.unwrap().payload {
+                DecodedPayload::RecordBatch(b) => Some(b),
+                _ => None,
+            }
+        })
+        .collect()
+        .await;
+        assert_eq!(
+            pretty_format_batches(&decoded).unwrap().to_string(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn ipc_overhead_estimate_covers_encoded_framing() {
+        // The estimate only drives how many re-encodes happen. Log how far it is from the
+        // real encoded size, so a change that makes it too small is visible in test output.
+        let batch = wide_sparse_batch(500, 384);
+        let overhead = ipc_message_overhead(&batch);
+        let estimated = overhead + slice_memory_size(&batch);
+        let actual = unsplit_message_size(batch).await;
+        println!("ipc overhead estimate: estimated {estimated} bytes, encoded {actual} bytes");
+        assert!(
+            estimated >= actual,
+            "estimate {estimated} < encoded {actual}"
         );
     }
 }

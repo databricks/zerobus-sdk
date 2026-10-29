@@ -149,6 +149,23 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Default: `None` (use the available server grace period)
     pub stream_paused_max_wait_time_ms: Option<u64>,
+
+    /// Optional maximum size in bytes of each Arrow Flight message's header and body, before
+    /// any gRPC compression.
+    ///
+    /// `None` keeps the default split, which targets about 2 MiB per message by row count.
+    /// `Some(bytes)` splits each batch by encoded size so that every message holding more
+    /// than one row is at most `bytes`, using as few messages as the limit allows. The limit
+    /// applies to each message's encoded header and body, after Arrow IPC compression and
+    /// before gRPC compression. With Arrow IPC compression, batches are sized from their
+    /// uncompressed buffers, so messages can come out smaller than the limit. Per-message
+    /// metadata adds a few bytes on top. A single row larger than the limit is sent as its
+    /// own message over the limit, because rows are never split.
+    ///
+    /// Must be greater than zero when set.
+    ///
+    /// Default: `None`
+    pub max_message_size_bytes: Option<usize>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -164,6 +181,7 @@ impl Default for ArrowStreamConfigurationOptions {
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
             ipc_compression: Some(CompressionType::ZSTD),
             stream_paused_max_wait_time_ms: None,
+            max_message_size_bytes: None,
         }
     }
 }
