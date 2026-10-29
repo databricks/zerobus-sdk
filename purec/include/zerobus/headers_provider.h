@@ -11,12 +11,11 @@
  * The SDK adds no authorization header itself, so a provider normally supplies
  * just that.
  *
- * A header name must be a lowercase gRPC metadata key: letters, digits, '-',
- * '_' and '.', not starting with "grpc-". The connection headers host,
+ * A header name must be a gRPC metadata key: letters, digits, '-', '_' and
+ * '.', in any case, not starting with "grpc-". The connection headers host,
  * connection, keep-alive, proxy-connection, transfer-encoding, upgrade and
- * content-length are not allowed. A value must be printable ASCII. A stream
- * checks these rules when it opens a call, and an invalid header fails the
- * open with INVALID_ARGUMENT.
+ * content-length are not allowed. A value must be printable ASCII.
+ * zerobus_headers_add checks these rules.
  */
 #ifndef ZEROBUS_HEADERS_PROVIDER_H
 #define ZEROBUS_HEADERS_PROVIDER_H
@@ -29,10 +28,10 @@ extern "C" {
 
 /*
  * Adds a header to the set that a get_headers callback fills. Both name and
- * value are copied. The value may be empty.
+ * value are copied, the name in lowercase. The value may be empty.
  *
- * Returns INVALID_ARGUMENT, and adds nothing, for an empty name, or for a name
- * or value that is not valid UTF-8.
+ * Returns INVALID_ARGUMENT, and adds nothing, for a header that breaks the
+ * rules at the top of this file.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_headers_add(zerobus_headers_t *headers, zerobus_string_view_t name,

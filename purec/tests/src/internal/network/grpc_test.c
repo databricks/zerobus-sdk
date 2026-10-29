@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "headers_provider.h"
 #include "internal/network/grpc.h"
 #include "test_common.h"
 
@@ -136,12 +137,10 @@ static zb_grpc_config_t test_config(void)
 /* Opens call i (or the heap call in ctx[i].owned) with the test callbacks
  * and the given request. Nothing is sent yet. */
 static zerobus_status_t open_request(int i, const char *path,
-                                     const zb_metadata_t *headers,
-                                     size_t header_count)
+                                     const zerobus_headers_t *headers)
 {
     zb_grpc_call_config_t config = {.path = sv(path),
                                     .headers = headers,
-                                    .header_count = header_count,
                                     .context = &ctx[i],
                                     .pull_send = pull_send,
                                     .on_message = on_message,
@@ -153,10 +152,10 @@ static zerobus_status_t open_request(int i, const char *path,
 /* Opens call i with the test path and metadata. Nothing is sent yet. */
 static zerobus_status_t add_call(int i)
 {
-    const zb_metadata_t headers[] = {
-        {sv("authorization"), sv("Bearer token")},
-        {sv("x-databricks-zerobus-table-name"), sv("c.s.t")}};
-    return open_request(i, PATH, headers, 2);
+    zb_header_t items[] = {{"authorization", "Bearer token"},
+                           {"x-databricks-zerobus-table-name", "c.s.t"}};
+    const zerobus_headers_t headers = {items, 2, 2};
+    return open_request(i, PATH, &headers);
 }
 
 /* ---- the peer ---------------------------------------------------------- */
@@ -415,10 +414,14 @@ static void test_init_validation(void)
     zb_grpc_config_t bad = config;
     const zb_grpc_call_config_t no_pull = {
         .path = sv(PATH), .context = &ctx[0], .on_message = on_message};
-    const zb_metadata_t upper = {sv("Upper"), sv("v")};
+    zb_header_t upper_item = {"Upper", "v"};
+    const zerobus_headers_t upper = {&upper_item, 1, 1};
     char big[301] = {0};
     memset(big, 'v', sizeof(big) - 1);
-    const zb_metadata_t large = {sv("x-big"), sv(big)};
+    zb_header_t large_item = {"x-big", big};
+    const zerobus_headers_t large = {&large_item, 1, 1};
+    /* Its items are never read: the count alone is over the limit. */
+    const zerobus_headers_t too_many = {&large_item, SIZE_MAX, 1};
     stop();
 
     CHECK_EQ_INT(zb_grpc_init(NULL, &config), ZEROBUS_STATUS_INVALID_ARGUMENT);
@@ -434,35 +437,30 @@ static void test_init_validation(void)
 
     /* A call needs an initialized session, callbacks and a valid request. A
      * failed open leaves the call zeroed. */
-    CHECK_EQ_INT(open_request(0, PATH, NULL, 0),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(open_request(0, PATH, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     REQUIRE_OK(zb_grpc_init(&grpc, &config));
     CHECK_EQ_INT(zb_grpc_call_open(&grpc, &calls[0], &no_pull),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(open_request(0, PATH, NULL, 1),
+    CHECK_EQ_INT(open_request(0, "no-slash", NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(open_request(0, "no-slash", NULL, 0),
+    CHECK_EQ_INT(open_request(0, PATH, &upper),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(open_request(0, PATH, &upper, 1),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(open_request(0, PATH, &large, SIZE_MAX),
-                 ZEROBUS_STATUS_OUT_OF_RANGE);
+    CHECK_EQ_INT(open_request(0, PATH, &too_many), ZEROBUS_STATUS_OUT_OF_RANGE);
     CHECK(calls[0].grpc == NULL);
 
     /* An open call cannot be opened again, and a failed session refuses new
      * calls with its failure. */
-    REQUIRE_OK(open_request(0, PATH, NULL, 0));
-    CHECK_EQ_INT(open_request(0, PATH, NULL, 0),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    REQUIRE_OK(open_request(0, PATH, NULL));
+    CHECK_EQ_INT(open_request(0, PATH, NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     zb_grpc_abort(&grpc, ZEROBUS_STATUS_UNAVAILABLE);
-    CHECK_EQ_INT(open_request(1, PATH, NULL, 0), ZEROBUS_STATUS_UNAVAILABLE);
+    CHECK_EQ_INT(open_request(1, PATH, NULL), ZEROBUS_STATUS_UNAVAILABLE);
     CHECK_EQ_INT(ctx[0].completions, 1);
 
     /* The request headers must fit max_header_bytes. */
     zb_grpc_destroy(&grpc);
     config.max_header_bytes = 512;
     REQUIRE_OK(zb_grpc_init(&grpc, &config));
-    CHECK_EQ_INT(open_request(0, PATH, &large, 1), ZEROBUS_STATUS_OUT_OF_RANGE);
+    CHECK_EQ_INT(open_request(0, PATH, &large), ZEROBUS_STATUS_OUT_OF_RANGE);
 zb_cleanup:
     stop();
 }

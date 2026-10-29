@@ -5,6 +5,7 @@
 #include "error.h"
 #include "headers_provider.h"
 #include "internal/common/utils.h"
+#include "internal/network/grpc_utils.h"
 #include "internal/platform/log.h"
 
 struct zerobus_headers_provider {
@@ -29,21 +30,33 @@ zerobus_status_t zerobus_headers_add(zerobus_headers_t *headers,
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "headers must not be NULL");
     }
-    if (!zb_is_valid_string(name)) {
+    if (zb_is_empty(name)) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "header name must be non-empty valid UTF-8");
+                       "header name must not be empty");
     }
-    if (value.len != 0 && !zb_is_valid_string(value)) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "header value must be valid UTF-8");
-    }
+    /* Names are case-insensitive, and HTTP/2 sends them lowercase. */
     char *name_copy = zb_strdup_view(name);
+    if (name_copy == NULL) {
+        ZB_ERROR("header allocation failed");
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < name.len; ++i) {
+        if (name_copy[i] >= 'A' && name_copy[i] <= 'Z') {
+            name_copy[i] = (char)(name_copy[i] - 'A' + 'a');
+        }
+    }
+    if (!zb_is_valid_grpc_metadata((zerobus_string_view_t){name_copy, name.len},
+                                   value)) {
+        free(name_copy);
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "header must be a gRPC metadata name with a "
+                       "printable-ASCII value");
+    }
     char *value_copy =
         value.data != NULL ? zb_strdup_view(value) : zb_strdup("");
-    if (name_copy == NULL || value_copy == NULL) {
+    if (value_copy == NULL) {
         ZB_ERROR("header allocation failed");
         free(name_copy);
-        zb_secure_free_cstr(value_copy);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     if (headers->count == headers->capacity) {

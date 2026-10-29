@@ -64,10 +64,15 @@ static void test_add(void)
     }
     CHECK_OK(zerobus_headers_add(&headers, sv("empty"),
                                  (zerobus_string_view_t){NULL, 0}, NULL));
-    REQUIRE(headers.count == 6);
+    /* Names are stored lowercase; values are kept as given. */
+    CHECK_OK(
+        zerobus_headers_add(&headers, sv("X-Mixed.Case"), sv("Mixed"), NULL));
+    REQUIRE(headers.count == 7);
     CHECK(strcmp(headers.items[4].name, "x-key.1_a") == 0);
     CHECK(strcmp(headers.items[4].value, "Value 1 !~") == 0);
     CHECK(strcmp(headers.items[5].value, "") == 0);
+    CHECK(strcmp(headers.items[6].name, "x-mixed.case") == 0);
+    CHECK(strcmp(headers.items[6].value, "Mixed") == 0);
 
 zb_cleanup:
     zb_headers_clear(&headers);
@@ -86,6 +91,20 @@ static void test_add_invalid(void)
     error = NULL;
     CHECK_EQ_INT(zerobus_headers_add(&headers, sv("a"),
                                      (zerobus_string_view_t){NULL, 1}, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    /* Names are gRPC metadata keys the transport doesn't own, in any case,
+     * and values are printable ASCII. */
+    const zerobus_string_view_t bad_names[] = {sv("grpc-status"),
+                                               sv("Grpc-Status"),
+                                               sv(":path"),
+                                               sv("TE"),
+                                               {"a\0b", 3}};
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); ++i) {
+        CHECK_EQ_INT(zerobus_headers_add(&headers, bad_names[i], sv("v"), NULL),
+                     ZEROBUS_STATUS_INVALID_ARGUMENT);
+    }
+    CHECK_EQ_INT(zerobus_headers_add(&headers, sv("authorization"),
+                                     sv("caf\xc3\xa9"), NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zerobus_headers_add(NULL, sv("a"), sv("b"), &error),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);

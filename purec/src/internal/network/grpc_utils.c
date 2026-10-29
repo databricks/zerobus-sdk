@@ -234,14 +234,15 @@ bool zb_is_valid_grpc_target(zerobus_string_view_t value, bool authority)
     return true;
 }
 
-bool zb_is_valid_grpc_metadata(const zb_metadata_t *header)
+bool zb_is_valid_grpc_metadata(zerobus_string_view_t name,
+                               zerobus_string_view_t value)
 {
-    if (header->name.data == NULL || header->name.len == 0 ||
-        (header->value.data == NULL && header->value.len != 0)) {
+    if (name.data == NULL || name.len == 0 ||
+        (value.data == NULL && value.len != 0)) {
         return false;
     }
-    for (size_t i = 0; i < header->name.len; ++i) {
-        char c = header->name.data[i];
+    for (size_t i = 0; i < name.len; ++i) {
+        char c = name.data[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
               c == '-' || c == '.')) {
             return false;
@@ -256,23 +257,23 @@ bool zb_is_valid_grpc_metadata(const zb_metadata_t *header)
                                            "proxy-connection",
                                            "transfer-encoding",
                                            "upgrade"};
-    if (header->name.len >= 5 && memcmp(header->name.data, "grpc-", 5) == 0) {
+    if (name.len >= 5 && memcmp(name.data, "grpc-", 5) == 0) {
         return false;
     }
     for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); ++i) {
-        if (zb_view_equals(header->name, reserved[i])) {
+        if (zb_view_equals(name, reserved[i])) {
             return false;
         }
     }
-    return zb_is_header_value(header->value);
+    return zb_is_header_value(value);
 }
 
-nghttp2_nv zb_make_nghttp2_nv(const zb_metadata_t *header)
+nghttp2_nv zb_make_nghttp2_nv(zerobus_string_view_t name,
+                              zerobus_string_view_t value)
 {
-    nghttp2_nv nv = {(uint8_t *)header->name.data,
-                     (uint8_t *)header->value.data, header->name.len,
-                     header->value.len, NGHTTP2_NV_FLAG_NONE};
-    if (zb_view_equals(header->name, "authorization")) {
+    nghttp2_nv nv = {(uint8_t *)name.data, (uint8_t *)value.data, name.len,
+                     value.len, NGHTTP2_NV_FLAG_NONE};
+    if (zb_view_equals(name, "authorization")) {
         nv.flags = NGHTTP2_NV_FLAG_NO_INDEX;
     }
     return nv;
