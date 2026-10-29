@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+// Out-of-band control/introspection plane for the mock server. NOT part of the
+// Zerobus wire protocol. The orchestrator is the client; the mock implements it.
+package zerobus.conformance.mock;
+
+service MockAdmin {
+  // Counters. StreamQuery.stream_id is RESERVED for later multi-stream use; the mock
+  // keeps counters globally, so an empty stream_id means "the whole mock".
+  rpc GetCallCount(StreamQuery) returns (CountResponse);             // CreateStream RPCs seen
+  rpc GetCapturedMessageCount(StreamQuery) returns (CountResponse);  // all wire messages captured
+  rpc GetOnCompletedCount(StreamQuery) returns (CountResponse);      // graceful stream completions
+  rpc GetCancelCount(StreamQuery) returns (CountResponse);           // client cancels (vs half-close)
+  rpc GetCapturedRecordCount(StreamQuery) returns (CountResponse);   // ingest records captured
+
+  // Observations.
+  rpc GetAckOffset(StreamQuery) returns (OffsetResponse);            // highest cumulative ack offset
+  rpc GetCapturedRecordBytes(RecordQuery) returns (BytesResponse);   // raw encoded bytes at offset
+
+  // Fault injection (one-shot). Arm BEFORE the stream is created. After the mock acks
+  // through `after_offset`, the next ingested record aborts the stream with a transient
+  // (retryable=true -> UNAVAILABLE, so a recovering SDK reconnects and resends) or a
+  // terminal error. Cleared by Reset. `after_offset = -1` aborts on the first record.
+  rpc InjectStreamError(InjectStreamErrorRequest) returns (Empty);
+
+  rpc Reset(Empty) returns (Empty);     // clear all captured state (incl. injection) between scenarios
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+message StreamQuery { string stream_id = 1; }                 // empty = global
+message RecordQuery { string stream_id = 1; int64 offset = 2; }
+message InjectStreamErrorRequest {
+  int64 after_offset = 1;  // ack through this offset, then abort on the next record (-1 = first record)
+  bool retryable = 2;      // true: transient (UNAVAILABLE); false: terminal
+}
+
+message CountResponse { int64 count = 1; }
+message OffsetResponse { int64 offset = 1; }
+message BytesResponse { bytes record_bytes = 1; }
+message Empty {}
