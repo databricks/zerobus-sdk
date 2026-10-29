@@ -52,6 +52,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Multiplexed Streams** *(Beta)* - Raise aggregate ingestion throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow). Note: the `arrow-flight` feature requires Rust 1.88 (via Arrow 60); default builds are unaffected.
 - **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.88 (via `apache-avro`); default builds are unaffected. Feature in development.
+- **Persistent Streams** *(opt-in, in development)* — Create a durable stream, save its `stream_id()`, and resume it later from the server's committed offset, even from a new process. Enable with `features = ["eos"]`; see [Persistent Stream](#persistent-stream-in-development-opt-in) and [`examples/json/persistent.rs`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/json/persistent.rs). JSON and compiled Protocol Buffers only. Default builds are unaffected.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -727,6 +728,10 @@ use databricks_zerobus_ingest_sdk::{message_descriptor, ProtoBytes};
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 
 // Build the descriptor at runtime (a column's proto field number is `position + 1`).
+let columns = vec![
+    UcColumn::new("id", "BIGINT").with_nullable(false).with_position(0),
+    UcColumn::new("customer_name", "STRING").with_position(1),
+];
 let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
 let descriptor = message_descriptor(&descriptor_proto)?;
 
@@ -886,6 +891,55 @@ type — unions, `fixed`, `decimal`, and logical types included. See
 Avro can also be multiplexed by calling `.multiplexed(n)` after `.avro(schema)`;
 all managed sub-streams use the same writer schema. See the
 [`avro_multiplexed`](examples/avro/multiplexed.rs) example.
+
+#### Persistent Stream (in development, opt-in)
+
+*(Requires `features = ["eos"]`. The API is in development and can change. JSON and compiled Protocol Buffers only.)*
+
+A persistent stream has a durable identity on the server. Create one with `persistent_stream_builder()`
+and save its `stream_id()`:
+
+```rust,ignore
+let mut stream = sdk
+    .persistent_stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .build()
+    .await?;
+
+let stream_id = stream.stream_id().unwrap().to_string(); // save this ID to resume later
+
+for record in records {
+    stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+To continue in a later process, call `resume()` with the saved ID. Use the same table and record format:
+
+```rust,ignore
+let mut stream = sdk
+    .persistent_stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .resume(stream_id)
+    .await?;
+```
+
+How offsets and resume work:
+
+- Each `ingest_record_offset()` call uses one offset. Each `ingest_records_offset()` call also uses one offset for the whole batch.
+- `resume_watermark()` returns the offset the server had committed when the stream opened. It returns `None` for a new stream. The value is a snapshot. It does not change as acknowledgments arrive.
+- A resumed stream numbers new records from `resume_watermark() + 1`.
+- The stream does not keep records across a restart. After a restart, replay records from your own source, starting above the watermark. If you ingest a record that the server already committed, the server writes it as a new row.
+- Inside one process, the SDK recovers from transient failures on its own. It reconnects with the same `stream_id` and resends only the records that the server has not committed.
+- `close()` flushes pending records and ends the connection. The stream stays available, and you can resume it later.
+- `PersistentStream` does not provide `get_unacked_records()`. Use the watermark and your own source to replay.
+
+Arrow Flight, Avro, dynamic Protocol Buffers, multiplexing, and federated authentication are not available on persistent streams.
+See [`examples/json/persistent.rs`](examples/json/persistent.rs) for a complete create-and-resume program.
 
 ### 5. Ingest Data
 
@@ -1301,7 +1355,7 @@ match stream.wait_for_offset(offset).await {
 
 (Requires `features = ["arrow-flight"]`.)
 
-`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Pass `ArrowSchemaOptions { annotate_variant_extension: true }` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
+`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Set `annotate_variant_extension` on `ArrowSchemaOptions` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
 
 ```rust
 use databricks_zerobus_ingest_sdk::schema::{
@@ -1369,6 +1423,7 @@ The `examples/` directory contains working examples covering different serializa
 |---------|--------------|-----------|----------|
 | `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
+| `json/persistent.rs` | JSON | Persistent create/resume | `cargo run -p rust-examples-json --example json_persistent` |
 | `proto/compiled/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
 | `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
@@ -1460,6 +1515,11 @@ pub fn stream_builder(&self) -> StreamBuilder<'_>
 Returns a fluent builder for creating ingestion streams. All setters can be called in any order. Call `validate()` to check the configuration without opening a stream, or `build()` / `build_arrow()` to open the stream. See [Create a Stream](#4-create-a-stream) for usage.
 
 ```rust
+pub fn persistent_stream_builder(&self) -> PersistentStreamBuilder<'_>
+```
+Returns a fluent builder for persistent streams. Requires `features = ["eos"]`; the API is in development. See [Persistent Stream](#persistent-stream-in-development-opt-in) for usage.
+
+```rust
 pub async fn recreate_stream(
     &self,
     stream: &ZerobusStream
@@ -1538,6 +1598,57 @@ Calling `multiplexed(stream_count)` consumes the ordinary builder and returns a
 `arrow-flight`) `build_arrow()`.
 Configure ordinary gRPC streams with `ack_callback`; configure gRPC mux streams with
 `multiplexed_ack_callback`. Each terminal build rejects the other callback type.
+
+### `PersistentStreamBuilder`
+
+*(Requires `features = ["eos"]`; in development.)*
+
+Returned by `ZerobusSdk::persistent_stream_builder()`. It has the same setters as `StreamBuilder` for the table, authentication, `json()` and `compiled_proto()`, recovery and timeouts, backpressure limits, and acknowledgment callbacks. Two methods open a stream:
+
+```rust
+pub async fn build(self) -> ZerobusResult<PersistentStream>
+```
+Opens a new persistent stream. The server assigns its `stream_id`.
+
+```rust
+pub async fn resume(self, stream_id: impl Into<String>) -> ZerobusResult<PersistentStream>
+```
+Reconnects to an existing persistent stream. The table and record format must match the ones the stream was created with.
+
+### `PersistentStream`
+
+*(Requires `features = ["eos"]`; in development.)*
+
+An open persistent stream. See [Persistent Stream](#persistent-stream-in-development-opt-in) for usage.
+
+**Methods:**
+```rust
+pub fn stream_id(&self) -> Option<&str>
+```
+The durable stream ID. Save it to resume the stream later.
+
+```rust
+pub fn resume_watermark(&self) -> Option<OffsetId>
+```
+The offset the server had committed when the stream opened, or `None` for a new stream. A snapshot that does not advance as acknowledgments arrive. New records get offsets from `resume_watermark() + 1`.
+
+```rust
+pub async fn ingest_record_offset(&self, payload: impl Into<EncodedRecord>) -> ZerobusResult<OffsetId>
+pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
+```
+Queue one record or one batch and return its offset. Each call uses one offset.
+
+```rust
+pub async fn flush(&self) -> ZerobusResult<()>
+pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()>
+```
+Wait for the server to acknowledge all pending records, or one offset.
+
+```rust
+pub async fn close(&mut self) -> ZerobusResult<()>
+pub fn is_closed(&self) -> bool
+```
+Flush and end the connection, or check whether the stream is closed. A closed stream can be resumed with `resume()`.
 
 ### `MultiplexedStream`
 

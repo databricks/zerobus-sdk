@@ -108,6 +108,7 @@ bool zerobus_error_is_retryable(const zerobus_error_t *error)
     case ZEROBUS_STATUS_PERMISSION_DENIED:
     case ZEROBUS_STATUS_NOT_FOUND:
     case ZEROBUS_STATUS_UNIMPLEMENTED:
+    case ZEROBUS_STATUS_OUT_OF_RANGE:
         return false;
     default:
         return true;

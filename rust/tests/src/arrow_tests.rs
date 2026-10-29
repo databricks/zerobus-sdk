@@ -728,14 +728,9 @@ mod arrow_flight_tests {
             let (mock_server, server_url) = start_mock_flight_server().await?;
             mock_server.inject_responses(TABLE_NAME, vec![]).await;
 
-            let cols = vec![UcColumn {
-                name: "attrs".into(),
-                type_name: "VARIANT".into(),
-                type_text: "variant".into(),
-                type_json: String::new(),
-                nullable: false,
-                position: 0,
-            }];
+            let cols = vec![UcColumn::new("attrs", "VARIANT")
+                .with_type_text("variant")
+                .with_nullable(false)];
             // Stream schema is annotated; the batch schema is not (same physical
             // shape). The marker is the only difference between them.
             let mut annotate = ArrowSchemaOptions::default();

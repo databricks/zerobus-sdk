@@ -131,8 +131,9 @@ pub enum StreamType {
     Ephemeral,
     /// Persistent (Eos) streams are durable and recoverable: the server records
     /// the stream identity and its committed offset, so a client can reconnect
-    /// after a crash and resume with exactly-once delivery into Delta. Created
-    /// via `ZerobusSdk::persistent_stream_builder` behind the `eos` feature.
+    /// after a crash and continue from that offset. Created via
+    /// `ZerobusSdk::persistent_stream_builder` behind the `eos` feature. In
+    /// development: this API can change.
     Persistent,
 }
 
