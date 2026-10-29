@@ -39,6 +39,14 @@ zerobus_headers_add(zerobus_headers_t *headers, zerobus_string_view_t name,
                     zerobus_string_view_t value, zerobus_error_t **out_error);
 
 /*
+ * Provider callbacks. get_headers and invalidate are called on SDK threads, and
+ * streams that share a provider may call them concurrently. get_headers may
+ * block, for example to fetch a token; invalidate must not. destroy runs on
+ * whichever thread releases the last reference. Callbacks may call functions
+ * such as zerobus_headers_add, but not functions on an SDK or a stream.
+ */
+
+/*
  * Called each time a stream opens a gRPC call, to collect the headers to send.
  * headers is valid only during the callback. On OK the added headers are sent.
  * Any other status fails the open with that status, and the added headers are
@@ -72,30 +80,30 @@ typedef void(ZEROBUS_CALL *zerobus_invalidate_headers_fn)(void *user_data);
 typedef void(ZEROBUS_CALL *zerobus_destroy_user_data_fn)(void *user_data);
 
 /*
- * The callbacks of a headers provider. get_headers is required, invalidate and
- * destroy may be NULL.
- */
-typedef struct zerobus_headers_provider_vtable {
-    zerobus_get_headers_fn get_headers;
-    zerobus_invalidate_headers_fn invalidate;
-    zerobus_destroy_user_data_fn destroy;
-} zerobus_headers_provider_vtable_t;
-
-/*
- * Creates a provider that calls the vtable's callbacks with user_data. The
- * vtable is copied, so it may be stack storage. A provider is reference
- * counted. Each stream that uses it holds its own reference, so the caller may
- * free the provider before those streams end.
+ * Creates a provider that calls its callbacks with user_data. get_headers is
+ * required, and destroy may be NULL. A provider serves one table and one
+ * identity. It is reference counted. Each stream that uses it holds its own
+ * reference, so the caller may free the provider before those streams end.
+ * Streams may share a provider, but one provider per stream is recommended, so
+ * that invalidate refers to that stream's last get_headers call.
  *
- * A provider serves one table and one identity. They run on SDK threads, and
- * streams that share a provider may call them concurrently.
+ * Other callbacks are optional, and each has a zerobus_headers_provider_set_*
+ * setter. Call the setters before passing the provider on: while a builder or
+ * stream holds it, they return FAILED_PRECONDITION.
  *
  * If creation fails, destroy is not called and user_data stays with the
  * caller.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_headers_provider_new(
-    const zerobus_headers_provider_vtable_t *vtable, void *user_data,
-    zerobus_headers_provider_t **out_provider, zerobus_error_t **out_error);
+    zerobus_get_headers_fn get_headers, zerobus_destroy_user_data_fn destroy,
+    void *user_data, zerobus_headers_provider_t **out_provider,
+    zerobus_error_t **out_error);
+
+/* Sets the provider's invalidate callback, or with NULL removes it. */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_headers_provider_set_invalidate(
+    zerobus_headers_provider_t *provider,
+    zerobus_invalidate_headers_fn invalidate, zerobus_error_t **out_error);
 
 /*
  * Creates a provider that sends the same count headers on every call: names[i]

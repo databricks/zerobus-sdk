@@ -9,7 +9,9 @@
 
 struct zerobus_headers_provider {
     atomic_size_t ref_cnt;
-    zerobus_headers_provider_vtable_t vtable;
+    zerobus_get_headers_fn get_headers;
+    zerobus_invalidate_headers_fn invalidate;
+    zerobus_destroy_user_data_fn destroy;
     void *user_data;
 };
 
@@ -74,19 +76,16 @@ void zb_headers_clear(zerobus_headers_t *headers)
 /* ---- provider ---------------------------------------------------------- */
 
 zerobus_status_t zerobus_headers_provider_new(
-    const zerobus_headers_provider_vtable_t *vtable, void *user_data,
-    zerobus_headers_provider_t **out_provider, zerobus_error_t **out_error)
+    zerobus_get_headers_fn get_headers, zerobus_destroy_user_data_fn destroy,
+    void *user_data, zerobus_headers_provider_t **out_provider,
+    zerobus_error_t **out_error)
 {
     if (out_error != NULL && *out_error != NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
-    if (vtable == NULL || out_provider == NULL) {
+    if (get_headers == NULL || out_provider == NULL) {
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "vtable and out_provider must not be NULL");
-    }
-    if (vtable->get_headers == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "get_headers must not be NULL");
+                       "get_headers and out_provider must not be NULL");
     }
     zerobus_headers_provider_t *provider =
         (zerobus_headers_provider_t *)calloc(1, sizeof(*provider));
@@ -95,10 +94,30 @@ zerobus_status_t zerobus_headers_provider_new(
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     atomic_init(&provider->ref_cnt, 1);
-    provider->vtable = *vtable;
+    provider->get_headers = get_headers;
+    provider->destroy = destroy;
     provider->user_data = user_data;
     *out_provider = provider;
     ZB_DEBUG("headers provider created");
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zerobus_headers_provider_set_invalidate(
+    zerobus_headers_provider_t *provider,
+    zerobus_invalidate_headers_fn invalidate, zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (provider == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "provider must not be NULL");
+    }
+    if (atomic_load(&provider->ref_cnt) != 1) {
+        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                       "provider is already in use by a builder or stream");
+    }
+    provider->invalidate = invalidate;
     return ZEROBUS_STATUS_OK;
 }
 
@@ -111,7 +130,7 @@ zerobus_status_t zb_headers_provider_get(zerobus_headers_provider_t *provider,
                                          zerobus_headers_t *headers)
 {
     zerobus_status_t status =
-        provider->vtable.get_headers(provider->user_data, headers);
+        provider->get_headers(provider->user_data, headers);
     if (status != ZEROBUS_STATUS_OK) {
         zb_headers_clear(headers);
     }
@@ -120,8 +139,8 @@ zerobus_status_t zb_headers_provider_get(zerobus_headers_provider_t *provider,
 
 void zb_headers_provider_invalidate(zerobus_headers_provider_t *provider)
 {
-    if (provider->vtable.invalidate != NULL) {
-        provider->vtable.invalidate(provider->user_data);
+    if (provider->invalidate != NULL) {
+        provider->invalidate(provider->user_data);
     }
 }
 
@@ -133,8 +152,8 @@ void zerobus_headers_provider_free(zerobus_headers_provider_t *provider)
     if (atomic_fetch_sub(&provider->ref_cnt, 1) != 1) {
         return;
     }
-    if (provider->vtable.destroy != NULL) {
-        provider->vtable.destroy(provider->user_data);
+    if (provider->destroy != NULL) {
+        provider->destroy(provider->user_data);
     }
     free(provider);
     ZB_DEBUG("headers provider freed");
@@ -164,12 +183,6 @@ static void ZEROBUS_CALL static_destroy(void *user_data)
     free(user_data);
 }
 
-static const zerobus_headers_provider_vtable_t static_vtable = {
-    static_get_headers,
-    NULL,
-    static_destroy,
-};
-
 zerobus_status_t zerobus_static_headers_provider_new(
     const zerobus_string_view_t *names, const zerobus_string_view_t *values,
     size_t count, zerobus_headers_provider_t **out_provider,
@@ -194,8 +207,8 @@ zerobus_status_t zerobus_static_headers_provider_new(
         status = zerobus_headers_add(copy, names[i], values[i], out_error);
     }
     if (status == ZEROBUS_STATUS_OK) {
-        status = zerobus_headers_provider_new(&static_vtable, copy,
-                                              out_provider, out_error);
+        status = zerobus_headers_provider_new(
+            static_get_headers, static_destroy, copy, out_provider, out_error);
     }
     if (status != ZEROBUS_STATUS_OK) {
         static_destroy(copy);
@@ -255,12 +268,6 @@ static void ZEROBUS_CALL oauth_destroy(void *user_data)
     free(state);
 }
 
-static const zerobus_headers_provider_vtable_t oauth_vtable = {
-    oauth_get_headers,
-    NULL,
-    oauth_destroy,
-};
-
 zerobus_status_t
 zb_oauth_headers_provider_new(const char *uc_endpoint, const char *workspace_id,
                               const char *table, const char *client_id,
@@ -284,8 +291,8 @@ zb_oauth_headers_provider_new(const char *uc_endpoint, const char *workspace_id,
         oauth_destroy(state);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
-    zerobus_status_t status =
-        zerobus_headers_provider_new(&oauth_vtable, state, out_provider, NULL);
+    zerobus_status_t status = zerobus_headers_provider_new(
+        oauth_get_headers, oauth_destroy, state, out_provider, NULL);
     if (status != ZEROBUS_STATUS_OK) {
         oauth_destroy(state);
     }

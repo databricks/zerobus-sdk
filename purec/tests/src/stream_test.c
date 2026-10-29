@@ -52,10 +52,9 @@ static void count_destroy(void *user_data)
 /* Create a provider that counts its destroy calls in *destroys. */
 static zerobus_headers_provider_t *make_provider(int *destroys)
 {
-    zerobus_headers_provider_vtable_t vtable = {no_headers, NULL,
-                                                count_destroy};
     zerobus_headers_provider_t *provider = NULL;
-    zerobus_headers_provider_new(&vtable, destroys, &provider, NULL);
+    zerobus_headers_provider_new(no_headers, count_destroy, destroys, &provider,
+                                 NULL);
     return provider;
 }
 
