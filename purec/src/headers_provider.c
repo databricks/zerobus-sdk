@@ -52,6 +52,12 @@ zerobus_status_t zerobus_headers_add(zerobus_headers_t *headers,
                        "header must be a gRPC metadata name with a "
                        "printable-ASCII value");
     }
+    if (strcmp(name_copy, "x-databricks-zerobus-table-name") == 0 ||
+        strcmp(name_copy, "user-agent") == 0) {
+        ZB_WARN("ignoring the %s header, which the SDK sets itself", name_copy);
+        free(name_copy);
+        return ZEROBUS_STATUS_OK;
+    }
     char *value_copy =
         value.data != NULL ? zb_strdup_view(value) : zb_strdup("");
     if (value_copy == NULL) {
@@ -59,20 +65,57 @@ zerobus_status_t zerobus_headers_add(zerobus_headers_t *headers,
         free(name_copy);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
+    return zb_headers_add_internal(headers, name_copy, value_copy);
+}
+
+zerobus_status_t zb_headers_add_internal(zerobus_headers_t *headers, char *name,
+                                         char *value)
+{
+    if (name == NULL || value == NULL) {
+        free(name);
+        zb_secure_free_cstr(value);
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
     if (headers->count == headers->capacity) {
         size_t capacity = headers->capacity ? 2 * headers->capacity : 4;
         zb_header_t *items =
             realloc(headers->items, capacity * sizeof(*headers->items));
         if (items == NULL) {
             ZB_ERROR("header set allocation failed");
-            free(name_copy);
-            zb_secure_free_cstr(value_copy);
+            free(name);
+            zb_secure_free_cstr(value);
             return ZEROBUS_STATUS_OUT_OF_MEMORY;
         }
         headers->items = items;
         headers->capacity = capacity;
     }
-    headers->items[headers->count++] = (zb_header_t){name_copy, value_copy};
+    headers->items[headers->count++] = (zb_header_t){name, value};
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t
+zerobus_headers_set_error_message(zerobus_headers_t *headers,
+                                  zerobus_string_view_t message,
+                                  zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (headers == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "headers must not be NULL");
+    }
+    if (!zb_is_valid_string(message)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "error message must be non-empty valid UTF-8");
+    }
+    char *copy = zb_strdup_view(message);
+    if (copy == NULL) {
+        ZB_ERROR("header error message allocation failed");
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    free(headers->error_message);
+    headers->error_message = copy;
     return ZEROBUS_STATUS_OK;
 }
 
@@ -83,6 +126,7 @@ void zb_headers_clear(zerobus_headers_t *headers)
         zb_secure_free_cstr(headers->items[i].value);
     }
     free(headers->items);
+    free(headers->error_message);
     *headers = (zerobus_headers_t){0};
 }
 
@@ -140,11 +184,18 @@ void zb_headers_provider_ref(zerobus_headers_provider_t *provider)
 }
 
 zerobus_status_t zb_headers_provider_get(zerobus_headers_provider_t *provider,
-                                         zerobus_headers_t *headers)
+                                         zerobus_headers_t *headers,
+                                         zerobus_error_t **out_error)
 {
     zerobus_status_t status =
         provider->get_headers(provider->user_data, headers);
     if (status != ZEROBUS_STATUS_OK) {
+        if (headers->error_message != NULL) {
+            zb_fail(out_error, status, "headers provider failed: %s",
+                    headers->error_message);
+        } else {
+            zb_fail(out_error, status, "headers provider failed");
+        }
         zb_headers_clear(headers);
     }
     return status;

@@ -29,6 +29,23 @@ static zerobus_status_t add_then_fail(void *user_data,
     return ZEROBUS_STATUS_UNAVAILABLE;
 }
 
+/* Fails with a message, after replacing an earlier one. */
+static zerobus_status_t fail_with_message(void *user_data,
+                                          zerobus_headers_t *headers)
+{
+    (void)user_data;
+    zerobus_headers_set_error_message(headers, sv("first"), NULL);
+    zerobus_headers_set_error_message(headers, sv("401 invalid_client"), NULL);
+    return ZEROBUS_STATUS_UNAUTHENTICATED;
+}
+
+static bool has_message(const zerobus_error_t *error, const char *text)
+{
+    zerobus_string_view_t message = zerobus_error_message(error);
+    return message.len == strlen(text) &&
+           memcmp(message.data, text, message.len) == 0;
+}
+
 static void count_invalidation(void *user_data)
 {
     ((struct provider_state *)user_data)->invalidations++;
@@ -67,6 +84,11 @@ static void test_add(void)
     /* Names are stored lowercase; values are kept as given. */
     CHECK_OK(
         zerobus_headers_add(&headers, sv("X-Mixed.Case"), sv("Mixed"), NULL));
+    /* The SDK sets the table name and user agent itself, so they're ignored. */
+    CHECK_OK(zerobus_headers_add(
+        &headers, sv("X-Databricks-Zerobus-Table-Name"), sv("c.s.t"), NULL));
+    CHECK_OK(
+        zerobus_headers_add(&headers, sv("user-agent"), sv("app/1.0"), NULL));
     REQUIRE(headers.count == 7);
     CHECK(strcmp(headers.items[4].name, "x-key.1_a") == 0);
     CHECK(strcmp(headers.items[4].value, "Value 1 !~") == 0);
@@ -105,6 +127,8 @@ static void test_add_invalid(void)
     }
     CHECK_EQ_INT(zerobus_headers_add(&headers, sv("authorization"),
                                      sv("caf\xc3\xa9"), NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_headers_add_internal(&headers, NULL, NULL),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zerobus_headers_add(NULL, sv("a"), sv("b"), &error),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
@@ -161,7 +185,7 @@ static void test_provider_callbacks(void)
     zerobus_headers_t headers = {0};
 
     REQUIRE_OK(new_counting(add_authorization, &state, &provider));
-    CHECK_OK(zb_headers_provider_get(provider, &headers));
+    CHECK_OK(zb_headers_provider_get(provider, &headers, NULL));
     CHECK_EQ_INT(state.gets, 1);
     REQUIRE(headers.count == 1);
     CHECK(strcmp(headers.items[0].name, "authorization") == 0);
@@ -175,22 +199,64 @@ zb_cleanup:
     CHECK_EQ_INT(state.destroys, 1);
 }
 
-/* A failed get returns the callback's status and discards its headers. */
+/* A failed get returns the callback's status, discards its headers, and
+ * reports the callback's message if it set one. */
 static void test_provider_get_failure(void)
 {
     struct provider_state state = {0};
     zerobus_headers_provider_t *provider = NULL;
     zerobus_headers_t headers = {0};
+    zerobus_error_t *error = NULL;
 
     REQUIRE_OK(new_counting(add_then_fail, &state, &provider));
-    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers),
+    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers, &error),
                  ZEROBUS_STATUS_UNAVAILABLE);
     CHECK_EQ_INT(state.gets, 1);
     CHECK(headers.count == 0 && headers.items == NULL);
+    CHECK(has_message(error, "headers provider failed"));
+    zerobus_error_free(error);
+    error = NULL;
+    zerobus_headers_provider_free(provider);
+    provider = NULL;
+
+    REQUIRE_OK(zerobus_headers_provider_new(fail_with_message, NULL, NULL,
+                                            &provider, NULL));
+    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers, &error),
+                 ZEROBUS_STATUS_UNAUTHENTICATED);
+    CHECK_EQ_INT(zerobus_error_status(error), ZEROBUS_STATUS_UNAUTHENTICATED);
+    CHECK(has_message(error, "headers provider failed: 401 invalid_client"));
+    CHECK(headers.error_message == NULL);
 
 zb_cleanup:
+    zerobus_error_free(error);
     zb_headers_clear(&headers);
     zerobus_headers_provider_free(provider);
+}
+
+/* An error message must be non-empty valid UTF-8, and is ignored on OK. */
+static void test_set_error_message(void)
+{
+    zerobus_headers_t headers = {0};
+    zerobus_error_t *error = NULL;
+
+    CHECK_EQ_INT(zerobus_headers_set_error_message(NULL, sv("m"), &error),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(error != NULL);
+    zerobus_error_free(error);
+    error = NULL;
+    CHECK_EQ_INT(zerobus_headers_set_error_message(
+                     &headers, (zerobus_string_view_t){NULL, 0}, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_headers_set_error_message(&headers, sv("\xff"), &error),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    /* An error left from an earlier call is refused, not overwritten. */
+    zerobus_error_t *left = error;
+    CHECK_EQ_INT(zerobus_headers_set_error_message(&headers, sv("m"), &error),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(error == left);
+    zerobus_error_free(error);
+    CHECK(headers.error_message == NULL);
 }
 
 /* destroy runs once, when the last reference is released. */
@@ -287,7 +353,7 @@ static void test_static_provider(void)
         zerobus_static_headers_provider_new(names, values, 2, &provider, NULL));
     value[0] = 'X';
     for (int i = 0; i < 2; ++i) {
-        CHECK_OK(zb_headers_provider_get(provider, &headers));
+        CHECK_OK(zb_headers_provider_get(provider, &headers, NULL));
         REQUIRE(headers.count == 2);
         CHECK(strcmp(headers.items[0].name, "authorization") == 0);
         CHECK(strcmp(headers.items[0].value, "Bearer token") == 0);
@@ -350,7 +416,7 @@ static void test_static_provider_no_headers(void)
 
     REQUIRE_OK(
         zerobus_static_headers_provider_new(NULL, NULL, 0, &provider, NULL));
-    CHECK_OK(zb_headers_provider_get(provider, &headers));
+    CHECK_OK(zb_headers_provider_get(provider, &headers, NULL));
     CHECK(headers.count == 0);
 
 zb_cleanup:
@@ -367,7 +433,7 @@ static void test_oauth_provider(void)
     REQUIRE_OK(zb_oauth_headers_provider_new("https://ws.cloud.example.com",
                                              "123", "c.s.t", "id", "secret",
                                              &provider));
-    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers),
+    CHECK_EQ_INT(zb_headers_provider_get(provider, &headers, NULL),
                  ZEROBUS_STATUS_UNIMPLEMENTED);
     CHECK(headers.count == 0);
 
@@ -383,6 +449,7 @@ int main(void)
     test_provider_new_invalid();
     test_provider_callbacks();
     test_provider_get_failure();
+    test_set_error_message();
     test_provider_references();
     test_provider_optional_callbacks();
     test_provider_set_invalidate_invalid();

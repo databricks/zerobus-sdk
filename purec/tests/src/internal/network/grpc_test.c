@@ -154,7 +154,8 @@ static zerobus_status_t add_call(int i)
 {
     zb_header_t items[] = {{"authorization", "Bearer token"},
                            {"x-databricks-zerobus-table-name", "c.s.t"}};
-    const zerobus_headers_t headers = {items, 2, 2};
+    const zerobus_headers_t headers = {
+        .items = items, .count = 2, .capacity = 2};
     return open_request(i, PATH, &headers);
 }
 
@@ -415,13 +416,16 @@ static void test_init_validation(void)
     const zb_grpc_call_config_t no_pull = {
         .path = sv(PATH), .context = &ctx[0], .on_message = on_message};
     zb_header_t upper_item = {"Upper", "v"};
-    const zerobus_headers_t upper = {&upper_item, 1, 1};
+    const zerobus_headers_t upper = {
+        .items = &upper_item, .count = 1, .capacity = 1};
     char big[301] = {0};
     memset(big, 'v', sizeof(big) - 1);
     zb_header_t large_item = {"x-big", big};
-    const zerobus_headers_t large = {&large_item, 1, 1};
+    const zerobus_headers_t large = {
+        .items = &large_item, .count = 1, .capacity = 1};
     /* Its items are never read: the count alone is over the limit. */
-    const zerobus_headers_t too_many = {&large_item, SIZE_MAX, 1};
+    const zerobus_headers_t too_many = {
+        .items = &large_item, .count = SIZE_MAX, .capacity = 1};
     stop();
 
     CHECK_EQ_INT(zb_grpc_init(NULL, &config), ZEROBUS_STATUS_INVALID_ARGUMENT);

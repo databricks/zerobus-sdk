@@ -13,18 +13,26 @@ struct zerobus_headers {
     zb_header_t *items;
     size_t count;
     size_t capacity;
+    char *error_message; /* Set by a failing get_headers, or NULL. */
 };
 
-/* Frees every header, zeroing the values, and leaves an empty set. */
+/* On failure, frees both name and value. */
+zerobus_status_t zb_headers_add_internal(zerobus_headers_t *headers, char *name,
+                                         char *value);
+
+/* Frees every header, zeroing the values, and the error message, and leaves an
+ * empty set. */
 void zb_headers_clear(zerobus_headers_t *headers);
 
 /* Caller must hold a live, non-NULL provider reference; release with
  * zerobus_headers_provider_free. */
 void zb_headers_provider_ref(zerobus_headers_provider_t *provider);
 
-/* Fills headers, which must be empty. On failure, headers is left empty. */
+/* Fills headers, which must be empty. On failure, headers is left empty, and
+ * the error carries the provider's message, if it set one. */
 zerobus_status_t zb_headers_provider_get(zerobus_headers_provider_t *provider,
-                                         zerobus_headers_t *headers);
+                                         zerobus_headers_t *headers,
+                                         zerobus_error_t **out_error);
 
 /* Tells the provider that the server rejected the credentials from its last
  * get. */
