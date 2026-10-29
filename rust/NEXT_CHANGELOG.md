@@ -123,9 +123,8 @@
 
 - `EncodedBatch` variants now hold the SDK-owned `BatchRecords<T>` instead of
   `smallvec::SmallVec<[T; 1]>`, and `EncodedBatchIter` variants hold
-  `BatchRecordsIntoIter<T>` instead of `smallvec::IntoIter<[T; 1]>`, so
-  `smallvec` is no longer part of the public API and a `smallvec` upgrade no
-  longer breaks the SDK API
+  `BatchRecordsIntoIter<T>` instead of `smallvec::IntoIter<[T; 1]>`, so a
+  `smallvec` upgrade no longer breaks the SDK API
   ([#912](https://github.com/databricks/zerobus-sdk/issues/912)). A
   single-record batch is still stored inline.
 

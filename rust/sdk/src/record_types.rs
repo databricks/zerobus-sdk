@@ -299,7 +299,7 @@ impl<T> Borrow<[T]> for BatchRecords<T> {
     }
 }
 
-// Prints as a list, like the `SmallVec` the variants held before, so batches log the same.
+// Prints as a plain list, without the `BatchRecords(..)` wrapper a derive would add.
 impl<T: fmt::Debug> fmt::Debug for BatchRecords<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
