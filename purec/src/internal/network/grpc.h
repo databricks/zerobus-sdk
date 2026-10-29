@@ -117,7 +117,9 @@ zerobus_status_t zb_grpc_retry_receive(zb_grpc_t *grpc);
 /* Queues a call on the session. It opens on the wire with the owner's next
  * nghttp2_session_mem_send. *call must be zeroed or completed, and stay in
  * place until it completes. Config is borrowed only for the duration of this
- * call. On failure the call is not opened and on_complete is not called. */
+ * call. On failure the call is not opened and on_complete is not called.
+ * Fails with UNAVAILABLE once the session takes no new calls, as after a
+ * GOAWAY. */
 zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
                                    const zb_grpc_call_config_t *config);
 

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "internal/platform/log.h"
 #include "io.h"
 #include "transport.h"
 
@@ -134,7 +135,15 @@ static zb_message_t *pull_send(void *context, bool *eof)
 static bool message_received(void *context, zb_message_t *message)
 {
     zb_transport_call_t *call = context;
-    return zb_channel_try_push(call->rx, message) == ZEROBUS_STATUS_OK;
+    zerobus_status_t status = zb_channel_try_push(call->rx, message);
+    if (status == ZEROBUS_STATUS_FAILED_PRECONDITION) {
+        /* Nobody reads a closed RX: drop the message rather than pause input
+         * for every call. */
+        free(message->data);
+        free(message);
+        return true;
+    }
+    return status == ZEROBUS_STATUS_OK;
 }
 
 static void complete(void *context, const zb_rpc_result_t *result)
@@ -367,10 +376,11 @@ fail_mutex:
 
 /* ---- call operations --------------------------------------------------- */
 
-zerobus_status_t
-zb_transport_call_open(zb_transport_t *transport, zerobus_string_view_t path,
-                       const zb_metadata_t *headers, size_t header_count,
-                       zb_deadline_t deadline, zb_transport_call_t **out_call)
+zerobus_status_t zb_transport_call_open(zb_transport_t *transport,
+                                        zerobus_string_view_t path,
+                                        const zerobus_headers_t *headers,
+                                        zb_deadline_t deadline,
+                                        zb_transport_call_t **out_call)
 {
     if (!transport || !out_call) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
@@ -399,7 +409,6 @@ zb_transport_call_open(zb_transport_t *transport, zerobus_string_view_t path,
 
     const zb_grpc_call_config_t config = {.path = path,
                                           .headers = headers,
-                                          .header_count = header_count,
                                           .context = call,
                                           .pull_send = pull_send,
                                           .on_message = message_received,
@@ -452,7 +461,14 @@ zerobus_status_t zb_transport_cancel(zb_transport_call_t *call)
 
 void zb_transport_call_free(zb_transport_call_t *call)
 {
-    if (!call || zb_transport_cancel(call) != ZEROBUS_STATUS_OK) {
+    if (!call) {
+        return;
+    }
+    zerobus_status_t status = zb_transport_cancel(call);
+    if (status != ZEROBUS_STATUS_OK) {
+        /* The I/O thread may still use the call, so keep it. */
+        ZB_WARN("transport call not freed: cancel failed (status %u)",
+                (unsigned)status);
         return;
     }
     zb_transport_t *transport = call->transport;
@@ -483,11 +499,17 @@ zerobus_status_t zb_transport_shutdown(zb_transport_t *transport)
     zerobus_status_t status = zb_wakeup_signal(transport->io.wakeup);
     (void)zb_mutex_unlock(&transport->mutex);
     if (status != ZEROBUS_STATUS_OK) {
+        /* The I/O thread sees stopping only once the socket wakes it. */
+        ZB_WARN("transport shutdown could not wake the I/O thread (status %u)",
+                (unsigned)status);
         return status;
     }
     if (transport->started) {
         status = zb_thread_join(&transport->thread, NULL);
         if (status != ZEROBUS_STATUS_OK) {
+            ZB_WARN("transport shutdown could not join the I/O thread "
+                    "(status %u)",
+                    (unsigned)status);
             return status;
         }
         transport->started = false;
@@ -502,12 +524,14 @@ void zb_transport_free(zb_transport_t *transport)
     }
     /* The I/O thread may still be running, so keep everything it uses. */
     if (zb_transport_shutdown(transport) != ZEROBUS_STATUS_OK) {
+        ZB_WARN("transport not freed: its I/O thread may still run");
         return;
     }
     while (transport->calls) {
         zb_transport_call_t *call = transport->calls;
         zb_transport_call_free(call);
         if (transport->calls == call) {
+            ZB_WARN("transport not freed: a call could not be freed");
             return;
         }
     }

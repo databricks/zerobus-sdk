@@ -29,21 +29,24 @@ zerobus_status_t zb_transport_open(const zb_transport_config_t *config,
                                    zb_deadline_t deadline,
                                    zb_transport_t **out_transport);
 
-/* Opens a call on path with headers, both borrowed only for this call.
- * Returns without waiting for the server, whose answer arrives on the call's
- * RX channel. May run concurrently with other calls' operations and with
- * shutdown. */
-zerobus_status_t
-zb_transport_call_open(zb_transport_t *transport, zerobus_string_view_t path,
-                       const zb_metadata_t *headers, size_t header_count,
-                       zb_deadline_t deadline, zb_transport_call_t **out_call);
+/* Opens a call on path with headers (NULL for none), both borrowed only for
+ * this call. Returns without waiting for the server, whose answer arrives on
+ * the call's RX channel. May run concurrently with other calls' operations and
+ * with shutdown. */
+zerobus_status_t zb_transport_call_open(zb_transport_t *transport,
+                                        zerobus_string_view_t path,
+                                        const zerobus_headers_t *headers,
+                                        zb_deadline_t deadline,
+                                        zb_transport_call_t **out_call);
 
 /* The call's send channel, or NULL for a NULL call. End sending with
  * zb_transport_half_close, not by closing the channel. */
 zb_channel_t *zb_transport_tx(const zb_transport_call_t *call);
 
 /* The call's receive channel, or NULL for a NULL call. It ends, with OK and a
- * NULL message, once the call has ended. */
+ * NULL message, once the call has ended. Drain it promptly: while it is full,
+ * input pauses for every call on the connection. Closing it drops the call's
+ * later messages. */
 zb_channel_t *zb_transport_rx(const zb_transport_call_t *call);
 
 /* The call's result, once RX has ended. NULL for a NULL call. */

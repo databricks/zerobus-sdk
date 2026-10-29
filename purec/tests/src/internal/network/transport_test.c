@@ -394,7 +394,7 @@ static zerobus_status_t open_transport(const server_t *server,
 static zerobus_status_t open_call(zb_transport_t *transport, const char *path,
                                   zb_transport_call_t **out)
 {
-    return zb_transport_call_open(transport, sv(path), NULL, 0,
+    return zb_transport_call_open(transport, sv(path), NULL,
                                   zb_deadline_after_ms(TIMEOUT_MS), out);
 }
 
@@ -509,9 +509,8 @@ static void test_open_failures(void)
     }
     CHECK_EQ_INT(zb_transport_open(NULL, deadline, &transport),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(
-        zb_transport_call_open(NULL, sv(ECHO), NULL, 0, deadline, &call),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_transport_call_open(NULL, sv(ECHO), NULL, deadline, &call),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(zb_transport_tx(NULL) == NULL && zb_transport_rx(NULL) == NULL &&
           zb_transport_get_result(NULL) == NULL);
     CHECK_EQ_INT(zb_transport_half_close(NULL),
@@ -569,7 +568,7 @@ static void test_calls(SSL_CTX *tls)
     REQUIRE_OK(open_transport(&server, &transport));
     REQUIRE_OK(open_call(transport, ECHO, &cancelled));
     REQUIRE_OK(open_call(transport, ECHO, &echo));
-    CHECK_EQ_INT(zb_transport_call_open(transport, sv(ECHO), NULL, 0,
+    CHECK_EQ_INT(zb_transport_call_open(transport, sv(ECHO), NULL,
                                         ZB_DEADLINE_IMMEDIATE, &late),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     CHECK(late == NULL);
@@ -712,6 +711,34 @@ zb_cleanup:
     server_stop(&server);
 }
 
+/* A call whose worker closed its RX drops what it receives, so the other calls
+ * on the connection keep receiving. The dropped echo goes out no later than
+ * the first echo below, so the second round trip comes after it. */
+static void test_closed_receive(void)
+{
+    server_t server = {0};
+    zb_transport_t *transport = NULL;
+    zb_transport_call_t *closed = NULL;
+    zb_transport_call_t *echo = NULL;
+    REQUIRE(server_start(&server));
+    REQUIRE_OK(open_transport(&server, &transport));
+    REQUIRE_OK(open_call(transport, ECHO, &closed));
+    REQUIRE_OK(open_call(transport, ECHO, &echo));
+
+    CHECK_OK(zb_channel_close(zb_transport_rx(closed)));
+    CHECK_OK(send_copy(closed, "a", 1));
+    CHECK_OK(send_copy(echo, "b", 1));
+    CHECK(received(echo, "b", 1));
+    CHECK_OK(send_copy(echo, "c", 1));
+    CHECK(received(echo, "c", 1));
+
+zb_cleanup:
+    zb_transport_call_free(echo);
+    zb_transport_call_free(closed);
+    zb_transport_free(transport);
+    server_stop(&server);
+}
+
 /* Workers on several threads open, use and free calls on one connection at
  * the same time. */
 static void test_concurrent_workers(void)
@@ -759,6 +786,7 @@ int main(void)
     test_connection_end(BREAK, ZEROBUS_STATUS_INTERNAL);
     test_connection_end(NULL, ZEROBUS_STATUS_CANCELLED);
     test_goaway();
+    test_closed_receive();
     test_concurrent_workers();
     SSL_CTX_free(tls);
     zb_tls_ctx_free(trusted);
