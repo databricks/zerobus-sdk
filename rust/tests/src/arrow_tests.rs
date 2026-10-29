@@ -5941,7 +5941,10 @@ mod arrow_flight_tests {
             assert!(!err.is_retryable(), "{err:?}");
             match err {
                 ZerobusError::CreateStreamError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unimplemented);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unimplemented
+                    );
                 }
                 other => panic!("expected CreateStreamError(Unimplemented), got {other:?}"),
             }
