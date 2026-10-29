@@ -203,15 +203,6 @@ zerobus_status_t zerobus_static_headers_provider_new(
     return status;
 }
 
-/* ---- empty provider ---------------------------------------------------- */
-
-zerobus_status_t
-zb_empty_headers_provider_new(zerobus_headers_provider_t **out_provider)
-{
-    return zerobus_static_headers_provider_new(NULL, NULL, 0, out_provider,
-                                               NULL);
-}
-
 /* ---- oauth provider ---------------------------------------------------- */
 
 struct oauth_state {

@@ -30,11 +30,6 @@ zerobus_status_t zb_headers_provider_get(zerobus_headers_provider_t *provider,
  * get. */
 void zb_headers_provider_invalidate(zerobus_headers_provider_t *provider);
 
-/* Creates a provider that sends no headers: the default for a stream with
- * neither OAuth nor a headers provider. */
-zerobus_status_t
-zb_empty_headers_provider_new(zerobus_headers_provider_t **out_provider);
-
 /*
  * Creates a provider that supplies an "authorization: Bearer <token>" header,
  * where the token is a Unity Catalog OAuth token. The token is requested from

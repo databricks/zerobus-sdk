@@ -16,9 +16,10 @@ extern "C" {
  * stream must not race any use of it.
  *
  * Stream builder. Requires a fully qualified catalog.schema.table name.
- * Streams are ephemeral gRPC JSON streams. To authenticate, set either OAuth
- * client credentials or a headers provider. A stream built with neither sends
- * no authentication headers. Credential copies are zeroed on free.
+ * Streams are ephemeral gRPC JSON streams. Building one requires either OAuth
+ * client credentials or a headers provider. For a table that needs no
+ * authentication, set a static headers provider with no headers. Credential
+ * copies are zeroed on free.
  *
  * The builder and each built stream retain their own SDK reference, so the
  * application may release its SDK reference after new() succeeds.

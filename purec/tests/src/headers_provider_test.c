@@ -278,12 +278,15 @@ static void test_static_provider_invalid(void)
     CHECK(provider == sentinel);
 }
 
-static void test_empty_provider(void)
+/* A static provider with no headers: the opt-out for a table that needs no
+ * authentication. */
+static void test_static_provider_no_headers(void)
 {
     zerobus_headers_provider_t *provider = NULL;
     zerobus_headers_t headers = {0};
 
-    REQUIRE_OK(zb_empty_headers_provider_new(&provider));
+    REQUIRE_OK(
+        zerobus_static_headers_provider_new(NULL, NULL, 0, &provider, NULL));
     CHECK_OK(zb_headers_provider_get(provider, &headers));
     CHECK(headers.count == 0);
 
@@ -321,7 +324,7 @@ int main(void)
     test_provider_optional_callbacks();
     test_static_provider();
     test_static_provider_invalid();
-    test_empty_provider();
+    test_static_provider_no_headers();
     test_oauth_provider();
     TEST_MAIN_RETURN();
 }

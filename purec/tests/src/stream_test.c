@@ -227,11 +227,13 @@ static void test_stream_builder_validation(void)
     zerobus_error_free(err);
     err = NULL;
 
-    /* Table set but no credentials: builds with no authentication. */
+    /* Table set but no credentials: fails before any network work. */
     zerobus_stream_builder_set_table(stb, sv("cat.sch.tbl"), NULL);
-    CHECK_OK(zerobus_stream_builder_build(stb, &stream, &err));
-    CHECK(stream != NULL);
-    zerobus_stream_free(stream);
+    CHECK_EQ_INT(zerobus_stream_builder_build(stb, &stream, &err),
+                 ZEROBUS_STATUS_FAILED_PRECONDITION);
+    CHECK(stream == NULL);
+    zerobus_error_free(err);
+    err = NULL;
 
     zerobus_stream_builder_free(stb);
     zerobus_sdk_free(sdk);

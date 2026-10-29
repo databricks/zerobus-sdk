@@ -292,8 +292,6 @@ resolve_headers_provider(const zerobus_stream_builder_t *builder,
                          zerobus_headers_provider_t **out_provider)
 {
     switch (builder->auth_kind) {
-    case AUTH_NONE:
-        return zb_empty_headers_provider_new(out_provider);
     case AUTH_OAUTH:
         return zb_oauth_headers_provider_new(
             builder->sdk->uc_endpoint, builder->sdk->workspace_id,
@@ -324,6 +322,11 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "table name is required");
     }
+    if (builder->auth_kind == AUTH_NONE) {
+        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                       "authentication is required: set OAuth credentials "
+                       "or a headers provider");
+    }
 
     /* TODO: open the stream. */
     zerobus_stream_t *s = (zerobus_stream_t *)calloc(1, sizeof(*s));
@@ -336,12 +339,16 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
     zb_sdk_ref(s->sdk);
     s->table = zb_strdup(builder->table);
     s->config = builder->config;
-    zerobus_status_t status =
-        resolve_headers_provider(builder, &s->headers_provider);
-    if (s->table == NULL || status != ZEROBUS_STATUS_OK) {
+    if (s->table == NULL) {
         ZB_ERROR("stream configuration allocation failed");
         zerobus_stream_free(s);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    zerobus_status_t status =
+        resolve_headers_provider(builder, &s->headers_provider);
+    if (status != ZEROBUS_STATUS_OK) {
+        zerobus_stream_free(s);
+        return zb_fail(out_error, status, "headers provider setup failed");
     }
 
     *out_stream = s;
