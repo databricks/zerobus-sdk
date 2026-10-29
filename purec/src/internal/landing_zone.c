@@ -17,12 +17,18 @@ struct zb_landing_zone {
     atomic_size_t in_flight; /* pushes that passed the first admission check */
 };
 
-zerobus_status_t zb_landing_zone_new(size_t capacity,
-                                     zb_landing_zone_t **out_zone)
+zerobus_status_t zb_landing_zone_new(size_t size, zb_landing_zone_t **out_zone)
 {
     /* Each semaphore needs room for one extra close token. */
-    if (out_zone == NULL || capacity >= ZB_SEM_VALUE_MAX) {
+    if (out_zone == NULL || size == 0 || size >= ZB_SEM_VALUE_MAX) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    size_t capacity = 4;
+    while (capacity < size) {
+        if (capacity > SIZE_MAX / 2) {
+            return ZEROBUS_STATUS_INVALID_ARGUMENT;
+        }
+        capacity <<= 1;
     }
     zb_landing_zone_t *zone = (zb_landing_zone_t *)calloc(1, sizeof(*zone));
     if (zone == NULL) {
@@ -37,7 +43,7 @@ zerobus_status_t zb_landing_zone_new(size_t capacity,
     if (status != ZEROBUS_STATUS_OK) {
         goto free_zone;
     }
-    status = zb_sem_init(&zone->space, (unsigned int)capacity);
+    status = zb_sem_init(&zone->space, (unsigned int)size);
     if (status != ZEROBUS_STATUS_OK) {
         goto free_queue;
     }

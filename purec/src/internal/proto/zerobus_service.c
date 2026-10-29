@@ -6,14 +6,12 @@
 #include "internal/proto/zerobus_service.h"
 #include "zerobus_service.pb-c.h"
 
-#define MAX_ENCODED_PAYLOAD ((size_t)INT32_MAX - 64u)
-
 static bool check_args(zerobus_string_view_t input, uint8_t **out_data,
                        size_t *out_len)
 {
     if (out_data == NULL || out_len == NULL ||
         (input.data == NULL && input.len > 0) ||
-        input.len > MAX_ENCODED_PAYLOAD) {
+        input.len > ZB_MAX_ENCODED_PAYLOAD) {
         return false;
     }
     return true;

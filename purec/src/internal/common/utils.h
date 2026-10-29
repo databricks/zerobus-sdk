@@ -40,6 +40,10 @@ bool zb_starts_with(const char *s, size_t len, const char *prefix);
  * equals ""; {NULL, nonzero} equals nothing. */
 bool zb_view_equals(zerobus_string_view_t value, const char *literal);
 
+/* True if every byte is printable ASCII (0x20 to 0x7E), as gRPC requires for
+ * header values. {NULL, 0} is allowed; {NULL, nonzero} is not. */
+bool zb_is_header_value(zerobus_string_view_t view);
+
 /* Parses all len bytes as an unsigned decimal into *out. False, leaving *out
  * unchanged, if len is 0, a byte is not a digit, or the value exceeds
  * UINT32_MAX. */
@@ -47,6 +51,10 @@ bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out);
 
 /* The value of hex digit c, in either case, or -1 if c is not one. */
 int zb_hex_value(char c);
+
+/* The view without leading or trailing ASCII whitespace. A view with NULL data
+ * is returned unchanged. */
+zerobus_string_view_t zb_trim_whitespace(zerobus_string_view_t view);
 
 /*
  * Report whether a table name is a fully qualified catalog.schema.table: three
