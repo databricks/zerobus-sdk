@@ -6,7 +6,9 @@ mod zeroparser_proto_build;
 
 fn main() {
     env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
-    tonic_prost_build::compile_protos("zerobus_service.proto")
+    tonic_prost_build::configure()
+        .build_server(false)
+        .compile_protos(&["zerobus_service.proto"], &["."])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 
     #[cfg(feature = "zeroparser")]

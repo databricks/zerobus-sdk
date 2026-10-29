@@ -2,11 +2,7 @@ use super::*;
 use databricks_zerobus_ingest_sdk::{EncodedRecord, NoTlsConfig, ZerobusSdk};
 use prost_types::{field_descriptor_proto, DescriptorProto, FieldDescriptorProto};
 
-#[allow(dead_code)]
-#[path = "../../../tests/src/mock_grpc.rs"]
-mod mock_grpc;
-
-use mock_grpc::{start_mock_server, MockResponse};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
 
 #[tokio::test]
 async fn close_keeps_unacked_proto_records_available_for_java_recovery(

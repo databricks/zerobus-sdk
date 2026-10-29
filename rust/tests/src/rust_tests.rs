@@ -1,4 +1,3 @@
-mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
@@ -6,13 +5,14 @@ use std::sync::Arc;
 use databricks_zerobus_ingest_sdk::{
     message_descriptor, GrpcCode, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
 };
-use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
     advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
     run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
+use zerobus_test_support::databricks::zerobus::RecordType as WireRecordType;
+use zerobus_test_support::mock_grpc::{self, start_mock_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -59,6 +59,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         let stream = result.unwrap();
         assert_eq!(stream.stream_type, StreamType::Ephemeral);
+        assert_eq!(
+            mock_server.get_create_requests().await[0].record_type,
+            Some(WireRecordType::Proto as i32)
+        );
 
         Ok(())
     }
@@ -1357,6 +1361,10 @@ mod schema_tests {
 
         assert_eq!(ingest_result, 0);
         assert_eq!(mock_server.get_write_count().await, 1);
+        assert_eq!(
+            mock_server.get_create_requests().await[0].record_type,
+            Some(WireRecordType::Json as i32)
+        );
 
         Ok(())
     }
@@ -1411,6 +1419,10 @@ mod schema_tests {
 
         assert_eq!(offset, 0);
         assert_eq!(mock_server.get_write_count().await, 1);
+        assert_eq!(
+            mock_server.get_create_requests().await[0].record_type,
+            Some(WireRecordType::Proto as i32)
+        );
 
         Ok(())
     }

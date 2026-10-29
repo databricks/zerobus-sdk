@@ -95,12 +95,8 @@ async fn ingest_dynamic_records(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
 /// A non-nullable top-level column of the given UC type at a 0-based position.
 fn col(name: &str, type_name: &str, position: i32) -> UcColumn {
-    UcColumn {
-        name: name.to_string(),
-        type_name: type_name.to_string(),
-        type_text: type_name.to_string(),
-        type_json: String::new(),
-        nullable: false,
-        position,
-    }
+    UcColumn::new(name, type_name)
+        .with_type_text(type_name)
+        .with_nullable(false)
+        .with_position(position)
 }

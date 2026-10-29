@@ -40,6 +40,9 @@ tracing.workspace = true
 hyper-http-proxy.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+# Not imported; these set a minimum version (see the workspace Cargo.toml).
+rustls-webpki.workspace = true
+webpki-roots.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
 futures.workspace = true

@@ -1,4 +1,3 @@
-mod mock_grpc;
 mod utils;
 
 use std::future::Future;
@@ -10,9 +9,9 @@ use databricks_zerobus_ingest_sdk::{
     GrpcCode, MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
 };
 use futures::poll;
-use mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 use tracing::info;
 use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 
 #[derive(Clone)]
 struct TestOpts {

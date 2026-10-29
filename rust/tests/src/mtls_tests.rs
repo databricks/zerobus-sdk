@@ -5,18 +5,16 @@
 //! test binary on purpose: `proxy_tests` sets process-wide proxy variables, and
 //! this test must not see them.
 
-#[allow(dead_code)]
-mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use databricks_zerobus_ingest_sdk::{TlsSettings, ZerobusSdk};
-use mock_grpc::{start_mock_mtls_server, MockResponse};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tracing::info;
 use utils::{setup_tracing, TestHeadersProvider};
+use zerobus_test_support::mock_grpc::{start_mock_mtls_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 

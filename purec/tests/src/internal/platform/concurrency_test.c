@@ -416,6 +416,24 @@ static void test_second_deadline_saturation(void)
     CHECK(zb_deadline_after_seconds(UINT64_MAX - 1) == largest);
 }
 
+static void test_deadline_remaining(void)
+{
+    CHECK(zb_deadline_remaining_ms(ZB_DEADLINE_INFINITE) == UINT64_MAX);
+    CHECK(!zb_deadline_expired(ZB_DEADLINE_INFINITE));
+    CHECK(zb_deadline_remaining_ms(ZB_DEADLINE_IMMEDIATE) == 0);
+    CHECK(zb_deadline_expired(ZB_DEADLINE_IMMEDIATE));
+
+    uint64_t remaining =
+        zb_deadline_remaining_ms(zb_deadline_after_ms(WAIT_TIMEOUT_MS));
+    CHECK(remaining > 0);
+    CHECK(remaining <= WAIT_TIMEOUT_MS);
+
+    /* A saturated finite deadline stays distinguishable from INFINITE. */
+    zb_deadline_t largest = zb_deadline_after_ms(UINT64_MAX - 1);
+    CHECK(zb_deadline_remaining_ms(largest) < UINT64_MAX);
+    CHECK(!zb_deadline_expired(largest));
+}
+
 static void test_mutex_try_lock(void)
 {
     zb_mutex_t mutex;
@@ -519,6 +537,7 @@ static void test_condition_timeout_and_mutex_reacquisition(void)
     zb_deadline_t deadline = zb_deadline_after_ms(20);
     CHECK_EQ_INT(wait_for_timeout(&cond, &mutex, deadline),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
+    CHECK(zb_deadline_expired(deadline));
     /* A realtime wait would misinterpret this monotonic deadline as past. */
     CHECK(zb_deadline_after_ms(1) > deadline);
     CHECK_EQ_INT(wait_for_timeout(&cond, &mutex, deadline),
@@ -926,6 +945,7 @@ int main(void)
     test_millisecond_deadlines();
     test_second_deadlines();
     test_second_deadline_saturation();
+    test_deadline_remaining();
 
     test_mutex_try_lock();
     test_mutex_contention();
