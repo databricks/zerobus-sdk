@@ -11,6 +11,7 @@ use tracing::{debug, error, warn};
 
 use super::types::IngestRequest;
 use super::ZerobusStream;
+use crate::grpc_status::GrpcStatus;
 use crate::{EncodedBatch, EncodedRecord, OffsetId, PreparedInput, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
@@ -186,7 +187,7 @@ impl ZerobusStream {
     pub(crate) fn check_open(&self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+            return Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                 "Stream closed",
             )));
         }
@@ -211,7 +212,7 @@ impl ZerobusStream {
                 |offset_id| async move {
                     let Some(stream_id) = self.stream_id.as_ref() else {
                         error!("Stream ID is None");
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        return Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                             "Stream ID is None",
                         )));
                     };
@@ -223,7 +224,7 @@ impl ZerobusStream {
         Ok(async move {
             rx.await.map_err(|err| {
                 error!(stream_id = %stream_id, "Failed to receive ack: {}", err);
-                ZerobusError::StreamClosedError(tonic::Status::internal("Failed to receive ack"))
+                ZerobusError::StreamClosedError(GrpcStatus::internal("Failed to receive ack"))
             })?
         })
     }
@@ -313,7 +314,7 @@ impl ZerobusStream {
                     cause,
                     "Stream capacity wait cancelled by terminal shutdown"
                 );
-                Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                     format!(
                         "Stream for table {table_name} terminated after {waited_ms} ms while waiting for capacity (max_inflight_requests: {max_inflight_requests}; cause: {cause})"
                     ),

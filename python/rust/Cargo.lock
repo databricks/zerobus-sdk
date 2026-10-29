@@ -562,6 +562,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rand 0.9.5",
  "reqwest",
+ "rustls-pki-types",
  "rustls-webpki",
  "serde",
  "serde_json",
@@ -3189,7 +3190,6 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
- "tonic",
  "tracing-subscriber",
 ]
 

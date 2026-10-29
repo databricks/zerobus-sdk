@@ -61,14 +61,13 @@ Add the SDK to your `Cargo.toml`:
 
 ```bash
 cargo add databricks-zerobus-ingest-sdk
-cargo add async-trait tonic
+cargo add async-trait
 cargo add prost prost-types
 cargo add tokio --features macros,rt-multi-thread
 ```
 **Why these dependencies?**
 - **`databricks-zerobus-ingest-sdk`** - The SDK itself
 - **`async-trait`** - Required when implementing the async `HeadersProvider` trait
-- **`tonic`** - Provides `transport::Endpoint` for custom `TlsConfig` implementations
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
@@ -591,21 +590,49 @@ let sdk = ZerobusSdk::builder()
 
 A `.no_tls()` shorthand on `ZerobusSdkBuilder` is also available behind the `testing` feature and is equivalent to the snippet above. Paired with `StreamBuilder::no_auth()` (also `testing`-gated, uses `NoAuthHeadersProvider`), it covers local testing against an unauthenticated plaintext server.
 
-For custom certificate handling, implement the `TlsConfig` trait:
+For custom certificate handling, describe the TLS setup with `TlsSettings`. A `TlsSettings` value implements `TlsConfig`, so you can pass it to the builder directly. The SDK trusts the operating system's CA certificates by default. You can add CA certificates, set a client identity for mutual TLS, and override the domain name:
 
 ```rust
-use databricks_zerobus_ingest_sdk::{TlsConfig, ZerobusResult};
-use tonic::transport::Endpoint;
+use databricks_zerobus_ingest_sdk::{TlsSettings, ZerobusSdk};
+use std::sync::Arc;
 
-struct MyTlsConfig { /* ... */ }
+let tls = TlsSettings::new()
+    .with_ca_certificate_pem(std::fs::read("private-ca.pem")?)
+    .with_client_identity_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
 
-impl TlsConfig for MyTlsConfig {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
-        // Custom TLS configuration logic
-        Ok(endpoint)
+let sdk = ZerobusSdk::builder()
+    .endpoint("https://<your-shard-id>.zerobus.<region>.azuredatabricks.net")
+    .unity_catalog_url("https://<your-workspace>.azuredatabricks.net")
+    .tls_config(Arc::new(tls))
+    .build()?;
+```
+
+Call `without_native_roots()` to trust only the CA certificates that you add. You must add at least one PEM certificate. The SDK rejects a CA entry that holds no certificate, such as a private key file. Use `with_domain_name(...)` to check the server certificate against a different domain name.
+
+If the SDK cannot use a CA certificate or a client identity that you set, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
+
+To read the certificates again for each new channel, for example to rotate them, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel:
+
+```rust
+use databricks_zerobus_ingest_sdk::{TlsConfig, TlsSettings, ZerobusResult};
+
+struct RotatingTlsConfig {
+    ca_path: std::path::PathBuf,
+}
+
+impl TlsConfig for RotatingTlsConfig {
+    fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
+        let ca_pem = std::fs::read(&self.ca_path).map_err(|e| {
+            databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
+                "Cannot read the CA certificate: {e}"
+            ))
+        })?;
+        Ok(TlsSettings::new().with_ca_certificate_pem(ca_pem))
     }
 }
 ```
+
+A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
 ### 3. Configure Authentication
 
@@ -1710,8 +1737,22 @@ Trait for TLS configuration strategies.
 
 ```rust
 pub trait TlsConfig: Send + Sync {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint>;
+    fn tls_settings(&self) -> ZerobusResult<TlsSettings>;
 }
+```
+
+### `TlsSettings`
+
+Describes the TLS setup of a gRPC channel. `TlsSettings` implements `TlsConfig`. The `Debug` output never prints certificate or key material.
+
+**Methods:**
+```rust
+pub fn new() -> Self                                  // TLS with the system CA certificates
+pub fn plaintext() -> Self                            // No TLS (requires `testing` feature)
+pub fn without_native_roots(self) -> Self             // Trust only the CA certificates you add
+pub fn with_ca_certificate_pem(self, pem: impl Into<Vec<u8>>) -> Self
+pub fn with_client_identity_pem(self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self
+pub fn with_domain_name(self, domain_name: impl Into<String>) -> Self
 ```
 
 ### `ZerobusError`
@@ -1723,6 +1764,31 @@ Error type for all SDK operations.
 pub fn is_retryable(&self) -> bool
 ```
 Returns `true` if the error can be automatically recovered by the SDK.
+
+`ZerobusError::CreateStreamError` and `ZerobusError::StreamClosedError` carry a `GrpcStatus`. Use `code()` to read the gRPC status code as a `GrpcCode`, and `message()` to read the message:
+
+```rust
+use databricks_zerobus_ingest_sdk::{GrpcCode, ZerobusError};
+
+match error {
+    ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Unauthenticated => {
+        // Refresh the credentials.
+    }
+    other => return Err(other),
+}
+```
+
+### `GrpcStatus` and `GrpcCode`
+
+`GrpcStatus` is the status that the server or the SDK reports for a failed stream. `GrpcCode` lists the 17 gRPC status codes and is `#[non_exhaustive]`. These types replace `tonic::Status` and `tonic::Code` in the public API, so a `tonic` upgrade does not change the SDK API.
+
+```rust
+impl GrpcStatus {
+    pub fn new(code: GrpcCode, message: impl Into<String>) -> Self
+    pub fn code(&self) -> GrpcCode
+    pub fn message(&self) -> &str
+}
+```
 
 ## Language Bindings
 
