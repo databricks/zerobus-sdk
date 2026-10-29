@@ -101,6 +101,43 @@ the call, so copy `error_message` if you need to keep it. All string,
 descriptor, and config inputs are copied before the async create call returns,
 but the `CZerobusSdk*` itself must remain valid until the callback fires.
 
+### Multiplexed streams (Beta)
+
+When one stream is the throughput bottleneck and global ordering is not
+required, a multiplexed stream opens several sub-streams to the same table and
+routes records round-robin across them. Ordering is preserved only within each
+sub-stream. Ingest calls return an opaque message ID instead of an offset:
+
+```c
+CResult r = {0};
+CStreamConfigurationOptions opts = zerobus_get_default_config();
+/* max_inflight_requests is split evenly across the sub-streams. */
+CZerobusMultiplexedStream *mux = zerobus_sdk_create_multiplexed_stream(
+    sdk, "catalog.schema.table", descriptor, descriptor_len,
+    client_id, client_secret, /* stream_count */ 4, &opts, &r);
+
+for (size_t i = 0; i < n; i++) {
+    /* Returns once queued; do not wait for each record. */
+    zerobus_multiplexed_stream_ingest_proto_record(mux, rec[i], rec_len[i], &r);
+    if (!r.success) { /* handle r.error_message, then free it */ }
+}
+zerobus_multiplexed_stream_flush(mux, &r);  /* wait once for every ack */
+zerobus_multiplexed_stream_close(mux, &r);
+zerobus_multiplexed_stream_free(mux);
+```
+
+- Message IDs are not ordered and may be negative. Check `r.success` rather
+  than the sign of the return value, and pass IDs only to
+  `zerobus_multiplexed_stream_wait_for_message_id` on the same stream.
+- Ack callbacks in `CStreamConfigurationOptions` receive message IDs, and
+  callbacks from different sub-streams may run concurrently, so
+  `ack_user_data` must be thread-safe.
+- With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one
+  headers callback serves every sub-stream. The FFI serializes calls into it.
+- If a sub-stream fails, the mux stops accepting records. Recover anything
+  unacknowledged with `zerobus_multiplexed_stream_get_unacked_records`.
+- Arrow Flight multiplexing is not yet exposed through the C FFI.
+
 ### Dynamic protobuf from a Unity Catalog schema (pure C)
 
 Build a protobuf descriptor and encode records straight from Unity Catalog

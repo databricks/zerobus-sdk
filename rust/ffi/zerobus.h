@@ -160,6 +160,8 @@ typedef struct CStreamConfigurationOptions {
    * callback object is destroyed, not merely until close() returns.
    * error_message is valid only during the call (copy to keep). Callbacks must
    * not unwind across the C boundary (panics are contained and logged).
+   * Multiplexed streams pass message IDs instead of offsets and may invoke the
+   * callbacks concurrently; see `zerobus_sdk_create_multiplexed_stream`.
    */
   void (*ack_on_ack)(int64_t offset_id, void *user_data);
   void (*ack_on_error)(int64_t offset_id, const char *error_message, void *user_data);
@@ -224,6 +226,15 @@ typedef struct CRecordArray {
 typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
                                          const struct CResult *result,
                                          void *user_data);
+
+/**
+ * Opaque handle for a multiplexed stream. Created by
+ * `zerobus_sdk_create_multiplexed_stream[_with_headers_provider]` and
+ * released by `zerobus_multiplexed_stream_free`.
+ */
+typedef struct CZerobusMultiplexedStream {
+  uint8_t _private[0];
+} CZerobusMultiplexedStream;
 
 /**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
@@ -842,6 +853,209 @@ void zerobus_free_error_message(char *message);
  * Get default stream configuration options
  */
 struct CStreamConfigurationOptions zerobus_get_default_config(void);
+
+/**
+ * Create a multiplexed stream with OAuth authentication (Beta).
+ *
+ * Opens `stream_count` sub-streams (1 to 64) to the same table and routes
+ * records round-robin across them. Use it when one stream is the throughput
+ * bottleneck and global ordering is not required: order is preserved only
+ * within each sub-stream. Construction is all-or-nothing; if any sub-stream
+ * fails to open, the opened ones are closed and NULL is returned.
+ *
+ * `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto (NULL for
+ * JSON streams). `options` may be NULL for defaults. Its
+ * `max_inflight_requests` is a budget for the whole mux, divided evenly
+ * across sub-streams, so it must be at least `stream_count`.
+ *
+ * Ack callbacks in `options` receive message IDs rather than offsets. Each
+ * sub-stream delivers its callbacks on its own background task, so callbacks
+ * from different sub-streams may run concurrently and in no global order;
+ * `ack_user_data` must tolerate concurrent access.
+ *
+ * Returns NULL on error; see `result` for details. Free the handle with
+ * `zerobus_multiplexed_stream_free`.
+ */
+struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream(struct CZerobusSdk *sdk,
+                                                                        const char *table_name,
+                                                                        const uint8_t *descriptor_proto_bytes,
+                                                                        uintptr_t descriptor_proto_len,
+                                                                        const char *client_id,
+                                                                        const char *client_secret,
+                                                                        uintptr_t stream_count,
+                                                                        const struct CStreamConfigurationOptions *options,
+                                                                        struct CResult *result);
+
+/**
+ * Create a multiplexed stream with a custom headers provider callback (Beta).
+ *
+ * Behaves like `zerobus_sdk_create_multiplexed_stream`, but authenticates
+ * with `headers_callback`. One provider is shared by every sub-stream; calls
+ * into `headers_callback` are serialized, so it need not be reentrant.
+ *
+ * Ownership of `user_data` follows
+ * `zerobus_sdk_create_stream_with_headers_provider`: once this function is
+ * called, the FFI owns it and invokes `free_user_data` (when set) exactly
+ * once, on failure before returning, or on success after the last sub-stream
+ * releases the provider.
+ */
+struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_headers_provider(struct CZerobusSdk *sdk,
+                                                                                              const char *table_name,
+                                                                                              const uint8_t *descriptor_proto_bytes,
+                                                                                              uintptr_t descriptor_proto_len,
+                                                                                              HeadersProviderCallback headers_callback,
+                                                                                              void *user_data,
+                                                                                              void (*free_user_data)(void *user_data),
+                                                                                              uintptr_t stream_count,
+                                                                                              const struct CStreamConfigurationOptions *options,
+                                                                                              struct CResult *result);
+
+/**
+ * Free a multiplexed stream handle.
+ *
+ * Call `zerobus_multiplexed_stream_close` first to flush pending records;
+ * freeing an open stream abandons them. Background `_nowait` tasks keep the
+ * stream alive until they finish.
+ */
+void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
+
+/**
+ * Ingest a protobuf-encoded record into the next sub-stream.
+ *
+ * Returns once the record is queued, with a message ID to pass to
+ * `zerobus_multiplexed_stream_wait_for_message_id`. Waits for room (up to 30
+ * seconds) when the chosen sub-stream is at capacity. Returns -1 on error.
+ * Valid message IDs can be negative, so check `result->success` rather than
+ * the sign of the return value.
+ */
+int64_t zerobus_multiplexed_stream_ingest_proto_record(struct CZerobusMultiplexedStream *mux,
+                                                       const uint8_t *data,
+                                                       uintptr_t data_len,
+                                                       struct CResult *result);
+
+/**
+ * Ingest a JSON record into the next sub-stream.
+ *
+ * Same return contract as `zerobus_multiplexed_stream_ingest_proto_record`.
+ */
+int64_t zerobus_multiplexed_stream_ingest_json_record(struct CZerobusMultiplexedStream *mux,
+                                                      const char *json_data,
+                                                      struct CResult *result);
+
+/**
+ * Ingest a batch of protobuf-encoded records into a single sub-stream.
+ *
+ * The whole batch lands on one sub-stream, and the returned message ID covers
+ * all of it. Returns -1 on error and -2 for an empty batch. Valid message IDs
+ * can be negative, so check `result->success` rather than the sign.
+ */
+int64_t zerobus_multiplexed_stream_ingest_proto_records(struct CZerobusMultiplexedStream *mux,
+                                                        const uint8_t *const *records,
+                                                        const uintptr_t *record_lens,
+                                                        uintptr_t num_records,
+                                                        struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records into a single sub-stream.
+ *
+ * Same return contract as `zerobus_multiplexed_stream_ingest_proto_records`.
+ */
+int64_t zerobus_multiplexed_stream_ingest_json_records(struct CZerobusMultiplexedStream *mux,
+                                                       const char *const *json_records,
+                                                       uintptr_t num_records,
+                                                       struct CResult *result);
+
+/**
+ * Ingest a protobuf record without waiting for it to be queued (fire-and-forget).
+ *
+ * Copies the record and returns immediately. `result` reports only argument
+ * validation errors; ingestion errors are discarded, but a sub-stream failure
+ * still surfaces from the next flush or close. Records submitted this way have
+ * no ordering guarantee relative to each other.
+ */
+void zerobus_multiplexed_stream_ingest_proto_record_nowait(struct CZerobusMultiplexedStream *mux,
+                                                           const uint8_t *data,
+                                                           uintptr_t data_len,
+                                                           struct CResult *result);
+
+/**
+ * Ingest a JSON record without waiting for it to be queued (fire-and-forget).
+ *
+ * Same contract as `zerobus_multiplexed_stream_ingest_proto_record_nowait`.
+ */
+void zerobus_multiplexed_stream_ingest_json_record_nowait(struct CZerobusMultiplexedStream *mux,
+                                                          const char *json_data,
+                                                          struct CResult *result);
+
+/**
+ * Ingest a batch of protobuf records without waiting (fire-and-forget).
+ *
+ * Copies every record before returning, so the caller may release its buffers
+ * immediately. Same error contract as
+ * `zerobus_multiplexed_stream_ingest_proto_record_nowait`.
+ */
+void zerobus_multiplexed_stream_ingest_proto_records_nowait(struct CZerobusMultiplexedStream *mux,
+                                                            const uint8_t *const *records,
+                                                            const uintptr_t *record_lens,
+                                                            uintptr_t num_records,
+                                                            struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records without waiting (fire-and-forget).
+ *
+ * Same contract as `zerobus_multiplexed_stream_ingest_proto_records_nowait`.
+ */
+void zerobus_multiplexed_stream_ingest_json_records_nowait(struct CZerobusMultiplexedStream *mux,
+                                                           const char *const *json_records,
+                                                           uintptr_t num_records,
+                                                           struct CResult *result);
+
+/**
+ * Wait until the record or batch behind `message_id` is acknowledged.
+ *
+ * For high throughput, prefer one `zerobus_multiplexed_stream_flush` after an
+ * ingest loop over waiting on every message ID.
+ */
+bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedStream *mux,
+                                                    int64_t message_id,
+                                                    struct CResult *result);
+
+/**
+ * Wait until every record queued on every sub-stream is acknowledged.
+ *
+ * A terminal sub-stream failure closes the mux for further ingestion; its
+ * unacknowledged records remain available via
+ * `zerobus_multiplexed_stream_get_unacked_records`.
+ */
+bool zerobus_multiplexed_stream_flush(struct CZerobusMultiplexedStream *mux,
+                                      struct CResult *result);
+
+/**
+ * Flush and close every sub-stream.
+ *
+ * Waits for in-progress ingest, flush, and wait calls on this mux to return
+ * first. On error, recover unacknowledged records with
+ * `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
+ * released with `zerobus_multiplexed_stream_free`.
+ */
+bool zerobus_multiplexed_stream_close(struct CZerobusMultiplexedStream *mux,
+                                      struct CResult *result);
+
+/**
+ * Returns whether the mux is closed, either explicitly or because a
+ * sub-stream failed. Also returns true while a close is in progress and for
+ * a null handle.
+ */
+bool zerobus_multiplexed_stream_is_closed(struct CZerobusMultiplexedStream *mux);
+
+/**
+ * Close the mux and return every record that was not acknowledged.
+ *
+ * Errors from the implicit close are ignored so recoverable records are still
+ * returned. Free the array with `zerobus_free_record_array`.
+ */
+struct CRecordArray zerobus_multiplexed_stream_get_unacked_records(struct CZerobusMultiplexedStream *mux,
+                                                                   struct CResult *result);
 
 /**
  * Build a protobuf schema from Unity Catalog table metadata JSON.
