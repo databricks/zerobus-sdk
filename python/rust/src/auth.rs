@@ -9,8 +9,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider as RustHeadersProvider, IdpTokenCallback, IdpTokenSupplier,
-    ZerobusError as RustError, ZerobusResult as RustResult,
+    GrpcCode, GrpcStatus, HeadersProvider as RustHeadersProvider, IdpTokenCallback,
+    IdpTokenSupplier, ZerobusError as RustError, ZerobusResult as RustResult,
 };
 
 use crate::common::intern_header_name;
@@ -118,7 +118,7 @@ impl RustHeadersProvider for HeadersProviderWrapper {
         })
         .map_err(|e: PyErr| {
             let msg = format!("Python HeadersProvider error: {}", e);
-            RustError::CreateStreamError(tonic::Status::new(tonic::Code::InvalidArgument, msg))
+            RustError::CreateStreamError(GrpcStatus::new(GrpcCode::InvalidArgument, msg))
         })?;
 
         // Convert Vec<(String, String)> to HashMap<&'static str, String>.

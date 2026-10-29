@@ -35,11 +35,15 @@ tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
 tonic-types = { workspace = true, optional = true }
+rustls-pki-types.workspace = true
 tracing.workspace = true
 http-body = { workspace = true, optional = true }
 hyper-http-proxy.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+# Not imported; these set a minimum version (see the workspace Cargo.toml).
+rustls-webpki.workspace = true
+webpki-roots.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
 futures.workspace = true

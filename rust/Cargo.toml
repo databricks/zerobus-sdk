@@ -8,6 +8,7 @@ members = [
     "examples/arrow",
     "tools/*",
     "tests",
+    "test-support",
 ]
 # Excluded until ffi/jni support Avro (#830). As a workspace member it would unify the sdk
 # `avro` feature onto ffi/jni, which don't handle Avro records yet. Build it standalone
@@ -33,6 +34,8 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-types = "0.14"
+# PEM parsing for `TlsSettings` validation. `pem` support starts at 1.9.
+rustls-pki-types = "1.9"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
@@ -54,6 +57,11 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 http-body = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Minimum versions that distrust the compromised eMudhra (emSign) CAs. The SDK
+# does not import these crates; declaring them makes upgrading the SDK enough
+# to get the fix, because a downstream Cargo.lock would otherwise keep older ones.
+rustls-webpki = { version = "0.103.16", default-features = false }
+webpki-roots = "1.0.11"
 
 # Error handling
 thiserror = "1.0"

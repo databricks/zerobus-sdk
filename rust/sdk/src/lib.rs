@@ -34,11 +34,24 @@
 #[cfg(feature = "avro")]
 use std::sync::Arc;
 
-pub mod databricks {
-    pub mod zerobus {
-        include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
+#[allow(dead_code, clippy::enum_variant_names)]
+mod proto {
+    pub mod databricks {
+        pub mod zerobus {
+            include!(concat!(env!("OUT_DIR"), "/databricks.zerobus.rs"));
+        }
     }
 }
+use proto::databricks;
+
+/// The generated wire-protocol module is private. Stable rustdoc doesn't check
+/// the pinned error code; nightly does.
+///
+/// ```compile_fail,E0603
+/// use databricks_zerobus_ingest_sdk::databricks;
+/// ```
+#[cfg(doctest)]
+struct GeneratedProtoIsPrivate;
 
 mod builder;
 mod callbacks;
@@ -46,6 +59,7 @@ mod client_warnings;
 mod default_token_factory;
 mod dynamic_proto;
 mod errors;
+mod grpc_status;
 mod headers_provider;
 mod landing_zone;
 mod multiplexed_stream;
@@ -76,6 +90,7 @@ pub use dynamic_proto::{
     MessageDescriptor, Value,
 };
 pub use errors::{SchemaValidationCause, ZerobusError};
+pub use grpc_status::{GrpcCode, GrpcStatus};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{
@@ -110,10 +125,10 @@ pub use stream::{
     ArrowCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch,
     TimeUnit, ZerobusArrowStream,
 };
-pub use stream_configuration::StreamConfigurationOptions;
+pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
-pub use tls_config::{SecureTlsConfig, TlsConfig};
+pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;

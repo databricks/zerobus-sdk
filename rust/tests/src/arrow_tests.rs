@@ -281,7 +281,10 @@ mod arrow_flight_tests {
                 .expect_err("close must observe the stored terminal error");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                     assert_eq!(status.message(), "permanent cleanup error");
                 }
                 other => panic!("expected the stored peer error, got {other:?}"),
@@ -1524,7 +1527,10 @@ mod arrow_flight_tests {
                 .expect_err("close must return the terminal peer error");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                 }
                 other => panic!("expected terminal stream error, got {other:?}"),
             }
@@ -2930,7 +2936,10 @@ mod arrow_flight_tests {
                 .expect_err("the post-deadline ACK must not replace the selected timeout");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::DeadlineExceeded
+                    );
                     assert_eq!(status.message(), "Flush timed out");
                 }
                 other => panic!("expected a flush timeout, got {other:?}"),
@@ -4319,7 +4328,10 @@ mod arrow_flight_tests {
                 .expect_err("close during recovery must preserve its current trigger");
             match error {
                 ZerobusError::CreateStreamError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(status.message(), "first reconnect failed");
                 }
                 other => panic!("expected the first attempt's reconnect error, got: {other:?}"),
@@ -6502,7 +6514,10 @@ mod arrow_flight_tests {
         fn assert_rotation_error(error: ZerobusError) {
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(
                         status.message(),
                         "Server requested graceful stream rotation"
@@ -6648,7 +6663,10 @@ mod arrow_flight_tests {
                 .expect_err("rotation must terminate when recovery is disabled");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(
                         status.message(),
                         "Server requested graceful stream rotation"
@@ -7091,7 +7109,10 @@ mod arrow_flight_tests {
                 .expect_err("peer error must win");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                     assert_eq!(status.message(), "post-EOF rejection");
                 }
                 other => panic!("expected permanent peer status, got {other:?}"),

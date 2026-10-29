@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::databricks;
 use databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ephemeral_stream_response::Payload as ResponsePayload,
@@ -17,19 +18,24 @@ use databricks::zerobus::{
     PersistentStreamRequest, PersistentStreamResponse, ResumeIngestStreamResponse,
     RetireStreamRequest, RetireStreamResponse,
 };
-use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 use tokio::time::sleep;
 use tokio_stream::Stream;
-use tonic::transport::{Identity, ServerTlsConfig};
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct MockResponseGate {
     semaphore: Semaphore,
+}
+
+impl Default for MockResponseGate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockResponseGate {
@@ -132,6 +138,12 @@ pub struct MockZerobusServer {
     persistent_open_fault: Arc<Mutex<Option<PersistentOpenFault>>>,
     /// One-shot disconnect after committing a persistent write but before ACKing it.
     fail_persistent_ack_once: Arc<AtomicBool>,
+}
+
+impl Default for MockZerobusServer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockZerobusServer {
@@ -738,11 +750,29 @@ pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn 
 #[allow(dead_code)]
 pub async fn start_mock_tls_server(
 ) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    start_mock_tls_server_with_client_ca(None).await
+}
+
+/// Starts the mock server with a runtime-generated TLS identity. The server
+/// rejects clients that do not present a certificate that chains to `client_ca_pem`.
+#[allow(dead_code)]
+pub async fn start_mock_mtls_server(
+    client_ca_pem: &[u8],
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    start_mock_tls_server_with_client_ca(Some(client_ca_pem)).await
+}
+
+async fn start_mock_tls_server_with_client_ca(
+    client_ca_pem: Option<&[u8]>,
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
     let CertifiedKey { cert, key_pair } =
         generate_simple_self_signed(vec!["localhost".to_string()])?;
     let cert_pem = cert.pem();
     let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
-    let tls = ServerTlsConfig::new().identity(identity);
+    let mut tls = ServerTlsConfig::new().identity(identity);
+    if let Some(client_ca_pem) = client_ca_pem {
+        tls = tls.client_ca_root(Certificate::from_pem(client_ca_pem));
+    }
     let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
     Ok((server, server_url, cert_pem.into_bytes()))
 }

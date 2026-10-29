@@ -18,7 +18,6 @@ use napi::{Env, JsFunction, JsGlobal, JsObject, JsString, JsUnknown, ValueType};
 use napi_derive::napi;
 
 use async_trait::async_trait;
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as RustRecordType;
 use databricks_zerobus_ingest_sdk::{
     DefaultTokenFactory, EncodedRecord as RustRecordPayload,
     HeadersProvider as RustHeadersProvider, ZerobusError as RustZerobusError,
@@ -1028,10 +1027,10 @@ impl ZerobusSdk {
         });
 
         let record_type = match opts.record_type {
-            Some(0) => RustRecordType::Json,
-            Some(1) => RustRecordType::Proto,
-            Some(2) => RustRecordType::Avro,
-            _ => RustRecordType::Proto,
+            Some(0) => RecordType::Json,
+            Some(1) => RecordType::Proto,
+            Some(2) => RecordType::Avro,
+            _ => RecordType::Proto,
         };
 
         let headers_tsfn = match headers_provider {
@@ -1098,13 +1097,13 @@ impl ZerobusSdk {
                 }
 
                 let builder = match record_type {
-                    RustRecordType::Json => builder.json(),
-                    RustRecordType::Avro => {
+                    RecordType::Json => builder.json(),
+                    RecordType::Avro => {
                         return Err(napi::Error::from_reason(
                             "Avro record type is not supported",
                         ))
                     }
-                    RustRecordType::Proto | RustRecordType::Unspecified => {
+                    RecordType::Proto => {
                         let desc = descriptor_proto.ok_or_else(|| {
                             napi::Error::from_reason(
                                 "Proto record type requires descriptor_proto on TableProperties",

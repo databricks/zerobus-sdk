@@ -264,13 +264,7 @@ bool zb_is_valid_grpc_metadata(const zb_metadata_t *header)
             return false;
         }
     }
-    for (size_t i = 0; i < header->value.len; ++i) {
-        unsigned char c = (unsigned char)header->value.data[i];
-        if (c < 0x20 || c > 0x7e) {
-            return false;
-        }
-    }
-    return true;
+    return zb_is_header_value(header->value);
 }
 
 nghttp2_nv zb_make_nghttp2_nv(const zb_metadata_t *header)

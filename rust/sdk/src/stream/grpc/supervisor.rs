@@ -24,6 +24,7 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
+use crate::grpc_status::{GrpcCode, GrpcStatus};
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -142,7 +143,7 @@ impl ZerobusStream {
                         )
                         .await
                         .map_err(|_| {
-                            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
                                 "Stream creation timed out",
                             ))
                         })
@@ -351,7 +352,7 @@ impl ZerobusStream {
                     // Mapping this to pass certain e2e tests.
                     // TODO: Remove this once we fix tests.
                     ZerobusError::StreamClosedError(status)
-                        if status.code() == tonic::Code::InvalidArgument =>
+                        if status.code() == GrpcCode::InvalidArgument =>
                     {
                         ZerobusError::InvalidArgument(status.message().to_string())
                     }

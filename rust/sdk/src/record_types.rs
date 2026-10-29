@@ -19,9 +19,9 @@ use crate::databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ingest_record_batch_request::Batch as IngestRequestBatch,
     ingest_record_request::Record as IngestRequestRecord, IngestRecordBatchRequest,
-    IngestRecordRequest, JsonRecordBatch, ProtoEncodedRecordBatch, RecordType,
+    IngestRecordRequest, JsonRecordBatch, ProtoEncodedRecordBatch,
 };
-use crate::{OffsetId, ZerobusError, ZerobusResult};
+use crate::{OffsetId, RecordType, ZerobusError, ZerobusResult};
 
 use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
 
@@ -311,7 +311,6 @@ impl EncodedBatch {
                 }
                 Ok(EncodedBatch::Avro(vec))
             }
-            _ => Err(mismatch()),
         }
     }
 

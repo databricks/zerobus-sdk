@@ -1,4 +1,3 @@
-mod mock_grpc;
 mod utils;
 
 use std::future::Future;
@@ -7,12 +6,12 @@ use std::task::Poll;
 use std::time::Duration;
 
 use databricks_zerobus_ingest_sdk::{
-    MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
+    GrpcCode, MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
 };
 use futures::poll;
-use mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 use tracing::info;
 use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 
 #[derive(Clone)]
 struct TestOpts {
@@ -845,7 +844,7 @@ mod failure_tests {
             .expect("poisoned flush should finish after the healthy acknowledgment")
             .expect_err("poisoned flush must return the stored lane failure");
         assert!(
-            matches!(&flush_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&flush_error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::PermissionDenied),
             "Expected stored PermissionDenied from poisoned flush, got {flush_error:?}"
         );
         let second_lane_error = mux
@@ -853,7 +852,7 @@ mod failure_tests {
             .await
             .expect_err("the second lane should surface its own failure");
         assert!(
-            matches!(&second_lane_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::Unauthenticated),
+            matches!(&second_lane_error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Unauthenticated),
             "Expected second lane's Unauthenticated error, got {second_lane_error:?}"
         );
 
@@ -866,7 +865,7 @@ mod failure_tests {
         );
         let ingest_after = mux.ingest_record(b"record3".to_vec()).await;
         assert!(
-            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied),
             "Expected terminal error on ingest after poison, got {:?}",
             ingest_after
         );
@@ -964,7 +963,7 @@ mod failure_tests {
             .await
             .expect("flush should finish after the healthy lane acknowledges");
         assert!(
-            matches!(&flush_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&flush_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied),
             "Expected terminal PermissionDenied from flush, got {flush_result:?}"
         );
         assert!(
@@ -974,7 +973,7 @@ mod failure_tests {
 
         let ingest_after = mux.ingest_record(b"data".to_vec()).await;
         assert!(
-            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied),
             "Expected terminal error after poison, got {:?}",
             ingest_after
         );
@@ -1181,7 +1180,7 @@ mod failure_tests {
             .await
             .expect_err("poisoned mux close should preserve the terminal failure");
         assert!(
-            matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&close_error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::PermissionDenied),
             "Expected PermissionDenied to beat the healthy lane timeout, got {close_error:?}"
         );
 
@@ -1317,7 +1316,7 @@ mod failure_tests {
             match result {
                 Ok(message_id) => successes.push((waiter_index, message_id)),
                 Err(ZerobusError::StreamClosedError(status))
-                    if status.code() == tonic::Code::PermissionDenied =>
+                    if status.code() == GrpcCode::PermissionDenied =>
                 {
                     errors += 1
                 }
@@ -1340,7 +1339,7 @@ mod failure_tests {
             .await
             .expect_err("ingest after poison must return the stored lane failure");
         assert!(
-            matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == tonic::Code::PermissionDenied),
+            matches!(&error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::PermissionDenied),
             "Expected stored PermissionDenied after capacity-wait failure, got {error:?}"
         );
         assert_eq!(mock_server.get_write_count().await, 2);

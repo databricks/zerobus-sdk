@@ -164,6 +164,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::grpc_status::{GrpcCode, GrpcStatus};
     use crate::{
         landing_zone::LandingZone, MultiplexedStream, NoAuthHeadersProvider, StreamType,
         TableProperties,
@@ -243,7 +244,7 @@ mod tests {
             .await
             .expect("retry must not flush the stopped lane for another second");
         assert!(
-            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded)
+            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::DeadlineExceeded)
         );
         let records: Vec<_> = mux.get_unacked_records().await.unwrap().collect();
         assert!(
@@ -272,7 +273,7 @@ mod tests {
         stream.supervisor_task = tokio::spawn(async move {
             cancelled.cancelled().await;
             let error =
-                ZerobusError::StreamClosedError(tonic::Status::permission_denied("terminal close"));
+                ZerobusError::StreamClosedError(GrpcStatus::permission_denied("terminal close"));
             closed.store(true, Ordering::Relaxed);
             error_tx.send(Some(error.clone())).unwrap();
             terminal.cancel();
@@ -288,7 +289,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied)
+                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied)
             );
         }
     }

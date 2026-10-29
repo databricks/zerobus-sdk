@@ -38,7 +38,6 @@ use crate::callbacks::AckCallback;
 #[cfg(feature = "arrow-flight")]
 use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{
@@ -47,6 +46,7 @@ use crate::headers_provider::{
 use crate::stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "avro")]
 use crate::AvroSchema;
+use crate::RecordType;
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
 };

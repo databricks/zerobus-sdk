@@ -1,6 +1,5 @@
 #[allow(dead_code)]
 mod mock_arrow_flight;
-mod mock_grpc;
 mod utils;
 
 use std::ffi::OsString;
@@ -9,23 +8,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    ConnectorFactory, NoTlsConfig, ProxyConnector, TlsConfig, ZerobusError, ZerobusResult,
+    ConnectorFactory, NoTlsConfig, ProxyConnector, TlsConfig, TlsSettings, ZerobusResult,
     ZerobusSdk,
 };
 use mock_arrow_flight::{
     start_mock_flight_server, start_mock_tls_flight_server, MockFlightResponse,
 };
-use mock_grpc::{start_mock_server, start_mock_tls_server, MockResponse};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
 use tokio_rustls::TlsAcceptor;
-use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::info;
 use utils::{
     create_test_arrow_schema, create_test_record_batch, setup_tracing, TestHeadersProvider,
 };
+use zerobus_test_support::mock_grpc::{start_mock_server, start_mock_tls_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -59,13 +57,11 @@ struct TestTlsConfig {
 }
 
 impl TlsConfig for TestTlsConfig {
-    fn configure_endpoint(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(&self.ca_pem))
-            .domain_name("localhost");
-        endpoint
-            .tls_config(tls)
-            .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)
+    fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
+        Ok(TlsSettings::new()
+            .without_native_roots()
+            .with_ca_certificate_pem(self.ca_pem.clone())
+            .with_domain_name("localhost"))
     }
 }
 

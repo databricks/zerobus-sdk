@@ -11,6 +11,9 @@
 
 #include "zerobus/common.h"
 
+/* Largest table name or record the encoders accept, in bytes. */
+#define ZB_MAX_ENCODED_PAYLOAD ((size_t)INT32_MAX - 64u)
+
 /*
  * See "Known protobuf-c compatibility behavior" in
  * tests/src/internal/proto/zerobus_service_test.c for accepted encoding and

@@ -16,6 +16,7 @@ use super::transport::{InboundMessage, InboundStream};
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::{CloseStreamSignal, IngestRecordResponse};
+use crate::grpc_status::GrpcStatus;
 use crate::{OffsetId, StreamConfigurationOptions, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
@@ -108,10 +109,9 @@ impl ZerobusStream {
                             Some(offset) => offset,
                             None => {
                                 error!("Missing ack offset in server response");
-                                let error =
-                                    ZerobusError::StreamClosedError(tonic::Status::internal(
-                                        "Missing ack offset in server response",
-                                    ));
+                                let error = ZerobusError::StreamClosedError(GrpcStatus::internal(
+                                    "Missing ack offset in server response",
+                                ));
                                 let _ = server_error_tx.send(Some(error.clone()));
                                 return Err(error);
                             }
@@ -169,7 +169,7 @@ impl ZerobusStream {
                     }
                     Ok(Ok(Some(InboundMessage::Other))) => {
                         error!("Unexpected response from server");
-                        let error = ZerobusError::StreamClosedError(tonic::Status::internal(
+                        let error = ZerobusError::StreamClosedError(GrpcStatus::internal(
                             "Unexpected response from server",
                         ));
                         let _ = server_error_tx.send(Some(error.clone()));
@@ -177,7 +177,7 @@ impl ZerobusStream {
                     }
                     Ok(Ok(None)) => {
                         info!("Server closed the stream without errors.");
-                        let error = ZerobusError::StreamClosedError(tonic::Status::ok(
+                        let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
                             "Stream closed by server without errors.",
                         ));
                         let _ = server_error_tx.send(Some(error.clone()));
@@ -185,7 +185,8 @@ impl ZerobusStream {
                     }
                     Ok(Err(status)) => {
                         error!("Unexpected response from server {status:?}");
-                        let error = ZerobusError::StreamClosedError(status);
+                        let error =
+                            ZerobusError::StreamClosedError(GrpcStatus::from_tonic(&status));
                         let _ = server_error_tx.send(Some(error.clone()));
                         return Err(error);
                     }
@@ -197,7 +198,7 @@ impl ZerobusStream {
                                 options.server_lack_of_ack_timeout_ms
                             );
                             let error = ZerobusError::StreamClosedError(
-                                tonic::Status::deadline_exceeded("Server ack timeout"),
+                                GrpcStatus::deadline_exceeded("Server ack timeout"),
                             );
                             let _ = server_error_tx.send(Some(error.clone()));
                             return Err(error);
@@ -240,7 +241,7 @@ impl ZerobusStream {
         pending_batches: usize,
     ) -> ZerobusResult<()> {
         let pending_batches = OffsetId::try_from(pending_batches).map_err(|_| {
-            ZerobusError::StreamClosedError(tonic::Status::invalid_argument(
+            ZerobusError::StreamClosedError(GrpcStatus::invalid_argument(
                 "Pending batch count exceeds the supported offset range",
             ))
         })?;
@@ -248,14 +249,14 @@ impl ZerobusStream {
             last_acked_offset
                 .checked_add(pending_batches)
                 .ok_or_else(|| {
-                    ZerobusError::StreamClosedError(tonic::Status::invalid_argument(
+                    ZerobusError::StreamClosedError(GrpcStatus::invalid_argument(
                         "Greatest sent offset exceeds the supported offset range",
                     ))
                 })?;
 
         if ack_offset < last_acked_offset || ack_offset > greatest_sent_offset {
             return Err(ZerobusError::StreamClosedError(
-                tonic::Status::invalid_argument(format!(
+                GrpcStatus::invalid_argument(format!(
                     "Invalid durability ACK offset {ack_offset}; expected {last_acked_offset}..={greatest_sent_offset}"
                 )),
             ));

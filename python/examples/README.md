@@ -47,12 +47,14 @@ python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
 python examples/sync_example_avro.py      # Avro
 python examples/sync_example_arrow.py     # Arrow Flight
+python examples/sync_example_persistent.py # Persistent stream (set ZEROBUS_PERSISTENT_STREAM_ID to resume)
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
 python examples/async_example_avro.py     # Avro
 python examples/async_example_arrow.py    # Arrow Flight
+python examples/async_example_persistent.py # Persistent stream (set ZEROBUS_PERSISTENT_STREAM_ID to resume)
 ```
 
 ## Examples Overview
@@ -94,6 +96,14 @@ stream.flush()
 # Option 2: Pass pre-serialized bytes (client controls serialization)
 # offset = stream.ingest_record_offset(record.SerializeToString())
 ```
+
+#### Persistent stream
+**Files:** `sync_example_persistent.py`, `async_example_persistent.py`
+
+Creates a persistent (Eos) stream, or resumes one, and ingests JSON records. On the first
+run, leave `ZEROBUS_PERSISTENT_STREAM_ID` unset. The example prints the new `stream_id`. Save
+it, then set `ZEROBUS_PERSISTENT_STREAM_ID` to that value on a later run to resume the same
+stream. Delivery into Delta stays exactly-once.
 
 #### JSON
 **Files:** `sync_example_json.py`, `async_example_json.py`
