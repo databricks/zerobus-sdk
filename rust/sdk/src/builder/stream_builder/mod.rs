@@ -540,7 +540,9 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the compression for Arrow Flight payloads (Arrow streams only).
     ///
-    /// Defaults to [`ArrowCompression::IpcZstd`](crate::ArrowCompression::IpcZstd). See
+    /// Defaults to [`ArrowCompression::FallbackToLegacy`](crate::ArrowCompression::FallbackToLegacy),
+    /// which applies the deprecated `ipc_compression` setting: IPC zstd unless changed.
+    /// Of this and `ipc_compression`, the last call wins. See
     /// [`ArrowCompression`](crate::ArrowCompression) for the options.
     #[cfg(feature = "arrow-flight")]
     pub fn compression(mut self, compression: crate::ArrowCompression) -> Self {
