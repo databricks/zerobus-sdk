@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::databricks;
 use databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ephemeral_stream_response::Payload as ResponsePayload,
@@ -17,7 +18,6 @@ use databricks::zerobus::{
     PersistentStreamRequest, PersistentStreamResponse, ResumeIngestStreamResponse,
     RetireStreamRequest, RetireStreamResponse,
 };
-use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
@@ -30,6 +30,12 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug)]
 pub struct MockResponseGate {
     semaphore: Semaphore,
+}
+
+impl Default for MockResponseGate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockResponseGate {
@@ -132,6 +138,12 @@ pub struct MockZerobusServer {
     persistent_open_fault: Arc<Mutex<Option<PersistentOpenFault>>>,
     /// One-shot disconnect after committing a persistent write but before ACKing it.
     fail_persistent_ack_once: Arc<AtomicBool>,
+}
+
+impl Default for MockZerobusServer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockZerobusServer {

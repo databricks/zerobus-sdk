@@ -20,6 +20,7 @@ rust/
 ├── jni/          # JNI crate — Java Native Interface bindings
 ├── examples/     # JSON, proto, Arrow Flight, and Avro ingestion examples
 ├── tests/        # Integration tests
+├── test-support/ # Mock gRPC server + its own generated server bindings (test-only)
 └── tools/        # Schema generation CLI
 ```
 

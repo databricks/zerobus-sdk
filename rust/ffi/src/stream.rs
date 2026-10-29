@@ -1,7 +1,6 @@
 //! Stream creation and record ingestion FFI surface.
 
 use crate::common::*;
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusResult, ZerobusStream,
 };
@@ -91,7 +90,7 @@ async fn build_stream_from_parts(
     let record_type = options
         .as_ref()
         .map(|c| c_record_type(c.record_type))
-        .unwrap_or(RecordType::Proto);
+        .unwrap_or(CRecordType::Proto);
 
     let base = match auth {
         StreamCreateAuth::OAuth {
@@ -108,7 +107,7 @@ async fn build_stream_from_parts(
     };
 
     let mut builder = match record_type {
-        RecordType::Proto => {
+        CRecordType::Proto => {
             let desc = descriptor_proto.ok_or_else(|| {
                 ZerobusError::InvalidArgument(
                     "Proto descriptor is required for Proto record type".to_string(),
@@ -116,13 +115,13 @@ async fn build_stream_from_parts(
             })?;
             base.compiled_proto(desc)
         }
-        RecordType::Json => base.json(),
-        RecordType::Avro => {
+        CRecordType::Json => base.json(),
+        CRecordType::Avro => {
             return Err(ZerobusError::InvalidArgument(
                 "Avro record type is not supported".to_string(),
             ))
         }
-        RecordType::Unspecified => {
+        CRecordType::Unspecified => {
             return Err(ZerobusError::InvalidArgument(
                 "Record type is not specified".to_string(),
             ))

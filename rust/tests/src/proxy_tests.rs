@@ -1,6 +1,5 @@
 #[allow(dead_code)]
 mod mock_arrow_flight;
-mod mock_grpc;
 mod utils;
 
 use std::ffi::OsString;
@@ -15,7 +14,6 @@ use databricks_zerobus_ingest_sdk::{
 use mock_arrow_flight::{
     start_mock_flight_server, start_mock_tls_flight_server, MockFlightResponse,
 };
-use mock_grpc::{start_mock_server, start_mock_tls_server, MockResponse};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -26,6 +24,7 @@ use tracing::info;
 use utils::{
     create_test_arrow_schema, create_test_record_batch, setup_tracing, TestHeadersProvider,
 };
+use zerobus_test_support::mock_grpc::{start_mock_server, start_mock_tls_server, MockResponse};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
