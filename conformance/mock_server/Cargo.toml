@@ -1,0 +1,38 @@
+[package]
+name = "zerobus-mock-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Conformance mock Zerobus server: Zerobus data plane + MockAdmin control plane"
+# This crate lives outside the rust/ directory, so point explicitly at the workspace root
+# (a sibling, not an ancestor) to inherit [workspace.dependencies] and unify crate versions.
+workspace = "../../rust"
+
+[lib]
+name = "zerobus_mock_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zerobus-mock-server"
+path = "src/main.rs"
+
+[dependencies]
+# Zerobus proto types come from the shared test-support crate (which generates the server
+# bindings from sdk/zerobus_service.proto); the SDK itself no longer re-exports them publicly.
+# Shared crates use `workspace = true` to unify versions.
+zerobus-test-support = { path = "../../rust/test-support" }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tonic = { workspace = true, features = ["transport", "codegen"] }
+tonic-prost = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "net", "signal", "time"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+protoc-bin-vendored = "3.0.0"
+
+[lints.clippy]
+double_must_use = "allow"
