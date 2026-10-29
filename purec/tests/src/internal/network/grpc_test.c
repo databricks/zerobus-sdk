@@ -704,6 +704,8 @@ static void test_goaway(void)
     peer_headers(CALL_STREAM, END, FIELDS(ok_only));
     CHECK_EQ_INT(pump(), 0);
     CHECK_EQ_INT(ctx[0].result.status, ZEROBUS_STATUS_OK);
+    /* New calls fail to open. */
+    CHECK_EQ_INT(add_call(2), ZEROBUS_STATUS_UNAVAILABLE);
 
     /* An error GOAWAY fails even the calls it covers. The result keeps the
      * peer's code; the stream is reset with CANCEL. */

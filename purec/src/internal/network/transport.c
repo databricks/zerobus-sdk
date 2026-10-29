@@ -367,10 +367,11 @@ fail_mutex:
 
 /* ---- call operations --------------------------------------------------- */
 
-zerobus_status_t
-zb_transport_call_open(zb_transport_t *transport, zerobus_string_view_t path,
-                       const zb_metadata_t *headers, size_t header_count,
-                       zb_deadline_t deadline, zb_transport_call_t **out_call)
+zerobus_status_t zb_transport_call_open(zb_transport_t *transport,
+                                        zerobus_string_view_t path,
+                                        const zerobus_headers_t *headers,
+                                        zb_deadline_t deadline,
+                                        zb_transport_call_t **out_call)
 {
     if (!transport || !out_call) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
@@ -399,7 +400,6 @@ zb_transport_call_open(zb_transport_t *transport, zerobus_string_view_t path,
 
     const zb_grpc_call_config_t config = {.path = path,
                                           .headers = headers,
-                                          .header_count = header_count,
                                           .context = call,
                                           .pull_send = pull_send,
                                           .on_message = message_received,

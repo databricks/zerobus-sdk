@@ -394,7 +394,7 @@ static zerobus_status_t open_transport(const server_t *server,
 static zerobus_status_t open_call(zb_transport_t *transport, const char *path,
                                   zb_transport_call_t **out)
 {
-    return zb_transport_call_open(transport, sv(path), NULL, 0,
+    return zb_transport_call_open(transport, sv(path), NULL,
                                   zb_deadline_after_ms(TIMEOUT_MS), out);
 }
 
@@ -509,9 +509,8 @@ static void test_open_failures(void)
     }
     CHECK_EQ_INT(zb_transport_open(NULL, deadline, &transport),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    CHECK_EQ_INT(
-        zb_transport_call_open(NULL, sv(ECHO), NULL, 0, deadline, &call),
-        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_transport_call_open(NULL, sv(ECHO), NULL, deadline, &call),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(zb_transport_tx(NULL) == NULL && zb_transport_rx(NULL) == NULL &&
           zb_transport_get_result(NULL) == NULL);
     CHECK_EQ_INT(zb_transport_half_close(NULL),
@@ -569,7 +568,7 @@ static void test_calls(SSL_CTX *tls)
     REQUIRE_OK(open_transport(&server, &transport));
     REQUIRE_OK(open_call(transport, ECHO, &cancelled));
     REQUIRE_OK(open_call(transport, ECHO, &echo));
-    CHECK_EQ_INT(zb_transport_call_open(transport, sv(ECHO), NULL, 0,
+    CHECK_EQ_INT(zb_transport_call_open(transport, sv(ECHO), NULL,
                                         ZB_DEADLINE_IMMEDIATE, &late),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     CHECK(late == NULL);
