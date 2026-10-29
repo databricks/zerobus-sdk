@@ -11,10 +11,9 @@
  * Deadlines apply only to semaphore waits. */
 typedef struct zb_landing_zone zb_landing_zone_t;
 
-/* Capacity must be a power of two, at least 4, and strictly less than
- * ZB_SEM_VALUE_MAX. */
-zerobus_status_t zb_landing_zone_new(size_t capacity,
-                                     zb_landing_zone_t **out_zone);
+/* Admits at most size requests at once. size must be at least 1 and strictly
+ * less than ZB_SEM_VALUE_MAX. */
+zerobus_status_t zb_landing_zone_new(size_t size, zb_landing_zone_t **out_zone);
 
 /* Takes ownership of the request on success. */
 zerobus_status_t zb_landing_zone_push(zb_landing_zone_t *zone,

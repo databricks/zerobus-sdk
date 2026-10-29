@@ -106,7 +106,7 @@ static void test_invalid_arguments(void)
     CHECK_EQ_INT(zb_landing_zone_new(ZB_SEM_VALUE_MAX, &unchanged),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(unchanged == zone);
-    CHECK_EQ_INT(zb_landing_zone_new(3, &unchanged),
+    CHECK_EQ_INT(zb_landing_zone_new(0, &unchanged),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(unchanged == zone);
     CHECK_EQ_INT(
@@ -229,13 +229,14 @@ static void test_full_waits_and_pop_releases_space(void)
     zb_landing_zone_t *zone = NULL;
     zb_ingest_request_t *pending = NULL, *borrowed = NULL, *owned = NULL;
     zerobus_offset_t offset = 99;
-    REQUIRE_OK(zb_landing_zone_new(4, &zone));
-    for (unsigned int i = 0; i < 4; i++) {
+    /* A limit below the ring's power-of-two size still blocks. */
+    REQUIRE_OK(zb_landing_zone_new(5, &zone));
+    for (unsigned int i = 0; i < 5; i++) {
         REQUIRE_OK(push_request(zone, (char)('0' + i), NULL));
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
                                            &borrowed, NULL));
     }
-    pending = zb_ingest_request_new(sv("4"));
+    pending = zb_ingest_request_new(sv("5"));
     REQUIRE(pending != NULL);
     CHECK_EQ_INT(
         zb_landing_zone_push(zone, pending, ZB_DEADLINE_IMMEDIATE, &offset),
@@ -244,17 +245,17 @@ static void test_full_waits_and_pop_releases_space(void)
     CHECK_EQ_INT(zb_landing_zone_push(zone, pending, deadline, &offset),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     CHECK_EQ_INT(offset, 99);
-    CHECK_EQ_INT(pending->data[0], '4');
+    CHECK_EQ_INT(pending->data[0], '5');
     owned = zb_landing_zone_pop(zone, &offset);
     REQUIRE(owned != NULL);
     CHECK_EQ_INT(offset, 0);
     REQUIRE_OK(zb_landing_zone_push(zone, pending, deadline, &offset));
     pending = NULL;
-    CHECK_EQ_INT(offset, 4);
+    CHECK_EQ_INT(offset, 5);
     REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                        &offset));
-    CHECK_EQ_INT(borrowed->data[0], '4');
-    CHECK_EQ_INT(offset, 4);
+    CHECK_EQ_INT(borrowed->data[0], '5');
+    CHECK_EQ_INT(offset, 5);
 
 zb_cleanup:
     zb_ingest_request_free(owned);

@@ -19,8 +19,10 @@ typedef struct zb_stream_config {
     size_t max_ingest_payload_bytes;
 } zb_stream_config_t;
 
+#define ZB_MAX_INFLIGHT_REQUESTS ((size_t)1 << 24)
+
 static const zb_stream_config_t zb_stream_config_default = {
-    .max_inflight_requests = (size_t)1 << 20,
+    .max_inflight_requests = 1 << 16,
     .recovery = true,
     .recovery_timeout_ms = 15000,
     .recovery_backoff_ms = 2000,

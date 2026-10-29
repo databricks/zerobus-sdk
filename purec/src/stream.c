@@ -4,8 +4,8 @@
 
 #include "error.h"
 #include "internal/common/utils.h"
-#include "internal/platform/concurrency.h"
 #include "internal/platform/log.h"
+#include "internal/proto/zerobus_service.h"
 #include "sdk.h"
 #include "stream.h"
 #include "zerobus/sdk.h"
@@ -133,15 +133,31 @@ zerobus_status_t zerobus_stream_builder_set_max_inflight_requests(
     if (status != ZEROBUS_STATUS_OK) {
         return status;
     }
-    /* The landing zone's capacity rule. */
-    size_t n = max_inflight_requests;
-    if (n < 4 || n >= ZB_SEM_VALUE_MAX || (n & (n - 1)) != 0) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "max in-flight requests must be a power of two from 4 "
-                       "to 2^30, got %zu",
-                       n);
+    if (max_inflight_requests == 0 ||
+        max_inflight_requests > ZB_MAX_INFLIGHT_REQUESTS) {
+        return zb_fail(
+            out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+            "max in-flight requests must be in range [1, %zu], got %zu",
+            ZB_MAX_INFLIGHT_REQUESTS, max_inflight_requests);
     }
-    builder->config.max_inflight_requests = n;
+    builder->config.max_inflight_requests = max_inflight_requests;
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zerobus_stream_builder_set_max_ingest_payload_bytes(
+    zerobus_stream_builder_t *builder, size_t max_bytes,
+    zerobus_error_t **out_error)
+{
+    zerobus_status_t status = check_setter_args(builder, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
+    }
+    if (max_bytes == 0 || max_bytes > ZB_MAX_ENCODED_PAYLOAD) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "max ingest payload must be in range [1, %zu], got %zu",
+                       (size_t)ZB_MAX_ENCODED_PAYLOAD, max_bytes);
+    }
+    builder->config.max_ingest_payload_bytes = max_bytes;
     return ZEROBUS_STATUS_OK;
 }
 
@@ -195,10 +211,15 @@ zerobus_status_t zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(
     zerobus_error_t **out_error)
 {
     zerobus_status_t status = check_setter_args(builder, out_error);
-    if (status == ZEROBUS_STATUS_OK) {
-        builder->config.server_lack_of_ack_timeout_ms = timeout_ms;
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
-    return status;
+    if (timeout_ms == 0) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "server lack-of-ack timeout must be non-zero");
+    }
+    builder->config.server_lack_of_ack_timeout_ms = timeout_ms;
+    return ZEROBUS_STATUS_OK;
 }
 
 zerobus_status_t
@@ -220,17 +241,6 @@ zerobus_status_t zerobus_stream_builder_set_stream_paused_max_wait_time_ms(
     zerobus_status_t status = check_setter_args(builder, out_error);
     if (status == ZEROBUS_STATUS_OK) {
         builder->config.stream_paused_max_wait_time_ms = wait_ms;
-    }
-    return status;
-}
-
-zerobus_status_t zerobus_stream_builder_set_max_ingest_payload_bytes(
-    zerobus_stream_builder_t *builder, size_t max_bytes,
-    zerobus_error_t **out_error)
-{
-    zerobus_status_t status = check_setter_args(builder, out_error);
-    if (status == ZEROBUS_STATUS_OK) {
-        builder->config.max_ingest_payload_bytes = max_bytes;
     }
     return status;
 }

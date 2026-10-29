@@ -275,9 +275,8 @@ static void test_stream_oauth_transactional(void)
     zerobus_sdk_free(sdk);
 }
 
-/* Every option setter accepts a value, max in-flight requests is checked
- * against the landing zone's capacity rule, and the size limit carries over to
- * the built stream. */
+/* Every option setter accepts a value, max in-flight requests is bounded, and
+ * the size limit carries over to the built stream. */
 static void test_stream_options(void)
 {
     zerobus_sdk_t *sdk = NULL;
@@ -292,8 +291,10 @@ static void test_stream_options(void)
         zerobus_stream_builder_set_oauth(stb, sv("id"), sv("secret"), NULL));
 
     CHECK_OK(zerobus_stream_builder_set_max_inflight_requests(
-        stb, (size_t)1 << 30, NULL));
-    CHECK_OK(zerobus_stream_builder_set_max_inflight_requests(stb, 4, NULL));
+        stb, (size_t)1 << 24, NULL));
+    CHECK_OK(
+        zerobus_stream_builder_set_max_inflight_requests(stb, 1000000, NULL));
+    CHECK_OK(zerobus_stream_builder_set_max_inflight_requests(stb, 1, NULL));
     CHECK_OK(zerobus_stream_builder_set_recovery(stb, false, NULL));
     CHECK_OK(zerobus_stream_builder_set_recovery_timeout_ms(stb, 1, NULL));
     CHECK_OK(zerobus_stream_builder_set_recovery_backoff_ms(stb, 1, NULL));
@@ -305,8 +306,8 @@ static void test_stream_options(void)
                                                                        NULL));
     CHECK_OK(zerobus_stream_builder_set_max_ingest_payload_bytes(stb, 4, NULL));
 
-    /* Not a power of two, or outside 4 to 2^30. */
-    static const size_t bad_inflight[] = {0, 2, 6, (size_t)1 << 31};
+    /* Outside 1 to 2^24. */
+    static const size_t bad_inflight[] = {0, ((size_t)1 << 24) + 1};
     for (size_t i = 0; i < sizeof(bad_inflight) / sizeof(bad_inflight[0]);
          ++i) {
         CHECK_EQ_INT(zerobus_stream_builder_set_max_inflight_requests(
@@ -316,6 +317,16 @@ static void test_stream_options(void)
         zerobus_error_free(err);
         err = NULL;
     }
+
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_max_ingest_payload_bytes(stb, 0, NULL),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zerobus_stream_builder_set_max_ingest_payload_bytes(
+                     stb, SIZE_MAX, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(stb, 0, NULL),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
 
     REQUIRE_OK(zerobus_stream_builder_build(stb, &stream, NULL));
     CHECK_EQ_INT(
@@ -333,8 +344,12 @@ static void test_stream_options(void)
         ZEROBUS_STATUS_INVALID_ARGUMENT);
     REQUIRE(err != NULL);
     const zerobus_error_t *seeded = err;
-    CHECK_EQ_INT(zerobus_stream_builder_set_recovery(stb, true, &err),
-                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_max_ingest_payload_bytes(stb, 1, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(
+        zerobus_stream_builder_set_server_lack_of_ack_timeout_ms(stb, 1, &err),
+        ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(err == seeded);
 
 zb_cleanup:
