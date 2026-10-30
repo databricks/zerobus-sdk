@@ -149,6 +149,31 @@ impl ZerobusSdk {
         crate::PersistentStreamBuilder::new(StreamBuilder::new(self))
     }
 
+    /// Creates a new builder for a unary ingestion client (Beta).
+    ///
+    /// In development: this API can change. It is available behind the `unary`
+    /// feature.
+    ///
+    /// A unary client is bound to one table and sends each batch as a single
+    /// request, without opening a stream. It is meant for clients that ingest
+    /// sparsely; for continuous ingestion, use a stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let client = sdk
+    ///     .unary_client_builder()
+    ///     .table("catalog.schema.events")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    /// ```
+    #[cfg(feature = "unary")]
+    pub fn unary_client_builder(&self) -> crate::UnaryClientBuilder<'_> {
+        crate::UnaryClientBuilder::new(self)
+    }
+
     /// Creates a new SDK instance with explicit configuration.
     ///
     /// This is used internally by the builder pattern. `sdk_identifier` is the

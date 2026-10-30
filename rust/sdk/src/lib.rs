@@ -82,6 +82,8 @@ mod token_cache;
 pub use apache_avro::types::Value as AvroValue;
 #[cfg(feature = "eos")]
 pub use builder::PersistentStreamBuilder;
+#[cfg(feature = "unary")]
+pub use builder::UnaryClientBuilder;
 pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
