@@ -28,7 +28,7 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 - **High-throughput ingestion**: Optimized for high-volume data ingestion with native Rust implementation
 - **Automatic recovery**: Built-in retry and recovery mechanisms for transient failures
 - **Flexible configuration**: Customizable stream behavior and timeouts
-- **Multiple serialization formats**: Support for JSON, Protocol Buffers, and Arrow Flight ingestion with optional LZ4 / ZSTD compression
+- **Multiple serialization formats**: Support for JSON, Protocol Buffers, Avro *(Beta)*, and Arrow Flight ingestion with optional LZ4 / ZSTD compression
 - **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) - automatically handles serialization
 - **Batch ingestion**: Ingest multiple records with a single acknowledgment for higher throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
@@ -90,13 +90,14 @@ npm run build
 
 ### Choose Your Serialization Format
 
-The SDK supports three ingestion formats. Protocol Buffers is the default record format and recommended for production row-oriented workloads:
+The SDK supports four ingestion formats. Protocol Buffers is the default record format and recommended for production row-oriented workloads:
 
 - **Protocol Buffers (Default)** - Strongly-typed schemas, efficient binary encoding, better performance. This is the default format.
 - **JSON** - Simple, no schema compilation needed. Good for getting started quickly or when schema flexibility is needed.
 - Arrow Flight - High-performance columnar ingestion for applications that already produce Arrow data. See the [Arrow example](examples/arrow/README.md).
+- **Avro** *(Beta)* - Row-oriented encoding against a writer schema. Set `avroSchema` on `TableProperties`; object encoding uses the optional `avsc` dependency. See the [Avro example](examples/avro/README.md).
 
-> **Note:** If you don't specify `recordType`, the SDK will use Protocol Buffers by default. To use JSON, explicitly set `recordType: RecordType.Json`.
+> **Note:** The record format follows the schema on `TableProperties`: a `descriptorProto` selects Protocol Buffers, an `avroSchema` selects Avro, and neither selects JSON when `recordType` is `RecordType.Json`. If you don't specify `recordType` and give no schema, the SDK uses Protocol Buffers.
 
 ### Acknowledgments and throughput
 
@@ -471,6 +472,58 @@ protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports 
 
 Both are necessary for Protocol Buffers ingestion!
 
+### Option 3: Using Avro (Beta)
+
+Avro ingestion encodes records against a **writer schema** you declare once, on
+`TableProperties.avroSchema` (the schema is sent to the server at stream creation and used
+to encode records). Object encoding uses the optional [`avsc`](https://www.npmjs.com/package/avsc)
+dependency — install it with `npm install avsc`. Pre-encoded Avro bytes (a `Buffer` or
+`Uint8Array`) are passed through unchanged and need no dependency; they must be bare Avro
+binary datums written with the writer schema — container files, single-object encoding, and
+Confluent-framed bytes (e.g. from a schema registry) are not accepted. In a record object,
+keys must match schema field names exactly (unknown keys are dropped), and a missing field
+takes the schema default.
+
+> **Beta.** The feature is in development. The published (CI-built) release binaries include
+> Avro; a from-source build enables it with `npm run build:avro`.
+
+```typescript
+import { ZerobusSdk, TableProperties, RecordType } from '@databricks/zerobus-ingest-sdk';
+
+const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+
+// The writer schema lives on TableProperties and selects the Avro record format.
+const avroSchema = JSON.stringify({
+  type: 'record',
+  name: 'Order',
+  fields: [
+    { name: 'id', type: 'long' },
+    { name: 'customer_name', type: 'string' },
+  ],
+});
+const tableProperties: TableProperties = { tableName: 'catalog.schema.orders', avroSchema };
+
+const stream = await sdk.createStream(tableProperties, CLIENT_ID, CLIENT_SECRET);
+
+// Ingest a record object (encoded against the schema), then flush once.
+await stream.ingestRecordOffset({ id: 1n, customer_name: 'Alice' }); // queue only — do NOT wait here
+await stream.flush();                                                // wait once for all pending acks
+await stream.close();
+```
+
+`recordType` is optional and defaults to `RecordType.Avro` when `avroSchema` is set; if you
+pass it explicitly it must agree with the schema. `avroSchema` is mutually exclusive with
+`descriptorProto`.
+
+**Value conventions:** `long` / BIGINT fields take a JavaScript `BigInt` (e.g. `1n`) so the
+full 64-bit range is preserved (a plain `number` loses precision past 2^53);
+`date`, `timestamp-millis` / `-micros`, and `local-timestamp-millis` / `-micros` fields accept
+a `Date` (read as UTC); `date` also accepts a `'YYYY-MM-DD'` string and reads a `Date` as its
+UTC calendar day. For `["int","long"]`
+a `number` selects `int` and a `BigInt` selects `long`; a same-type union such as
+`["float","double"]` takes the wrapped form `{ double: 1.5 }`. See the
+[Avro examples](examples/avro/README.md) for the full set of conventions.
+
 ## Usage Examples
 
 The source repository contains complete, runnable examples in `examples/`.
@@ -613,7 +666,7 @@ const stream = await sdk.createStream(
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `recordType` | `RecordType.Proto` | Serialization format: `RecordType.Json` or `RecordType.Proto` |
+| `recordType` | `RecordType.Proto` | Optional serialization format (`Json` / `Proto` / `Avro`); the schema on `TableProperties` selects it |
 | `maxInflightRequests` | 1,000,000 | Maximum number of unacknowledged requests |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15,000 | Timeout for recovery operations (ms) |
@@ -1016,7 +1069,8 @@ Configuration for the target table.
 ```typescript
 interface TableProperties {
     tableName: string;              // Fully qualified table name (e.g., "catalog.schema.table")
-    descriptorProto?: string;       // Base64-encoded protobuf descriptor (required for Protocol Buffers)
+    descriptorProto?: string;       // Base64-encoded protobuf descriptor (Protocol Buffers)
+    avroSchema?: string;            // Avro writer schema as JSON (Avro); mutually exclusive with descriptorProto
 }
 ```
 
@@ -1043,7 +1097,7 @@ Configuration options for stream behavior.
 
 ```typescript
 interface StreamConfigurationOptions {
-    recordType?: RecordType;              // RecordType.Json or RecordType.Proto. Default: RecordType.Proto
+    recordType?: RecordType;              // Optional; the schema on TableProperties selects the format. Default: RecordType.Proto
     maxInflightRequests?: number;         // Default: 1,000,000
     recovery?: boolean;                   // Default: true
     recoveryTimeoutMs?: number;           // Default: 15,000
@@ -1056,7 +1110,8 @@ interface StreamConfigurationOptions {
 
 enum RecordType {
     Json = 0,   // JSON encoding
-    Proto = 1   // Protocol Buffers encoding
+    Proto = 1,  // Protocol Buffers encoding
+    Avro = 2    // Avro encoding
 }
 ```
 

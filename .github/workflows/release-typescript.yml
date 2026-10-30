@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       macos-binaries-release:
-        description: "Optional GitHub Release tag with zerobus-ingest-sdk.darwin-*.node files to add for macOS. Those binaries must include Arrow Flight (npm run build:arrow). Leave empty to skip macOS."
+        description: "Optional GitHub Release tag with zerobus-ingest-sdk.darwin-*.node files to add for macOS. Those binaries must include Arrow Flight and Avro (npm run build:all). Leave empty to skip macOS."
         required: false
         type: string
         default: ""
@@ -69,7 +69,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build
-        run: npm run build:arrow -- --target ${{ matrix.target }}
+        run: npm run build:all -- --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -91,7 +91,7 @@ jobs:
           if-no-files-found: error
 
   # Darwin .node files are not compiled here. Added binaries must include
-  # Arrow Flight (`npm run build:arrow`).
+  # Arrow Flight and Avro (`npm run build:all`).
   import-macos:
     if: inputs.macos-binaries-release != ''
     runs-on:

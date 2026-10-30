@@ -2,8 +2,8 @@
   "name": "@databricks/zerobus-ingest-sdk",
   "version": "1.4.0",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "wrapper.js",
+  "types": "wrapper.d.ts",
   "typesVersions": {
     "*": {
       "utils/descriptor": [
@@ -31,6 +31,9 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "wrapper.js",
+    "wrapper.d.ts",
+    "avro.js",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -61,8 +64,12 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:arrow": "napi build --platform --release --features arrow-flight",
+    "build:avro": "napi build --platform --release --features avro",
+    "build:all": "napi build --platform --release --features arrow-flight,avro",
     "build:debug": "napi build --platform",
     "build:debug:arrow": "napi build --platform --features arrow-flight",
+    "build:debug:avro": "napi build --platform --features avro",
+    "build:debug:all": "napi build --platform --features arrow-flight,avro",
     "build:proto": "mkdir -p examples/generated && pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto && pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js && protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto",
     "test": "tsx --test test/unit.test.ts test/integration.test.ts",
     "test:unit": "tsx --test test/unit.test.ts",
@@ -73,7 +80,9 @@
     "example:json:batch": "tsx examples/json/batch.ts",
     "example:proto:single": "tsx examples/proto/single.ts",
     "example:proto:batch": "tsx examples/proto/batch.ts",
-    "example:arrow": "tsx examples/arrow/batch.ts"
+    "example:arrow": "tsx examples/arrow/batch.ts",
+    "example:avro:single": "tsx examples/avro/single.ts",
+    "example:avro:batch": "tsx examples/avro/batch.ts"
   },
   "optionalDependencies": {
     "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.4.0",
@@ -86,10 +95,14 @@
     "protobufjs": "^8.7.1"
   },
   "peerDependencies": {
-    "apache-arrow": "^18.0.0"
+    "apache-arrow": "^18.0.0",
+    "avsc": "^5.7.9"
   },
   "peerDependenciesMeta": {
     "apache-arrow": {
+      "optional": true
+    },
+    "avsc": {
       "optional": true
     }
   },
@@ -97,6 +110,7 @@
     "@napi-rs/cli": "^2.18.0",
     "@types/node": "^20.0.0",
     "apache-arrow": "^18.1.0",
+    "avsc": "^5.7.9",
     "dotenv": "^17.2.3",
     "protobufjs-cli": "^2.6.1",
     "tsx": "^4.21.0",
