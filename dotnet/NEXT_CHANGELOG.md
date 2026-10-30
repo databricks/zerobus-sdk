@@ -22,6 +22,14 @@
   (`CreateStreamWithHeadersProviderAsync`) creation paths. Tracks the FFI
   signature change to `zerobus_sdk_create_stream_with_headers_provider` and
   `zerobus_sdk_create_stream_with_headers_provider_async`. No public API change.
+- Fixed a race in stream disposal. The count of in-flight asynchronous operations
+  and its "drained" signal were updated separately, so `Dispose()`,
+  `DisposeAsync()`, `Close()` or `RecreateStream(...)` could treat the stream as
+  drained while an asynchronous operation was still registered, and close or free
+  the native stream while that operation could still use it.
+- `ZerobusStream.DisposeAsync()` (and `await using`) no longer blocks the calling
+  thread while asynchronous operations such as `FlushAsync()` are in flight; it
+  awaits them, then closes the stream.
 
 ### Documentation
 
