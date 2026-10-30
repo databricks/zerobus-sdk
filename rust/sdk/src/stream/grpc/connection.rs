@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use prost::Message;
 use tokio::time::Duration;
-use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -20,7 +19,7 @@ use super::transport::{
 };
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::grpc_status::GrpcStatus;
-use crate::headers_provider::insert_header_metadata;
+use crate::headers_provider::grpc_metadata_from_headers;
 use crate::RecordType;
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
@@ -115,33 +114,6 @@ impl super::ZerobusStream {
         result
     }
 
-    /// Reserved keys are matched case-insensitively, as tonic lowercases every key on insert.
-    fn build_stream_metadata(
-        headers: std::collections::HashMap<&'static str, String>,
-        table_name_for_log: &str,
-    ) -> ZerobusResult<tonic::metadata::MetadataMap> {
-        let mut stream_metadata = tonic::metadata::MetadataMap::new();
-        for (key, value) in headers {
-            if key.eq_ignore_ascii_case("x-databricks-zerobus-table-name") {
-                let table_name = MetadataValue::try_from(value.as_str())
-                    .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
-                stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
-            } else if key.eq_ignore_ascii_case("authorization") {
-                let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
-                    error!(table_name = %table_name_for_log, "authorization token is not a valid HTTP header value");
-                    ZerobusError::InvalidUCTokenError(
-                        "authorization token is not a valid HTTP header value".to_string(),
-                    )
-                })?;
-                auth_value.set_sensitive(true);
-                stream_metadata.insert("authorization", auth_value);
-            } else {
-                insert_header_metadata(&mut stream_metadata, key, &value)?;
-            }
-        }
-        Ok(stream_metadata)
-    }
-
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     async fn create_stream_connection_inner(
         mut channel: ZerobusClient<Channel>,
@@ -152,7 +124,7 @@ impl super::ZerobusStream {
     ) -> ZerobusResult<StreamConnection> {
         let outbound = transport::make_outbound(kind);
         let headers = headers_provider.get_headers().await?;
-        let stream_metadata = Self::build_stream_metadata(headers, &table_properties.table_name)?;
+        let stream_metadata = grpc_metadata_from_headers(headers, &table_properties.table_name)?;
 
         let (sink, mut inbound) =
             transport::open_rpc(outbound, &mut channel, stream_metadata).await?;
@@ -316,24 +288,5 @@ mod tests {
             stream_id: "other-id".to_string(),
         };
         assert!(ZerobusStream::validate_open_response(&kind, opened).is_err());
-    }
-
-    #[test]
-    fn mixed_case_reserved_headers_keep_reserved_handling() {
-        let headers = std::collections::HashMap::from([
-            ("Authorization", "Bearer secret".to_string()),
-            ("X-Databricks-Zerobus-Table-Name", "bad\nname".to_string()),
-        ]);
-        let err = ZerobusStream::build_stream_metadata(headers.clone(), "t").unwrap_err();
-        assert!(matches!(err, ZerobusError::InvalidTableName(_)), "{err:?}");
-
-        let mut headers = headers;
-        headers.insert("X-Databricks-Zerobus-Table-Name", "c.s.t".to_string());
-        let metadata = ZerobusStream::build_stream_metadata(headers, "t").unwrap();
-        assert!(metadata.get("authorization").unwrap().is_sensitive());
-        assert_eq!(
-            metadata.get("x-databricks-zerobus-table-name").unwrap(),
-            "c.s.t"
-        );
     }
 }
