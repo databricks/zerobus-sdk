@@ -58,7 +58,8 @@ set_tests_properties(internal_platform_log_test PROPERTIES ENVIRONMENT
 
 # Suppresses TSan's lock-order report from inside libcrypto, for the tests
 # that use OpenSSL; see tsan.supp. Replaces CI's TSAN_OPTIONS for them.
-set_tests_properties(internal_network_tls_test internal_network_connection_test
+set_tests_properties(sdk_test stream_test
+                     internal_network_tls_test internal_network_connection_test
                      internal_network_transport_test internal_network_http_client_test
                      PROPERTIES ENVIRONMENT
   "TSAN_OPTIONS=halt_on_error=1 suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp")

@@ -3,6 +3,7 @@
 
 #include <stdatomic.h>
 
+#include "internal/network/tls.h"
 #include "zerobus/common.h"
 
 struct zerobus_sdk {
@@ -14,6 +15,8 @@ struct zerobus_sdk {
     char *application_name;
     uint64_t token_refresh_buffer_ms;
     bool connection_per_stream;
+    /* Trusts the system's roots for an https uc_endpoint; NULL for http. */
+    zb_tls_ctx_t *uc_tls_context;
 };
 
 /* Caller must hold a live, non-NULL SDK reference; release with sdk_free. */

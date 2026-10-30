@@ -6,7 +6,12 @@
 #include "headers_provider.h"
 #include "internal/common/utils.h"
 #include "internal/network/grpc_utils.h"
+#include "internal/oauth/oauth.h"
 #include "internal/platform/log.h"
+#include "sdk.h" /* IWYU pragma: keep */
+#include "stream.h"
+#include "zerobus/common.h"
+#include "zerobus/error.h"
 
 struct zerobus_headers_provider {
     atomic_size_t ref_cnt;
@@ -283,9 +288,7 @@ zerobus_status_t zerobus_static_headers_provider_new(
 /* ---- oauth provider ---------------------------------------------------- */
 
 struct oauth_state {
-    char *uc_endpoint;
-    char *workspace_id;
-    char *table;
+    const zerobus_stream_t *stream; /* borrowed */
     char *client_id;
     char *client_secret; /* zeroed on free */
 };
@@ -293,30 +296,42 @@ struct oauth_state {
 static zerobus_status_t ZEROBUS_CALL
 oauth_get_headers(void *user_data, zerobus_headers_t *headers)
 {
-    char *token = NULL;
-    /* TODO: fetch the token for the provider's table from the Unity Catalog
-     * endpoint. */
-    (void)user_data;
-    if (token == NULL) {
-        return ZEROBUS_STATUS_UNIMPLEMENTED;
+    const struct oauth_state *state = (const struct oauth_state *)user_data;
+    const zerobus_stream_t *stream = state->stream;
+    const zerobus_sdk_t *sdk = stream->sdk;
+    zb_fetched_token_t token = {0};
+    zerobus_error_t *error = NULL;
+    zerobus_status_t status = zb_oauth_fetch_token(
+        sdk->uc_tls_context, sdk->uc_endpoint, sdk->workspace_id, stream->table,
+        state->client_id, state->client_secret,
+        zb_deadline_after_ms(stream->config.recovery_timeout_ms), &token,
+        &error);
+    if (status != ZEROBUS_STATUS_OK) {
+        zerobus_string_view_t message = {0};
+        if (error != NULL) {
+            message = zerobus_error_message(error);
+        }
+        ZB_ERROR("OAuth token fetch failed%s%.*s", message.len != 0 ? ": " : "",
+                 (int)message.len, message.data);
+        zerobus_error_free(error);
+        return status;
     }
 
     static const char prefix[] = "Bearer ";
     const size_t prefix_len = sizeof(prefix) - 1;
-    size_t token_len = strlen(token);
+    size_t token_len = strlen(token.token);
     size_t len = prefix_len + token_len;
     char *value = (char *)malloc(len);
     if (value == NULL) {
         ZB_ERROR("authorization header allocation failed");
-        zb_secure_free_cstr(token);
+        zb_fetched_token_clear(&token);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     memcpy(value, prefix, prefix_len);
-    memcpy(value + prefix_len, token, token_len);
-    zb_secure_free_cstr(token);
-    zerobus_status_t status =
-        zerobus_headers_add(headers, zerobus_string_view("authorization"),
-                            (zerobus_string_view_t){value, len}, NULL);
+    memcpy(value + prefix_len, token.token, token_len);
+    zb_fetched_token_clear(&token);
+    status = zerobus_headers_add(headers, zerobus_string_view("authorization"),
+                                 (zerobus_string_view_t){value, len}, NULL);
     zb_secure_free(value, len);
     return status;
 }
@@ -324,18 +339,14 @@ oauth_get_headers(void *user_data, zerobus_headers_t *headers)
 static void ZEROBUS_CALL oauth_destroy(void *user_data)
 {
     struct oauth_state *state = (struct oauth_state *)user_data;
-    free(state->uc_endpoint);
-    free(state->workspace_id);
-    free(state->table);
     free(state->client_id);
     zb_secure_free_cstr(state->client_secret);
     free(state);
 }
 
 zerobus_status_t
-zb_oauth_headers_provider_new(const char *uc_endpoint, const char *workspace_id,
-                              const char *table, const char *client_id,
-                              const char *client_secret,
+zb_oauth_headers_provider_new(const zerobus_stream_t *stream,
+                              const char *client_id, const char *client_secret,
                               zerobus_headers_provider_t **out_provider)
 {
     struct oauth_state *state = (struct oauth_state *)calloc(1, sizeof(*state));
@@ -343,14 +354,10 @@ zb_oauth_headers_provider_new(const char *uc_endpoint, const char *workspace_id,
         ZB_ERROR("OAuth provider allocation failed");
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
-    state->uc_endpoint = zb_strdup(uc_endpoint);
-    state->workspace_id = zb_strdup(workspace_id);
-    state->table = zb_strdup(table);
+    state->stream = stream;
     state->client_id = zb_strdup(client_id);
     state->client_secret = zb_strdup(client_secret);
-    if (state->uc_endpoint == NULL || state->workspace_id == NULL ||
-        state->table == NULL || state->client_id == NULL ||
-        state->client_secret == NULL) {
+    if (state->client_id == NULL || state->client_secret == NULL) {
         ZB_ERROR("OAuth provider configuration allocation failed");
         oauth_destroy(state);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;

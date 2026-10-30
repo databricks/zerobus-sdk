@@ -1,7 +1,15 @@
-/* Unit tests for header sets and headers providers (headers_provider.c). */
+/* Unit tests for header sets and headers providers (headers_provider.c). The
+ * OAuth provider fetches from a Unity Catalog played by the scripted HTTP
+ * server on a loopback port. */
+#define _GNU_SOURCE
+
+#include <stdio.h>
 #include <string.h>
 
 #include "headers_provider.h"
+#include "http_server.h"
+#include "sdk.h"
+#include "stream.h"
 #include "test_common.h"
 
 /* ---- helpers ----------------------------------------------------------- */
@@ -68,6 +76,45 @@ static zerobus_status_t new_counting(zerobus_get_headers_fn get_headers,
             *out_provider, count_invalidation, NULL);
     }
     return status;
+}
+
+/* A stream whose SDK points at a Unity Catalog played by server. */
+typedef struct {
+    http_server_t server;
+    bool started;
+    char reply[256];
+    char origin[32];
+    struct zerobus_sdk sdk;
+    struct zerobus_stream stream;
+} oauth_fixture_t;
+
+/* Starts the server, which answers every token request with status_line and
+ * body, and sets up the stream for table c.s.t with the default timeouts. */
+static bool oauth_fixture_start(oauth_fixture_t *f, const char *status_line,
+                                const char *body)
+{
+    snprintf(f->reply, sizeof(f->reply),
+             "HTTP/1.1 %s\r\nContent-Length: %zu\r\n\r\n%s", status_line,
+             strlen(body), body);
+    f->server.reply[0] = f->reply;
+    f->started = http_server_start(&f->server);
+    snprintf(f->origin, sizeof(f->origin), "http://127.0.0.1:%u",
+             (unsigned)f->server.port);
+    f->sdk = (struct zerobus_sdk){.uc_endpoint = f->origin,
+                                  .workspace_id = (char *)"123"};
+    f->stream = (struct zerobus_stream){.sdk = &f->sdk,
+                                        .table = (char *)"c.s.t",
+                                        .config = zb_stream_config_default};
+    return f->started;
+}
+
+/* Stops the server, if it runs, so its fields can be read. */
+static void oauth_fixture_stop(oauth_fixture_t *f)
+{
+    if (f->started) {
+        f->started = false;
+        http_server_stop(&f->server);
+    }
 }
 
 /* ---- tests ------------------------------------------------------------- */
@@ -424,20 +471,49 @@ zb_cleanup:
     zerobus_headers_provider_free(provider);
 }
 
-/* Not implemented yet: get fails with UNIMPLEMENTED and adds nothing. */
+/* Each get adds the authorization header with a token fetched for it. */
 static void test_oauth_provider(void)
 {
+    oauth_fixture_t f = {0};
     zerobus_headers_provider_t *provider = NULL;
     zerobus_headers_t headers = {0};
+    REQUIRE(oauth_fixture_start(
+        &f, "200 OK", "{\"access_token\":\"tok\",\"expires_in\":3600}"));
+    REQUIRE_OK(
+        zb_oauth_headers_provider_new(&f.stream, "id", "secret", &provider));
 
-    REQUIRE_OK(zb_oauth_headers_provider_new("https://ws.cloud.example.com",
-                                             "123", "c.s.t", "id", "secret",
-                                             &provider));
+    CHECK_OK(zb_headers_provider_get(provider, &headers, NULL));
+    CHECK(headers.count == 1 &&
+          strcmp(headers.items[0].name, "authorization") == 0 &&
+          strcmp(headers.items[0].value, "Bearer tok") == 0);
+    zb_headers_clear(&headers);
+    CHECK_OK(zb_headers_provider_get(provider, &headers, NULL));
+    oauth_fixture_stop(&f);
+    /* Each get fetched a token of its own. */
+    CHECK_EQ_INT(f.server.served, 2);
+
+zb_cleanup:
+    oauth_fixture_stop(&f);
+    zb_headers_clear(&headers);
+    zerobus_headers_provider_free(provider);
+}
+
+/* A failed fetch fails get, which adds nothing. */
+static void test_oauth_provider_failure(void)
+{
+    oauth_fixture_t f = {0};
+    zerobus_headers_provider_t *provider = NULL;
+    zerobus_headers_t headers = {0};
+    REQUIRE(oauth_fixture_start(&f, "503 Service Unavailable", ""));
+    REQUIRE_OK(
+        zb_oauth_headers_provider_new(&f.stream, "id", "secret", &provider));
+
     CHECK_EQ_INT(zb_headers_provider_get(provider, &headers, NULL),
-                 ZEROBUS_STATUS_UNIMPLEMENTED);
+                 ZEROBUS_STATUS_UNAVAILABLE);
     CHECK(headers.count == 0);
 
 zb_cleanup:
+    oauth_fixture_stop(&f);
     zb_headers_clear(&headers);
     zerobus_headers_provider_free(provider);
 }
@@ -457,5 +533,6 @@ int main(void)
     test_static_provider_invalid();
     test_static_provider_no_headers();
     test_oauth_provider();
+    test_oauth_provider_failure();
     TEST_MAIN_RETURN();
 }
