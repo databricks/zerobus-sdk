@@ -78,6 +78,8 @@ mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
 mod token_cache;
+#[cfg(feature = "unary")]
+mod unary_client;
 
 #[cfg(feature = "avro")]
 pub use apache_avro::types::Value as AvroValue;
@@ -134,6 +136,8 @@ pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
+#[cfg(feature = "unary")]
+pub use unary_client::UnaryClient;
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;
