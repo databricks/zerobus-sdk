@@ -77,6 +77,10 @@ set(ZEROBUS_SOURCES
   src/internal/proto/zerobus_service.c
   src/internal/network/grpc.c
   src/internal/network/grpc_utils.c
+  src/internal/network/channel.c
+  src/internal/network/connection.c
+  src/internal/network/io.c
+  src/internal/network/transport.c
   src/internal/landing_zone.c
   src/error.c
   src/headers_provider.c
@@ -106,7 +110,6 @@ target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
 target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          ${CMAKE_CURRENT_SOURCE_DIR}/src
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/src
   PRIVATE "${GENERATED_DIR}")
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c_testing PRIVATE c_std_11)

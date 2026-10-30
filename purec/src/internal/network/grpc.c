@@ -589,6 +589,11 @@ zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
     if (grpc->failure != ZEROBUS_STATUS_OK) {
         return grpc->failure;
     }
+    /* After a GOAWAY, nghttp2 still queues a request but refuses its stream
+     * only when sending it, so fail the open now. */
+    if (!nghttp2_session_check_request_allowed(grpc->session)) {
+        return ZEROBUS_STATUS_UNAVAILABLE;
+    }
     /* Keeps only the callbacks: the request fields are borrowed. */
     *call = (zb_grpc_call_t){.grpc = grpc,
                              .config = {.context = config->context,
