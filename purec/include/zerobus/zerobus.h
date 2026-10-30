@@ -4,9 +4,7 @@
  * Includes the whole public surface. Per-area headers can be included directly:
  * common.h, error.h, headers_provider.h, sdk.h, stream.h.
  *
- * The SDK is under early development: the functions validate inputs and honor
- * the documented status/ownership rules, but the networking core is not
- * implemented yet.
+ * The SDK is under early development: the API may still change before 1.0.
  *
  * Logging: set ZEROBUS_LOG_LEVEL before launching the application to one of
  * off, error, warn, info, debug, trace (lowercase). Each level includes more
