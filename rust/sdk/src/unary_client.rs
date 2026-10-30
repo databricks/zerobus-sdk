@@ -1,8 +1,9 @@
 //! Unary ingestion client (Beta): one `InsertRecords` call per batch, no stream.
 //!
 //! [`UnaryClient::ingest_records`] converts the records, checks that each one is
-//! exactly one valid JSON object, joins them into one JSON array (the request's
-//! `records_json` body), and sends it with the same retry policy as initial
+//! exactly one valid JSON object, joins them into one JSON array or into JSON
+//! Lines (the request's `records_json` body), and sends it with the same retry
+//! policy as initial
 //! stream creation. Each attempt is bounded by `server_lack_of_ack_timeout_ms`.
 //! The server answers only once the batch is durable, so a successful call has
 //! nothing left to flush or acknowledge.
@@ -29,6 +30,17 @@ pub(crate) struct UnaryOptions {
     pub(crate) recovery_backoff_ms: u64,
     pub(crate) server_lack_of_ack_timeout_ms: u64,
     pub(crate) max_ingest_payload_bytes: usize,
+    pub(crate) body: UnaryBody,
+}
+
+/// How the records are joined into the request body, chosen with the
+/// builder's format setter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnaryBody {
+    /// `[r0,r1,...]`, from `.json()`.
+    JsonArray,
+    /// `r0\nr1\n...` without a trailing newline, from `.json_lines()`.
+    JsonLines,
 }
 
 /// A client that ingests JSON records into one table without opening a stream (Beta).
@@ -176,8 +188,11 @@ impl UnaryClient {
         I: IntoIterator<Item = T>,
         T: Into<PreparedInput>,
     {
-        let Some(records_json) =
-            build_request_body(records, self.options.max_ingest_payload_bytes)?
+        let Some(records_json) = build_request_body(
+            records,
+            self.options.max_ingest_payload_bytes,
+            self.options.body,
+        )?
         else {
             return Ok(());
         };
@@ -276,14 +291,18 @@ impl UnaryClient {
     }
 }
 
-/// Builds the `records_json` body: the records joined into one JSON array.
-/// Returns `None` for an empty batch, which is not sent.
+/// Builds the `records_json` body: the records joined into one JSON array, or
+/// into JSON Lines. Returns `None` for an empty batch, which is not sent.
 ///
 /// Runs before any network I/O, in this order: convert the records (a
 /// non-JSON record fails), skip an empty batch, validate each record, check
 /// the body size, then join.
 #[allow(clippy::result_large_err)]
-fn build_request_body<I, T>(records: I, max_payload_bytes: usize) -> ZerobusResult<Option<Vec<u8>>>
+fn build_request_body<I, T>(
+    records: I,
+    max_payload_bytes: usize,
+    body_kind: UnaryBody,
+) -> ZerobusResult<Option<Vec<u8>>>
 where
     I: IntoIterator<Item = T>,
     T: Into<PreparedInput>,
@@ -297,33 +316,40 @@ where
         return Ok(None);
     }
 
-    for (index, record) in records.iter().enumerate() {
+    records.iter().enumerate().try_for_each(|(index, record)| {
         validate_json_object(record).map_err(|problem| {
             ZerobusError::InvalidArgument(format!(
                 "record {index} is not a single JSON object: {problem}"
             ))
-        })?;
-    }
+        })
+    })?;
 
-    // The record bytes, n - 1 commas, and 2 brackets. Unlike on streams, the
-    // whole body counts, because the server limits the whole request.
-    let body_len = records.iter().map(String::len).sum::<usize>() + records.len() + 1;
+    // Unlike on streams, the whole body counts, because the server limits the
+    // whole request: the record bytes plus n - 1 separators, and 2 brackets
+    // for an array.
+    let record_bytes = records.iter().map(String::len).sum::<usize>();
+    let (body_len, shape) = match body_kind {
+        UnaryBody::JsonArray => (record_bytes + records.len() + 1, "a JSON array"),
+        UnaryBody::JsonLines => (record_bytes + records.len() - 1, "JSON Lines"),
+    };
     if body_len > max_payload_bytes {
         return Err(ZerobusError::InvalidArgument(format!(
-            "Ingest payload too large: {body_len} bytes (the records joined into a JSON array) exceeds the configured limit of {max_payload_bytes} bytes"
+            "Ingest payload too large: {body_len} bytes (the records joined into {shape}) exceeds the configured limit of {max_payload_bytes} bytes"
         )));
     }
 
-    let mut body = Vec::with_capacity(body_len);
-    body.push(b'[');
-    for (index, record) in records.iter().enumerate() {
-        if index > 0 {
-            body.push(b',');
-        }
-        body.extend_from_slice(record.as_bytes());
-    }
-    body.push(b']');
-    Ok(Some(body))
+    let body = match body_kind {
+        UnaryBody::JsonArray => format!("[{}]", records.join(",")),
+        UnaryBody::JsonLines => records
+            .iter()
+            // A validated record has raw line breaks only between tokens, where
+            // a space means the same, so this keeps its value and keeps it on
+            // one line.
+            .map(|record| record.replace(['\n', '\r'], " "))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    Ok(Some(body.into_bytes()))
 }
 
 /// Extracts the JSON text of record `index`, or fails if it is not a JSON record.
@@ -373,7 +399,7 @@ mod tests {
     }
 
     fn body(records: Vec<PreparedInput>) -> ZerobusResult<Option<Vec<u8>>> {
-        build_request_body(records, usize::MAX)
+        build_request_body(records, usize::MAX, UnaryBody::JsonArray)
     }
 
     #[test]
@@ -426,6 +452,56 @@ mod tests {
         }
     }
 
+    fn lines(records: Vec<PreparedInput>) -> ZerobusResult<Option<Vec<u8>>> {
+        build_request_body(records, usize::MAX, UnaryBody::JsonLines)
+    }
+
+    #[test]
+    fn json_lines_joins_records_with_newlines() {
+        let records: Vec<PreparedInput> = vec![
+            JsonString(r#"{"a":1}"#.to_string()).into(),
+            JsonString(r#"{"a":2}"#.to_string()).into(),
+        ];
+        assert_eq!(lines(records).unwrap().unwrap(), b"{\"a\":1}\n{\"a\":2}");
+    }
+
+    #[test]
+    fn json_lines_turns_raw_line_breaks_into_spaces_and_keeps_escapes() {
+        let pretty = "{\r\n  \"msg\": \"a\\nb\"\n}";
+        let records: Vec<PreparedInput> = vec![
+            JsonString(pretty.to_string()).into(),
+            JsonString(r#"{"a":2}"#.to_string()).into(),
+        ];
+        let body = lines(records).unwrap().unwrap();
+        assert_eq!(body, b"{    \"msg\": \"a\\nb\" }\n{\"a\":2}");
+
+        // Same value as the record the caller passed, on a single line.
+        let first_line = body.split(|&byte| byte == b'\n').next().unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(first_line).unwrap();
+        let passed: serde_json::Value = serde_json::from_str(pretty).unwrap();
+        assert_eq!(sent, passed);
+        assert_eq!(sent["msg"], "a\nb");
+    }
+
+    #[test]
+    fn json_lines_size_limit_counts_one_byte_per_separator() {
+        // `{}\n{}` is 5 bytes: 4 record bytes and 1 newline.
+        let records = || -> Vec<PreparedInput> {
+            vec![
+                JsonString("{}".to_string()).into(),
+                JsonString("{}".to_string()).into(),
+            ]
+        };
+        assert!(build_request_body(records(), 5, UnaryBody::JsonLines)
+            .unwrap()
+            .is_some());
+        let msg = invalid_argument(build_request_body(records(), 4, UnaryBody::JsonLines));
+        assert!(
+            msg.contains("5 bytes") && msg.contains("JSON Lines"),
+            "{msg}"
+        );
+    }
+
     #[test]
     fn size_limit_counts_the_whole_body() {
         // `[{},{}]` is 7 bytes: 4 record bytes, 1 comma, 2 brackets.
@@ -435,8 +511,10 @@ mod tests {
                 JsonString("{}".to_string()).into(),
             ]
         };
-        assert!(build_request_body(records(), 7).unwrap().is_some());
-        let msg = invalid_argument(build_request_body(records(), 6));
+        assert!(build_request_body(records(), 7, UnaryBody::JsonArray)
+            .unwrap()
+            .is_some());
+        let msg = invalid_argument(build_request_body(records(), 6, UnaryBody::JsonArray));
         assert!(
             msg.contains("7 bytes") && msg.contains("limit of 6 bytes"),
             "{msg}"
