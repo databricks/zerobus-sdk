@@ -50,7 +50,7 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
-    shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+    shared_stream_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -196,7 +196,7 @@ impl ZerobusSdk {
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
-            shared_channel: tokio::sync::Mutex::new(None),
+            shared_stream_channel: tokio::sync::Mutex::new(None),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -245,7 +245,7 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let channel = self.get_or_create_channel_zerobus_client().await?;
+        let channel = self.get_or_create_stream_channel().await?;
         let new_stream = ZerobusStream::new_stream(
             channel,
             stream.table_properties.clone(),
@@ -365,19 +365,19 @@ impl ZerobusSdk {
         }
     }
 
-    /// Creates a dedicated client or returns a clone of the SDK's shared client,
-    /// according to the SDK's `connection_per_stream` setting.
-    pub(crate) async fn get_or_create_channel_zerobus_client(
+    /// Creates a dedicated stream channel or returns a clone of the SDK's shared
+    /// stream channel, according to the SDK's `connection_per_stream` setting.
+    pub(crate) async fn get_or_create_stream_channel(
         &self,
     ) -> ZerobusResult<ZerobusClient<Channel>> {
         if self.connection_per_stream {
-            return self.create_channel_zerobus_client();
+            return self.create_stream_channel();
         }
 
-        let mut guard = self.shared_channel.lock().await;
+        let mut guard = self.shared_stream_channel.lock().await;
 
         if guard.is_none() {
-            *guard = Some(self.create_channel_zerobus_client()?);
+            *guard = Some(self.create_stream_channel()?);
         }
 
         Ok(guard
@@ -386,7 +386,7 @@ impl ZerobusSdk {
             .clone())
     }
 
-    fn create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+    fn create_stream_channel(&self) -> ZerobusResult<ZerobusClient<Channel>> {
         let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
             .user_agent(self.sdk_identifier.as_ref())
