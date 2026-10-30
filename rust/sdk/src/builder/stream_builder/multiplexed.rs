@@ -206,13 +206,13 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
-            table_name: self.inner.table_name.clone(),
+            table_name: self.inner.core.table_name.clone(),
             descriptor_proto: format.descriptor_proto,
             message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
             avro_schema: format.avro_schema,
         };
-        let sdk = self.inner.sdk;
+        let sdk = self.inner.core.sdk;
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
@@ -276,12 +276,12 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         let inner = self.inner;
         inner.warn_arrow_ignored_options();
         let table_properties = super::ArrowTableProperties {
-            table_name: inner.table_name,
+            table_name: inner.core.table_name,
             schema,
         };
         let mut options = inner.arrow_config;
         options.max_inflight_batches = capacity;
-        let sdk = inner.sdk;
+        let sdk = inner.core.sdk;
         let opens = delays
             .into_iter()
             .zip(headers_providers)
