@@ -26,8 +26,7 @@ typedef struct {
 typedef struct {
     /* Borrowed only for the duration of zb_grpc_call_open. */
     zerobus_string_view_t path;
-    const zb_metadata_t *headers;
-    size_t header_count;
+    const zerobus_headers_t *headers; /* NULL for none. */
 
     void *context; /* For the callbacks, valid until the call completes. */
 

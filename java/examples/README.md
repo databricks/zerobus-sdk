@@ -10,6 +10,7 @@ The examples are organized by stream type and demonstrate both single-record and
 - `ZerobusProtoStream` - Protocol Buffer ingestion with method-level generics
 - `ZerobusJsonStream` - JSON ingestion with flexible serialization
 - `ZerobusArrowStream` - Arrow Flight columnar ingestion
+- `ZerobusAvroStream` - Avro ingestion (Beta; requires Java 11+ and `org.apache.avro:avro`)
 - `ZerobusStream` (deprecated) - Legacy Future-based API for backward compatibility
 
 ## Directory Structure
@@ -29,6 +30,9 @@ examples/
 ├── arrow/                 (Arrow Flight examples - ZerobusArrowStream)
 │   ├── README.md
 │   └── ArrowIngestionExample.java
+├── avro/                  (Avro examples - ZerobusAvroStream, Beta)
+│   ├── SingleRecordExample.java
+│   └── BatchIngestionExample.java
 └── legacy/                (Legacy examples - ZerobusStream)
     └── LegacyStreamExample.java
 ```
@@ -42,9 +46,12 @@ examples/
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
 | `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close |
+| `avro/SingleRecordExample` | `ZerobusAvroStream` | Single record ingestion (GenericRecord + byte[]) |
+| `avro/BatchIngestionExample` | `ZerobusAvroStream` | Batch ingestion |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
-Each example demonstrates: queue then flush, batch ingestion, and recreateStream.
+Most examples demonstrate queue-then-flush, batch ingestion, and recreateStream; the Avro examples
+cover queue-then-flush and batch ingestion.
 
 ## Stream Classes
 
@@ -97,6 +104,26 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
         .build()
         .join()) {
     stream.ingestBatch(vectorSchemaRoot);
+    stream.flush();
+}
+```
+
+### ZerobusAvroStream (Avro, Beta)
+
+Requires Java 11+ and the `org.apache.avro:avro` dependency.
+
+```java
+Schema schema = new Schema.Parser().parse(schemaJson);
+try (ZerobusAvroStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .avro(schemaJson)
+        .build()
+        .join()) {
+    stream.ingestRecordOffset(genericRecord);         // GenericRecord
+    stream.ingestRecordOffset(preEncodedDatum);       // byte[]
+    stream.ingestRecordsOffset(listOfRecords);        // batch
+    stream.ingestRecordsOffset(listOfByteArrays);     // batch
     stream.flush();
 }
 ```
@@ -205,6 +232,25 @@ java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.BatchIngestionExample
 ```
 
+### Avro Examples
+
+Avro (Beta) needs Java 11+ and the `org.apache.avro:avro` jar, which is a `provided` dependency and
+so is **not** bundled in `jar-with-dependencies`. Put it on the classpath explicitly (for example
+copy it and its transitive deps with `mvn dependency:copy-dependencies -DincludeGroupIds=org.apache.avro,com.fasterxml.jackson.core,org.apache.commons -DoutputDirectory=target/avro-deps`):
+
+```bash
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+AVRO_CP=$(echo ../target/avro-deps/*.jar | tr ' ' ':')
+
+# Compile examples
+javac -d . -cp "$SDK_JAR:$AVRO_CP" avro/SingleRecordExample.java avro/BatchIngestionExample.java
+
+# Run
+java -cp ".:$SDK_JAR:$AVRO_CP" com.databricks.zerobus.examples.avro.SingleRecordExample
+java -cp ".:$SDK_JAR:$AVRO_CP" com.databricks.zerobus.examples.avro.BatchIngestionExample
+```
+
 ### Legacy Examples
 
 ```bash
@@ -231,17 +277,18 @@ java -cp ".:$SDK_JAR" \
 | Protocol Buffers (new code) | `ZerobusProtoStream` | Method-level generics, batch support |
 | JSON (new code) | `ZerobusJsonStream` | Clean API, no proto dependency |
 | Large columnar datasets | `ZerobusArrowStream` | Arrow Flight, high throughput |
+| Avro-native data (Beta) | `ZerobusAvroStream` | Encodes `GenericRecord` or passes datums; needs Java 11+ |
 | Existing code with `ZerobusStream` | `ZerobusStream` | Backward compatible, migrate later |
 
 ## API Comparison
 
-| Feature | ZerobusProtoStream | ZerobusJsonStream | ZerobusArrowStream | ZerobusStream |
-|---------|-------------------|-------------------|--------------------|---------------|
-| Input | `Message` / `byte[]` | `Object` / `String` | `VectorSchemaRoot` | `Message` |
-| Return Type | `long` offset | `long` offset | `Optional<Long>` | `CompletableFuture` |
-| Batch Support | Yes | Yes | Yes (columnar) | No |
-| Extra Deps | protobuf-java | None | arrow-vector, arrow-memory-netty | protobuf-java |
-| Status | **Recommended** | **Recommended** | **Recommended** | Deprecated |
+| Feature | ZerobusProtoStream | ZerobusJsonStream | ZerobusArrowStream | ZerobusAvroStream | ZerobusStream |
+|---------|-------------------|-------------------|--------------------|-------------------|---------------|
+| Input | `Message` / `byte[]` | `Object` / `String` | `VectorSchemaRoot` | `GenericRecord` / `byte[]` | `Message` |
+| Return Type | `long` offset | `long` offset | `Optional<Long>` | `long` / `Optional<Long>` | `CompletableFuture` |
+| Batch Support | Yes | Yes | Yes (columnar) | Yes | No |
+| Extra Deps | protobuf-java | None | arrow-vector, arrow-memory-netty | avro (Java 11+) | protobuf-java |
+| Status | **Recommended** | **Recommended** | **Recommended** | **Beta** | Deprecated |
 
 ## Additional Resources
 

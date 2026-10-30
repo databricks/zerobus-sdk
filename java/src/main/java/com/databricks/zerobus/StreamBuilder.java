@@ -12,8 +12,8 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * the Rust SDK. Shared setters may be called in any order before selecting a record format. Because
  * Java cannot return different stream types from a single {@code build()}, the record format is
  * selected with a terminal method that returns a typed sub-builder: {@link #json()}, {@link
- * #compiledProto(DescriptorProto)}, or {@link #arrow(Schema)}. Each sub-builder exposes a {@code
- * build()} that returns the matching stream type.
+ * #compiledProto(DescriptorProto)}, {@link #avro(String)}, or {@link #arrow(Schema)}. Each
+ * sub-builder exposes a {@code build()} that returns the matching stream type.
  *
  * <h3>Thread Safety</h3>
  *
@@ -166,8 +166,8 @@ public final class StreamBuilder {
   /**
    * Sets the maximum number of in-flight records.
    *
-   * <p>Applies to JSON and Protocol Buffer streams. It is ignored for Arrow streams, which use
-   * {@link ArrowStreamBuilder#maxInflightBatches(int)} instead.
+   * <p>Applies to JSON, Protocol Buffer, and Avro streams. It is ignored for Arrow streams, which
+   * use {@link ArrowStreamBuilder#maxInflightBatches(int)} instead.
    *
    * @param maxInflightRecords the maximum number of in-flight records
    * @return this builder for method chaining
@@ -181,7 +181,7 @@ public final class StreamBuilder {
   /**
    * Sets the acknowledgment callback.
    *
-   * <p>Applies to JSON and Protocol Buffer streams only. Arrow Flight streams do not support ACK
+   * <p>Applies to JSON, Protocol Buffer, and Avro streams. Arrow Flight streams do not support ACK
    * callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws {@link
    * IllegalStateException}.
    *
@@ -222,6 +222,19 @@ public final class StreamBuilder {
   public ArrowStreamBuilder arrow(Schema schema) {
     Objects.requireNonNull(schema, "schema");
     return new ArrowStreamBuilder(this, schema);
+  }
+
+  /**
+   * Selects the Avro record format (Beta).
+   *
+   * <p>Ingesting record objects requires Java 11+ and the {@code org.apache.avro:avro} dependency
+   * on the classpath; the pre-encoded {@code byte[]} path needs neither.
+   *
+   * @param schemaJson the Avro writer schema as a JSON string
+   * @return an {@link AvroStreamBuilder} that builds a {@link ZerobusAvroStream}
+   */
+  public AvroStreamBuilder avro(String schemaJson) {
+    return new AvroStreamBuilder(this, requireNonBlank(schemaJson, "schemaJson"));
   }
 
   // ==================== Package-private helpers ====================
@@ -330,6 +343,34 @@ public final class StreamBuilder {
       base.validateRequired();
       return base.sdk.createJsonStreamInternal(
           base.tableName,
+          base.clientId,
+          base.clientSecret,
+          base.headersProvider,
+          base.toStreamOptions());
+    }
+  }
+
+  /** Builds a {@link ZerobusAvroStream}. Created via {@link StreamBuilder#avro(String)}. */
+  public static final class AvroStreamBuilder {
+    private final StreamBuilder base;
+    private final String schemaJson;
+
+    private AvroStreamBuilder(StreamBuilder base, String schemaJson) {
+      this.base = base;
+      this.schemaJson = schemaJson;
+    }
+
+    /**
+     * Builds and opens the Avro stream.
+     *
+     * @return a future that completes with the {@link ZerobusAvroStream} when ready
+     * @throws IllegalStateException if the table name or authentication has not been set
+     */
+    public CompletableFuture<ZerobusAvroStream> build() {
+      base.validateRequired();
+      return base.sdk.createAvroStreamInternal(
+          base.tableName,
+          schemaJson,
           base.clientId,
           base.clientSecret,
           base.headersProvider,

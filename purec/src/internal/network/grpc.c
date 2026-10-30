@@ -3,6 +3,7 @@
 
 #include "grpc.h"
 #include "grpc_utils.h"
+#include "headers_provider.h"
 #include "internal/common/utils.h"
 
 /* ---- call completion --------------------------------------------------- */
@@ -401,45 +402,54 @@ static zerobus_status_t queue_call(zb_grpc_call_t *call,
                                    const zb_grpc_call_config_t *request)
 {
     const zb_grpc_config_t *config = &call->grpc->config;
-    const zb_metadata_t protocol[] = {
-        {zerobus_string_view(":method"), zerobus_string_view("POST")},
-        {zerobus_string_view(":scheme"),
-         zerobus_string_view(config->tls ? "https" : "http")},
-        {zerobus_string_view(":authority"), config->authority},
-        {zerobus_string_view(":path"), request->path},
-        {zerobus_string_view("content-type"),
-         zerobus_string_view("application/grpc")},
-        {zerobus_string_view("te"), zerobus_string_view("trailers")}};
+    const zerobus_headers_t *headers = request->headers;
+    char *path = zb_strdup_view(request->path);
+    if (path == NULL) {
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    const zb_header_t protocol[] = {{":method", "POST"},
+                                    {":scheme", config->tls ? "https" : "http"},
+                                    {":authority", call->grpc->authority},
+                                    {":path", path},
+                                    {"content-type", "application/grpc"},
+                                    {"te", "trailers"}};
     const size_t protocol_count = sizeof(protocol) / sizeof(protocol[0]);
-    const size_t count = protocol_count + request->header_count;
+    const size_t count =
+        protocol_count + (headers != NULL ? headers->count : 0);
     size_t total = 0;
     for (size_t i = 0; i < count; ++i) {
-        const zb_metadata_t *header =
-            i < protocol_count ? &protocol[i]
-                               : &request->headers[i - protocol_count];
-        if (!zb_add_http2_header_bytes(&total, header->name.len,
-                                       header->value.len,
+        const zb_header_t *header = i < protocol_count
+                                        ? &protocol[i]
+                                        : &headers->items[i - protocol_count];
+        zerobus_string_view_t name = zerobus_string_view(header->name);
+        zerobus_string_view_t value = zerobus_string_view(header->value);
+        if (!zb_add_http2_header_bytes(&total, name.len, value.len,
                                        config->max_header_bytes)) {
+            free(path);
             return ZEROBUS_STATUS_OUT_OF_RANGE;
         }
-        if (i >= protocol_count && !zb_is_valid_grpc_metadata(header)) {
+        if (i >= protocol_count && !zb_is_valid_grpc_metadata(name, value)) {
+            free(path);
             return ZEROBUS_STATUS_INVALID_ARGUMENT;
         }
     }
     nghttp2_nv *nva = malloc(count * sizeof(*nva));
     if (nva == NULL) {
+        free(path);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     for (size_t i = 0; i < count; ++i) {
-        const zb_metadata_t *header =
-            i < protocol_count ? &protocol[i]
-                               : &request->headers[i - protocol_count];
-        nva[i] = zb_make_nghttp2_nv(header);
+        const zb_header_t *header = i < protocol_count
+                                        ? &protocol[i]
+                                        : &headers->items[i - protocol_count];
+        nva[i] = zb_make_nghttp2_nv(zerobus_string_view(header->name),
+                                    zerobus_string_view(header->value));
     }
     const nghttp2_data_provider provider = {{0}, on_data_source_read};
     int32_t id = nghttp2_submit_request(call->grpc->session, NULL, nva, count,
                                         &provider, call);
     free(nva);
+    free(path);
     if (id < 0) {
         return zb_map_nghttp2_error(id);
     }
@@ -562,13 +572,14 @@ zerobus_status_t zb_grpc_call_open(zb_grpc_t *grpc, zb_grpc_call_t *call,
 {
     if (grpc == NULL || grpc->session == NULL || call == NULL ||
         (call->grpc != NULL && !call->completed) || config == NULL ||
-        config->pull_send == NULL || config->on_message == NULL ||
-        (config->headers == NULL && config->header_count != 0)) {
+        config->pull_send == NULL || config->on_message == NULL) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     /* The 6 are the protocol fields queue_call adds ahead of the headers. */
-    if (config->header_count > grpc->config.max_header_bytes / 32 ||
-        config->header_count > SIZE_MAX / sizeof(nghttp2_nv) - 6 ||
+    const size_t header_count =
+        config->headers != NULL ? config->headers->count : 0;
+    if (header_count > grpc->config.max_header_bytes / 32 ||
+        header_count > SIZE_MAX / sizeof(nghttp2_nv) - 6 ||
         config->path.len > grpc->config.max_header_bytes) {
         return ZEROBUS_STATUS_OUT_OF_RANGE;
     }

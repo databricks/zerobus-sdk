@@ -79,6 +79,7 @@ set(ZEROBUS_SOURCES
   src/internal/network/grpc_utils.c
   src/internal/landing_zone.c
   src/error.c
+  src/headers_provider.c
   src/sdk.c
   src/stream.c
 

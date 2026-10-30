@@ -5,11 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef struct {
-    zerobus_string_view_t name;
-    zerobus_string_view_t value;
-} zb_metadata_t;
-
 /* Descriptor and data are individually malloc-owned. NULL data is permitted
  * for empty messages.
  *

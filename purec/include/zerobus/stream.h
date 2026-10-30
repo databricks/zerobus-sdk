@@ -15,9 +15,11 @@ extern "C" {
  * separate output/error slots. Builders require exclusive access. Freeing a
  * stream must not race any use of it.
  *
- * Stream builder. Requires a fully qualified catalog.schema.table name and
- * OAuth client credentials. Streams are ephemeral gRPC JSON streams
- * authenticated with Unity Catalog OAuth. Credential copies are zeroed on free.
+ * Stream builder. Requires a fully qualified catalog.schema.table name.
+ * Streams are ephemeral gRPC JSON streams. Building one requires either OAuth
+ * client credentials or a headers provider. For a table that needs no
+ * authentication, set a static headers provider with no headers. Credential
+ * copies are zeroed on free.
  *
  * The builder and each built stream retain their own SDK reference, so the
  * application may release its SDK reference after new() succeeds.
@@ -30,6 +32,7 @@ ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_set_table(
     zerobus_stream_builder_t *builder, zerobus_string_view_t table_name,
     zerobus_error_t **out_error);
 
+/* Authenticates with OAuth client credentials. Replaces a headers provider. */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_set_oauth(
     zerobus_stream_builder_t *builder, zerobus_string_view_t client_id,
     zerobus_string_view_t client_secret, zerobus_error_t **out_error);
@@ -95,6 +98,17 @@ zerobus_stream_builder_set_flush_timeout_ms(zerobus_stream_builder_t *builder,
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_stream_builder_set_stream_paused_max_wait_time_ms(
     zerobus_stream_builder_t *builder, uint64_t wait_ms,
+    zerobus_error_t **out_error);
+
+/*
+ * Authenticates with the headers of a provider, see zerobus/headers_provider.h.
+ * Replaces OAuth client credentials. The builder and every stream built from
+ * it with this provider hold their own reference, so the caller may free the
+ * provider once this returns.
+ */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL
+zerobus_stream_builder_set_headers_provider(
+    zerobus_stream_builder_t *builder, zerobus_headers_provider_t *provider,
     zerobus_error_t **out_error);
 
 /*

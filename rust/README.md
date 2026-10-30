@@ -1609,6 +1609,8 @@ Returns unacknowledged records grouped by batch, preserving the original batch s
 
 Only call after stream failure.
 
+Each `EncodedBatch` variant holds its records as a read-only `BatchRecords<T>`, which derefs to a slice, iterates by value or by reference, and converts to a `Vec` with `into_vec()`.
+
 `EncodedRecord` and `EncodedBatch` are `#[non_exhaustive]`. The `Avro` variants exist only with the `avro` feature, and later releases may add record formats, so a `match` on either needs a `_` arm:
 
 ```rust
