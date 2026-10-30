@@ -918,6 +918,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "http-body",
  "hyper-http-proxy",
  "hyper-rustls",
  "hyper-util",
@@ -1031,7 +1032,6 @@ name = "example_arrow"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
- "arrow-ipc",
  "chrono",
  "databricks-zerobus-ingest-sdk",
  "tokio",

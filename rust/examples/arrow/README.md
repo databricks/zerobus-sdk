@@ -10,7 +10,8 @@ The `arrow-flight` feature flag must be enabled.
 - [Running the Example](#running-the-example)
 - [Code Highlights](#code-highlights)
 - [Telemetry](#telemetry)
-- [IPC compression](#ipc-compression)
+- [Compression](#compression)
+  - [gRPC compression](#grpc-compression)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -126,29 +127,37 @@ rows were acknowledged, otherwise only the unacknowledged suffix. Earlier partia
 transmissions have no event, so the first observed event can have `attempt > 0`.
 See the [SDK telemetry docs](../../README.md#telemetry-beta) for aggregation limits.
 
-## IPC compression
+## Compression
 
-Arrow streams compress IPC payloads with `ZSTD` by default, which reduces bytes on the wire at the cost of CPU on the client. Use `ipc_compression` on the stream builder to choose a different codec or turn compression off.
-
-The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` sets the codec explicitly on the stream builder:
+Arrow streams compress each IPC buffer with zstd by default, which reduces bytes on the wire at the cost of client CPU. Use `compression` on the stream builder to choose another option. The example's `main.rs` sets this behavior explicitly:
 
 ```rust
-use arrow_ipc::CompressionType;
+use databricks_zerobus_ingest_sdk::ArrowCompression;
 
 let stream = sdk
     .stream_builder()
     .table(TABLE_NAME)
     .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
     .arrow(schema)
-    .ipc_compression(Some(CompressionType::ZSTD))  // default; or LZ4_FRAME, or None
+    .compression(ArrowCompression::IpcZstd)  // same as the default
     .build_arrow()
     .await?;
 ```
 
-- `ZSTD` (default) — higher compression ratio, more CPU per batch.
-- `LZ4_FRAME` — fast, low CPU overhead, modest compression ratio.
+- `IpcZstd` (the default behavior): compresses each Arrow buffer with zstd. Higher compression ratio, more CPU per batch.
+- `IpcLz4`: compresses each Arrow buffer with LZ4. Fast, low CPU overhead, modest compression ratio.
+- `GrpcZstd`: compresses each whole gRPC request message with zstd (see below).
+- `Uncompressed`: no compression. This can help when client CPU, rather than network bandwidth, limits throughput.
 
-To disable compression, pass `.ipc_compression(None)`. This can help when client CPU, rather than network bandwidth, limits throughput.
+`compression` replaces the deprecated `ipc_compression` setter.
+
+### gRPC compression
+
+IPC compression compresses each Arrow buffer separately and leaves the IPC message header and alignment padding uncompressed. For wide or sparse schemas, with hundreds of columns or many mostly-null columns, those can make up most of each message. `GrpcZstd` instead compresses each whole gRPC request message, which usually sends noticeably fewer bytes for such schemas.
+
+The trade-off is client CPU: `GrpcZstd` can use noticeably more of it than `IpcZstd`, and on narrow, dense schemas it saves few bytes. That's why IPC zstd stays the default behavior. Measure on your own data before switching.
+
+Buffers are sent without IPC compression, with 8-byte alignment, because compressing already-compressed buffers again doesn't reduce size.
 
 ## Adapting for Your Custom Table
 

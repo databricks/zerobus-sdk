@@ -4,9 +4,8 @@ use std::sync::Arc;
 use arrow_array::{
     Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
 };
-use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{
-    channel_exporter, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
+    channel_exporter, ArrowCompression, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
 };
 
 /// One row of the `orders` table.
@@ -103,7 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .table(TABLE_NAME)
         .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
         .arrow(schema.clone())
-        .ipc_compression(Some(CompressionType::ZSTD))
+        .compression(ArrowCompression::IpcZstd)
         .max_inflight_batches(100)
         .stats_exporter(stats_exporter)
         .build_arrow()

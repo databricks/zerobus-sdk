@@ -359,8 +359,9 @@ let mut stream = sdk
 let telemetry = tokio::spawn(async move {
     while let Some(stat) = stats_rx.recv().await {
         if let StreamStat::BatchSent { offset, attempt, stats } = stat {
-            // stats.approximate_wire_bytes: FlightData payload after IPC compression
-            //   (excludes transport overhead and schema; does not measure socket writes)
+            // stats.approximate_wire_bytes: FlightData payload after IPC or gRPC
+            //   compression (excludes transport overhead and schema; does not measure
+            //   socket writes)
             // stats.uncompressed_bytes: emitted IPC buffer bytes before compression
             // stats.records: rows in this transmission; offset: the batch's ingest offset
             // attempt: 0 = first send, >0 = retransmit of the unacked suffix after reconnect
@@ -1240,7 +1241,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
-| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Arrow IPC compression: `ZSTD`, `LZ4_FRAME`, or `None` to disable |
+| `compression` | `ArrowCompression` | `FallbackToLegacy` (uses `ipc_compression`) | Payload compression, set with `StreamBuilder::compression`: `IpcZstd`, `IpcLz4`, `GrpcZstd`, or `Uncompressed`. `GrpcZstd` compresses each whole gRPC request message, which is often smaller than IPC compression for wide or sparse schemas but can use more client CPU, especially on narrow, dense schemas. See the [Arrow example](examples/arrow/README.md#compression) |
+| `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Deprecated: use `compression`. Arrow IPC compression, used only when `compression` is `FallbackToLegacy` |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust
@@ -1251,7 +1253,7 @@ let stream = sdk
     .arrow(schema)
     .max_inflight_batches(1_000)
     .connection_timeout_ms(30_000)
-    .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+    .compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
     .build_arrow()
     .await?;
 ```

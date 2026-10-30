@@ -37,6 +37,7 @@ tonic-prost.workspace = true
 tonic-types = { workspace = true, optional = true }
 rustls-pki-types.workspace = true
 tracing.workspace = true
+http-body = { workspace = true, optional = true }
 hyper-http-proxy.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
@@ -77,7 +78,7 @@ default = []
 # Avro record format (Beta), opt-in. Requires Rust 1.88 (apache-avro 0.22).
 avro = ["dep:apache-avro"]
 # Arrow Flight support
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tonic-types"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tonic-types", "dep:http-body", "tonic/zstd"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
 internal-arrow-c-data = [
     "arrow-flight",

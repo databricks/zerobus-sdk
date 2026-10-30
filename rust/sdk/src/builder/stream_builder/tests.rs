@@ -527,6 +527,62 @@ fn shared_setters_write_to_arrow_config() {
 }
 
 #[cfg(feature = "arrow-flight")]
+fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "id",
+        DataType::Int32,
+        false,
+    )]));
+    sdk.stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(schema)
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+#[allow(deprecated)]
+fn compression_defaults_to_deprecated_ipc_zstd() {
+    let sdk = test_sdk();
+    let config = arrow_test_builder(&sdk).arrow_config;
+    assert_eq!(
+        config.compression,
+        crate::ArrowCompression::FallbackToLegacy
+    );
+    assert_eq!(
+        config.ipc_compression,
+        Some(arrow_ipc::CompressionType::ZSTD)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+#[allow(deprecated)]
+fn last_compression_setter_wins() {
+    let sdk = test_sdk();
+    let new_last = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .compression(crate::ArrowCompression::GrpcZstd)
+        .arrow_config;
+    assert_eq!(new_last.compression, crate::ArrowCompression::GrpcZstd);
+
+    let deprecated_last = arrow_test_builder(&sdk)
+        .compression(crate::ArrowCompression::GrpcZstd)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .arrow_config;
+    assert_eq!(
+        deprecated_last.compression,
+        crate::ArrowCompression::FallbackToLegacy
+    );
+    assert_eq!(
+        deprecated_last.ipc_compression,
+        Some(arrow_ipc::CompressionType::LZ4_FRAME)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
 #[tokio::test]
 async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
     let sdk = test_sdk();
