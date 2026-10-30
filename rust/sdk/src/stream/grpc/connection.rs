@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use prost::Message;
 use tokio::time::Duration;
-use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -20,6 +19,7 @@ use super::transport::{
 };
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::grpc_status::GrpcStatus;
+use crate::headers_provider::grpc_metadata_from_headers;
 use crate::RecordType;
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
@@ -123,32 +123,8 @@ impl super::ZerobusStream {
         kind: &GrpcConnectionMode,
     ) -> ZerobusResult<StreamConnection> {
         let outbound = transport::make_outbound(kind);
-        let mut stream_metadata = tonic::metadata::MetadataMap::new();
         let headers = headers_provider.get_headers().await?;
-        for (key, value) in headers {
-            match key {
-                "x-databricks-zerobus-table-name" => {
-                    let table_name = MetadataValue::try_from(value.as_str())
-                        .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
-                    stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
-                }
-                "authorization" => {
-                    let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
-                        error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
-                        ZerobusError::InvalidUCTokenError(
-                            "authorization token is not a valid HTTP header value".to_string(),
-                        )
-                    })?;
-                    auth_value.set_sensitive(true);
-                    stream_metadata.insert("authorization", auth_value);
-                }
-                other_key => {
-                    let header_value = MetadataValue::try_from(value.as_str())
-                        .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
-                    stream_metadata.insert(other_key, header_value);
-                }
-            }
-        }
+        let stream_metadata = grpc_metadata_from_headers(headers, &table_properties.table_name)?;
 
         let (sink, mut inbound) =
             transport::open_rpc(outbound, &mut channel, stream_metadata).await?;
