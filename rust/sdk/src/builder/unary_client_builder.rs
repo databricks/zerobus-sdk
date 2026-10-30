@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use super::client_builder_core::{ClientBuilderCore, FormatConfig};
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
-use crate::unary_client::UnaryOptions;
+use crate::unary_client::{UnaryBody, UnaryOptions};
 use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// A fluent builder for a unary ingestion client (Beta).
@@ -115,9 +115,32 @@ impl<'a> UnaryClientBuilder<'a> {
         self
     }
 
-    /// Select JSON record format. Unary calls support only JSON.
+    /// Select JSON records, sent as one JSON array: `[r0,r1,...]`.
+    ///
+    /// Unary calls support only JSON. Use [`json_lines`](Self::json_lines) to
+    /// send the same records as JSON Lines instead. The last format setter
+    /// called wins.
     pub fn json(mut self) -> Self {
         self.core.set_format(FormatConfig::Json);
+        self
+    }
+
+    /// Select JSON records, sent as JSON Lines: one record per line, joined
+    /// with `\n`, with no brackets.
+    ///
+    /// The records are passed exactly as with [`json`](Self::json), one JSON
+    /// object per record; the SDK does the line framing. A record may contain
+    /// raw line breaks, for example when it is pretty-printed. JSON does not
+    /// allow raw line breaks inside strings (a line break in a value is
+    /// written as the escape `\n`), so a raw one can only be formatting
+    /// between tokens. The SDK replaces each raw `\n` and `\r` with a space
+    /// before sending, which keeps the record's value and keeps it on one
+    /// line. Escaped `\n` in string values are left untouched.
+    ///
+    /// Validation, size limit, retries, and errors work as with `json()`. The
+    /// body is two bytes smaller: one `\n` per separator and no brackets.
+    pub fn json_lines(mut self) -> Self {
+        self.core.set_format(FormatConfig::JsonLines);
         self
     }
 
@@ -157,8 +180,9 @@ impl<'a> UnaryClientBuilder<'a> {
 
     /// Set the maximum request body size in bytes allowed per call.
     ///
-    /// The whole body counts: the record bytes plus the brackets and the commas
-    /// that join them into one JSON array. Calls exceeding this limit fail
+    /// The whole body counts: the record bytes plus what joins them, the
+    /// brackets and commas of the JSON array, or the line breaks of JSON
+    /// Lines. Calls exceeding this limit fail
     /// fast with [`ZerobusError::InvalidArgument`] before any network I/O.
     ///
     /// Defaults to slightly below the 10 MiB server limit.
@@ -176,7 +200,7 @@ impl<'a> UnaryClientBuilder<'a> {
         self.core.validate_target()?;
         if self.core.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json()".into(),
+                "record format is required: call .json() or .json_lines()".into(),
             ));
         }
         Ok(())
@@ -193,6 +217,17 @@ impl<'a> UnaryClientBuilder<'a> {
         self.validate()?;
 
         let core = self.core;
+        let body = match core.format {
+            Some(FormatConfig::Json) => UnaryBody::JsonArray,
+            Some(FormatConfig::JsonLines) => UnaryBody::JsonLines,
+            // No unary setter selects another format; this guards against one
+            // that would.
+            _ => {
+                return Err(ZerobusError::InvalidArgument(
+                    "unary clients support only .json() and .json_lines()".into(),
+                ))
+            }
+        };
         // A unary call has one timeout per attempt, so a proactive token
         // refresh gets half of it, as a stream's refresh gets half of its
         // recovery timeout.
@@ -210,6 +245,7 @@ impl<'a> UnaryClientBuilder<'a> {
                 recovery_backoff_ms: core.recovery_backoff_ms,
                 server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
                 max_ingest_payload_bytes: core.max_ingest_payload_bytes,
+                body,
             },
         ))
     }
@@ -263,7 +299,25 @@ mod tests {
                 .oauth("a", "b")
                 .validate(),
         );
-        assert_eq!(msg, "record format is required: call .json()");
+        assert_eq!(
+            msg,
+            "record format is required: call .json() or .json_lines()"
+        );
+    }
+
+    #[test]
+    fn json_lines_is_a_format_and_the_last_format_setter_wins() {
+        let sdk = test_sdk();
+        let lines = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json_lines();
+        assert!(lines.validate().is_ok());
+        assert!(format!("{lines:?}").contains("JsonLines"));
+
+        let array = lines.json();
+        assert!(format!("{array:?}").contains("\"Json\""));
     }
 
     #[tokio::test]
@@ -277,7 +331,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json()"),
+            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json() or .json_lines()"),
             "{error:?}"
         );
 
