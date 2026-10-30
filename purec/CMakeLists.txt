@@ -94,6 +94,9 @@ set(ZEROBUS_SOURCES
   src/internal/network/http_client.c
   src/internal/oauth/oauth.c
   src/internal/landing_zone.c
+  src/internal/stream/supervisor.c
+  src/internal/stream/sender.c
+  src/internal/stream/receiver.c
   src/error.c
   src/headers_provider.c
   src/sdk.c
@@ -113,12 +116,14 @@ target_include_directories(zerobus_c
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
+target_compile_definitions(zerobus_c PRIVATE ZEROBUS_VERSION="${PROJECT_VERSION}")
 target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c zerobus_jansson PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
 add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
-target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
+target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING
+  PRIVATE ZEROBUS_VERSION="${PROJECT_VERSION}")
 target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -297,6 +297,53 @@ resolve_headers_provider(const zerobus_stream_builder_t *builder,
     }
 }
 
+/* Allocates a stream with its locks, and acked at -1. */
+static zerobus_status_t new_stream(zerobus_stream_t **out_stream)
+{
+    zerobus_stream_t *s = (zerobus_stream_t *)calloc(1, sizeof(*s));
+    if (s == NULL) {
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    zerobus_status_t status = zb_mutex_init(&s->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        free(s);
+        return status;
+    }
+    status = zb_cond_init(&s->changed);
+    if (status == ZEROBUS_STATUS_OK) {
+        status = zb_cond_init(&s->acked_changed);
+        if (status != ZEROBUS_STATUS_OK) {
+            (void)zb_cond_destroy(&s->changed);
+        }
+    }
+    if (status != ZEROBUS_STATUS_OK) {
+        (void)zb_mutex_destroy(&s->mutex);
+        free(s);
+        return status;
+    }
+    atomic_init(&s->closed, false);
+    atomic_init(&s->acked, -1);
+    atomic_init(&s->flush_waiters, 0);
+    *out_stream = s;
+    return ZEROBUS_STATUS_OK;
+}
+
+/* Frees the stream and everything it owns, with the requests still in the
+ * landing zone. */
+static void destroy(zerobus_stream_t *stream)
+{
+    zb_landing_zone_free(stream->zone);
+    /* The OAuth provider borrows the stream, so it goes first. */
+    zerobus_headers_provider_free(stream->headers_provider);
+    free(stream->table);
+    zerobus_sdk_free(stream->sdk);
+    free(stream->failure_message);
+    (void)zb_cond_destroy(&stream->acked_changed);
+    (void)zb_cond_destroy(&stream->changed);
+    (void)zb_mutex_destroy(&stream->mutex);
+    free(stream);
+}
+
 zerobus_status_t
 zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                              zerobus_stream_t **out_stream,
@@ -319,28 +366,35 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                        "or a headers provider");
     }
 
-    /* TODO: open the stream. */
-    zerobus_stream_t *s = (zerobus_stream_t *)calloc(1, sizeof(*s));
-    if (s == NULL) {
+    zerobus_stream_t *s = NULL;
+    zerobus_status_t status = new_stream(&s);
+    if (status != ZEROBUS_STATUS_OK) {
         ZB_ERROR("stream allocation failed");
-        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+        return status;
     }
-    atomic_init(&s->closed, false);
     s->sdk = builder->sdk;
     zb_sdk_ref(s->sdk);
     s->table = zb_strdup(builder->table);
     s->config = builder->config;
     if (s->table == NULL) {
         ZB_ERROR("stream configuration allocation failed");
-        zerobus_stream_free(s);
+        destroy(s);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
-    zerobus_status_t status =
-        resolve_headers_provider(builder, s, &s->headers_provider);
+    status = resolve_headers_provider(builder, s, &s->headers_provider);
     if (status != ZEROBUS_STATUS_OK) {
-        zerobus_stream_free(s);
+        destroy(s);
         return zb_fail(out_error, status, "headers provider setup failed");
     }
+    status = zb_landing_zone_new(s->config.max_inflight_requests, &s->zone);
+    if (status != ZEROBUS_STATUS_OK) {
+        destroy(s);
+        return zb_fail(out_error, status,
+                       "allocating the landing zone of %zu requests failed",
+                       builder->config.max_inflight_requests);
+    }
+    /* TODO: open the stream: start the supervisor and wait for the first
+     * open. */
 
     *out_stream = s;
     ZB_DEBUG("stream created");
@@ -440,9 +494,6 @@ void zerobus_stream_free(zerobus_stream_t *stream)
         return;
     }
     /* TODO: tear down the transport and join I/O workers before freeing. */
-    free(stream->table);
-    zerobus_headers_provider_free(stream->headers_provider);
-    zerobus_sdk_free(stream->sdk);
-    free(stream);
+    destroy(stream);
     ZB_DEBUG("stream freed");
 }
