@@ -2,7 +2,9 @@
 //!
 //! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`] and
 //! forwards its public setters to it. The core holds only what is independent
-//! of the transport: the SDK, the table name, and the authentication choice.
+//! of the transport: the SDK, the table name, the authentication choice, and
+//! the record format. Each wrapper decides which formats it exposes and how it
+//! reports a missing one.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +14,11 @@ use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
 };
-use crate::{ZerobusError, ZerobusResult, ZerobusSdk};
+#[cfg(feature = "arrow-flight")]
+use crate::stream::ArrowSchema;
+#[cfg(feature = "avro")]
+use crate::AvroSchema;
+use crate::{MessageDescriptor, RecordType, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// Internal representation of the authentication configuration.
 enum AuthConfig {
@@ -36,6 +42,66 @@ enum AuthConfig {
     NoAuth,
 }
 
+/// Which record format was selected.
+pub(super) enum FormatConfig {
+    Json,
+    CompiledProto(Box<prost_types::DescriptorProto>),
+    DynamicProto(MessageDescriptor),
+    #[cfg(feature = "arrow-flight")]
+    Arrow(Arc<ArrowSchema>),
+    #[cfg(feature = "avro")]
+    Avro(String),
+}
+
+/// A non-Arrow format resolved into the pieces a gRPC request needs.
+pub(super) struct GrpcFormat {
+    pub(super) record_type: RecordType,
+    pub(super) descriptor_proto: Option<prost_types::DescriptorProto>,
+    pub(super) message_descriptor: Option<MessageDescriptor>,
+    #[cfg(feature = "avro")]
+    pub(super) avro_schema: Option<Arc<AvroSchema>>,
+}
+
+impl FormatConfig {
+    pub(super) fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
+        let (record_type, descriptor_proto, message_descriptor) = match self {
+            Self::Json => (RecordType::Json, None, None),
+            Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
+            Self::DynamicProto(descriptor) => (
+                RecordType::Proto,
+                Some(descriptor.descriptor_proto().clone()),
+                Some(descriptor),
+            ),
+            #[cfg(feature = "arrow-flight")]
+            Self::Arrow(_) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Arrow format requires .build_arrow() instead of .build()".into(),
+                ));
+            }
+            #[cfg(feature = "avro")]
+            Self::Avro(json) => {
+                let parsed = apache_avro::Schema::parse_str(&json).map_err(|e| {
+                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
+                })?;
+                return Ok(GrpcFormat {
+                    record_type: RecordType::Avro,
+                    descriptor_proto: None,
+                    message_descriptor: None,
+                    avro_schema: Some(Arc::new(AvroSchema { json, parsed })),
+                });
+            }
+        };
+
+        Ok(GrpcFormat {
+            record_type,
+            descriptor_proto,
+            message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema: None,
+        })
+    }
+}
+
 const fn missing_auth_error() -> &'static str {
     #[cfg(feature = "testing")]
     {
@@ -47,11 +113,12 @@ const fn missing_auth_error() -> &'static str {
     }
 }
 
-/// Table and authentication settings shared by the client builders.
+/// Table, authentication, and format settings shared by the client builders.
 pub(crate) struct ClientBuilderCore<'a> {
     pub(super) sdk: &'a ZerobusSdk,
     pub(super) table_name: String,
     auth: Option<AuthConfig>,
+    pub(super) format: Option<FormatConfig>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -61,6 +128,7 @@ impl<'a> ClientBuilderCore<'a> {
             sdk,
             table_name: String::new(),
             auth: None,
+            format: None,
         }
     }
 
@@ -95,6 +163,10 @@ impl<'a> ClientBuilderCore<'a> {
         self.auth = Some(AuthConfig::NoAuth);
     }
 
+    pub(super) fn set_format(&mut self, format: FormatConfig) {
+        self.format = Some(format);
+    }
+
     /// Name of the configured auth kind, for `Debug` output.
     pub(super) fn auth_kind(&self) -> &'static str {
         match &self.auth {
@@ -103,6 +175,20 @@ impl<'a> ClientBuilderCore<'a> {
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
+            None => "None",
+        }
+    }
+
+    /// Name of the configured format, for `Debug` output.
+    pub(super) fn format_kind(&self) -> &'static str {
+        match &self.format {
+            Some(FormatConfig::Json) => "Json",
+            Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
+            Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
+            #[cfg(feature = "arrow-flight")]
+            Some(FormatConfig::Arrow(_)) => "Arrow",
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(_)) => "Avro",
             None => "None",
         }
     }

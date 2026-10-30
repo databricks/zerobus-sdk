@@ -39,14 +39,11 @@ use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
 use crate::stream_configuration::StreamConfigurationOptions;
-#[cfg(feature = "avro")]
-use crate::AvroSchema;
-use crate::RecordType;
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
 };
 
-use super::client_builder_core::ClientBuilderCore;
+use super::client_builder_core::{ClientBuilderCore, FormatConfig};
 
 mod ephemeral;
 mod multiplexed;
@@ -59,65 +56,6 @@ use multiplexed::MAX_MULTIPLEXED_JITTER_MS;
 use crate::stream::{
     ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusArrowStream,
 };
-
-/// Which record format was selected.
-enum FormatConfig {
-    Json,
-    CompiledProto(Box<prost_types::DescriptorProto>),
-    DynamicProto(MessageDescriptor),
-    #[cfg(feature = "arrow-flight")]
-    Arrow(Arc<ArrowSchema>),
-    #[cfg(feature = "avro")]
-    Avro(String),
-}
-
-struct GrpcFormat {
-    record_type: RecordType,
-    descriptor_proto: Option<prost_types::DescriptorProto>,
-    message_descriptor: Option<MessageDescriptor>,
-    #[cfg(feature = "avro")]
-    avro_schema: Option<Arc<AvroSchema>>,
-}
-
-impl FormatConfig {
-    fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
-        let (record_type, descriptor_proto, message_descriptor) = match self {
-            Self::Json => (RecordType::Json, None, None),
-            Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
-            Self::DynamicProto(descriptor) => (
-                RecordType::Proto,
-                Some(descriptor.descriptor_proto().clone()),
-                Some(descriptor),
-            ),
-            #[cfg(feature = "arrow-flight")]
-            Self::Arrow(_) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Arrow format requires .build_arrow() instead of .build()".into(),
-                ));
-            }
-            #[cfg(feature = "avro")]
-            Self::Avro(json) => {
-                let parsed = apache_avro::Schema::parse_str(&json).map_err(|e| {
-                    ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {e}"))
-                })?;
-                return Ok(GrpcFormat {
-                    record_type: RecordType::Avro,
-                    descriptor_proto: None,
-                    message_descriptor: None,
-                    avro_schema: Some(Arc::new(AvroSchema { json, parsed })),
-                });
-            }
-        };
-
-        Ok(GrpcFormat {
-            record_type,
-            descriptor_proto,
-            message_descriptor,
-            #[cfg(feature = "avro")]
-            avro_schema: None,
-        })
-    }
-}
 
 /// A fluent builder for creating Zerobus ingestion streams.
 ///
@@ -160,7 +98,6 @@ impl FormatConfig {
 #[must_use = "a StreamBuilder does nothing until `.build()` is called"]
 pub struct StreamBuilder<'a> {
     core: ClientBuilderCore<'a>,
-    format: Option<FormatConfig>,
     grpc_config: StreamConfigurationOptions,
     multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
     #[cfg(feature = "arrow-flight")]
@@ -182,20 +119,10 @@ pub(crate) struct GrpcStreamParts {
 
 impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let format_kind = match &self.format {
-            Some(FormatConfig::Json) => "Json",
-            Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
-            Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
-            #[cfg(feature = "arrow-flight")]
-            Some(FormatConfig::Arrow(_)) => "Arrow",
-            #[cfg(feature = "avro")]
-            Some(FormatConfig::Avro(_)) => "Avro",
-            None => "None",
-        };
         f.debug_struct("StreamBuilder")
             .field("table_name", &self.core.table_name)
             .field("auth", &self.core.auth_kind())
-            .field("format", &format_kind)
+            .field("format", &self.core.format_kind())
             .field("ack_callback", &self.grpc_config.ack_callback.is_some())
             .field(
                 "multiplexed_ack_callback",
@@ -210,7 +137,6 @@ impl<'a> StreamBuilder<'a> {
     pub(crate) fn new(sdk: &'a ZerobusSdk) -> Self {
         Self {
             core: ClientBuilderCore::new(sdk),
-            format: None,
             grpc_config: StreamConfigurationOptions::default(),
             multiplexed_callback: None,
             #[cfg(feature = "arrow-flight")]
@@ -271,13 +197,14 @@ impl<'a> StreamBuilder<'a> {
 
     /// Select JSON record format.
     pub fn json(mut self) -> Self {
-        self.format = Some(FormatConfig::Json);
+        self.core.set_format(FormatConfig::Json);
         self
     }
 
     /// Select compiled protobuf record format.
     pub fn compiled_proto(mut self, descriptor: prost_types::DescriptorProto) -> Self {
-        self.format = Some(FormatConfig::CompiledProto(Box::new(descriptor)));
+        self.core
+            .set_format(FormatConfig::CompiledProto(Box::new(descriptor)));
         self
     }
 
@@ -292,14 +219,14 @@ impl<'a> StreamBuilder<'a> {
     /// Fill records with [`DynamicRecord`](crate::DynamicRecord). Wire-identical to
     /// [`compiled_proto`](Self::compiled_proto).
     pub fn dynamic_proto(mut self, descriptor: MessageDescriptor) -> Self {
-        self.format = Some(FormatConfig::DynamicProto(descriptor));
+        self.core.set_format(FormatConfig::DynamicProto(descriptor));
         self
     }
 
     /// Select Arrow Flight record format.
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
-        self.format = Some(FormatConfig::Arrow(schema));
+        self.core.set_format(FormatConfig::Arrow(schema));
         self
     }
 
@@ -310,7 +237,7 @@ impl<'a> StreamBuilder<'a> {
     /// ([`AvroBytes`](crate::AvroBytes)).
     #[cfg(feature = "avro")]
     pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
-        self.format = Some(FormatConfig::Avro(schema_json.into()));
+        self.core.set_format(FormatConfig::Avro(schema_json.into()));
         self
     }
 
@@ -529,13 +456,15 @@ impl<'a> StreamBuilder<'a> {
 
     fn validate_common(&self) -> ZerobusResult<()> {
         self.core.validate_target()?;
-        if self.format.is_none() {
+        if self.core.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
                 "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .avro(), or .arrow()".into(),
             ));
         }
         #[cfg(feature = "arrow-flight")]
-        if self.stats_exporter.is_some() && !matches!(self.format, Some(FormatConfig::Arrow(_))) {
+        if self.stats_exporter.is_some()
+            && !matches!(self.core.format, Some(FormatConfig::Arrow(_)))
+        {
             return Err(ZerobusError::InvalidArgument(
                 "stats_exporter is only supported for Arrow Flight streams; use .arrow()".into(),
             ));
@@ -570,6 +499,7 @@ impl<'a> StreamBuilder<'a> {
         // Avro schemas are parsed here, before any connection is opened. The raw JSON and
         // parsed schema remain together in TableProperties for stream creation and ingest.
         let format = self
+            .core
             .format
             .take()
             .expect("format was validated")
@@ -633,7 +563,7 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     #[allow(clippy::result_large_err)]
     fn arrow_schema(&self) -> ZerobusResult<&Arc<ArrowSchema>> {
-        match self.format.as_ref() {
+        match self.core.format.as_ref() {
             Some(FormatConfig::Arrow(schema)) => Ok(schema),
             Some(_) => Err(ZerobusError::InvalidArgument(
                 "non-Arrow format requires .build() instead of .build_arrow()".into(),
