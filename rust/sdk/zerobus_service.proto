@@ -57,6 +57,12 @@ service Zerobus {
   // Permanently retires a persistent stream. Unary and idempotent; callable
   // without an open connection. A retired stream can never be resumed.
   rpc RetireStream(RetireStreamRequest) returns (RetireStreamResponse);
+
+  // InsertRecords inserts a list of JSON records into a specified
+  // 3-parts UC table. Unary: it returns once the records are durable, without
+  // opening a stream. Also served over REST as
+  // POST /zerobus/v1/tables/{table_name}/insert.
+  rpc InsertRecords(InsertRecordsRequest) returns (InsertRecordsResponse);
 }
 
 /*
@@ -360,4 +366,44 @@ message RetireStreamRequest {
 // IN DEVELOPMENT: may change or be removed.
 // Empty: success or failure is carried by the gRPC status code.
 message RetireStreamResponse {
+}
+
+/*
+ * A message in the InsertRecords unary rpc.
+ *
+ * This message type allows clients to ingest a batch of records.
+ */
+message InsertRecordsRequest {
+  // Field 2 / name "records" was previously
+  // `repeated google.protobuf.Struct records = 2;`, which truncated int64
+  // JSON values outside ±2^53. Replaced by `records_json` (field 3).
+  reserved 2;
+  reserved "records";
+
+  // Target managed table name in 3 part form (catalog.schema.table).
+  //
+  // Required.
+  optional string table_name = 1;
+
+  // The raw JSON request body: a JSON array of objects, each representing
+  // one row to insert. The server parses it with serde_json, which preserves
+  // arbitrary-precision integers (i64/u64).
+  //
+  // Required, but marked `optional` in proto; presence is enforced by the
+  // server at runtime. Maximum total size is 10MB.
+  //
+  // Example body:
+  //   [
+  //     {"id": 1, "name": "Alice", "email": "alice@example.com"},
+  //     {"id": 3824212507853254558, "name": "Bob"}
+  //   ]
+  optional bytes records_json = 3;
+}
+
+/*
+ * A message representing the InsertRecords response.
+ *
+ * Empty: success or failure is carried by the gRPC status code.
+ */
+message InsertRecordsResponse {
 }
