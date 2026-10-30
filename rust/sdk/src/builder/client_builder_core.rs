@@ -5,6 +5,11 @@
 //! of the transport: the SDK, the table name, the authentication choice, and
 //! the record format. Each wrapper decides which formats it exposes and how it
 //! reports a missing one.
+//!
+//! The core also holds the settings that every client kind honors: recovery on
+//! or off, retry count and backoff, the server acknowledgement timeout, and the
+//! per-call payload limit. Settings that only streams have (in-flight limits,
+//! flush and recovery-attempt timeouts, callbacks) stay in the stream builder.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +21,7 @@ use crate::headers_provider::{
 };
 #[cfg(feature = "arrow-flight")]
 use crate::stream::ArrowSchema;
+use crate::stream_options::defaults;
 #[cfg(feature = "avro")]
 use crate::AvroSchema;
 use crate::{MessageDescriptor, RecordType, ZerobusError, ZerobusResult, ZerobusSdk};
@@ -113,12 +119,17 @@ const fn missing_auth_error() -> &'static str {
     }
 }
 
-/// Table, authentication, and format settings shared by the client builders.
+/// Target, format, and retry settings shared by the client builders.
 pub(crate) struct ClientBuilderCore<'a> {
     pub(super) sdk: &'a ZerobusSdk,
     pub(super) table_name: String,
     auth: Option<AuthConfig>,
     pub(super) format: Option<FormatConfig>,
+    pub(super) recovery: bool,
+    pub(super) recovery_retries: u32,
+    pub(super) recovery_backoff_ms: u64,
+    pub(super) server_lack_of_ack_timeout_ms: u64,
+    pub(super) max_ingest_payload_bytes: usize,
 }
 
 #[allow(clippy::result_large_err)]
@@ -129,6 +140,11 @@ impl<'a> ClientBuilderCore<'a> {
             table_name: String::new(),
             auth: None,
             format: None,
+            recovery: defaults::RECOVERY,
+            recovery_retries: defaults::RECOVERY_RETRIES,
+            recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
+            server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
+            max_ingest_payload_bytes: defaults::MAX_INGEST_PAYLOAD_BYTES,
         }
     }
 
@@ -165,6 +181,26 @@ impl<'a> ClientBuilderCore<'a> {
 
     pub(super) fn set_format(&mut self, format: FormatConfig) {
         self.format = Some(format);
+    }
+
+    pub(super) fn set_recovery(&mut self, enabled: bool) {
+        self.recovery = enabled;
+    }
+
+    pub(super) fn set_recovery_retries(&mut self, n: u32) {
+        self.recovery_retries = n;
+    }
+
+    pub(super) fn set_recovery_backoff_ms(&mut self, ms: u64) {
+        self.recovery_backoff_ms = ms;
+    }
+
+    pub(super) fn set_server_lack_of_ack_timeout_ms(&mut self, ms: u64) {
+        self.server_lack_of_ack_timeout_ms = ms;
+    }
+
+    pub(super) fn set_max_ingest_payload_bytes(&mut self, bytes: usize) {
+        self.max_ingest_payload_bytes = bytes;
     }
 
     /// Name of the configured auth kind, for `Debug` output.

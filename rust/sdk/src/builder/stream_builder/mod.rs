@@ -243,11 +243,8 @@ impl<'a> StreamBuilder<'a> {
 
     /// Enable or disable automatic stream recovery.
     pub fn recovery(mut self, enabled: bool) -> Self {
-        self.grpc_config.recovery = enabled;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.recovery = enabled;
-        }
+        self.core.set_recovery(enabled);
+        self.sync_shared_settings();
         self
     }
 
@@ -268,31 +265,22 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the backoff time in milliseconds between recovery retries.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
-        self.grpc_config.recovery_backoff_ms = ms;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.recovery_backoff_ms = ms;
-        }
+        self.core.set_recovery_backoff_ms(ms);
+        self.sync_shared_settings();
         self
     }
 
     /// Set the maximum number of recovery retry attempts.
     pub fn recovery_retries(mut self, n: u32) -> Self {
-        self.grpc_config.recovery_retries = n;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.recovery_retries = n;
-        }
+        self.core.set_recovery_retries(n);
+        self.sync_shared_settings();
         self
     }
 
     /// Set the timeout in milliseconds for server acknowledgement.
     pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
-        self.grpc_config.server_lack_of_ack_timeout_ms = ms;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.server_lack_of_ack_timeout_ms = ms;
-        }
+        self.core.set_server_lack_of_ack_timeout_ms(ms);
+        self.sync_shared_settings();
         self
     }
 
@@ -329,7 +317,8 @@ impl<'a> StreamBuilder<'a> {
     /// Arrow Flight streams (built with `build_arrow()`) do not read this value
     /// and have no client-side payload-size enforcement.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
-        self.grpc_config.max_ingest_payload_bytes = bytes;
+        self.core.set_max_ingest_payload_bytes(bytes);
+        self.sync_shared_settings();
         self
     }
 
@@ -422,6 +411,27 @@ impl<'a> StreamBuilder<'a> {
     pub fn compression(mut self, compression: crate::ArrowCompression) -> Self {
         self.arrow_config.compression = compression;
         self
+    }
+
+    /// Copy the settings owned by the core into the gRPC and Arrow configs.
+    ///
+    /// The core is the source of truth. The stream constructors still read the
+    /// two config structs, so every shared setter mirrors into them right away.
+    /// Arrow has no payload limit, so `max_ingest_payload_bytes` goes to gRPC only.
+    fn sync_shared_settings(&mut self) {
+        let core = &self.core;
+        self.grpc_config.recovery = core.recovery;
+        self.grpc_config.recovery_retries = core.recovery_retries;
+        self.grpc_config.recovery_backoff_ms = core.recovery_backoff_ms;
+        self.grpc_config.server_lack_of_ack_timeout_ms = core.server_lack_of_ack_timeout_ms;
+        self.grpc_config.max_ingest_payload_bytes = core.max_ingest_payload_bytes;
+        #[cfg(feature = "arrow-flight")]
+        {
+            self.arrow_config.recovery = core.recovery;
+            self.arrow_config.recovery_retries = core.recovery_retries;
+            self.arrow_config.recovery_backoff_ms = core.recovery_backoff_ms;
+            self.arrow_config.server_lack_of_ack_timeout_ms = core.server_lack_of_ack_timeout_ms;
+        }
     }
 
     /// Validate that the builder has all required fields configured.
