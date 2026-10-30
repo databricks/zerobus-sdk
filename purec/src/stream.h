@@ -67,6 +67,12 @@ struct zerobus_stream {
     char *failure_message;
     bool finishing; /* Close flushed: end the call cleanly, then stop. */
     bool aborting;  /* Free, or a close whose flush failed: stop at once. */
+    /* The first close's result, which later closes report. */
+    bool close_done;
+    zerobus_status_t close_status;
+    char *close_message;
+    zb_thread_t supervisor;
+    bool supervisor_running; /* Started and not joined yet. */
 };
 
 #endif /* ZB_STREAM_H */

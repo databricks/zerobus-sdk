@@ -7,8 +7,10 @@
 #include "internal/common/utils.h"
 #include "internal/platform/log.h"
 #include "internal/proto/zerobus_service.h"
+#include "internal/stream/workers.h"
 #include "sdk.h"
 #include "stream.h"
+#include "zerobus/error.h"
 #include "zerobus/sdk.h"
 #include "zerobus/stream.h"
 
@@ -338,6 +340,7 @@ static void destroy(zerobus_stream_t *stream)
     free(stream->table);
     zerobus_sdk_free(stream->sdk);
     free(stream->failure_message);
+    free(stream->close_message);
     (void)zb_cond_destroy(&stream->acked_changed);
     (void)zb_cond_destroy(&stream->changed);
     (void)zb_mutex_destroy(&stream->mutex);
@@ -364,6 +367,11 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "authentication is required: set OAuth credentials "
                        "or a headers provider");
+    }
+    if (!builder->sdk->connection_per_stream) {
+        return zb_fail(out_error, ZEROBUS_STATUS_UNIMPLEMENTED,
+                       "streams sharing one connection are not implemented "
+                       "yet");
     }
 
     zerobus_stream_t *s = NULL;
@@ -393,8 +401,30 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
                        "allocating the landing zone of %zu requests failed",
                        builder->config.max_inflight_requests);
     }
-    /* TODO: open the stream: start the supervisor and wait for the first
-     * open. */
+    status = zb_thread_create(&s->supervisor, zb_supervisor_main, s);
+    if (status != ZEROBUS_STATUS_OK) {
+        destroy(s);
+        return zb_fail(out_error, status, "starting the supervisor failed");
+    }
+    s->supervisor_running = true;
+
+    /* The supervisor publishes the first open's result, after retrying as
+     * recovery allows. */
+    (void)zb_mutex_lock(&s->mutex);
+    while (!s->opened) {
+        (void)zb_cond_wait(&s->changed, &s->mutex);
+    }
+    status = s->open_status;
+    if (status != ZEROBUS_STATUS_OK) {
+        (void)zb_fail(out_error, status, "opening the stream failed: %s",
+                      s->failure_message ? s->failure_message
+                                         : "unknown error");
+    }
+    (void)zb_mutex_unlock(&s->mutex);
+    if (status != ZEROBUS_STATUS_OK) {
+        zerobus_stream_free(s);
+        return status;
+    }
 
     *out_stream = s;
     ZB_DEBUG("stream created");
@@ -415,6 +445,78 @@ void zerobus_stream_builder_free(zerobus_stream_builder_t *builder)
 
 /* ---- stream ------------------------------------------------------------ */
 
+/* The status and message for an operation refused because the stream is
+ * closing or failed. Call with mutex held. A zone closed by neither is a
+ * failure being published, so this waits for it. */
+static zerobus_status_t refused(zerobus_stream_t *stream,
+                                zerobus_error_t **out_error)
+{
+    while (stream->failure == ZEROBUS_STATUS_OK &&
+           !atomic_load(&stream->closed) && !stream->aborting) {
+        (void)zb_cond_wait(&stream->changed, &stream->mutex);
+    }
+    if (stream->failure != ZEROBUS_STATUS_OK) {
+        return zb_fail(out_error, stream->failure, "stream failed: %s",
+                       stream->failure_message ? stream->failure_message
+                                               : "unknown error");
+    }
+    return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                   "stream is closing or closed");
+}
+
+/* Checks one record of an ingest call. */
+static zerobus_status_t check_record(const zerobus_stream_t *stream,
+                                     zerobus_string_view_t json_record,
+                                     zerobus_error_t **out_error)
+{
+    if (zb_is_empty(json_record)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "record must be non-empty");
+    }
+    if (json_record.len > stream->config.max_ingest_payload_bytes) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "record of %zu bytes exceeds the %zu-byte limit",
+                       json_record.len,
+                       stream->config.max_ingest_payload_bytes);
+    }
+    if (!zb_is_valid_string(json_record)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "record must be valid UTF-8 without embedded NUL");
+    }
+    return ZEROBUS_STATUS_OK;
+}
+
+/* Copies the count records into one request and pushes it into the landing
+ * zone, waiting while it is full. Returns the request's offset. */
+static zerobus_status_t admit(zerobus_stream_t *stream,
+                              const zerobus_string_view_t *json_records,
+                              size_t count, zerobus_offset_t *out_offset,
+                              zerobus_error_t **out_error)
+{
+    zb_ingest_request_t *request = zb_ingest_request_new(json_records, count);
+    if (request == NULL) {
+        ZB_ERROR("record allocation failed");
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    zerobus_offset_t offset = -1;
+    zerobus_status_t status = zb_landing_zone_push(
+        stream->zone, request, ZB_DEADLINE_INFINITE, &offset);
+    if (status != ZEROBUS_STATUS_OK) {
+        zb_ingest_request_free(request);
+        if (status != ZEROBUS_STATUS_FAILED_PRECONDITION) {
+            return zb_fail(out_error, status, "admitting the record failed");
+        }
+        (void)zb_mutex_lock(&stream->mutex);
+        status = refused(stream, out_error);
+        (void)zb_mutex_unlock(&stream->mutex);
+        return status;
+    }
+    if (out_offset != NULL) {
+        *out_offset = offset;
+    }
+    return ZEROBUS_STATUS_OK;
+}
+
 zerobus_status_t zerobus_stream_ingest_json_record(
     zerobus_stream_t *stream, zerobus_string_view_t json_record,
     zerobus_offset_t *out_offset, zerobus_error_t **out_error)
@@ -430,26 +532,108 @@ zerobus_status_t zerobus_stream_ingest_json_record(
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "stream is closing or closed");
     }
-    if (zb_is_empty(json_record)) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record must be non-empty");
+    zerobus_status_t status = check_record(stream, json_record, out_error);
+    if (status != ZEROBUS_STATUS_OK) {
+        return status;
     }
-    if (json_record.len > stream->config.max_ingest_payload_bytes) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record of %zu bytes exceeds the %zu-byte limit",
-                       json_record.len,
-                       stream->config.max_ingest_payload_bytes);
-    }
-    if (!zb_is_valid_string(json_record)) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
-                       "record must be valid UTF-8 without embedded NUL");
-    }
+    return admit(stream, &json_record, 1, out_offset, out_error);
+}
 
-    /* TODO: copy the record, assign its offset, and queue it for the sender. On
-     * success write the offset to *out_offset when non-NULL. Returns
-     * UNIMPLEMENTED until the networking core lands. */
-    (void)out_offset;
-    return ZEROBUS_STATUS_UNIMPLEMENTED;
+zerobus_status_t zerobus_stream_ingest_json_records(
+    zerobus_stream_t *stream, const zerobus_string_view_t *json_records,
+    size_t record_count, zerobus_offset_t *out_offset,
+    zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (stream == NULL || (json_records == NULL && record_count != 0)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "stream and records must not be NULL");
+    }
+    if (atomic_load(&stream->closed)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                       "stream is closing or closed");
+    }
+    size_t limit = stream->config.max_ingest_payload_bytes;
+    size_t total = 0;
+    for (size_t i = 0; i < record_count; ++i) {
+        zerobus_status_t status =
+            check_record(stream, json_records[i], out_error);
+        if (status != ZEROBUS_STATUS_OK) {
+            return status;
+        }
+        if (json_records[i].len > limit - total) {
+            return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                           "batch exceeds the %zu-byte limit", limit);
+        }
+        total += json_records[i].len;
+    }
+    if (record_count == 0) {
+        if (out_offset != NULL) {
+            *out_offset = -1;
+        }
+        return ZEROBUS_STATUS_OK;
+    }
+    return admit(stream, json_records, record_count, out_offset, out_error);
+}
+
+/* Waits until the server acknowledges target, the stream fails, or the flush
+ * timeout passes. what names the wait in the timeout's message. */
+static zerobus_status_t wait_acked(zerobus_stream_t *stream,
+                                   zerobus_offset_t target, const char *what,
+                                   zerobus_error_t **out_error)
+{
+    zb_deadline_t deadline =
+        zb_deadline_after_ms(stream->config.flush_timeout_ms);
+    zerobus_status_t status = ZEROBUS_STATUS_OK;
+    (void)zb_mutex_lock(&stream->mutex);
+    /* Published before reading acked, which the receiver writes before it
+     * reads flush_waiters: one of the two sees the other. */
+    (void)atomic_fetch_add(&stream->flush_waiters, 1);
+    while (atomic_load(&stream->acked) < target) {
+        if (stream->failure != ZEROBUS_STATUS_OK) {
+            status = refused(stream, out_error);
+            break;
+        }
+        if (zb_cond_wait_until(&stream->acked_changed, &stream->mutex,
+                               deadline) == ZEROBUS_STATUS_DEADLINE_EXCEEDED &&
+            atomic_load(&stream->acked) < target) {
+            status = zb_fail(
+                out_error, ZEROBUS_STATUS_DEADLINE_EXCEEDED,
+                "%s timed out after %llu ms at offset %lld of %lld", what,
+                (unsigned long long)stream->config.flush_timeout_ms,
+                (long long)atomic_load(&stream->acked), (long long)target);
+            break;
+        }
+    }
+    (void)atomic_fetch_sub(&stream->flush_waiters, 1);
+    (void)zb_mutex_unlock(&stream->mutex);
+    return status;
+}
+
+zerobus_status_t zerobus_stream_wait_for_offset(zerobus_stream_t *stream,
+                                                zerobus_offset_t offset,
+                                                zerobus_error_t **out_error)
+{
+    if (out_error != NULL && *out_error != NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    if (stream == NULL) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "stream must not be NULL");
+    }
+    if (atomic_load(&stream->closed)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
+                       "stream is closing or closed");
+    }
+    /* The last offset includes every one an ingest has returned. */
+    if (offset < 0 || offset > zb_landing_zone_last_offset(stream->zone)) {
+        return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
+                       "no ingest on this stream returned offset %lld",
+                       (long long)offset);
+    }
+    return wait_acked(stream, offset, "waiting for the offset", out_error);
 }
 
 zerobus_status_t zerobus_stream_flush(zerobus_stream_t *stream,
@@ -466,9 +650,17 @@ zerobus_status_t zerobus_stream_flush(zerobus_stream_t *stream,
         return zb_fail(out_error, ZEROBUS_STATUS_FAILED_PRECONDITION,
                        "stream is closing or closed");
     }
-    /* TODO: wait for the server to acknowledge every queued record. Returns
-     * UNIMPLEMENTED until the networking core lands. */
-    return ZEROBUS_STATUS_UNIMPLEMENTED;
+    return wait_acked(stream, zb_landing_zone_last_offset(stream->zone),
+                      "flush", out_error);
+}
+
+/* Joins the supervisor once. Callers are serialized by close or free. */
+static void join_supervisor(zerobus_stream_t *stream)
+{
+    if (stream->supervisor_running) {
+        (void)zb_thread_join(&stream->supervisor, NULL);
+        stream->supervisor_running = false;
+    }
 }
 
 zerobus_status_t zerobus_stream_close(zerobus_stream_t *stream,
@@ -481,11 +673,54 @@ zerobus_status_t zerobus_stream_close(zerobus_stream_t *stream,
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "stream must not be NULL");
     }
-    /* TODO: flush pending records before teardown, returning any flush error.
-     */
-    atomic_store(&stream->closed, true);
-    ZB_DEBUG("stream closed");
-    return ZEROBUS_STATUS_OK;
+    if (atomic_exchange(&stream->closed, true)) {
+        /* Another close runs or ran: report its result. */
+        (void)zb_mutex_lock(&stream->mutex);
+        while (!stream->close_done) {
+            (void)zb_cond_wait(&stream->changed, &stream->mutex);
+        }
+        zerobus_status_t status = stream->close_status;
+        if (status != ZEROBUS_STATUS_OK) {
+            (void)zb_fail(out_error, status, "%s",
+                          stream->close_message ? stream->close_message
+                                                : "close failed");
+        }
+        (void)zb_mutex_unlock(&stream->mutex);
+        return status;
+    }
+
+    (void)zb_landing_zone_close(stream->zone);
+    zerobus_error_t *error = NULL;
+    zerobus_status_t status = wait_acked(
+        stream, zb_landing_zone_last_offset(stream->zone), "flush", &error);
+    (void)zb_mutex_lock(&stream->mutex);
+    if (status == ZEROBUS_STATUS_OK) {
+        stream->finishing = true;
+    } else {
+        stream->aborting = true;
+    }
+    (void)zb_cond_broadcast(&stream->changed);
+    (void)zb_mutex_unlock(&stream->mutex);
+    join_supervisor(stream);
+
+    ZB_DEBUG("stream to %s closed (status %u)", stream->table,
+             (unsigned)status);
+    zerobus_string_view_t message = zerobus_error_message(error);
+    (void)zb_mutex_lock(&stream->mutex);
+    stream->close_done = true;
+    stream->close_status = status;
+    stream->close_message =
+        message.data ? zb_strndup(message.data, message.len) : NULL;
+    (void)zb_cond_broadcast(&stream->changed);
+    /* A later close may now return, and its caller free the stream, so the
+     * stream is not touched after this. */
+    (void)zb_mutex_unlock(&stream->mutex);
+    if (out_error != NULL) {
+        *out_error = error;
+    } else {
+        zerobus_error_free(error);
+    }
+    return status;
 }
 
 void zerobus_stream_free(zerobus_stream_t *stream)
@@ -493,7 +728,12 @@ void zerobus_stream_free(zerobus_stream_t *stream)
     if (stream == NULL) {
         return;
     }
-    /* TODO: tear down the transport and join I/O workers before freeing. */
+    (void)zb_mutex_lock(&stream->mutex);
+    stream->aborting = true;
+    (void)zb_cond_broadcast(&stream->changed);
+    (void)zb_mutex_unlock(&stream->mutex);
+    (void)zb_landing_zone_close(stream->zone);
+    join_supervisor(stream);
     destroy(stream);
     ZB_DEBUG("stream freed");
 }

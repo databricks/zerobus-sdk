@@ -112,12 +112,13 @@ zerobus_stream_builder_set_headers_provider(
     zerobus_error_t **out_error);
 
 /*
- * Validates configuration and (once implemented) opens the initial
- * authenticated connection. The builder is not consumed and may be reused or
- * freed.
+ * Validates configuration and opens the stream: gets the headers, connects,
+ * and creates the server-side stream, retrying retryable failures while
+ * recovery is enabled. The builder is not consumed and may be reused or freed.
  *
- * Not implemented yet: validates configuration and returns a usable handle
- * without opening a connection.
+ * Streams that share one connection (see
+ * zerobus_sdk_builder_set_connection_per_stream) are not implemented yet:
+ * build returns ZEROBUS_STATUS_UNIMPLEMENTED for them.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_build(
     const zerobus_stream_builder_t *builder, zerobus_stream_t **out_stream,
@@ -131,34 +132,55 @@ zerobus_stream_builder_free(zerobus_stream_builder_t *builder);
  * The record must be non-empty valid UTF-8, without raw NUL bytes, and no
  * larger than the payload limit. Success means the record was copied and queued
  * locally, not acknowledged by the server, so the caller may reuse the bytes on
- * return.
+ * return. Waits while max in-flight requests are queued or unacknowledged.
  *
  * On success *out_offset, when non-NULL, receives the record's stream offset —
  * a handle to wait on later.
- *
- * Not implemented yet: validates its inputs, then returns
- * ZEROBUS_STATUS_UNIMPLEMENTED until the networking core lands.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_ingest_json_record(
     zerobus_stream_t *stream, zerobus_string_view_t json_record,
     zerobus_offset_t *out_offset, zerobus_error_t **out_error);
 
 /*
- * Wait until the server acknowledges every record queued before this call.
+ * Ingest records as one batch: one request with one offset, acknowledged
+ * together. Prefer it over single records where throughput matters, since
+ * each call costs one request. Each record follows the rules of
+ * zerobus_stream_ingest_json_record, and together they must not exceed the
+ * payload limit. A batch counts as one request towards max in-flight
+ * requests. An empty batch admits nothing and sets *out_offset, when
+ * non-NULL, to -1. json_records may be NULL when record_count is 0.
+ */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_ingest_json_records(
+    zerobus_stream_t *stream, const zerobus_string_view_t *json_records,
+    size_t record_count, zerobus_offset_t *out_offset,
+    zerobus_error_t **out_error);
+
+/*
+ * Wait until the server acknowledges offset, an offset an ingest on this
+ * stream returned, and so every record before it, as flush does: until the
+ * stream fails or the flush timeout passes. Any other offset returns
+ * INVALID_ARGUMENT, and after close FAILED_PRECONDITION.
  *
- * Not implemented yet: returns ZEROBUS_STATUS_UNIMPLEMENTED until the
- * networking core lands.
+ * Each wait costs a round trip to the server, so waiting after every ingest
+ * caps throughput at one record per round trip. Use it only where a record
+ * must be acknowledged before going on; otherwise ingest all, then flush once.
+ */
+ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_wait_for_offset(
+    zerobus_stream_t *stream, zerobus_offset_t offset,
+    zerobus_error_t **out_error);
+
+/*
+ * Wait until the server acknowledges every record queued before this call,
+ * the stream fails, or the flush timeout passes.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_stream_flush(zerobus_stream_t *stream, zerobus_error_t **out_error);
 
 /*
- * Stop ingestion, flush pending records, and tear down the stream. Idempotent.
- * If the flush fails, teardown still happens and the error is returned. After
- * close, ingest and flush return FAILED_PRECONDITION.
- *
- * Not implemented yet: only marks the stream closed, no flush or teardown until
- * the networking core lands.
+ * Stop ingestion, flush pending records, and tear down the stream. Idempotent:
+ * every call returns the first close's result. If the flush fails, teardown
+ * still happens and the error is returned. After close, ingest and flush
+ * return FAILED_PRECONDITION.
  */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_stream_close(zerobus_stream_t *stream, zerobus_error_t **out_error);
