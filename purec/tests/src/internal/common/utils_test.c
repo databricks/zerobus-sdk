@@ -137,6 +137,20 @@ static void test_parse_u32(void)
     CHECK_EQ_INT(out, 7);
 }
 
+/* The digit rules are those of zb_parse_u32, which uses it. */
+static void test_parse_u64(void)
+{
+    uint64_t out = 0;
+    CHECK(zb_parse_u64((const uint8_t *)"4294967296", 10, &out) &&
+          out == 4294967296u);
+    CHECK(zb_parse_u64((const uint8_t *)"18446744073709551615", 20, &out) &&
+          out == UINT64_MAX);
+    out = 7;
+    /* UINT64_MAX + 1 */
+    CHECK(!zb_parse_u64((const uint8_t *)"18446744073709551616", 20, &out));
+    CHECK(out == 7);
+}
+
 static void test_hex_value(void)
 {
     CHECK_EQ_INT(zb_hex_value('0'), 0);
@@ -376,6 +390,7 @@ int main(void)
     test_starts_with();
     test_equals_ignore_case();
     test_parse_u32();
+    test_parse_u64();
     test_hex_value();
     test_view_equals();
     test_copy_bounded();

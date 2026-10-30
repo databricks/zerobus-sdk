@@ -48,6 +48,7 @@ zerobus_add_test(internal/network/channel_test)
 zerobus_add_test(internal/network/connection_test)
 zerobus_add_test(internal/network/transport_test)
 zerobus_add_test(internal/network/http_client_test)
+zerobus_add_test(internal/oauth/oauth_test)
 
 target_include_directories(internal_proto_zerobus_service_test PRIVATE
   "${GENERATED_DIR}")
@@ -68,4 +69,5 @@ set_tests_properties(sdk_test stream_test internal_platform_concurrency_test
                      internal_network_grpc_test internal_platform_network_test
                      internal_network_tls_test internal_network_channel_test
                      internal_network_connection_test internal_network_transport_test
-                     internal_network_http_client_test PROPERTIES TIMEOUT 30)
+                     internal_network_http_client_test internal_oauth_oauth_test
+                     PROPERTIES TIMEOUT 30)

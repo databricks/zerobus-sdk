@@ -109,20 +109,30 @@ bool zb_is_header_value(zerobus_string_view_t view)
 
 /* ---- parsing ----------------------------------------------------------- */
 
-bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
+bool zb_parse_u64(const uint8_t *value, size_t len, uint64_t *out)
 {
     if (len == 0) {
         return false;
     }
-    uint32_t res = 0;
+    uint64_t res = 0;
     for (size_t i = 0; i < len; ++i) {
-        uint32_t c = (uint32_t)(value[i] - '0');
-        if (value[i] < '0' || value[i] > '9' || res > (UINT32_MAX - c) / 10) {
+        uint64_t c = (uint64_t)(value[i] - '0');
+        if (value[i] < '0' || value[i] > '9' || res > (UINT64_MAX - c) / 10) {
             return false;
         }
         res = res * 10 + c;
     }
     *out = res;
+    return true;
+}
+
+bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
+{
+    uint64_t res = 0;
+    if (!zb_parse_u64(value, len, &res) || res > UINT32_MAX) {
+        return false;
+    }
+    *out = (uint32_t)res;
     return true;
 }
 
