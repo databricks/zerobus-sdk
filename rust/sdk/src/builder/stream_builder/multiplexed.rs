@@ -123,7 +123,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         }
 
         #[cfg(feature = "arrow-flight")]
-        if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
+        if matches!(self.inner.core.format, Some(FormatConfig::Arrow(_))) {
             self.inner.validate_arrow()?;
             if self.inner.stats_exporter.is_some() {
                 return Err(ZerobusError::InvalidArgument(
@@ -199,6 +199,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         // immutable writer schema allocation across lanes, supervisors, and retries.
         let format = self
             .inner
+            .core
             .format
             .take()
             .expect("format was validated")
