@@ -6,6 +6,15 @@
 
 ### New Features and Improvements
 
+- JSON and protobuf gRPC connections now send HTTP/2 keepalive PINGs every 30
+  seconds (10 second ack timeout, also while no stream is open) and enable TCP
+  keepalive with a 30 second idle time. NAT gateways, load balancers, and
+  firewalls with short idle timeouts no longer drop idle streams without
+  notice, which showed up as `Server ack timeout` on the next record. Dead
+  connections now fail after about 40 seconds instead of at the 60 second ack
+  timeout. Arrow Flight streams are unchanged. TCP keepalive is not applied
+  through a proxy connector.
+
 - Arrow Flight streams with IPC compression now pad IPC buffers to a multiple
   of 8 bytes instead of 64. With compression, 64-byte alignment gives no
   benefit and only adds padding bytes to the payload. Uncompressed payloads
@@ -134,3 +143,8 @@
   `UcColumn::with_nullable`, `UcColumn::with_position`, and
   `UcTableSchema::new`.
 - Added `RecordType`.
+- Added `ZerobusSdkBuilder::http2_keepalive_interval`,
+  `ZerobusSdkBuilder::http2_keepalive_timeout`, and
+  `ZerobusSdkBuilder::tcp_keepalive`, and the constants
+  `DEFAULT_HTTP2_KEEPALIVE_INTERVAL`, `DEFAULT_HTTP2_KEEPALIVE_TIMEOUT`, and
+  `DEFAULT_TCP_KEEPALIVE`.

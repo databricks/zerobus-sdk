@@ -112,7 +112,10 @@ pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
-pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+pub use sdk::{
+    ZerobusSdk, DEFAULT_HTTP2_KEEPALIVE_INTERVAL, DEFAULT_HTTP2_KEEPALIVE_TIMEOUT,
+    DEFAULT_SDK_IDENTIFIER, DEFAULT_TCP_KEEPALIVE,
+};
 #[cfg(feature = "arrow-flight")]
 pub use stats::{
     channel_exporter, BatchStats, ChannelExporter, ReconnectReason, StatsExporter, StreamStat,

@@ -94,6 +94,23 @@ aggregate throughput. Dedicated connections isolate that loss. For many
 smaller, low-throughput streams, call `ConnectionPerStream(false)`; shared
 multiplexing is recommended there to reduce connection overhead.
 
+JSON/protobuf connections send HTTP/2 keepalive PINGs (every 30 s, 10 s ack
+timeout) and enable TCP keepalive (30 s idle) by default. This keeps idle
+streams alive through NAT gateways, load balancers and firewalls that silently
+drop idle flows, and detects dead connections without waiting for the server
+ack timeout. Tune or disable with `Http2KeepAlive(interval, timeout)` and
+`TcpKeepAlive(idle)`; `TimeSpan.Zero` disables. If the server rejects PINGs
+(GOAWAY `ENHANCE_YOUR_CALM`), disable HTTP/2 PINGs and keep TCP keepalive:
+
+```csharp
+using var sdk = ZerobusSdk.CreateBuilder()
+    .Endpoint(zerobusEndpoint)
+    .UnityCatalogUrl(unityCatalogUrl)
+    .Http2KeepAlive(TimeSpan.Zero, TimeSpan.Zero)
+    .TcpKeepAlive(TimeSpan.FromSeconds(60))
+    .Build();
+```
+
 #### `CreateJsonStream`
 
 Creates a JSON-only stream with OAuth 2.0 client credentials authentication.
