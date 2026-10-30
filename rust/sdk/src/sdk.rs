@@ -23,6 +23,19 @@ use crate::stream::ZerobusArrowStream;
 /// application suffix.
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
+/// How long the unary channel waits without receiving any frame, while a call
+/// is in flight, before it sends an HTTP/2 PING. A third of the default
+/// server acknowledgement timeout.
+#[cfg(feature = "unary")]
+const UNARY_KEEPALIVE_INTERVAL: Duration =
+    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 3);
+
+/// How long the unary channel waits for the PING reply before it closes the
+/// connection. A sixth of the default server acknowledgement timeout.
+#[cfg(feature = "unary")]
+const UNARY_KEEPALIVE_TIMEOUT: Duration =
+    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 6);
+
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
 /// ```rust,ignore
@@ -51,6 +64,11 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
     shared_stream_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+    /// Channel shared by every unary client of this SDK, created on first use.
+    /// It is separate from `shared_stream_channel`, so unary clients never
+    /// share a connection with streams, whatever `connection_per_stream` says.
+    #[cfg(feature = "unary")]
+    unary_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -197,6 +215,8 @@ impl ZerobusSdk {
             unity_catalog_url,
             workspace_id,
             shared_stream_channel: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "unary")]
+            unary_channel: tokio::sync::Mutex::new(None),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -371,26 +391,60 @@ impl ZerobusSdk {
         &self,
     ) -> ZerobusResult<ZerobusClient<Channel>> {
         if self.connection_per_stream {
-            return self.create_stream_channel();
+            return self.create_zerobus_client(std::convert::identity);
         }
-
-        let mut guard = self.shared_stream_channel.lock().await;
-
-        if guard.is_none() {
-            *guard = Some(self.create_stream_channel()?);
-        }
-
-        Ok(guard
-            .as_ref()
-            .expect("Channel was just initialized")
-            .clone())
+        self.get_or_create_shared_channel(&self.shared_stream_channel, std::convert::identity)
+            .await
     }
 
-    fn create_stream_channel(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+    /// Returns a clone of the channel shared by every unary client of this SDK,
+    /// creating it on first use.
+    ///
+    /// The channel sends HTTP/2 keepalive PINGs only while a call is in flight,
+    /// so a connection that died silently between sparse calls is detected and
+    /// closed during the next call, and its retry opens a new connection.
+    // Used by `UnaryClientBuilder::build()`, which a later commit adds.
+    #[allow(dead_code)]
+    #[cfg(feature = "unary")]
+    pub(crate) async fn get_or_create_unary_channel(
+        &self,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
+        self.get_or_create_shared_channel(&self.unary_channel, |endpoint| {
+            endpoint
+                .http2_keep_alive_interval(UNARY_KEEPALIVE_INTERVAL)
+                .keep_alive_timeout(UNARY_KEEPALIVE_TIMEOUT)
+                .keep_alive_while_idle(false)
+        })
+        .await
+    }
+
+    /// Returns a clone of the channel in `slot`, creating it with `configure`
+    /// on first use. Every caller of the same slot gets the same connection.
+    async fn get_or_create_shared_channel(
+        &self,
+        slot: &tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+        configure: impl FnOnce(Endpoint) -> Endpoint,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
+        let mut guard = slot.lock().await;
+        if let Some(channel) = guard.as_ref() {
+            return Ok(channel.clone());
+        }
+        let channel = self.create_zerobus_client(configure)?;
+        *guard = Some(channel.clone());
+        Ok(channel)
+    }
+
+    /// Creates a lazy client with the SDK's endpoint, user agent, TLS, and
+    /// proxy settings. `configure` adjusts the endpoint before it connects.
+    fn create_zerobus_client(
+        &self,
+        configure: impl FnOnce(Endpoint) -> Endpoint,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
         let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
             .user_agent(self.sdk_identifier.as_ref())
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+        let endpoint = configure(endpoint);
 
         let endpoint = self.tls_config.tls_settings()?.apply(endpoint)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
@@ -403,5 +457,42 @@ impl ZerobusSdk {
         Ok(ZerobusClient::new(channel)
             .max_decoding_message_size(usize::MAX)
             .max_encoding_message_size(usize::MAX))
+    }
+}
+
+#[cfg(all(test, feature = "unary"))]
+mod tests {
+    use super::*;
+
+    fn test_sdk(connection_per_stream: bool) -> ZerobusSdk {
+        ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            "http://localhost:5678".to_string(),
+            "test-workspace".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            connection_per_stream,
+        )
+    }
+
+    #[test]
+    fn unary_keepalive_is_a_third_and_a_sixth_of_the_default_ack_timeout() {
+        assert_eq!(UNARY_KEEPALIVE_INTERVAL, Duration::from_secs(20));
+        assert_eq!(UNARY_KEEPALIVE_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn unary_channel_is_created_once_and_never_shared_with_streams() {
+        for connection_per_stream in [true, false] {
+            let sdk = test_sdk(connection_per_stream);
+            sdk.get_or_create_unary_channel().await.unwrap();
+            sdk.get_or_create_unary_channel().await.unwrap();
+
+            assert!(sdk.unary_channel.lock().await.is_some());
+            assert!(sdk.shared_stream_channel.lock().await.is_none());
+        }
     }
 }
