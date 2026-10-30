@@ -123,6 +123,7 @@ static void test_arguments(void)
         {"a", "b\r\nc: d"},
         /* The client writes these itself. */
         {"Host", "example.com"},
+        {"Content-Type", "application/json"},
         {"content-length", "0"},
         {"Transfer-Encoding", "chunked"},
         {"CONNECTION", "keep-alive"},

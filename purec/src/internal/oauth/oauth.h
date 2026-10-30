@@ -22,8 +22,8 @@ void zb_fetched_token_clear(zb_fetched_token_t *token);
  *
  * Returns OK and fills *out_token. Otherwise leaves *out_token untouched and
  * returns UNAVAILABLE for a 5xx response, UNAUTHENTICATED for any other
- * non-2xx response, INTERNAL for a 2xx response without an access_token that
- * is a non-empty header value, or the failure of zb_http_client_post.
+ * non-2xx response or a 2xx response without an access_token that is a
+ * non-empty header value, or the failure of zb_http_client_post.
  */
 zerobus_status_t
 zb_oauth_fetch_token(const zb_tls_ctx_t *tls, const char *uc_endpoint,

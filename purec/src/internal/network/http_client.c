@@ -91,8 +91,9 @@ static bool is_token(const char *name)
  * the request to the client. */
 static bool headers_are_valid(const zerobus_headers_t *headers)
 {
-    static const char *const framing[] = {"host", "content-length",
-                                          "transfer-encoding", "connection"};
+    static const char *const framing[] = {"host", "content-type",
+                                          "content-length", "transfer-encoding",
+                                          "connection"};
     if (!headers) {
         return false;
     }

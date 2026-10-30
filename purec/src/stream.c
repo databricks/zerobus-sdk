@@ -27,15 +27,6 @@ struct zerobus_stream_builder {
     } auth;
 };
 
-struct zerobus_stream {
-    zerobus_sdk_t *sdk; /* owned reference */
-    char *table;
-    zb_stream_config_t config;
-    zerobus_headers_provider_t *headers_provider; /* owned reference */
-
-    atomic_bool closed; /* set by close, rejects ingest once true */
-};
-
 /* ---- builder ----------------------------------------------------------- */
 
 static void clear_auth(zerobus_stream_builder_t *builder)
@@ -289,13 +280,13 @@ zerobus_status_t zerobus_stream_builder_set_headers_provider(
 
 static zerobus_status_t
 resolve_headers_provider(const zerobus_stream_builder_t *builder,
+                         const zerobus_stream_t *stream,
                          zerobus_headers_provider_t **out_provider)
 {
     switch (builder->auth_kind) {
     case AUTH_OAUTH:
         return zb_oauth_headers_provider_new(
-            builder->sdk->uc_endpoint, builder->sdk->workspace_id,
-            builder->table, builder->auth.oauth.client_id,
+            stream, builder->auth.oauth.client_id,
             builder->auth.oauth.client_secret, out_provider);
     case AUTH_HEADERS_PROVIDER:
         zb_headers_provider_ref(builder->auth.headers_provider);
@@ -345,7 +336,7 @@ zerobus_stream_builder_build(const zerobus_stream_builder_t *builder,
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
     zerobus_status_t status =
-        resolve_headers_provider(builder, &s->headers_provider);
+        resolve_headers_provider(builder, s, &s->headers_provider);
     if (status != ZEROBUS_STATUS_OK) {
         zerobus_stream_free(s);
         return zb_fail(out_error, status, "headers provider setup failed");

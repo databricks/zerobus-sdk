@@ -20,8 +20,8 @@ typedef struct {
  * and reads the whole response by deadline, except for the DNS lookup, which
  * is unbounded. origin is an "http(s)://host[:port]" that zb_url_validate
  * accepts. https needs tls. Header names must be HTTP tokens other than Host,
- * Content-Length, Transfer-Encoding and Connection, which the client writes
- * itself.
+ * Content-Type, Content-Length, Transfer-Encoding and Connection, which the
+ * client writes itself.
  *
  * Any HTTP status returns OK and fills *out, for zb_http_response_clear to
  * release. Otherwise returns UNAVAILABLE for a failed, untrusted or cut-short

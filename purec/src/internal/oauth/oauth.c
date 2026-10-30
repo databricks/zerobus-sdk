@@ -1,6 +1,5 @@
 #include "oauth.h"
 
-#include <ctype.h>
 #include <jansson.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -83,7 +82,9 @@ static char *base64_encode(const unsigned char *data, size_t len)
 
 static bool is_unreserved(unsigned char c)
 {
-    return isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~';
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+           c == '~';
 }
 
 static char *form_encode(const char *text)
@@ -237,16 +238,16 @@ static uint64_t parse_expires_in(const json_t *value)
                : 0;
 }
 
-/* Parses the JSON body of a 2xx token response into *out_token. INTERNAL for
- * a body without an access_token that is a non-empty header value, leaving
- * *out_token untouched. */
+/* Parses the JSON body of a 2xx token response into *out_token.
+ * UNAUTHENTICATED, which is not retryable, for a body without an access_token
+ * that is a non-empty header value, leaving *out_token untouched. */
 static zerobus_status_t parse_response(const char *body, size_t len,
                                        zb_fetched_token_t *out_token,
                                        zerobus_error_t **out_error)
 {
     json_t *root = json_loadb(body, len, 0, NULL);
     if (root == NULL) {
-        return zb_fail(out_error, ZEROBUS_STATUS_INTERNAL,
+        return zb_fail(out_error, ZEROBUS_STATUS_UNAUTHENTICATED,
                        "token response is not valid JSON");
     }
     const json_t *access_token = json_object_get(root, "access_token");
@@ -255,7 +256,7 @@ static zerobus_status_t parse_response(const char *body, size_t len,
     zerobus_status_t status = ZEROBUS_STATUS_OK;
     /* Checked so a token that cannot be sent never replaces one that can. */
     if (!zb_is_valid_string(token) || !zb_is_header_value(token)) {
-        status = zb_fail(out_error, ZEROBUS_STATUS_INTERNAL,
+        status = zb_fail(out_error, ZEROBUS_STATUS_UNAUTHENTICATED,
                          "token response has no access_token that can be "
                          "sent as a header value");
     } else {

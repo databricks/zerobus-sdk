@@ -160,7 +160,7 @@ static void test_expires_in(void)
 }
 
 /* A 2xx body without an access_token that is a non-empty header value is
- * rejected, leaving the token untouched. */
+ * rejected for good, leaving the token untouched. */
 static void test_invalid_response(void)
 {
     static const char *const bodies[] = {
@@ -175,8 +175,8 @@ static void test_invalid_response(void)
     for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
         zerobus_error_t *error = NULL;
         CHECK_EQ_INT(fetch_body(bodies[i], &token, &error),
-                     ZEROBUS_STATUS_INTERNAL);
-        CHECK(error != NULL);
+                     ZEROBUS_STATUS_UNAUTHENTICATED);
+        CHECK(error != NULL && !zerobus_error_is_retryable(error));
         zerobus_error_free(error);
     }
     CHECK(token.token == NULL && token.expires_in == 7);
