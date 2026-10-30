@@ -62,7 +62,12 @@ async fn close_keeps_unacked_proto_records_available_for_java_recovery(
 
     stream.ingest_record_offset(record.clone()).await?;
 
-    let handle = NativeStreamHandle::new(stream, String::new(), String::new());
+    let handle = NativeStreamHandle::new(
+        stream,
+        databricks_zerobus_ingest_sdk::RecordType::Proto,
+        String::new(),
+        String::new(),
+    );
     assert!(close_native_stream(&handle).await.is_err());
 
     let guard = handle.stream.lock().await;
@@ -74,4 +79,29 @@ async fn close_keeps_unacked_proto_records_available_for_java_recovery(
     assert!(matches!(&unacked[0], EncodedRecord::Proto(payload) if payload == &record));
 
     Ok(())
+}
+
+#[test]
+fn encoded_record_from_maps_record_types() {
+    use databricks_zerobus_ingest_sdk::RecordType;
+
+    // Proto: bytes pass through.
+    assert!(matches!(
+        encoded_record_from(RecordType::Proto, vec![1, 2, 3]),
+        Ok(EncodedRecord::Proto(b)) if b == vec![1, 2, 3]
+    ));
+
+    // JSON: valid UTF-8 becomes a Json string; invalid UTF-8 is an error.
+    assert!(matches!(
+        encoded_record_from(RecordType::Json, b"{}".to_vec()),
+        Ok(EncodedRecord::Json(s)) if s == "{}"
+    ));
+    assert!(encoded_record_from(RecordType::Json, vec![0xff, 0xfe]).is_err());
+
+    // Avro: bytes pass through when the feature is enabled.
+    #[cfg(feature = "avro")]
+    assert!(matches!(
+        encoded_record_from(RecordType::Avro, vec![9]),
+        Ok(EncodedRecord::Avro(b)) if b == vec![9]
+    ));
 }

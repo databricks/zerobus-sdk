@@ -8,24 +8,46 @@ use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
 use databricks_zerobus_ingest_sdk::ZerobusStream;
-use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord};
+use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord, RecordType};
 use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
-use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Wrap payload bytes as the `EncodedRecord` variant for the stream's `RecordType`.
+fn encoded_record_from(record_type: RecordType, bytes: Vec<u8>) -> Result<EncodedRecord, String> {
+    match record_type {
+        RecordType::Proto => Ok(EncodedRecord::Proto(bytes)),
+        RecordType::Json => String::from_utf8(bytes)
+            .map(EncodedRecord::Json)
+            .map_err(|e| format!("Invalid UTF-8 in JSON payload: {}", e)),
+        #[cfg(feature = "avro")]
+        RecordType::Avro => Ok(EncodedRecord::Avro(bytes)),
+        // `RecordType` is non-exhaustive; without `avro` its `Avro` variant does not exist.
+        other => Err(format!("Unsupported record type: {:?}", other)),
+    }
+}
+
 /// Native stream handle stored in Java.
 pub struct NativeStreamHandle {
     pub stream: Arc<Mutex<Option<ZerobusStream>>>,
+    /// Record format, fixed at creation; the ingest paths read it instead of taking it per call.
+    pub record_type: RecordType,
     pub client_id: String,
     pub client_secret: String,
 }
 
 impl NativeStreamHandle {
-    pub fn new(stream: ZerobusStream, client_id: String, client_secret: String) -> Self {
+    pub fn new(
+        stream: ZerobusStream,
+        record_type: RecordType,
+        client_id: String,
+        client_secret: String,
+    ) -> Self {
         Self {
             stream: Arc::new(Mutex::new(Some(stream))),
+            record_type,
             client_id,
             client_secret,
         }
@@ -84,7 +106,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeDestr
 ///
 /// # JNI Signature
 /// ```java
-/// private native CompletableFuture<Void> nativeIngestRecord(long handle, byte[] payload, boolean isJson);
+/// private native CompletableFuture<Void> nativeIngestRecord(long handle, byte[] payload);
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecord<'local>(
@@ -92,7 +114,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     _obj: JObject<'local>,
     handle: jlong,
     payload: JByteArray<'local>,
-    is_json: jboolean,
 ) -> JObject<'local> {
     // Create the CompletableFuture to return
     let future = match create_completable_future(&mut env) {
@@ -126,17 +147,12 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     let stream_arc = stream_handle.stream.clone();
 
     // Create the encoded record
-    let record = if is_json != JNI_FALSE {
-        let json_str = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid UTF-8 in JSON payload: {}", e));
-                return JObject::null();
-            }
-        };
-        EncodedRecord::Json(json_str)
-    } else {
-        EncodedRecord::Proto(bytes)
+    let record = match encoded_record_from(stream_handle.record_type, bytes) {
+        Ok(r) => r,
+        Err(msg) => {
+            throw_zerobus_exception(&mut env, &msg);
+            return JObject::null();
+        }
     };
 
     // Spawn async operation
@@ -160,7 +176,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 ///
 /// # JNI Signature
 /// ```java
-/// private native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
+/// private native long nativeIngestRecordOffset(long handle, byte[] payload);
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordOffset<
@@ -170,7 +186,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     _obj: JObject<'local>,
     handle: jlong,
     payload: JByteArray<'local>,
-    is_json: jboolean,
 ) -> jlong {
     // Extract payload bytes
     let bytes: Vec<u8> = match env.convert_byte_array(payload) {
@@ -185,17 +200,12 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
     // Create the encoded record
-    let record = if is_json != JNI_FALSE {
-        let json_str = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid UTF-8 in JSON payload: {}", e));
-                return -1;
-            }
-        };
-        EncodedRecord::Json(json_str)
-    } else {
-        EncodedRecord::Proto(bytes)
+    let record = match encoded_record_from(stream_handle.record_type, bytes) {
+        Ok(r) => r,
+        Err(msg) => {
+            throw_zerobus_exception(&mut env, &msg);
+            return -1;
+        }
     };
 
     // Block on the async operation
@@ -223,7 +233,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 ///
 /// # JNI Signature
 /// ```java
-/// private native long nativeIngestRecordsOffset(long handle, List<byte[]> payloads, boolean isJson);
+/// private native long nativeIngestRecordsOffset(long handle, List<byte[]> payloads);
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordsOffset<
@@ -233,8 +243,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     _obj: JObject<'local>,
     handle: jlong,
     payloads: JObject<'local>,
-    is_json: jboolean,
 ) -> jlong {
+    // Get stream handle
+    let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
+
     // Convert Java List to Vec of byte arrays
     let list = match JList::from_env(&mut env, &payloads) {
         Ok(l) => l,
@@ -271,20 +283,12 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
             }
         };
 
-        let record = if is_json != JNI_FALSE {
-            let json_str = match String::from_utf8(bytes) {
-                Ok(s) => s,
-                Err(e) => {
-                    throw_zerobus_exception(
-                        &mut env,
-                        &format!("Invalid UTF-8 in JSON payload: {}", e),
-                    );
-                    return -1;
-                }
-            };
-            EncodedRecord::Json(json_str)
-        } else {
-            EncodedRecord::Proto(bytes)
+        let record = match encoded_record_from(stream_handle.record_type, bytes) {
+            Ok(r) => r,
+            Err(msg) => {
+                throw_zerobus_exception(&mut env, &msg);
+                return -1;
+            }
         };
 
         records.push(record);
@@ -293,9 +297,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     if records.is_empty() {
         return -1;
     }
-
-    // Get stream handle
-    let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
     // Block on the async operation
     let result = block_on(async {
@@ -498,6 +499,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
         let bytes = match record {
             EncodedRecord::Proto(p) => p,
             EncodedRecord::Json(j) => j.into_bytes(),
+            #[cfg(feature = "avro")]
+            EncodedRecord::Avro(a) => a,
             _ => {
                 throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
                 return JObject::null();
@@ -582,10 +585,17 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
 
     // Add each batch to the list
     for batch in batches {
-        let (is_json, records): (bool, Vec<Vec<u8>>) = match batch {
-            EncodedBatch::Proto(records) => (false, records.into_iter().collect()),
-            EncodedBatch::Json(records) => {
-                (true, records.into_iter().map(|r| r.into_bytes()).collect())
+        let (format_code, records): (jint, Vec<Vec<u8>>) = match batch {
+            EncodedBatch::Proto(records) => {
+                (RecordType::Proto as jint, records.into_iter().collect())
+            }
+            EncodedBatch::Json(records) => (
+                RecordType::Json as jint,
+                records.into_iter().map(|r| r.into_bytes()).collect(),
+            ),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => {
+                (RecordType::Avro as jint, records.into_iter().collect())
             }
             _ => {
                 throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
@@ -628,14 +638,11 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             }
         }
 
-        // Create EncodedBatch object
+        // Package-private EncodedBatch(List<byte[]>, int formatCode).
         let batch_obj = match env.new_object(
             &encoded_batch_class,
-            "(Ljava/util/List;Z)V",
-            &[
-                JValue::Object(&records_list),
-                JValue::Bool(if is_json { JNI_TRUE } else { JNI_FALSE }),
-            ],
+            "(Ljava/util/List;I)V",
+            &[JValue::Object(&records_list), JValue::Int(format_code)],
         ) {
             Ok(b) => b,
             Err(e) => {

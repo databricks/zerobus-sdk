@@ -10,10 +10,10 @@ members = [
     "tests",
     "test-support",
 ]
-# Excluded until ffi/jni support Avro (#830). As a workspace member it would unify the sdk
-# `avro` feature onto ffi/jni, which don't handle Avro records yet. Build it standalone
-# meanwhile; it rejoins `members` once ffi/jni enable `avro` themselves — the feature stays
-# permanently opt-in.
+# Excluded until ffi supports Avro (#830). As a workspace member it would unify the sdk `avro`
+# feature onto ffi, which doesn't handle Avro records yet. (The jni crate gates Avro behind its
+# own feature, so it is unaffected.) Build it standalone meanwhile; it rejoins `members` once ffi
+# enables `avro` itself — the feature stays permanently opt-in.
 exclude = ["examples/avro"]
 resolver = "2"
 

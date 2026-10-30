@@ -51,7 +51,6 @@ abstract class BaseZerobusStream implements AutoCloseable {
   // Stream properties.
   protected final String tableName;
   protected final StreamConfigurationOptions options;
-  protected final boolean isJsonMode;
 
   // Cached unacked records (populated on close for use in recreateStream).
   protected volatile List<byte[]> cachedUnackedRecords;
@@ -60,17 +59,47 @@ abstract class BaseZerobusStream implements AutoCloseable {
   /**
    * Creates a new BaseZerobusStream.
    *
+   * <p>The record format is fixed natively at stream creation, so the ingest paths do not carry it.
+   *
    * @param nativeHandle the native handle from JNI
    * @param tableName the table name
    * @param options the stream configuration options
-   * @param isJsonMode whether this stream is in JSON mode
    */
   protected BaseZerobusStream(
-      long nativeHandle, String tableName, StreamConfigurationOptions options, boolean isJsonMode) {
+      long nativeHandle, String tableName, StreamConfigurationOptions options) {
     this.nativeHandle = nativeHandle;
     this.tableName = tableName;
     this.options = options;
-    this.isJsonMode = isJsonMode;
+  }
+
+  /**
+   * Ingests one pre-encoded record and returns its offset. Shared by the typed stream subclasses;
+   * the native layer wraps the bytes according to the stream's record format.
+   *
+   * @param payload the encoded record bytes
+   * @return the offset ID assigned to this record
+   * @throws ZerobusException if the stream is closed or an error occurs
+   */
+  protected final long ingestEncoded(byte[] payload) throws ZerobusException {
+    ensureOpen();
+    return nativeIngestRecordOffset(nativeHandle, payload);
+  }
+
+  /**
+   * Ingests a batch of pre-encoded records and returns the batch offset (empty if the list is
+   * empty).
+   *
+   * @param payloads the encoded record byte arrays
+   * @return the batch offset ID, or empty if {@code payloads} is empty
+   * @throws ZerobusException if the stream is closed or an error occurs
+   */
+  protected final java.util.Optional<Long> ingestEncoded(List<byte[]> payloads)
+      throws ZerobusException {
+    if (payloads.isEmpty()) {
+      return java.util.Optional.empty();
+    }
+    ensureOpen();
+    return java.util.Optional.of(nativeIngestRecordsOffset(nativeHandle, payloads));
   }
 
   /**
@@ -265,13 +294,11 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   private static native void nativeDestroy(long handle);
 
-  protected native CompletableFuture<Void> nativeIngestRecord(
-      long handle, byte[] payload, boolean isJson);
+  protected native CompletableFuture<Void> nativeIngestRecord(long handle, byte[] payload);
 
-  protected native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
+  private native long nativeIngestRecordOffset(long handle, byte[] payload);
 
-  protected native long nativeIngestRecordsOffset(
-      long handle, List<byte[]> payloads, boolean isJson);
+  private native long nativeIngestRecordsOffset(long handle, List<byte[]> payloads);
 
   private native void nativeWaitForOffset(long handle, long offset);
 
