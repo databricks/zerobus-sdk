@@ -151,6 +151,7 @@ static void test_request(void)
     snprintf(expected, sizeof(expected),
              "POST " PATH " HTTP/1.1\r\n"
              "Host: 127.0.0.1:%u\r\n"
+             "Content-Type: application/x-www-form-urlencoded\r\n"
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "Authorization: Basic aWQ6c2VjcmV0\r\n"

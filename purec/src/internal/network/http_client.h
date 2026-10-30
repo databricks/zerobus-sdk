@@ -14,8 +14,9 @@ typedef struct {
     size_t body_len;
 } zb_http_response_t;
 
-/* POSTs body to path on origin and reads the whole response by deadline,
- * except for the DNS lookup, which is unbounded. origin is an
+/* POSTs body, a form (application/x-www-form-urlencoded), to path on origin
+ * and reads the whole response by deadline, except for the DNS lookup, which
+ * is unbounded. origin is an
  * "http(s)://host[:port]" that zb_url_validate accepts. https needs tls, and
  * header names must not contain ':'.
  *

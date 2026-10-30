@@ -40,8 +40,8 @@ zerobus_sdk_builder_set_application_name(zerobus_sdk_builder_t *builder,
                                          zerobus_string_view_t application_name,
                                          zerobus_error_t **out_error);
 
-/* Streams from this SDK share each table's OAuth token, which is refreshed once
- * it is this close to expiring. Default 300 seconds. */
+/* Each stream built from this SDK refreshes its OAuth token once it is this
+ * close to expiring. Default 300 seconds. */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_sdk_builder_set_token_refresh_buffer_ms(zerobus_sdk_builder_t *builder,
                                                 uint64_t buffer_ms,

@@ -206,7 +206,7 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     }
 
     /* Endpoints and options were validated when set.
-     * TODO: initialize shared TLS/OAuth/transport state. */
+     * TODO: the Zerobus endpoint's TLS context and shared transport state. */
     zerobus_sdk_t *sdk = (zerobus_sdk_t *)calloc(1, sizeof(*sdk));
     if (sdk == NULL) {
         ZB_ERROR("SDK allocation failed");
@@ -226,6 +226,15 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    if (zb_starts_with(sdk->uc_endpoint, strlen(sdk->uc_endpoint),
+                       "https://")) {
+        zerobus_status_t status = zb_tls_ctx_new(NULL, &sdk->uc_tls_context);
+        if (status != ZEROBUS_STATUS_OK) {
+            zerobus_sdk_free(sdk);
+            return zb_fail(out_error, status,
+                           "could not load the system's trusted certificates");
+        }
     }
 
     *out_sdk = sdk;
@@ -265,6 +274,7 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     free(sdk->uc_endpoint);
     free(sdk->application_name);
     free(sdk->workspace_id);
+    zb_tls_ctx_free(sdk->uc_tls_context);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }
