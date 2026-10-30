@@ -20,10 +20,12 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::client_builder_core::{ClientBuilderCore, FormatConfig};
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
-use crate::{ZerobusError, ZerobusResult, ZerobusSdk};
+use crate::unary_client::UnaryOptions;
+use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// A fluent builder for a unary ingestion client (Beta).
 ///
@@ -155,8 +157,9 @@ impl<'a> UnaryClientBuilder<'a> {
 
     /// Set the maximum request body size in bytes allowed per call.
     ///
-    /// Calls exceeding this limit fail fast with
-    /// [`ZerobusError::InvalidArgument`] before any network I/O.
+    /// The whole body counts: the record bytes plus the brackets and the commas
+    /// that join them into one JSON array. Calls exceeding this limit fail
+    /// fast with [`ZerobusError::InvalidArgument`] before any network I/O.
     ///
     /// Defaults to slightly below the 10 MiB server limit.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
@@ -177,6 +180,38 @@ impl<'a> UnaryClientBuilder<'a> {
             ));
         }
         Ok(())
+    }
+
+    /// Build the client.
+    ///
+    /// Validates the configuration like [`validate`](Self::validate), resolves
+    /// the authentication into a headers provider, and gets the SDK's shared
+    /// unary connection. The connection opens lazily on the first call, so
+    /// `build()` sends nothing; it is async because it may wait for another
+    /// task that is creating the shared connection.
+    pub async fn build(self) -> ZerobusResult<UnaryClient> {
+        self.validate()?;
+
+        let core = self.core;
+        // A unary call has one timeout per attempt, so a proactive token
+        // refresh gets half of it, as a stream's refresh gets half of its
+        // recovery timeout.
+        let refresh_timeout = Duration::from_millis(core.server_lack_of_ack_timeout_ms) / 2;
+        let headers_provider = core.resolve_headers_provider(refresh_timeout)?;
+        let channel = core.sdk.get_or_create_unary_channel().await?;
+
+        Ok(UnaryClient::new(
+            channel,
+            core.table_name,
+            headers_provider,
+            UnaryOptions {
+                recovery: core.recovery,
+                recovery_retries: core.recovery_retries,
+                recovery_backoff_ms: core.recovery_backoff_ms,
+                server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
+                max_ingest_payload_bytes: core.max_ingest_payload_bytes,
+            },
+        ))
     }
 }
 
@@ -229,6 +264,34 @@ mod tests {
                 .validate(),
         );
         assert_eq!(msg, "record format is required: call .json()");
+    }
+
+    #[tokio::test]
+    async fn build_validates_first_and_sends_nothing() {
+        let sdk = test_sdk();
+        let error = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("a", "b")
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json()"),
+            "{error:?}"
+        );
+
+        // Nothing listens on the test endpoint; build() succeeds because the
+        // connection opens only on the first call.
+        let client = sdk
+            .unary_client_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .json()
+            .build()
+            .await
+            .unwrap();
+        assert!(format!("{client:?}").contains("catalog.schema.table"));
     }
 
     #[test]

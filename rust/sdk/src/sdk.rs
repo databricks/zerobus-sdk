@@ -403,8 +403,6 @@ impl ZerobusSdk {
     /// The channel sends HTTP/2 keepalive PINGs only while a call is in flight,
     /// so a connection that died silently between sparse calls is detected and
     /// closed during the next call, and its retry opens a new connection.
-    // Used by `UnaryClientBuilder::build()`, which a later commit adds.
-    #[allow(dead_code)]
     #[cfg(feature = "unary")]
     pub(crate) async fn get_or_create_unary_channel(
         &self,
