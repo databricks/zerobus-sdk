@@ -42,6 +42,8 @@ typedef struct zerobus_sdk zerobus_sdk_t;
 typedef struct zerobus_stream_builder zerobus_stream_builder_t;
 typedef struct zerobus_stream zerobus_stream_t;
 typedef struct zerobus_error zerobus_error_t;
+typedef struct zerobus_headers zerobus_headers_t;
+typedef struct zerobus_headers_provider zerobus_headers_provider_t;
 
 /*
  * A borrowed view of UTF-8 text: the caller must pass valid UTF-8 with no

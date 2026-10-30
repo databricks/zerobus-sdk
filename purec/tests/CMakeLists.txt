@@ -8,10 +8,9 @@ function(zerobus_add_test test_path)
   add_executable(${test} src/${test_path}.c)
   target_link_libraries(${test} PRIVATE zerobus_c_testing)
   target_compile_options(${test} PRIVATE ${ZEROBUS_WARN_FLAGS})
-  # Internal headers may use C11, like the library they belong to.
-  if(test_path MATCHES "^internal/")
-    target_compile_features(${test} PRIVATE c_std_11)
-  endif()
+  # Tests may include internal headers, which use C11 like the library. The
+  # example, built as C99, checks that the public headers stay C99.
+  target_compile_features(${test} PRIVATE c_std_11)
   # A directory of its own where the test can write files, also available
   # below as ${<test>_DIR}.
   set(dir ${CMAKE_CURRENT_BINARY_DIR}/output/${test})
@@ -22,6 +21,7 @@ function(zerobus_add_test test_path)
 endfunction()
 
 zerobus_add_test(error_test)
+zerobus_add_test(headers_provider_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
 zerobus_add_test(internal/ingest_request_test)
