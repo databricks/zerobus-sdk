@@ -11,7 +11,8 @@
 //! `ephemeral.rs` holds `build()`, and `multiplexed.rs` holds `multiplexed()`
 //! and `multiplexed_ack_callback()`. Persistent streams do not support
 //! multiplexing or Arrow Flight. The Arrow Flight setters and `build_arrow()`
-//! are still in this file.
+//! are still in this file. The table and authentication state lives in
+//! [`ClientBuilderCore`], which the public setters forward to.
 //!
 //! # Examples
 //!
@@ -28,8 +29,6 @@
 
 use std::fmt;
 use std::sync::Arc;
-
-#[cfg(test)]
 use std::time::Duration;
 
 use tonic::transport::Channel;
@@ -38,11 +37,7 @@ use crate::callbacks::AckCallback;
 #[cfg(feature = "arrow-flight")]
 use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-#[cfg(feature = "testing")]
-use crate::headers_provider::NoAuthHeadersProvider;
-use crate::headers_provider::{
-    FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
-};
+use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
 use crate::stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "avro")]
 use crate::AvroSchema;
@@ -50,6 +45,8 @@ use crate::RecordType;
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
 };
+
+use super::client_builder_core::ClientBuilderCore;
 
 mod ephemeral;
 mod multiplexed;
@@ -62,28 +59,6 @@ use multiplexed::MAX_MULTIPLEXED_JITTER_MS;
 use crate::stream::{
     ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusArrowStream,
 };
-
-/// Internal representation of the authentication configuration.
-enum AuthConfig {
-    OAuth {
-        client_id: String,
-        client_secret: String,
-    },
-    /// External-IdP federation via RFC 8693 token exchange. `client_id` is
-    /// `Some` for workload identity federation and `None` for account-level
-    /// federation. The shared token cache is partitioned by the identity the
-    /// caller already holds — the service principal `client_id` for workload,
-    /// or the `idp_token_supplier`'s own stable identity (not a reusable pointer)
-    /// for account-level — so distinct identities never collide, without the
-    /// caller passing a partition key.
-    FederatedAuth {
-        idp_token_supplier: IdpTokenSupplier,
-        client_id: Option<String>,
-    },
-    HeadersProvider(Arc<dyn HeadersProvider>),
-    #[cfg(feature = "testing")]
-    NoAuth,
-}
 
 /// Which record format was selected.
 enum FormatConfig {
@@ -184,9 +159,7 @@ impl FormatConfig {
 /// ```
 #[must_use = "a StreamBuilder does nothing until `.build()` is called"]
 pub struct StreamBuilder<'a> {
-    sdk: &'a ZerobusSdk,
-    table_name: String,
-    auth: Option<AuthConfig>,
+    core: ClientBuilderCore<'a>,
     format: Option<FormatConfig>,
     grpc_config: StreamConfigurationOptions,
     multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
@@ -209,14 +182,6 @@ pub(crate) struct GrpcStreamParts {
 
 impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let auth_kind = match &self.auth {
-            Some(AuthConfig::OAuth { .. }) => "OAuth",
-            Some(AuthConfig::FederatedAuth { .. }) => "FederatedAuth",
-            Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
-            #[cfg(feature = "testing")]
-            Some(AuthConfig::NoAuth) => "NoAuth",
-            None => "None",
-        };
         let format_kind = match &self.format {
             Some(FormatConfig::Json) => "Json",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
@@ -228,8 +193,8 @@ impl fmt::Debug for StreamBuilder<'_> {
             None => "None",
         };
         f.debug_struct("StreamBuilder")
-            .field("table_name", &self.table_name)
-            .field("auth", &auth_kind)
+            .field("table_name", &self.core.table_name)
+            .field("auth", &self.core.auth_kind())
             .field("format", &format_kind)
             .field("ack_callback", &self.grpc_config.ack_callback.is_some())
             .field(
@@ -240,24 +205,11 @@ impl fmt::Debug for StreamBuilder<'_> {
     }
 }
 
-const fn missing_auth_error() -> &'static str {
-    #[cfg(feature = "testing")]
-    {
-        "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
-    }
-    #[cfg(not(feature = "testing"))]
-    {
-        "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
-    }
-}
-
 #[allow(clippy::result_large_err)]
 impl<'a> StreamBuilder<'a> {
     pub(crate) fn new(sdk: &'a ZerobusSdk) -> Self {
         Self {
-            sdk,
-            table_name: String::new(),
-            auth: None,
+            core: ClientBuilderCore::new(sdk),
             format: None,
             grpc_config: StreamConfigurationOptions::default(),
             multiplexed_callback: None,
@@ -270,16 +222,13 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the fully-qualified Unity Catalog table name (e.g., `"catalog.schema.table"`).
     pub fn table(mut self, table_name: impl Into<String>) -> Self {
-        self.table_name = table_name.into();
+        self.core.set_table(table_name.into());
         self
     }
 
     /// Authenticate with OAuth client credentials.
     pub fn oauth(mut self, client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
-        self.auth = Some(AuthConfig::OAuth {
-            client_id: client_id.into(),
-            client_secret: client_secret.into(),
-        });
+        self.core.set_oauth(client_id.into(), client_secret.into());
         self
     }
 
@@ -299,16 +248,14 @@ impl<'a> StreamBuilder<'a> {
         idp_token_supplier: IdpTokenSupplier,
         client_id: impl Into<Option<String>>,
     ) -> Self {
-        self.auth = Some(AuthConfig::FederatedAuth {
-            idp_token_supplier,
-            client_id: client_id.into(),
-        });
+        self.core
+            .set_federated_auth(idp_token_supplier, client_id.into());
         self
     }
 
     /// Authenticate with a custom headers provider.
     pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
-        self.auth = Some(AuthConfig::HeadersProvider(provider));
+        self.core.set_headers_provider(provider);
         self
     }
 
@@ -318,7 +265,7 @@ impl<'a> StreamBuilder<'a> {
     /// enforce authentication. Available behind the `testing` feature flag.
     #[cfg(feature = "testing")]
     pub fn no_auth(mut self) -> Self {
-        self.auth = Some(AuthConfig::NoAuth);
+        self.core.set_no_auth();
         self
     }
 
@@ -581,14 +528,7 @@ impl<'a> StreamBuilder<'a> {
     }
 
     fn validate_common(&self) -> ZerobusResult<()> {
-        if self.table_name.is_empty() {
-            return Err(ZerobusError::InvalidArgument(
-                "table name is required: call .table()".into(),
-            ));
-        }
-        if self.auth.is_none() {
-            return Err(ZerobusError::InvalidArgument(missing_auth_error().into()));
-        }
+        self.core.validate_target()?;
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
                 "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), .avro(), or .arrow()".into(),
@@ -603,56 +543,18 @@ impl<'a> StreamBuilder<'a> {
         Ok(())
     }
 
-    /// Resolve the headers provider from the stored auth config. For OAuth, a
-    /// proactive token refresh is bounded by half the stream's recovery timeout.
+    /// Resolve the headers provider from the stored auth config. For OAuth and
+    /// federation, a proactive token refresh is bounded by half the stream's
+    /// recovery timeout.
     fn resolve_headers_provider(&self) -> ZerobusResult<Arc<dyn HeadersProvider>> {
-        match self.auth.as_ref() {
-            Some(AuthConfig::OAuth {
-                client_id,
-                client_secret,
-            }) => {
-                // Give a proactive refresh half the recovery timeout so a stalled
-                // refresh falls back to the cached token before the setup deadline
-                // cancels the request. Both recovery-timeout setters write the gRPC
-                // and Arrow configs in lockstep, so grpc_config is a valid single
-                // source even for an Arrow stream; revisit if a per-transport
-                // recovery timeout is ever added.
-                let refresh_timeout =
-                    std::time::Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
-                Ok(Arc::new(OAuthHeadersProvider::with_cache(
-                    client_id.clone(),
-                    client_secret.clone(),
-                    self.table_name.clone(),
-                    self.sdk.workspace_id.clone(),
-                    self.sdk.unity_catalog_url.clone(),
-                    Arc::clone(&self.sdk.token_cache),
-                    Some(refresh_timeout),
-                )))
-            }
-            Some(AuthConfig::FederatedAuth {
-                idp_token_supplier,
-                client_id,
-            }) => {
-                // Federation mirrors OAuth's proactive-refresh bound so a stalled
-                // token exchange falls back to the cached token before the setup
-                // deadline, keeping client-credentials and token-exchange at parity.
-                let refresh_timeout =
-                    std::time::Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
-                Ok(Arc::new(FederatedTokenProvider::with_cache(
-                    client_id.clone(),
-                    idp_token_supplier.clone(),
-                    self.table_name.clone(),
-                    self.sdk.workspace_id.clone(),
-                    self.sdk.unity_catalog_url.clone(),
-                    Arc::clone(&self.sdk.token_cache),
-                    Some(refresh_timeout),
-                )))
-            }
-            Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
-            #[cfg(feature = "testing")]
-            Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
-            None => Err(ZerobusError::InvalidArgument(missing_auth_error().into())),
-        }
+        // Give a proactive refresh half the recovery timeout so a stalled
+        // refresh falls back to the cached token before the setup deadline
+        // cancels the request. Both recovery-timeout setters write the gRPC
+        // and Arrow configs in lockstep, so grpc_config is a valid single
+        // source even for an Arrow stream; revisit if a per-transport
+        // recovery timeout is ever added.
+        let refresh_timeout = Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
+        self.core.resolve_headers_provider(refresh_timeout)
     }
 
     /// Validates the builder and resolves the pieces shared by the gRPC
@@ -676,14 +578,14 @@ impl<'a> StreamBuilder<'a> {
 
         self.grpc_config.record_type = format.record_type;
         let table_properties = TableProperties {
-            table_name: self.table_name,
+            table_name: self.core.table_name,
             descriptor_proto: format.descriptor_proto,
             message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
             avro_schema: format.avro_schema,
         };
 
-        let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
+        let channel = self.core.sdk.get_or_create_channel_zerobus_client().await?;
         Ok(GrpcStreamParts {
             channel,
             table_properties,
@@ -708,19 +610,19 @@ impl<'a> StreamBuilder<'a> {
         let headers_provider = self.resolve_headers_provider()?;
 
         let table_properties = ArrowTableProperties {
-            table_name: self.table_name,
+            table_name: self.core.table_name,
             schema,
         };
 
         let table_name = table_properties.table_name.clone();
         let stream = ZerobusArrowStream::new(
-            &self.sdk.zerobus_endpoint,
-            Arc::clone(&self.sdk.tls_config),
-            self.sdk.connector_factory.clone(),
+            &self.core.sdk.zerobus_endpoint,
+            Arc::clone(&self.core.sdk.tls_config),
+            self.core.sdk.connector_factory.clone(),
             table_properties,
             headers_provider,
             self.arrow_config,
-            Arc::clone(&self.sdk.sdk_identifier),
+            Arc::clone(&self.core.sdk.sdk_identifier),
             self.stats_exporter,
         )
         .await?;
