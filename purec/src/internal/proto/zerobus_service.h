@@ -1,5 +1,5 @@
 /*
- * Codec for the EphemeralStream envelope messages of
+ * Ingest requests, and the codec for the EphemeralStream envelope messages of
  * rust/sdk/zerobus_service.proto (package databricks.zerobus).
  */
 #ifndef ZB_PROTO_ZEROBUS_SERVICE_H
@@ -13,6 +13,40 @@
 
 /* Largest table name or record the encoders accept, in bytes. */
 #define ZB_MAX_ENCODED_PAYLOAD ((size_t)INT32_MAX - 64u)
+
+/* One record of an ingest request, pointing into the request's own block. */
+typedef struct zb_record {
+    uint8_t *data;
+    size_t len;
+} zb_record_t;
+
+/*
+ * The records of one ingest request, as the landing zone holds them. A single
+ * allocation holds the request, then its batch entries, then the bytes they
+ * point to, so the request owns its records. Pass it by pointer only: a copy
+ * would still point into the original.
+ *
+ *   [count | batch[0] | batch[1] | ... | record 0 | record 1 | ...]
+ *               |          |             ^          ^
+ *               +----------|-------------+          |
+ *                          +------------------------+
+ *
+ * The records are JSON for now. Adding a kind enum here would let the same
+ * layout carry protobuf records as well.
+ */
+typedef struct zb_ingest_request {
+    size_t count;
+    zb_record_t batch[];
+} zb_ingest_request_t;
+
+/* Copies the count records into a new request. Returns NULL on size overflow,
+ * allocation failure, NULL records with nonzero count, or a record with NULL
+ * data and nonzero length. */
+zb_ingest_request_t *zb_ingest_request_new(const zerobus_string_view_t *records,
+                                           size_t count);
+
+/* Frees the request and its records. Accepts NULL. */
+void zb_ingest_request_free(zb_ingest_request_t *request);
 
 /*
  * See "Known protobuf-c compatibility behavior" in
@@ -36,6 +70,14 @@ zerobus_status_t
 zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
                               zerobus_string_view_t json_record,
                               uint8_t **out_data, size_t *out_len);
+
+/* Encode EphemeralStreamRequest{ingest_record_batch: {offset_id, json_batch:
+ * {records}}} from the request's records. Each record, and ownership, as for
+ * zb_proto_encode_ingest_record. */
+zerobus_status_t zb_proto_encode_json_batch(zerobus_offset_t offset_id,
+                                            const zb_ingest_request_t *request,
+                                            uint8_t **out_data,
+                                            size_t *out_len);
 
 typedef enum zb_response_kind {
     ZB_RESPONSE_NONE = 0, /* no payload, or one this SDK does not know */

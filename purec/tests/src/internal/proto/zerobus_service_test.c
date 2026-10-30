@@ -75,7 +75,127 @@ encode_ingest_record_generated(zerobus_offset_t offset_id,
     return ZEROBUS_STATUS_OK;
 }
 
+/* Reference batch encoder using generated code. */
+static zerobus_status_t
+encode_json_batch_generated(zerobus_offset_t offset_id,
+                            const zerobus_string_view_t *records, size_t count,
+                            uint8_t **out_data, size_t *out_len)
+{
+    zerobus_status_t status = ZEROBUS_STATUS_OUT_OF_MEMORY;
+    char **copies = (char **)calloc(count ? count : 1, sizeof(*copies));
+    uint8_t *data = NULL;
+    if (copies == NULL) {
+        return status;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        copies[i] = zb_is_empty(records[i]) ? zb_strdup("")
+                                            : zb_strdup_view(records[i]);
+        if (copies[i] == NULL) {
+            goto done;
+        }
+    }
+    Databricks__Zerobus__JsonRecordBatch json;
+    databricks__zerobus__json_record_batch__init(&json);
+    json.n_records = count;
+    json.records = copies;
+
+    Databricks__Zerobus__IngestRecordBatchRequest batch;
+    databricks__zerobus__ingest_record_batch_request__init(&batch);
+    batch.has_offset_id = 1;
+    batch.offset_id = offset_id;
+    batch.batch_case =
+        DATABRICKS__ZEROBUS__INGEST_RECORD_BATCH_REQUEST__BATCH_JSON_BATCH;
+    batch.json_batch = &json;
+
+    Databricks__Zerobus__EphemeralStreamRequest request;
+    databricks__zerobus__ephemeral_stream_request__init(&request);
+    request.payload_case =
+        DATABRICKS__ZEROBUS__EPHEMERAL_STREAM_REQUEST__PAYLOAD_INGEST_RECORD_BATCH;
+    request.ingest_record_batch = &batch;
+
+    size_t len = databricks__zerobus__ephemeral_stream_request__get_packed_size(
+        &request);
+    data = (uint8_t *)malloc(len);
+    if (data == NULL) {
+        goto done;
+    }
+    if (databricks__zerobus__ephemeral_stream_request__pack(&request, data) !=
+        len) {
+        status = ZEROBUS_STATUS_INTERNAL;
+        goto done;
+    }
+    *out_data = data;
+    *out_len = len;
+    data = NULL;
+    status = ZEROBUS_STATUS_OK;
+done:
+    for (size_t i = 0; i < count; ++i) {
+        free(copies[i]);
+    }
+    free(copies);
+    free(data);
+    return status;
+}
+
 /* ---- tests ------------------------------------------------------------- */
+
+static void test_request_owns_copies(void)
+{
+    char first[] = {'a', '\0', 'b'};
+    char second[] = {'c', 'd'};
+    const zerobus_string_view_t records[] = {{first, sizeof(first)},
+                                             {second, sizeof(second)}};
+    zb_ingest_request_t *request = zb_ingest_request_new(records, 2);
+    REQUIRE(request != NULL);
+    CHECK_EQ_INT(request->count, 2);
+    /* The records follow the entries, in order, in the request's block. */
+    CHECK(request->batch[0].data == (uint8_t *)&request->batch[2]);
+    CHECK(request->batch[1].data == request->batch[0].data + sizeof(first));
+    memset(first, 'x', sizeof(first));
+    memset(second, 'x', sizeof(second));
+    CHECK_EQ_INT(request->batch[0].len, sizeof(first));
+    CHECK(memcmp(request->batch[0].data, "a\0b", sizeof(first)) == 0);
+    CHECK_EQ_INT(request->batch[1].len, sizeof(second));
+    CHECK(memcmp(request->batch[1].data, "cd", sizeof(second)) == 0);
+
+zb_cleanup:
+    zb_ingest_request_free(request);
+}
+
+static void test_empty_requests(void)
+{
+    const zerobus_string_view_t records[] = {{NULL, 0}, {"x", 0}};
+    zb_ingest_request_t *empty_records = zb_ingest_request_new(records, 2);
+    zb_ingest_request_t *no_records = zb_ingest_request_new(NULL, 0);
+    REQUIRE(empty_records != NULL && no_records != NULL);
+    CHECK_EQ_INT(empty_records->count, 2);
+    CHECK_EQ_INT(empty_records->batch[0].len, 0);
+    CHECK_EQ_INT(empty_records->batch[1].len, 0);
+    CHECK_EQ_INT(no_records->count, 0);
+
+zb_cleanup:
+    zb_ingest_request_free(empty_records);
+    zb_ingest_request_free(no_records);
+}
+
+static void test_request_rejects_invalid_input(void)
+{
+    const zerobus_string_view_t null_data = {NULL, 1};
+    /* The shortest record whose request size overflows. */
+    const zerobus_string_view_t huge = {
+        "x", SIZE_MAX - sizeof(zb_ingest_request_t) - sizeof(zb_record_t) + 1};
+    const struct {
+        const zerobus_string_view_t *records;
+        size_t count;
+    } cases[] = {{NULL, 1}, {&null_data, 1}, {&huge, 1}, {&huge, SIZE_MAX}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        zb_ingest_request_t *request =
+            zb_ingest_request_new(cases[i].records, cases[i].count);
+        CHECK(request == NULL);
+        zb_ingest_request_free(request);
+    }
+    zb_ingest_request_free(NULL);
+}
 
 static void test_encode_create_stream(void)
 {
@@ -277,6 +397,87 @@ static void test_encode_rejects_invalid_arguments(void)
             &data, &len),
         ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK(data == NULL);
+}
+
+static void test_encode_json_batch_matches_generated(void)
+{
+    /* As for single records: empty batches and records, signed offsets, and
+     * multibyte lengths, compared with generated code. */
+    char long_record[200];
+    memset(long_record, ' ', sizeof(long_record));
+    long_record[0] = '{';
+    long_record[sizeof(long_record) - 1] = '}';
+    const zerobus_string_view_t records[] = {
+        sv("{\"id\":1}"),
+        {NULL, 0},
+        {long_record, sizeof(long_record)},
+    };
+    const struct {
+        zerobus_offset_t offset;
+        size_t count;
+    } cases[] = {{0, 0}, {0, 1}, {300, 2}, {-1, 3}, {INT64_MAX, 3}};
+    zb_ingest_request_t *request = NULL;
+    uint8_t *expected = NULL;
+    uint8_t *data = NULL;
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t expected_len = 0;
+        size_t len = 0;
+        REQUIRE_OK(encode_json_batch_generated(cases[i].offset, records,
+                                               cases[i].count, &expected,
+                                               &expected_len));
+        request = zb_ingest_request_new(records, cases[i].count);
+        REQUIRE(request != NULL);
+        REQUIRE_OK(
+            zb_proto_encode_json_batch(cases[i].offset, request, &data, &len));
+        CHECK(bytes_equal(data, len, expected, expected_len));
+        free(data);
+        data = NULL;
+        free(expected);
+        expected = NULL;
+        zb_ingest_request_free(request);
+        request = NULL;
+    }
+
+zb_cleanup:
+    zb_ingest_request_free(request);
+    free(data);
+    free(expected);
+}
+
+static void test_encode_json_batch_rejects_invalid_arguments(void)
+{
+    static uint8_t sentinel = 'x';
+    const zerobus_string_view_t record = sv("{}");
+    zb_ingest_request_t *valid = zb_ingest_request_new(&record, 1);
+    /* Records too long to encode, built by hand over one byte that the
+     * encoder must not read. */
+    zb_ingest_request_t *huge =
+        (zb_ingest_request_t *)malloc(sizeof(*huge) + 2 * sizeof(zb_record_t));
+    uint8_t *data = NULL;
+    size_t len = 0;
+    REQUIRE(valid != NULL && huge != NULL);
+    CHECK_EQ_INT(zb_proto_encode_json_batch(0, valid, NULL, &len),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_proto_encode_json_batch(0, valid, &data, NULL),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK_EQ_INT(zb_proto_encode_json_batch(0, NULL, &data, &len),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    huge->count = 1;
+    huge->batch[0] = (zb_record_t){&sentinel, (size_t)INT32_MAX - 63u};
+    CHECK_EQ_INT(zb_proto_encode_json_batch(0, huge, &data, &len),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    /* Each fits on its own, but not both together. */
+    huge->count = 2;
+    huge->batch[0] = (zb_record_t){&sentinel, (size_t)INT32_MAX / 2};
+    huge->batch[1] = huge->batch[0];
+    CHECK_EQ_INT(zb_proto_encode_json_batch(0, huge, &data, &len),
+                 ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(data == NULL);
+
+zb_cleanup:
+    zb_ingest_request_free(valid);
+    free(huge);
 }
 
 static void test_decode_create_stream_response(void)
@@ -695,6 +896,9 @@ static void test_compat_known_field_with_other_wire_type_is_rejected(void)
 
 int main(void)
 {
+    test_request_owns_copies();
+    test_empty_requests();
+    test_request_rejects_invalid_input();
     test_encode_create_stream();
     test_encode_ingest_record();
     test_encode_ingest_record_matches_generated();
@@ -703,6 +907,8 @@ int main(void)
     test_encode_record_preserves_invalid_utf8();
     test_encode_long_record();
     test_encode_rejects_invalid_arguments();
+    test_encode_json_batch_matches_generated();
+    test_encode_json_batch_rejects_invalid_arguments();
     test_decode_create_stream_response();
     test_decode_ingest_record_response();
     test_decode_close_stream_signal();

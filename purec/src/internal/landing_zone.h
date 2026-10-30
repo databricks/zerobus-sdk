@@ -3,8 +3,8 @@
 
 #include <stddef.h>
 
-#include "ingest_request.h"
 #include "internal/platform/concurrency.h"
+#include "internal/proto/zerobus_service.h"
 #include "zerobus/common.h"
 
 /* Blocking wrapper around zb_queue_t. See queue.h for queue semantics.
