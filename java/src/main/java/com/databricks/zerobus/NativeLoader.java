@@ -42,18 +42,38 @@ public final class NativeLoader {
   private static final String LIBRARY_NAME = "zerobus_jni";
   private static final String NATIVE_RESOURCE_PATH = "/native";
 
+  // Bumped with the Rust NATIVE_ABI_VERSION whenever native signatures change, to reject a stale
+  // libzerobus_jni (natives bind by name only, so an old one would read arguments from wrong
+  // slots).
+  static final int EXPECTED_NATIVE_ABI = 1;
+
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;
 
   static {
     try {
       loadNativeLibrary();
+      verifyAbiVersion();
       loaded = true;
     } catch (Throwable t) {
       loadError = t;
       logger.error("Failed to load native library", t);
     }
   }
+
+  private static void verifyAbiVersion() {
+    int actual = nativeAbiVersion();
+    if (actual != EXPECTED_NATIVE_ABI) {
+      throw new UnsatisfiedLinkError(
+          "zerobus native library ABI "
+              + actual
+              + " does not match this SDK (expected "
+              + EXPECTED_NATIVE_ABI
+              + "); rebuild libzerobus_jni from this version (with --features avro)");
+    }
+  }
+
+  private static native int nativeAbiVersion();
 
   private NativeLoader() {
     // Utility class.

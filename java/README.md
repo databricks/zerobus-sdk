@@ -35,6 +35,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Protocol Buffers**: Strongly-typed schema using protobuf
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
 - **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
+- **Avro** *(Beta)*: Ingest Avro record objects (need Java 11+) or pre-encoded datums (see [Avro Examples](#avro-examples))
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
@@ -118,6 +119,17 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
     <groupId>org.apache.arrow</groupId>
     <artifactId>arrow-memory-netty</artifactId>
     <version>17.0.0</version>
+</dependency>
+```
+
+**When ingesting Avro record objects (`ZerobusAvroStream`, Beta)** — additional dependency, opt-in, and requires **Java 11+** at runtime (Apache Avro 1.12 is compiled for Java 11). The pre-encoded `byte[]` path needs neither:
+- [`avro` 1.12.2](https://mvnrepository.com/artifact/org.apache.avro/avro/1.12.2)
+
+```xml
+<dependency>
+    <groupId>org.apache.avro</groupId>
+    <artifactId>avro</artifactId>
+    <version>1.12.2</version>
 </dependency>
 ```
 
@@ -575,6 +587,16 @@ try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
         .join()) {
     // ingest...
 }
+
+// Avro (Beta; record objects need Java 11+ and org.apache.avro:avro)
+try (ZerobusAvroStream avroStream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .avro(schemaJson)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 Stream configuration is set directly on the builder (for example `.maxInflightRecords(50000)`,
@@ -673,6 +695,62 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
 }
 ```
 
+### Avro Examples
+
+*(Beta.)* Best when your data is already Avro-native. Declare the writer schema as JSON, then ingest
+`GenericRecord` objects (encoded against the schema) or pre-encoded Avro datums (`byte[]`). Ingesting
+`GenericRecord`s requires **Java 11+** and the `org.apache.avro:avro` dependency; the `byte[]` path
+needs neither.
+
+```java
+String schemaJson = "{\"type\":\"record\",\"name\":\"Order\",\"fields\":["
+    + "{\"name\":\"id\",\"type\":\"long\"},{\"name\":\"customer\",\"type\":\"string\"}]}";
+Schema schema = new Schema.Parser().parse(schemaJson);
+
+try (ZerobusAvroStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .avro(schemaJson)
+        .build()
+        .join()) {
+    for (Order order : orders) {
+        GenericRecord record = new GenericData.Record(schema);
+        record.put("id", order.id);
+        record.put("customer", order.customer);
+        stream.ingestRecordOffset(record);     // GenericRecord, or a pre-encoded byte[]
+    }
+    stream.flush();                            // confirm durability once, not per record
+}
+```
+
+A pre-encoded `byte[]` must be a **bare** Avro binary datum written with the writer schema. Framed
+forms — Avro container files, single-object encoding, and Confluent-framed bytes — are not accepted.
+
+Build records with the Java value each Avro type expects. Date/time, `decimal`, and `uuid` logical
+types also accept their raw underlying primitive.
+
+| Avro type | Java value |
+|-----------|------------|
+| boolean / int / long / float / double | `Boolean` / `Integer` / `Long` / `Float` / `Double` |
+| string | `String` |
+| bytes | `java.nio.ByteBuffer` |
+| record / array / map | `GenericRecord` / `java.util.List` / `java.util.Map<String,?>` |
+| enum | `GenericData.EnumSymbol` |
+| fixed | `GenericData.Fixed` |
+| union | the branch value (resolved by its Java type); `null` for a null branch |
+| date | `java.time.LocalDate` |
+| time-millis / time-micros | `java.time.LocalTime` |
+| timestamp-millis / timestamp-micros | `java.time.Instant` |
+| local-timestamp-millis / local-timestamp-micros | `java.time.LocalDateTime` |
+| decimal | `java.math.BigDecimal` |
+| uuid | `java.util.UUID` |
+
+Notes: a `BigDecimal` may have fewer fractional digits than the schema scale but not more (Avro
+won't round) and must fit the precision. Schema defaults are **not** applied to unset fields of a
+`GenericData.Record` — set every field, or use `GenericRecordBuilder`. Each record's schema (nested
+records included) must match the writer schema: field order matters and the namespace must match,
+though metadata such as `avro.java.string` or docs is ignored.
+
 ---
 
 ## Authentication
@@ -698,7 +776,8 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 }
 ```
 
-The same provider works with the builder's `compiledProto()` and `arrow()` format selectors.
+The same provider works with the builder's `compiledProto()`, `avro()`, and `arrow()` format
+selectors.
 Providers may override `invalidate()` to clear cached credentials after an authentication
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
@@ -1143,12 +1222,13 @@ StreamBuilder recoveryBackoffMs(int ms)
 StreamBuilder recoveryRetries(int n)
 StreamBuilder serverLackOfAckTimeoutMs(int ms)
 StreamBuilder flushTimeoutMs(int ms)
-StreamBuilder maxInflightRecords(int n)          // JSON/proto only
-StreamBuilder ackCallback(AckCallback callback)  // JSON/proto only
+StreamBuilder maxInflightRecords(int n)          // JSON/proto/Avro (not Arrow)
+StreamBuilder ackCallback(AckCallback callback)  // JSON/proto/Avro (not Arrow)
 
 // Format selection -> typed sub-builder:
 JsonStreamBuilder  json()
 ProtoStreamBuilder compiledProto(DescriptorProto descriptorProto)
+AvroStreamBuilder  avro(String schemaJson)       // Beta; GenericRecord ingestion needs Java 11 + org.apache.avro:avro
 ArrowStreamBuilder arrow(Schema schema)
 ```
 
@@ -1157,6 +1237,7 @@ Each sub-builder exposes `build()`:
 ```java
 CompletableFuture<ZerobusJsonStream>  StreamBuilder.JsonStreamBuilder.build()
 CompletableFuture<ZerobusProtoStream> StreamBuilder.ProtoStreamBuilder.build()
+CompletableFuture<ZerobusAvroStream>  StreamBuilder.AvroStreamBuilder.build()
 CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()
 ```
 
@@ -1259,6 +1340,42 @@ Returns unacknowledged records deserialized into objects.
 List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records grouped by batch.
+
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+
+---
+
+### ZerobusAvroStream
+
+Stream for Avro ingestion (Beta). Use `ZerobusSdk.streamBuilder().avro(schemaJson)` to create instances. Ingesting `GenericRecord`s requires Java 11+ and `org.apache.avro:avro` on the classpath; the pre-encoded `byte[]` path needs neither.
+
+**Single Record Methods:**
+
+```java
+long ingestRecordOffset(GenericRecord record) throws ZerobusException
+```
+Encodes a record against the writer schema and returns the offset immediately.
+
+```java
+long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException
+```
+Ingests a bare, pre-encoded Avro datum (no container/single-object/Confluent framing) and returns the offset immediately.
+
+**Batch Methods:**
+
+```java
+Optional<Long> ingestRecordsOffset(Iterable<? extends GenericRecord> records) throws ZerobusException
+Optional<Long> ingestRecordsOffset(List<byte[]> encodedRecords) throws ZerobusException
+```
+Ingests a batch of records (encoded) or bare pre-encoded datums and returns the batch offset.
+
+**Recovery Methods:**
+
+```java
+List<byte[]> getUnackedRecords() throws ZerobusException
+List<EncodedBatch> getUnackedBatches() throws ZerobusException
+```
+Returns unacknowledged records as raw Avro datums, or grouped by batch.
 
 **Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
 

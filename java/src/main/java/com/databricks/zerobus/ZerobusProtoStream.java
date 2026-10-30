@@ -67,7 +67,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
       String clientId,
       String clientSecret,
       HeadersProvider headersProvider) {
-    super(nativeHandle, tableName, options, false);
+    super(nativeHandle, tableName, options);
     this.descriptorProtoBytes = descriptorProtoBytes;
     this.clientId = clientId;
     this.clientSecret = clientSecret;
@@ -111,8 +111,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public <T extends Message> long ingestRecordOffset(T record) throws ZerobusException {
-    ensureOpen();
-    return nativeIngestRecordOffset(nativeHandle, record.toByteArray(), false);
+    return ingestEncoded(record.toByteArray());
   }
 
   /**
@@ -126,8 +125,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException {
-    ensureOpen();
-    return nativeIngestRecordOffset(nativeHandle, encodedBytes, false);
+    return ingestEncoded(encodedBytes);
   }
 
   // ==================== Batch Ingestion ====================
@@ -152,11 +150,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
     for (T record : records) {
       payloads.add(record.toByteArray());
     }
-    if (payloads.isEmpty()) {
-      return Optional.empty();
-    }
-    ensureOpen();
-    return Optional.of(nativeIngestRecordsOffset(nativeHandle, payloads, false));
+    return ingestEncoded(payloads);
   }
 
   /**
@@ -170,11 +164,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public Optional<Long> ingestRecordsOffset(List<byte[]> encodedRecords) throws ZerobusException {
-    if (encodedRecords.isEmpty()) {
-      return Optional.empty();
-    }
-    ensureOpen();
-    return Optional.of(nativeIngestRecordsOffset(nativeHandle, encodedRecords, false));
+    return ingestEncoded(encodedRecords);
   }
 
   // ==================== Unacknowledged Records ====================

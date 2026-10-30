@@ -144,13 +144,13 @@ jobs:
 
       - name: Build JNI library
         if: '!matrix.zigbuild'
-        run: cargo build --release -p zerobus-jni --target ${{ matrix.target }}
+        run: cargo build --release -p zerobus-jni --features avro --target ${{ matrix.target }}
 
       - name: Build JNI library (zigbuild)
         if: matrix.zigbuild
         env:
           RUSTFLAGS: -C target-feature=-crt-static
-        run: cargo zigbuild --release -p zerobus-jni --target ${{ matrix.build_target || matrix.target }}
+        run: cargo zigbuild --release -p zerobus-jni --features avro --target ${{ matrix.build_target || matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

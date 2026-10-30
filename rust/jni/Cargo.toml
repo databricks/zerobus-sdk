@@ -30,6 +30,9 @@ arrow-ipc = { workspace = true, features = ["lz4", "zstd"] }
 
 [features]
 default = []
+# Avro (Beta). Enable only with `-p zerobus-jni` so it isn't unified onto the FFI crate.
+# Requires Rust 1.88 (via `apache-avro` 0.22), above this crate's declared `rust-version`.
+avro = ["databricks-zerobus-ingest-sdk/avro"]
 test-helpers = []
 
 [dev-dependencies]

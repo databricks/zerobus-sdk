@@ -21,10 +21,10 @@ build-release:
 	cargo build --release --workspace
 
 build-jni:
-	cargo build --release -p zerobus-jni
+	cargo build --release -p zerobus-jni --features avro
 
 build-jni-test:
-	cargo build --release -p zerobus-jni --features test-helpers
+	cargo build --release -p zerobus-jni --features test-helpers,avro
 
 build-ffi:
 	cargo build --release -p zerobus-ffi

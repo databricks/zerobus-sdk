@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Represents a batch of encoded records that were ingested together.
@@ -12,26 +13,45 @@ import java.util.List;
  * preserves the batch grouping from the original ingestion, which can be useful for re-ingesting
  * records in the same batches.
  *
- * <p>Each EncodedBatch contains a list of raw byte arrays (the encoded records) and a flag
- * indicating whether they are JSON or Protocol Buffer encoded.
+ * <p>Each EncodedBatch contains a list of raw byte arrays (the encoded records) and the {@link
+ * RecordFormat} they are encoded in.
  *
  * @see ZerobusProtoStream#getUnackedBatches()
  * @see ZerobusJsonStream#getUnackedBatches()
+ * @see ZerobusAvroStream#getUnackedBatches()
  */
 public class EncodedBatch {
 
   private final List<byte[]> records;
-  private final boolean isJson;
+  private final RecordFormat format;
+
+  /**
+   * Creates a new EncodedBatch with the given records and format.
+   *
+   * @param records the list of encoded record byte arrays
+   * @param format the record format of the batch
+   */
+  public EncodedBatch(List<byte[]> records, RecordFormat format) {
+    this.records = records != null ? new ArrayList<>(records) : new ArrayList<>();
+    this.format = Objects.requireNonNull(format, "format");
+  }
 
   /**
    * Creates a new EncodedBatch with the given records.
    *
    * @param records the list of encoded record byte arrays
    * @param isJson true if the records are JSON encoded, false if Protocol Buffer encoded
+   * @deprecated Cannot express Avro (maps {@code false} to Protocol Buffers). Use {@link
+   *     #EncodedBatch(List, RecordFormat)} instead.
    */
+  @Deprecated
   public EncodedBatch(List<byte[]> records, boolean isJson) {
-    this.records = records != null ? new ArrayList<>(records) : new ArrayList<>();
-    this.isJson = isJson;
+    this(records, isJson ? RecordFormat.JSON : RecordFormat.PROTO);
+  }
+
+  /** Package-private constructor used by the native layer (format passed as a wire code). */
+  EncodedBatch(List<byte[]> records, int formatCode) {
+    this(records, RecordFormat.fromCode(formatCode));
   }
 
   /**
@@ -55,9 +75,9 @@ public class EncodedBatch {
    * @throws IllegalStateException if this batch is not JSON encoded
    */
   public List<String> getRecordsAsStrings() {
-    if (!isJson) {
+    if (format != RecordFormat.JSON) {
       throw new IllegalStateException(
-          "Cannot convert Protocol Buffer batch to strings. Use getRecords() instead.");
+          "Cannot convert " + format + " batch to strings. Use getRecords() instead.");
     }
     List<String> result = new ArrayList<>(records.size());
     for (byte[] bytes : records) {
@@ -67,12 +87,21 @@ public class EncodedBatch {
   }
 
   /**
+   * Returns the record format of this batch.
+   *
+   * @return the record format
+   */
+  public RecordFormat getFormat() {
+    return format;
+  }
+
+  /**
    * Returns whether the records in this batch are JSON encoded.
    *
-   * @return true if JSON encoded, false if Protocol Buffer encoded
+   * @return true if JSON encoded, false otherwise
    */
   public boolean isJson() {
-    return isJson;
+    return format == RecordFormat.JSON;
   }
 
   /**
