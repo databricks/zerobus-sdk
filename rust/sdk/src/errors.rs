@@ -140,6 +140,14 @@ pub enum ZerobusError {
     #[cfg(feature = "avro")]
     #[error("Avro record encoding failed: {0}")]
     AvroEncodingError(String),
+    /// Returned when a unary `InsertRecords` call failed with a gRPC status,
+    /// after retries were exhausted or for a non-retryable code. An attempt
+    /// that ran out of time is reported as `DeadlineExceeded`. A connection
+    /// failure is reported as `Unavailable`. Available behind the `unary`
+    /// feature.
+    #[cfg(feature = "unary")]
+    #[error("InsertRecords failed: {0}")]
+    UnaryIngestError(GrpcStatus),
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -223,6 +231,10 @@ impl ZerobusError {
             ZerobusError::AvroSchemaParseError(_) => false,
             #[cfg(feature = "avro")]
             ZerobusError::AvroEncodingError(_) => false,
+            #[cfg(feature = "unary")]
+            ZerobusError::UnaryIngestError(status) => {
+                !UNRETRIABLE_STATUS_CODES.contains(&status.code())
+            }
         }
     }
 
@@ -231,13 +243,17 @@ impl ZerobusError {
     /// decide when to invalidate cached credentials so the next attempt
     /// re-derives them.
     pub(crate) fn is_auth_rejection(&self) -> bool {
+        let status = match self {
+            ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status) => {
+                status
+            }
+            #[cfg(feature = "unary")]
+            ZerobusError::UnaryIngestError(status) => status,
+            _ => return false,
+        };
         matches!(
-            self,
-            ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status)
-                if matches!(
-                    status.code(),
-                    GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
-                )
+            status.code(),
+            GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
         )
     }
 }
@@ -344,6 +360,34 @@ mod tests {
         assert!(!ZerobusError::CreateStreamError(GrpcStatus::unavailable("x")).is_auth_rejection());
         // Other variants are never auth rejections.
         assert!(!ZerobusError::TokenFetchError("x".to_string()).is_auth_rejection());
+    }
+
+    #[cfg(feature = "unary")]
+    #[test]
+    fn unary_ingest_error_is_classified_like_stream_setup_errors() {
+        let unary = ZerobusError::UnaryIngestError;
+        assert!(unary(GrpcStatus::unavailable("x")).is_retryable());
+        assert!(unary(GrpcStatus::deadline_exceeded("x")).is_retryable());
+        assert!(unary(GrpcStatus::internal("x")).is_retryable());
+        assert!(!unary(GrpcStatus::invalid_argument("x")).is_retryable());
+        assert!(!unary(GrpcStatus::new(GrpcCode::NotFound, "x")).is_retryable());
+
+        assert!(unary(GrpcStatus::unauthenticated("x")).is_auth_rejection());
+        assert!(unary(GrpcStatus::permission_denied("x")).is_auth_rejection());
+        assert!(!unary(GrpcStatus::internal("x")).is_auth_rejection());
+
+        let mut auth_retry_available = true;
+        let rejection = unary(GrpcStatus::unauthenticated("stale token"));
+        assert!(should_retry_initial_connection(
+            &rejection,
+            true,
+            &mut auth_retry_available
+        ));
+        assert!(!should_retry_initial_connection(
+            &rejection,
+            true,
+            &mut auth_retry_available
+        ));
     }
 
     /// The language bindings surface `ZerobusError::to_string()`. Pins the full
