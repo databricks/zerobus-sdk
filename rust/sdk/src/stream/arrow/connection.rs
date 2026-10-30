@@ -556,10 +556,14 @@ impl ZerobusArrowStream {
         let offset_counter_clone = Arc::clone(&offset_counter);
         let stats_out = stats_exporter;
         let pending_out = Arc::clone(&pending);
+        let mut encoder_builder = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .with_options(ipc_write_options);
+        if let Some(max_message_size) = options.max_message_size_bytes {
+            encoder_builder = encoder_builder.with_enforced_max_flight_data_size(max_message_size);
+        }
         let encoded: FlightRequestStream = Box::pin(
-            FlightDataEncoderBuilder::new()
-                .with_schema(schema)
-                .with_options(ipc_write_options)
+            encoder_builder
                 .build(batch_stream)
                 .enumerate()
                 .map(move |(idx, result)| {

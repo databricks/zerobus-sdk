@@ -15,6 +15,12 @@
   counts bytes after gRPC compression. The default leaves the wire format
   unchanged.
 
+- Added `StreamBuilder::max_message_size_bytes` to split Arrow Flight batches by
+  encoded size instead of by row count. Each message is kept within the limit
+  (measured before gRPC compression), so a batch is sent in as few messages as the
+  limit allows. The default is unchanged. A single row larger than the limit is
+  sent as its own message over the limit, because rows are not split.
+
 ### Bug Fixes
 
 ### Documentation

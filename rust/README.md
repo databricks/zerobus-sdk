@@ -1244,6 +1244,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `compression` | `ArrowCompression` | `FallbackToLegacy` (uses `ipc_compression`) | Payload compression, set with `StreamBuilder::compression`: `IpcZstd`, `IpcLz4`, `GrpcZstd`, or `Uncompressed`. `GrpcZstd` compresses each whole gRPC request message, which is often smaller than IPC compression for wide or sparse schemas but can use more client CPU, especially on narrow, dense schemas. See the [Arrow example](examples/arrow/README.md#compression) |
 | `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Deprecated: use `compression`. Arrow IPC compression, used only when `compression` is `FallbackToLegacy` |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
+| `max_message_size_bytes` | `Option<usize>` | `None` | Opt-in cap on each Flight message's size before gRPC compression; batches are split by encoded size to stay within it. `None` keeps the row-count split. A single row larger than the cap is sent alone and exceeds it |
 
 ```rust
 let stream = sdk
