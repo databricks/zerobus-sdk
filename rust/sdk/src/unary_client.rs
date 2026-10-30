@@ -23,8 +23,6 @@ use crate::headers_provider::grpc_metadata_from_headers;
 use crate::{EncodedRecord, HeadersProvider, PreparedInput, ZerobusError, ZerobusResult};
 
 /// The builder settings a unary client reads.
-// Constructed by `UnaryClientBuilder::build()`, which a later commit adds.
-#[allow(dead_code)]
 pub(crate) struct UnaryOptions {
     pub(crate) recovery: bool,
     pub(crate) recovery_retries: u32,
@@ -86,8 +84,6 @@ impl std::fmt::Debug for UnaryClient {
 }
 
 impl UnaryClient {
-    // Called by `UnaryClientBuilder::build()`, which a later commit adds.
-    #[allow(dead_code)]
     pub(crate) fn new(
         channel: ZerobusClient<Channel>,
         table_name: String,

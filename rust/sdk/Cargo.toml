@@ -96,7 +96,7 @@ eos = []
 # Personal access token (PAT) authentication (Private Preview), opt-in. Needs
 # server-side enablement; adds no dependencies and no toolchain floor.
 pat-auth = []
-# Unary InsertRecords client (Beta); API is in development.
+# Unary InsertRecords client (Beta), opt-in; API is in development.
 unary = []
 testing = []
 # Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
