@@ -41,6 +41,8 @@ public sealed class ZerobusSdkBuilder : IDisposable
     private string? _sdkIdentifier;
     private string? _applicationName;
     private bool? _connectionPerStream;
+    private (ulong IntervalMs, ulong TimeoutMs)? _http2KeepAlive;
+    private ulong? _tcpKeepAliveMs;
     private bool _disableTls;
     private int _consumed;  // 0 = live, 1 = consumed/disposed
 
@@ -126,6 +128,49 @@ public sealed class ZerobusSdkBuilder : IDisposable
     }
 
     /// <summary>
+    /// Configures HTTP/2 keepalive PINGs on JSON/protobuf gRPC connections.
+    /// Enabled by default with a 30 s interval and a 10 s timeout.
+    /// </summary>
+    /// <remarks>
+    /// PINGs keep idle connections alive through NAT gateways, load balancers and
+    /// firewalls that silently drop idle flows, and close dead connections after
+    /// <paramref name="timeout"/> instead of waiting for the server ack timeout.
+    /// If the server rejects PINGs (GOAWAY <c>ENHANCE_YOUR_CALM</c>), disable them
+    /// and rely on <see cref="TcpKeepAlive"/>.
+    /// </remarks>
+    /// <param name="interval">Interval between PINGs; <see cref="TimeSpan.Zero"/> disables PINGs.</param>
+    /// <param name="timeout">Time to wait for a PING acknowledgement; <see cref="TimeSpan.Zero"/> keeps the default.</param>
+    /// <returns>This builder, for chaining.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown if a value is negative.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the builder has been consumed or disposed.</exception>
+    public ZerobusSdkBuilder Http2KeepAlive(TimeSpan interval, TimeSpan timeout)
+    {
+        ThrowIfConsumed();
+        ArgumentOutOfRangeException.ThrowIfLessThan(interval, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(timeout, TimeSpan.Zero);
+        _http2KeepAlive = (ToMilliseconds(interval), ToMilliseconds(timeout));
+        return this;
+    }
+
+    /// <summary>
+    /// Configures the TCP keepalive idle time on JSON/protobuf gRPC sockets.
+    /// Enabled by default with 30 s. Not applied when a proxy is used.
+    /// </summary>
+    /// <param name="idle">Idle time before keepalive probes are sent; <see cref="TimeSpan.Zero"/> disables TCP keepalive.</param>
+    /// <returns>This builder, for chaining.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown if <paramref name="idle"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the builder has been consumed or disposed.</exception>
+    public ZerobusSdkBuilder TcpKeepAlive(TimeSpan idle)
+    {
+        ThrowIfConsumed();
+        ArgumentOutOfRangeException.ThrowIfLessThan(idle, TimeSpan.Zero);
+        _tcpKeepAliveMs = ToMilliseconds(idle);
+        return this;
+    }
+
+    private static ulong ToMilliseconds(TimeSpan value) => (ulong)Math.Ceiling(value.TotalMilliseconds);
+
+    /// <summary>
     /// Disables TLS for the gRPC connection. TLS is enabled by default.
     /// Only use this for local development or testing.
     /// </summary>
@@ -166,6 +211,10 @@ public sealed class ZerobusSdkBuilder : IDisposable
                 NativeMethods.SdkBuilderApplicationName(builderPtr, _applicationName);
             if (_connectionPerStream.HasValue)
                 NativeMethods.SdkBuilderConnectionPerStream(builderPtr, _connectionPerStream.Value);
+            if (_http2KeepAlive is var (intervalMs, timeoutMs))
+                NativeMethods.SdkBuilderHttp2Keepalive(builderPtr, intervalMs, timeoutMs);
+            if (_tcpKeepAliveMs.HasValue)
+                NativeMethods.SdkBuilderTcpKeepalive(builderPtr, _tcpKeepAliveMs.Value);
             if (_disableTls)
                 NativeMethods.SdkBuilderDisableTls(builderPtr);
         }

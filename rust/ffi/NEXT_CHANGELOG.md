@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- JSON and protobuf gRPC connections now use HTTP/2 keepalive (30 second PING
+  interval, 10 second timeout) and TCP keepalive (30 second idle time) by
+  default, picked up from the Rust SDK.
+
 ### Bug Fixes
 
 - The library is now built with `rustls-webpki` 0.103.16 and `webpki-roots`
@@ -35,3 +39,8 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `zerobus_sdk_builder_http2_keepalive(builder, interval_ms, timeout_ms)`
+  and `zerobus_sdk_builder_tcp_keepalive(builder, idle_ms)`. `0` disables
+  (for `timeout_ms`, keeps the default). Additive; existing symbols are
+  unchanged.

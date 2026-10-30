@@ -1202,6 +1202,9 @@ Also accepts `0` or `no`.
 | `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
 | `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
 | `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
+| `http2_keepalive_interval(Option<Duration>)` | 30 seconds | Interval between HTTP/2 keepalive PINGs on JSON/protobuf connections. `None` disables PINGs. |
+| `http2_keepalive_timeout(Duration)` | 10 seconds | How long to wait for a PING acknowledgement before the connection is closed. |
+| `tcp_keepalive(Option<Duration>)` | 30 seconds | TCP keepalive idle time on JSON/protobuf sockets. `None` disables it. Not applied through a proxy connector. |
 | `token_cache_enabled(bool)` | `true` | Enable or disable token caching for the built-in OAuth and federated paths. |
 | `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth or federated token is refreshed. |
 
@@ -1211,6 +1214,12 @@ cause head-of-line blocking that stalls every stream on that connection and
 reduces aggregate throughput. Dedicated connections isolate that loss. If you
 run many smaller, low-throughput streams, set `connection_per_stream(false)`;
 shared multiplexing is recommended there to reduce connection overhead.
+
+Keepalive keeps idle connections open through NAT gateways, load balancers, and
+firewalls that drop idle flows without notice, and closes dead connections
+without waiting for the server ack timeout. If the server rejects PINGs
+(`GOAWAY` with `ENHANCE_YOUR_CALM`), disable HTTP/2 PINGs with
+`http2_keepalive_interval(None)` and keep TCP keepalive.
 
 ### StreamConfigurationOptions
 

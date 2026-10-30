@@ -470,6 +470,12 @@ internal static partial class NativeMethods
         IntPtr builder,
         [MarshalAs(UnmanagedType.I1)] bool enabled);
 
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_http2_keepalive")]
+    public static extern void SdkBuilderHttp2Keepalive(IntPtr builder, ulong intervalMs, ulong timeoutMs);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_tcp_keepalive")]
+    public static extern void SdkBuilderTcpKeepalive(IntPtr builder, ulong idleMs);
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_disable_tls")]
     public static extern void SdkBuilderDisableTls(IntPtr builder);
 

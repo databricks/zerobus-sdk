@@ -462,6 +462,22 @@ void zerobus_sdk_builder_application_name(struct CZerobusSdkBuilder *builder, co
 void zerobus_sdk_builder_connection_per_stream(struct CZerobusSdkBuilder *builder, bool enabled);
 
 /**
+ * Configures HTTP/2 keepalive PINGs on JSON/protobuf gRPC connections.
+ * `interval_ms == 0` disables PINGs. `timeout_ms == 0` keeps the default
+ * timeout. Enabled by default (30 s interval, 10 s timeout). No-op on null.
+ */
+void zerobus_sdk_builder_http2_keepalive(struct CZerobusSdkBuilder *builder,
+                                         uint64_t interval_ms,
+                                         uint64_t timeout_ms);
+
+/**
+ * Configures the TCP keepalive idle time on JSON/protobuf gRPC sockets.
+ * `idle_ms == 0` disables TCP keepalive. Enabled by default (30 s). No-op on
+ * null.
+ */
+void zerobus_sdk_builder_tcp_keepalive(struct CZerobusSdkBuilder *builder, uint64_t idle_ms);
+
+/**
  * Selects a no-TLS gRPC channel. TLS is on by default.
  */
 void zerobus_sdk_builder_disable_tls(struct CZerobusSdkBuilder *builder);

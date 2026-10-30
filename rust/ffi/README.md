@@ -87,6 +87,20 @@ aggregate throughput. Dedicated connections isolate that loss. For many
 smaller, low-throughput streams, shared multiplexing is recommended to reduce
 connection overhead.
 
+### Connection keepalive
+
+JSON/protobuf connections send HTTP/2 keepalive PINGs every 30 seconds (10 second
+ack timeout) and enable TCP keepalive with a 30 second idle time by default.
+Pass `0` to disable either one:
+
+```c
+zerobus_sdk_builder_http2_keepalive(builder, 0, 0); // disable HTTP/2 PINGs
+zerobus_sdk_builder_tcp_keepalive(builder, 60000);  // 60 s TCP keepalive
+```
+
+Arrow Flight streams are unaffected. TCP keepalive is not applied through a
+proxy connector.
+
 ### Async stream creation callback
 
 For callers that do not want to block a thread in the synchronous stream

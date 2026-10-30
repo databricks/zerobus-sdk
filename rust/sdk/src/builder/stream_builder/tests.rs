@@ -20,6 +20,7 @@ fn test_sdk() -> ZerobusSdk {
         true,
         crate::token_cache::DEFAULT_REFRESH_BUFFER,
         true,
+        crate::sdk::KeepaliveConfig::default(),
     )
 }
 

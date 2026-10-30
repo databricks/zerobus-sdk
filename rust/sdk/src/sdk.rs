@@ -23,6 +23,46 @@ use crate::stream::ZerobusArrowStream;
 /// application suffix.
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
+/// Default interval between HTTP/2 keepalive PINGs on the gRPC channel.
+pub const DEFAULT_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Default time to wait for a PING acknowledgement before closing the connection.
+pub const DEFAULT_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default TCP keepalive idle time on the gRPC socket.
+pub const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// Keepalive settings applied to JSON/protobuf gRPC channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeepaliveConfig {
+    /// `None` disables HTTP/2 keepalive PINGs.
+    pub(crate) http2_interval: Option<Duration>,
+    pub(crate) http2_timeout: Duration,
+    /// `None` disables TCP keepalive. Not applied when a proxy connector is used.
+    pub(crate) tcp_keepalive: Option<Duration>,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            http2_interval: Some(DEFAULT_HTTP2_KEEPALIVE_INTERVAL),
+            http2_timeout: DEFAULT_HTTP2_KEEPALIVE_TIMEOUT,
+            tcp_keepalive: Some(DEFAULT_TCP_KEEPALIVE),
+        }
+    }
+}
+
+impl KeepaliveConfig {
+    pub(crate) fn apply(&self, endpoint: Endpoint) -> Endpoint {
+        let endpoint = endpoint.tcp_keepalive(self.tcp_keepalive);
+        match self.http2_interval {
+            Some(interval) => endpoint
+                .http2_keep_alive_interval(interval)
+                .keep_alive_timeout(self.http2_timeout)
+                .keep_alive_while_idle(true),
+            None => endpoint,
+        }
+    }
+}
+
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
 /// ```rust,ignore
@@ -53,6 +93,7 @@ pub struct ZerobusSdk {
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
+    pub(crate) keepalive: KeepaliveConfig,
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     pub(crate) connector_factory: Option<ConnectorFactory>,
@@ -164,6 +205,7 @@ impl ZerobusSdk {
         token_cache_enabled: bool,
         token_refresh_buffer: Duration,
         connection_per_stream: bool,
+        keepalive: KeepaliveConfig,
     ) -> Self {
         ZerobusSdk {
             zerobus_endpoint,
@@ -171,6 +213,7 @@ impl ZerobusSdk {
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
             connection_per_stream,
+            keepalive,
             tls_config,
             connector_factory,
             sdk_identifier,
@@ -364,6 +407,7 @@ impl ZerobusSdk {
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
             .user_agent(self.sdk_identifier.as_ref())
             .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+        let endpoint = self.keepalive.apply(endpoint);
 
         let endpoint = self.tls_config.tls_settings()?.apply(endpoint)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
@@ -376,5 +420,104 @@ impl ZerobusSdk {
         Ok(ZerobusClient::new(channel)
             .max_decoding_message_size(usize::MAX)
             .max_encoding_message_size(usize::MAX))
+    }
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::databricks::zerobus::EphemeralStreamRequest;
+
+    const FRAME_SETTINGS: u8 = 0x4;
+    const FRAME_PING: u8 = 0x6;
+    const FLAG_ACK: u8 = 0x1;
+
+    /// Minimal HTTP/2 peer: acknowledges SETTINGS and PINGs, never answers requests.
+    async fn start_ping_counting_server() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pings = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&pings);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut preface = [0u8; 24];
+            socket.read_exact(&mut preface).await.unwrap();
+            socket
+                .write_all(&[0, 0, 0, FRAME_SETTINGS, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            loop {
+                let mut header = [0u8; 9];
+                if socket.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+                let mut payload = vec![0u8; len];
+                if socket.read_exact(&mut payload).await.is_err() {
+                    return;
+                }
+                let (kind, flags) = (header[3], header[4]);
+                if flags & FLAG_ACK != 0 {
+                    continue;
+                }
+                let reply = match kind {
+                    FRAME_SETTINGS => vec![0, 0, 0, FRAME_SETTINGS, FLAG_ACK, 0, 0, 0, 0],
+                    FRAME_PING => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let mut frame = vec![0, 0, 8, FRAME_PING, FLAG_ACK, 0, 0, 0, 0];
+                        frame.extend_from_slice(&payload);
+                        frame
+                    }
+                    _ => continue,
+                };
+                if socket.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        (format!("http://{addr}"), pings)
+    }
+
+    /// Opens an idle bidi stream with `keepalive` applied and counts client PINGs.
+    async fn count_pings_on_idle_stream(keepalive: KeepaliveConfig) -> usize {
+        let (url, pings) = start_ping_counting_server().await;
+        let channel = keepalive
+            .apply(Endpoint::from_shared(url).unwrap())
+            .connect_lazy();
+        let mut client = ZerobusClient::new(channel);
+        let rpc = tokio::spawn(async move {
+            let requests = tokio_stream::pending::<EphemeralStreamRequest>();
+            let _ = client.ephemeral_stream(requests).await;
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        rpc.abort();
+        pings.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn http2_keepalive_sends_pings_on_idle_stream() {
+        let pings = count_pings_on_idle_stream(KeepaliveConfig {
+            http2_interval: Some(Duration::from_millis(100)),
+            http2_timeout: Duration::from_secs(5),
+            tcp_keepalive: None,
+        })
+        .await;
+
+        assert!(pings >= 3, "expected at least 3 PINGs, got {pings}");
+    }
+
+    #[tokio::test]
+    async fn http2_keepalive_disabled_sends_no_pings() {
+        let pings = count_pings_on_idle_stream(KeepaliveConfig {
+            http2_interval: None,
+            http2_timeout: Duration::from_secs(5),
+            tcp_keepalive: None,
+        })
+        .await;
+
+        assert_eq!(pings, 0);
     }
 }

@@ -7,6 +7,11 @@
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Call `ZerobusSdk.CreateBuilder().ConnectionPerStream(false)` to share one
   HTTP/2 connection across streams.
+- JSON and protobuf gRPC connections now send HTTP/2 keepalive PINGs (30 s
+  interval, 10 s timeout) and enable TCP keepalive (30 s idle) by default, so
+  idle streams are not dropped by NAT gateways, load balancers, or firewalls
+  with short idle timeouts, and dead connections are detected before the 60 s
+  server ack timeout.
 
 ### Deprecations
 
@@ -41,3 +46,7 @@
 - Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
 
 ### API Changes
+
+- Added `ZerobusSdkBuilder.Http2KeepAlive(TimeSpan interval, TimeSpan timeout)`
+  and `ZerobusSdkBuilder.TcpKeepAlive(TimeSpan idle)`. `TimeSpan.Zero` disables
+  (for the PING timeout, keeps the default).

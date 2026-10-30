@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::proxy::ConnectorFactory;
+use crate::sdk::KeepaliveConfig;
 use crate::token_cache::DEFAULT_REFRESH_BUFFER;
 #[cfg(feature = "testing")]
 use crate::NoTlsConfig;
@@ -34,6 +35,7 @@ pub struct ZerobusSdkBuilder {
     token_cache_enabled: bool,
     token_refresh_buffer: Duration,
     connection_per_stream: bool,
+    keepalive: KeepaliveConfig,
 }
 
 impl ZerobusSdkBuilder {
@@ -51,6 +53,7 @@ impl ZerobusSdkBuilder {
             token_cache_enabled: true,
             token_refresh_buffer: DEFAULT_REFRESH_BUFFER,
             connection_per_stream: true,
+            keepalive: KeepaliveConfig::default(),
         }
     }
 
@@ -121,6 +124,43 @@ impl ZerobusSdkBuilder {
     /// are unaffected by this option.
     pub fn connection_per_stream(mut self, enabled: bool) -> Self {
         self.connection_per_stream = enabled;
+        self
+    }
+
+    /// Sets the interval between HTTP/2 keepalive PINGs on JSON/protobuf gRPC
+    /// connections, or `None` to disable them.
+    ///
+    /// Defaults to [`DEFAULT_HTTP2_KEEPALIVE_INTERVAL`](crate::DEFAULT_HTTP2_KEEPALIVE_INTERVAL)
+    /// (30 s). PINGs keep idle connections alive through NAT gateways, load
+    /// balancers and firewalls that silently drop idle flows, and detect dead
+    /// connections without waiting for the server ack timeout. PINGs are sent
+    /// even when no stream is open. Servers may reject PINGs that arrive more
+    /// often than they allow (`GOAWAY` with `ENHANCE_YOUR_CALM`); in that case
+    /// disable them and rely on [`tcp_keepalive`](Self::tcp_keepalive).
+    /// Arrow Flight streams are unaffected.
+    pub fn http2_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.keepalive.http2_interval = interval;
+        self
+    }
+
+    /// Sets how long to wait for an HTTP/2 keepalive PING acknowledgement before
+    /// the connection is closed.
+    ///
+    /// Defaults to [`DEFAULT_HTTP2_KEEPALIVE_TIMEOUT`](crate::DEFAULT_HTTP2_KEEPALIVE_TIMEOUT)
+    /// (10 s). Ignored when HTTP/2 keepalive is disabled.
+    pub fn http2_keepalive_timeout(mut self, timeout: Duration) -> Self {
+        self.keepalive.http2_timeout = timeout;
+        self
+    }
+
+    /// Sets the TCP keepalive idle time on JSON/protobuf gRPC sockets, or `None`
+    /// to disable TCP keepalive.
+    ///
+    /// Defaults to [`DEFAULT_TCP_KEEPALIVE`](crate::DEFAULT_TCP_KEEPALIVE) (30 s).
+    /// Not applied when the connection goes through a proxy connector. Arrow
+    /// Flight streams are unaffected.
+    pub fn tcp_keepalive(mut self, idle: Option<Duration>) -> Self {
+        self.keepalive.tcp_keepalive = idle;
         self
     }
 
@@ -294,6 +334,7 @@ impl ZerobusSdkBuilder {
             self.token_cache_enabled,
             self.token_refresh_buffer,
             self.connection_per_stream,
+            self.keepalive,
         ))
     }
 }
@@ -370,6 +411,44 @@ mod tests {
             .expect("should build");
 
         assert!(!sdk.connection_per_stream);
+    }
+
+    #[test]
+    fn test_keepalive_enabled_by_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build");
+
+        assert_eq!(sdk.keepalive, KeepaliveConfig::default());
+        assert_eq!(
+            sdk.keepalive.http2_interval,
+            Some(crate::DEFAULT_HTTP2_KEEPALIVE_INTERVAL)
+        );
+        assert_eq!(
+            sdk.keepalive.tcp_keepalive,
+            Some(crate::DEFAULT_TCP_KEEPALIVE)
+        );
+    }
+
+    #[test]
+    fn test_keepalive_can_be_configured_and_disabled() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .http2_keepalive_interval(None)
+            .http2_keepalive_timeout(Duration::from_secs(5))
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .build()
+            .expect("should build");
+
+        assert_eq!(
+            sdk.keepalive,
+            KeepaliveConfig {
+                http2_interval: None,
+                http2_timeout: Duration::from_secs(5),
+                tcp_keepalive: Some(Duration::from_secs(60)),
+            }
+        );
     }
 
     #[test]

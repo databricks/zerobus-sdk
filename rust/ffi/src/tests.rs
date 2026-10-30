@@ -4,7 +4,8 @@ use crate::{
     zerobus_free_record_array, zerobus_get_default_config, zerobus_sdk_builder_application_name,
     zerobus_sdk_builder_build, zerobus_sdk_builder_connection_per_stream,
     zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint, zerobus_sdk_builder_free,
-    zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
+    zerobus_sdk_builder_http2_keepalive, zerobus_sdk_builder_new,
+    zerobus_sdk_builder_sdk_identifier, zerobus_sdk_builder_tcp_keepalive,
     zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
     zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
     zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
@@ -319,7 +320,26 @@ fn test_builder_setters_on_null_are_safe() {
     zerobus_sdk_builder_sdk_identifier(ptr::null_mut(), s.as_ptr());
     zerobus_sdk_builder_application_name(ptr::null_mut(), s.as_ptr());
     zerobus_sdk_builder_connection_per_stream(ptr::null_mut(), false);
+    zerobus_sdk_builder_http2_keepalive(ptr::null_mut(), 30_000, 10_000);
+    zerobus_sdk_builder_tcp_keepalive(ptr::null_mut(), 30_000);
     zerobus_sdk_builder_disable_tls(ptr::null_mut());
+}
+
+#[test]
+fn test_sdk_builder_keepalive_settings_build() {
+    for (interval_ms, timeout_ms, tcp_idle_ms) in [(60_000, 20_000, 45_000), (0, 0, 0)] {
+        let endpoint_c = CString::new("https://workspace.zerobus.databricks.com").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_http2_keepalive(builder, interval_ms, timeout_ms);
+        zerobus_sdk_builder_tcp_keepalive(builder, tcp_idle_ms);
+
+        let mut result = CResult::success();
+        let sdk = zerobus_sdk_builder_build(builder, &mut result);
+        assert!(!sdk.is_null());
+        assert!(result.success);
+        zerobus_sdk_free(sdk);
+    }
 }
 
 #[test]
