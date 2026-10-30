@@ -50,7 +50,10 @@ bool zb_is_header_value(zerobus_string_view_t view);
 
 /* Parses all len bytes as an unsigned decimal into *out. False, leaving *out
  * unchanged, if len is 0, a byte is not a digit, or the value exceeds
- * UINT32_MAX. */
+ * UINT64_MAX. */
+bool zb_parse_u64(const uint8_t *value, size_t len, uint64_t *out);
+
+/* Like zb_parse_u64, but also false for a value over UINT32_MAX. */
 bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out);
 
 /* The value of hex digit c, in either case, or -1 if c is not one. */
