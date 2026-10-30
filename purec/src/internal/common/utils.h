@@ -36,6 +36,10 @@ bool zb_is_valid_string(zerobus_string_view_t view);
  * is NUL-terminated and must be lowercase (only s is folded). */
 bool zb_starts_with(const char *s, size_t len, const char *prefix);
 
+/* True if s (len bytes) equals lower, matched case-insensitively. lower is
+ * NUL-terminated and must be lowercase (only s is folded). */
+bool zb_equals_ignore_case(const char *s, size_t len, const char *lower);
+
 /* True if value is exactly literal, compared case-sensitively. {NULL, 0}
  * equals ""; {NULL, nonzero} equals nothing. */
 bool zb_view_equals(zerobus_string_view_t value, const char *literal);

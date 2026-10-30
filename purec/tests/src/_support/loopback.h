@@ -1,5 +1,6 @@
 /* Helpers for test servers on a loopback port: the listener, a self-signed
- * certificate, and a TLS server context that uses it. */
+ * certificate, a TLS server context that uses it, and SIGPIPE blocking for
+ * the server's thread. */
 #ifndef ZB_TEST_LOOPBACK_H
 #define ZB_TEST_LOOPBACK_H
 
@@ -19,5 +20,9 @@ bool loopback_write_certificate(const char *cert_file, const char *key_file);
  * HTTP/2 when the client offers it, otherwise no protocol. */
 SSL_CTX *loopback_server_tls(const char *cert_file, const char *key_file,
                              bool h2);
+
+/* Blocks SIGPIPE in the calling thread, so a server's write to a client that
+ * has left fails with EPIPE instead of ending the test. */
+void loopback_block_sigpipe(void);
 
 #endif /* ZB_TEST_LOOPBACK_H */
