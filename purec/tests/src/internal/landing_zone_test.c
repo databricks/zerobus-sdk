@@ -1,8 +1,8 @@
 #include <stdlib.h>
 
-#include "internal/ingest_request.h"
 #include "internal/landing_zone.h"
 #include "internal/platform/concurrency.h"
+#include "internal/proto/zerobus_service.h"
 #include "test_common.h"
 
 struct worker {
@@ -28,7 +28,7 @@ static zerobus_status_t push_request(zb_landing_zone_t *zone, char data,
                                      zerobus_offset_t *offset)
 {
     zb_ingest_request_t *request =
-        zb_ingest_request_new((zerobus_string_view_t){&data, 1});
+        zb_ingest_request_new(&(zerobus_string_view_t){&data, 1}, 1);
     if (request == NULL) {
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
     }
@@ -173,14 +173,14 @@ static void test_fifo_and_offsets(void)
     for (unsigned int i = 0; i < 4; i++) {
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
                                            &borrowed, &offset));
-        CHECK_EQ_INT(borrowed->len, 1);
-        CHECK_EQ_INT(borrowed->data[0], '0' + i);
+        CHECK_EQ_INT(borrowed->batch[0].len, 1);
+        CHECK_EQ_INT(borrowed->batch[0].data[0], '0' + i);
         CHECK_EQ_INT(offset, i);
     }
     for (unsigned int i = 0; i < 4; i++) {
         owned = zb_landing_zone_pop(zone, &offset);
         REQUIRE(owned != NULL);
-        CHECK_EQ_INT(owned->data[0], '0' + i);
+        CHECK_EQ_INT(owned->batch[0].data[0], '0' + i);
         CHECK_EQ_INT(offset, i);
         zb_ingest_request_free(owned);
         owned = NULL;
@@ -210,8 +210,8 @@ static void test_observe_with_optional_outputs(void)
         owned = zb_landing_zone_pop(zone, &offset);
         REQUIRE(owned != NULL);
         CHECK_EQ_INT(offset, i);
-        CHECK_EQ_INT(owned->len, 1);
-        CHECK_EQ_INT(owned->data[0], '0' + i);
+        CHECK_EQ_INT(owned->batch[0].len, 1);
+        CHECK_EQ_INT(owned->batch[0].data[0], '0' + i);
         zb_ingest_request_free(owned);
         owned = NULL;
         zb_ingest_request_t *extra = zb_landing_zone_pop(zone, NULL);
@@ -236,7 +236,7 @@ static void test_full_waits_and_pop_releases_space(void)
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
                                            &borrowed, NULL));
     }
-    pending = zb_ingest_request_new(sv("5"));
+    pending = zb_ingest_request_new(&(zerobus_string_view_t){"5", 1}, 1);
     REQUIRE(pending != NULL);
     CHECK_EQ_INT(
         zb_landing_zone_push(zone, pending, ZB_DEADLINE_IMMEDIATE, &offset),
@@ -245,7 +245,7 @@ static void test_full_waits_and_pop_releases_space(void)
     CHECK_EQ_INT(zb_landing_zone_push(zone, pending, deadline, &offset),
                  ZEROBUS_STATUS_DEADLINE_EXCEEDED);
     CHECK_EQ_INT(offset, 99);
-    CHECK_EQ_INT(pending->data[0], '5');
+    CHECK_EQ_INT(pending->batch[0].data[0], '5');
     owned = zb_landing_zone_pop(zone, &offset);
     REQUIRE(owned != NULL);
     CHECK_EQ_INT(offset, 0);
@@ -254,7 +254,7 @@ static void test_full_waits_and_pop_releases_space(void)
     CHECK_EQ_INT(offset, 5);
     REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                        &offset));
-    CHECK_EQ_INT(borrowed->data[0], '5');
+    CHECK_EQ_INT(borrowed->batch[0].data[0], '5');
     CHECK_EQ_INT(offset, 5);
 
 zb_cleanup:
@@ -297,7 +297,7 @@ static void test_reset_observe_replays_retained_requests(void)
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
                                            &borrowed, &offset));
         CHECK_EQ_INT(offset, i);
-        CHECK_EQ_INT(borrowed->data[0], '0' + i);
+        CHECK_EQ_INT(borrowed->batch[0].data[0], '0' + i);
         if (i < 3) {
             CHECK(borrowed == original[i]);
         }
@@ -336,7 +336,7 @@ static void test_reset_observe_closed_zone(void)
         REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE,
                                            &borrowed, &offset));
         CHECK_EQ_INT(offset, i);
-        CHECK_EQ_INT(borrowed->data[0], '0' + i);
+        CHECK_EQ_INT(borrowed->batch[0].data[0], '0' + i);
         owned = zb_landing_zone_pop(zone, NULL);
         REQUIRE(owned != NULL);
         CHECK(owned == borrowed);
@@ -368,7 +368,7 @@ static void test_close_rejects_push_and_allows_observe_and_pop(void)
     CHECK_EQ_INT(zb_landing_zone_last_offset(zone), 0);
     REQUIRE_OK(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                        &offset));
-    CHECK_EQ_INT(borrowed->data[0], '0');
+    CHECK_EQ_INT(borrowed->batch[0].data[0], '0');
     CHECK_EQ_INT(offset, 0);
     CHECK_EQ_INT(zb_landing_zone_observe(zone, ZB_DEADLINE_IMMEDIATE, &borrowed,
                                          &offset),
@@ -376,7 +376,7 @@ static void test_close_rejects_push_and_allows_observe_and_pop(void)
     CHECK_EQ_INT(zb_landing_zone_observe(zone, zb_deadline_after_ms(1),
                                          &borrowed, &offset),
                  ZEROBUS_STATUS_RESOURCE_EXHAUSTED);
-    CHECK_EQ_INT(borrowed->data[0], '0');
+    CHECK_EQ_INT(borrowed->batch[0].data[0], '0');
     CHECK_EQ_INT(offset, 0);
 
     offset = 99;
@@ -410,8 +410,8 @@ static void test_pop_transfers_ownership(void)
     /* Free the zone with both observed and unobserved leftovers. */
     zb_landing_zone_free(zone);
     zone = NULL;
-    CHECK_EQ_INT(owned->len, 1);
-    CHECK_EQ_INT(owned->data[0], '0');
+    CHECK_EQ_INT(owned->batch[0].len, 1);
+    CHECK_EQ_INT(owned->batch[0].data[0], '0');
 
 zb_cleanup:
     zb_ingest_request_free(owned);
@@ -427,7 +427,8 @@ static void test_producer_progress_after_pop(void)
     for (unsigned int i = 0; i < 4; i++) {
         REQUIRE_OK(push_request(zone, '0', NULL));
     }
-    producer.request = zb_ingest_request_new(sv("4"));
+    producer.request =
+        zb_ingest_request_new(&(zerobus_string_view_t){"4", 1}, 1);
     REQUIRE(producer.request != NULL);
     REQUIRE_OK(start_worker(&producer, zone));
     REQUIRE_OK(zb_sem_wait(&producer.ready, zb_deadline_after_ms(5000)));
@@ -457,7 +458,7 @@ static void test_observer_progress_after_push(void)
     join_worker(&observer);
     CHECK_OK(observer.status);
     REQUIRE(observer.request != NULL);
-    CHECK_EQ_INT(observer.request->data[0], '0');
+    CHECK_EQ_INT(observer.request->batch[0].data[0], '0');
     CHECK_EQ_INT(observer.offset, 0);
 
 zb_cleanup:
@@ -474,7 +475,8 @@ static void test_close_rejects_producers(void)
         REQUIRE_OK(push_request(zone, '0', NULL));
     }
     for (unsigned int i = 0; i < 4; i++) {
-        producers[i].request = zb_ingest_request_new(sv("4"));
+        producers[i].request =
+            zb_ingest_request_new(&(zerobus_string_view_t){"4", 1}, 1);
         REQUIRE(producers[i].request != NULL);
         REQUIRE_OK(start_worker(&producers[i], zone));
         REQUIRE_OK(
@@ -486,7 +488,7 @@ static void test_close_rejects_producers(void)
         join_worker(&producers[i]);
         CHECK_EQ_INT(producers[i].status, ZEROBUS_STATUS_FAILED_PRECONDITION);
         CHECK_EQ_INT(producers[i].offset, -1);
-        CHECK_EQ_INT(producers[i].request->data[0], '4');
+        CHECK_EQ_INT(producers[i].request->batch[0].data[0], '4');
     }
 
 zb_cleanup:

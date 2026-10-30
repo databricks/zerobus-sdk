@@ -6,6 +6,43 @@
 #include "internal/proto/zerobus_service.h"
 #include "zerobus_service.pb-c.h"
 
+zb_ingest_request_t *zb_ingest_request_new(const zerobus_string_view_t *records,
+                                           size_t count)
+{
+    if ((records == NULL && count != 0) ||
+        count >
+            (SIZE_MAX - sizeof(zb_ingest_request_t)) / sizeof(zb_record_t)) {
+        return NULL;
+    }
+    size_t size = sizeof(zb_ingest_request_t) + count * sizeof(zb_record_t);
+    for (size_t i = 0; i < count; ++i) {
+        if ((records[i].data == NULL && records[i].len != 0) ||
+            records[i].len > SIZE_MAX - size) {
+            return NULL;
+        }
+        size += records[i].len;
+    }
+    zb_ingest_request_t *request = (zb_ingest_request_t *)malloc(size);
+    if (request == NULL) {
+        return NULL;
+    }
+    request->count = count;
+    uint8_t *bytes = (uint8_t *)&request->batch[count];
+    for (size_t i = 0; i < count; ++i) {
+        request->batch[i] = (zb_record_t){bytes, records[i].len};
+        if (records[i].len != 0) {
+            memcpy(bytes, records[i].data, records[i].len);
+            bytes += records[i].len;
+        }
+    }
+    return request;
+}
+
+void zb_ingest_request_free(zb_ingest_request_t *request)
+{
+    free(request);
+}
+
 static bool check_args(zerobus_string_view_t input, uint8_t **out_data,
                        size_t *out_len)
 {
@@ -119,6 +156,60 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
     p = write_varint(p, json_record.len);
     if (json_record.len > 0) {
         memcpy(p, json_record.data, json_record.len);
+    }
+    *out_data = data;
+    *out_len = len;
+    return ZEROBUS_STATUS_OK;
+}
+
+zerobus_status_t zb_proto_encode_json_batch(zerobus_offset_t offset_id,
+                                            const zb_ingest_request_t *request,
+                                            uint8_t **out_data, size_t *out_len)
+{
+    if (request == NULL || out_data == NULL || out_len == NULL) {
+        return ZEROBUS_STATUS_INVALID_ARGUMENT;
+    }
+    const zb_record_t *records = request->batch;
+    size_t records_len = 0;
+    for (size_t i = 0; i < request->count; ++i) {
+        if (records[i].len > ZB_MAX_ENCODED_PAYLOAD) {
+            return ZEROBUS_STATUS_INVALID_ARGUMENT;
+        }
+        size_t field = 1 + varint_size(records[i].len) + records[i].len;
+        if (field > ZB_MAX_ENCODED_PAYLOAD - records_len) {
+            return ZEROBUS_STATUS_INVALID_ARGUMENT;
+        }
+        records_len += field;
+    }
+    /* Update the sizes and encoding below whenever these fields change in
+     * rust/sdk/zerobus_service.proto:
+     *   EphemeralStreamRequest.ingest_record_batch
+     *   IngestRecordBatchRequest.offset_id
+     *   IngestRecordBatchRequest.json_batch
+     *   JsonRecordBatch.records */
+    uint64_t offset = (uint64_t)offset_id;
+    size_t batch_len =
+        1 + varint_size(offset) + 1 + varint_size(records_len) + records_len;
+    size_t len = 1 + varint_size(batch_len) + batch_len;
+    uint8_t *data = (uint8_t *)malloc(len);
+    if (data == NULL) {
+        return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+
+    uint8_t *p = data;
+    *p++ = 0x1a; /* EphemeralStreamRequest.ingest_record_batch: field 3. */
+    p = write_varint(p, batch_len);
+    *p++ = 0x08; /* IngestRecordBatchRequest.offset_id: field 1, int64. */
+    p = write_varint(p, offset);
+    *p++ = 0x1a; /* IngestRecordBatchRequest.json_batch: field 3, message. */
+    p = write_varint(p, records_len);
+    for (size_t i = 0; i < request->count; ++i) {
+        *p++ = 0x0a; /* JsonRecordBatch.records: field 1, string. */
+        p = write_varint(p, records[i].len);
+        if (records[i].len > 0) {
+            memcpy(p, records[i].data, records[i].len);
+            p += records[i].len;
+        }
     }
     *out_data = data;
     *out_len = len;
