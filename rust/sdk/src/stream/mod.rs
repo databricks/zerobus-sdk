@@ -17,8 +17,8 @@ pub(crate) use arrow::c_data as arrow_c_data;
 pub(crate) use arrow::ArrowTableProperties;
 #[cfg(feature = "arrow-flight")]
 pub use arrow::{
-    ArrowCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch,
-    TimeUnit, ZerobusArrowStream,
+    ArrowCompression, ArrowDictionaryHandling, ArrowSchema, ArrowStreamConfigurationOptions,
+    DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream,
 };
 
 pub use grpc::ZerobusStream;

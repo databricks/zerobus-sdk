@@ -1243,6 +1243,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
 | `compression` | `ArrowCompression` | `FallbackToLegacy` (uses `ipc_compression`) | Payload compression, set with `StreamBuilder::compression`: `IpcZstd`, `IpcLz4`, `GrpcZstd`, or `Uncompressed`. `GrpcZstd` compresses each whole gRPC request message, which is often smaller than IPC compression for wide or sparse schemas but can use more client CPU, especially on narrow, dense schemas. See the [Arrow example](examples/arrow/README.md#compression) |
 | `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Deprecated: use `compression`. Arrow IPC compression, used only when `compression` is `FallbackToLegacy` |
+| `dictionary_handling` | `ArrowDictionaryHandling` | `Hydrate` | How dictionary-encoded columns are sent: `Hydrate` decodes them on the client, `Resend` and `Delta` send Arrow IPC dictionaries. Zerobus does not support Arrow dictionaries yet, so keep `Hydrate` |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust
@@ -1257,6 +1258,15 @@ let stream = sdk
     .build_arrow()
     .await?;
 ```
+
+By default, dictionary-encoded columns are decoded on the client and sent as
+plain values. `.dictionary_handling(ArrowDictionaryHandling::Resend)` sends the
+dictionaries instead. `Delta` also sends dictionaries, but when a batch's
+dictionary starts with the previous batch's values for that column, it sends
+only the new values; otherwise it sends the full dictionary. Zerobus does not
+support Arrow dictionaries yet, so keep the default, `Hydrate`. Until it does,
+`Resend` or `Delta` with dictionary-encoded columns makes stream creation fail
+with `ZerobusError::InvalidSchema`.
 
 For Arrow Flight streams, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long the oldest batch may remain pending during normal

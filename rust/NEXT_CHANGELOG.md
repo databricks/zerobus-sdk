@@ -14,6 +14,14 @@
   more client CPU than `IpcZstd`. With it, `BatchStats::approximate_wire_bytes`
   counts bytes after gRPC compression. The default leaves the wire format
   unchanged.
+- Added `StreamBuilder::dictionary_handling(ArrowDictionaryHandling)` for Arrow
+  Flight streams. The default, `Hydrate`, decodes dictionary-encoded columns on
+  the client, as before. `Resend` sends them as Arrow IPC dictionaries. `Delta`
+  also sends dictionaries, but when a batch's dictionary starts with the
+  previous batch's values for that column, it sends only the new values.
+  Zerobus does not support Arrow dictionaries yet, so keep the default. Until
+  it does, `Resend` or `Delta` with dictionary-encoded columns makes stream
+  creation fail with `ZerobusError::InvalidSchema`.
 
 ### Bug Fixes
 
@@ -33,3 +41,7 @@
   variant is deprecated too and will be removed with the field.
 
 ### API Changes
+
+- Added `ArrowDictionaryHandling`, `StreamBuilder::dictionary_handling`, and
+  `ArrowStreamConfigurationOptions::dictionary_handling` (behind the
+  `arrow-flight` feature).

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
-use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_flight::encode::{DictionaryHandling, FlightDataEncoderBuilder};
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::{FlightClient, FlightData, PutResult};
@@ -29,8 +29,9 @@ use super::compressed_sizes::{CompressedSizeChannel, CompressedSizes, SentFrame}
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::stats_size::frame_stats;
 use super::{
-    configured_deadline, ArrowCompression, ArrowStreamConfigurationOptions, ArrowTableProperties,
-    BatchItem, FlightConnectionParameters, ZerobusArrowStream,
+    configured_deadline, ArrowCompression, ArrowDictionaryHandling,
+    ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem, FlightConnectionParameters,
+    ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
@@ -164,6 +165,12 @@ fn record_sent_frame(
             },
         ),
     }
+}
+
+/// Whether `frame` carries an IPC dictionary batch rather than a record batch.
+fn is_dictionary_frame(frame: &FlightData) -> bool {
+    arrow_ipc::root_as_message(&frame.data_header)
+        .is_ok_and(|message| message.header_as_dictionary_batch().is_some())
 }
 
 pub(super) type FlightResponseStream =
@@ -522,10 +529,11 @@ impl ZerobusArrowStream {
 
     /// Builds a request body that can be stopped at a FlightData boundary and observed
     /// reaching EOF without dropping the surrounding HTTP/2 stream. The stream is a
-    /// schema frame (index 0) followed by per-batch data frames, each tagged with its
-    /// wire offset. When an exporter is registered, per-batch stats accumulate in a
-    /// single slot and `BatchSent` is emitted with the batch's final frame, because
-    /// cancellation or drop may arrive before another poll.
+    /// schema frame (index 0) followed by per-batch data frames. Record-batch frames are
+    /// tagged with their wire offset; dictionary frames are not, because the server
+    /// numbers only record batches. When an exporter is registered, per-batch stats
+    /// accumulate in a single slot and `BatchSent` is emitted with the batch's final
+    /// frame, because cancellation or drop may arrive before another poll.
     fn make_request_stream(
         batch_rx: mpsc::Receiver<BatchItem>,
         table_properties: &ArrowTableProperties,
@@ -534,7 +542,19 @@ impl ZerobusArrowStream {
         compressed_sizes: Option<Arc<CompressedSizes>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
-        let ipc_write_options = stream_ipc_write_options(options)?;
+        let mut ipc_write_options = stream_ipc_write_options(options)?;
+        let dictionary_handling = match options.dictionary_handling {
+            ArrowDictionaryHandling::Hydrate => DictionaryHandling::Hydrate,
+            ArrowDictionaryHandling::Resend => DictionaryHandling::Resend,
+            // The Flight encoder has no delta mode, but its IPC dictionary writer does.
+            ArrowDictionaryHandling::Delta => {
+                ipc_write_options = ipc_write_options
+                    .with_dictionary_handling(arrow_ipc::writer::DictionaryHandling::Delta);
+                DictionaryHandling::Resend
+            }
+        };
+        // Hydrated streams never emit dictionary frames, so skip parsing their headers.
+        let sends_dictionaries = dictionary_handling == DictionaryHandling::Resend;
         let schema = Arc::clone(&table_properties.schema);
         let pending: Arc<StdMutex<Option<EncodeInProgress>>> = Arc::new(StdMutex::new(None));
 
@@ -560,15 +580,18 @@ impl ZerobusArrowStream {
             FlightDataEncoderBuilder::new()
                 .with_schema(schema)
                 .with_options(ipc_write_options)
+                .with_dictionary_handling(dictionary_handling)
                 .build(batch_stream)
                 .enumerate()
                 .map(move |(idx, result)| {
                     result.map(|mut flight_data| {
                         if idx > 0 {
-                            let offset = offset_counter_clone.fetch_add(1, Ordering::Relaxed);
-                            let metadata = FlightBatchMetadata::new(offset);
-                            if let Ok(bytes) = metadata.to_bytes() {
-                                flight_data.app_metadata = bytes.into();
+                            if !(sends_dictionaries && is_dictionary_frame(&flight_data)) {
+                                let offset = offset_counter_clone.fetch_add(1, Ordering::Relaxed);
+                                let metadata = FlightBatchMetadata::new(offset);
+                                if let Ok(bytes) = metadata.to_bytes() {
+                                    flight_data.app_metadata = bytes.into();
+                                }
                             }
                             if let Some(exporter) = &stats_out {
                                 record_sent_frame(
@@ -1003,6 +1026,148 @@ mod tests {
                 s.uncompressed_bytes
             );
         }
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_resend_numbers_only_record_batches() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::DictionaryArray;
+        use arrow_schema::{DataType, Field};
+
+        use super::{ArrowDictionaryHandling, FlightBatchMetadata};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "category",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let make_batch = |values: &[&str]| {
+            let categories: DictionaryArray<Int32Type> = values.iter().copied().collect();
+            super::super::RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(categories)])
+                .unwrap()
+        };
+
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(2);
+        let (request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions {
+                dictionary_handling: ArrowDictionaryHandling::Resend,
+                ..ArrowStreamConfigurationOptions::default()
+            },
+            None,
+            None,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        // The second batch has a different dictionary, so the encoder sends it too.
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 0,
+                send_attempts: None,
+                batch: make_batch(&["a", "b", "a"]),
+            }))
+            .await
+            .unwrap();
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 1,
+                send_attempts: None,
+                batch: make_batch(&["c"]),
+            }))
+            .await
+            .unwrap();
+        drop(batch_tx);
+        let frames: Vec<_> = request_body.map(|frame| frame.unwrap()).collect().await;
+
+        // `None` marks a dictionary frame; `Some` is a record batch's wire offset.
+        let wire_offsets: Vec<_> = frames[1..]
+            .iter()
+            .map(|frame| {
+                if frame.app_metadata.is_empty() {
+                    None
+                } else {
+                    Some(
+                        FlightBatchMetadata::from_bytes(&frame.app_metadata)
+                            .unwrap()
+                            .offset_id,
+                    )
+                }
+            })
+            .collect();
+        assert_eq!(wire_offsets, [None, Some(0), None, Some(1)]);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_delta_sends_only_new_dictionary_values() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::DictionaryArray;
+        use arrow_schema::{DataType, Field};
+
+        use super::ArrowDictionaryHandling;
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "category",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let make_batch = |values: &[&str]| {
+            let categories: DictionaryArray<Int32Type> = values.iter().copied().collect();
+            super::super::RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(categories)])
+                .unwrap()
+        };
+
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(2);
+        let (request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions {
+                dictionary_handling: ArrowDictionaryHandling::Delta,
+                ..ArrowStreamConfigurationOptions::default()
+            },
+            None,
+            None,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        // The second batch's dictionary, [a, b, c], extends the first, [a, b].
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 0,
+                send_attempts: None,
+                batch: make_batch(&["a", "b"]),
+            }))
+            .await
+            .unwrap();
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 1,
+                send_attempts: None,
+                batch: make_batch(&["a", "b", "c"]),
+            }))
+            .await
+            .unwrap();
+        drop(batch_tx);
+        let frames: Vec<_> = request_body.map(|frame| frame.unwrap()).collect().await;
+
+        // Frames: schema, dictionary, batch, dictionary delta, batch.
+        let message = arrow_ipc::root_as_message(&frames[3].data_header).unwrap();
+        let delta = message.header_as_dictionary_batch().unwrap();
+        assert!(delta.isDelta());
+        assert_eq!(delta.data().unwrap().length(), 1);
+        assert!(frames[3].app_metadata.is_empty());
     }
 
     #[tokio::test]
