@@ -60,7 +60,8 @@ use multiplexed::MAX_MULTIPLEXED_JITTER_MS;
 
 #[cfg(feature = "arrow-flight")]
 use crate::stream::{
-    ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusArrowStream,
+    ArrowDictionaryHandling, ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties,
+    ZerobusArrowStream,
 };
 
 /// Internal representation of the authentication configuration.
@@ -547,6 +548,19 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub fn compression(mut self, compression: crate::ArrowCompression) -> Self {
         self.arrow_config.compression = compression;
+        self
+    }
+
+    /// Set how dictionary-encoded columns are sent (Arrow streams only).
+    ///
+    /// Zerobus does not support Arrow dictionaries yet, so keep the default,
+    /// `Hydrate`. Until it does, `Resend` or `Delta` with dictionary-encoded columns
+    /// makes stream creation fail with
+    /// [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema). See
+    /// [`ArrowDictionaryHandling`] for the modes.
+    #[cfg(feature = "arrow-flight")]
+    pub fn dictionary_handling(mut self, handling: ArrowDictionaryHandling) -> Self {
+        self.arrow_config.dictionary_handling = handling;
         self
     }
 
