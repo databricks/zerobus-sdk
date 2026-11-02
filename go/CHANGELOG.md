@@ -18,6 +18,8 @@
 
 ### Internal Changes
 
+- Set `sdkVersion` to `1.8.0` so the wire user-agent matches this tag.
+
 ### API Changes
 
 ## Release v1.7.0
