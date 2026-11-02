@@ -383,8 +383,24 @@ zb_cleanup:
     free((char *)flooding.reply[0]);
 }
 
+/* A port nobody listens on. */
+static void test_refused(void)
+{
+    zb_http_response_t response = {0};
+    http_server_t closed = {0};
+    closed.listener = loopback_listen(&closed.port);
+    REQUIRE(closed.listener >= 0);
+    close(closed.listener);
+    CHECK_EQ_INT(post(&closed, NULL, TIMEOUT_MS, &response),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+
+zb_cleanup:
+    zb_http_response_clear(&response);
+}
+
 /* Without a port, the host is the whole authority. A label over 63 characters
- * fails inside libc, before any DNS query. */
+ * fails inside libc, before any DNS query. Which default port is used isn't
+ * checked, since that would need a privileged port. */
 static void test_origin_without_port(void)
 {
     zb_http_response_t response;
@@ -400,24 +416,53 @@ static void test_origin_without_port(void)
 
 static void test_https(void)
 {
+    static const struct {
+        const char *reply;
+        bool close_notify;
+        zerobus_status_t status;
+    } cases[] = {
+        {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", false,
+         ZEROBUS_STATUS_OK},
+        /* Without close_notify, a body that ends with the connection may have
+         * been cut short. */
+        {"HTTP/1.0 200 OK\r\n\r\n{}", true, ZEROBUS_STATUS_OK},
+        {"HTTP/1.0 200 OK\r\n\r\n{}", false, ZEROBUS_STATUS_UNAVAILABLE},
+    };
     zb_http_response_t response = {0};
     zb_tls_ctx_t *tls = NULL;
-    http_server_t server = {
-        .reply = {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"},
-        .tls = loopback_server_tls(CERT_FILE, KEY_FILE, false)};
-    REQUIRE(server.tls != NULL);
+    zb_tls_ctx_t *system_roots = NULL;
+    SSL_CTX *server_tls = loopback_server_tls(CERT_FILE, KEY_FILE, false);
+    REQUIRE(server_tls != NULL);
     REQUIRE_OK(zb_tls_ctx_new(CERT_FILE, &tls));
-    REQUIRE(http_server_start(&server));
-    CHECK_OK(post(&server, tls, TIMEOUT_MS, &response));
-    http_server_stop(&server);
-    CHECK(strstr(server.request, "\r\n\r\n" BODY) != NULL);
-    CHECK_EQ_INT(response.status, 200);
-    CHECK(response.body && strcmp(response.body, "{}") == 0);
+    REQUIRE_OK(zb_tls_ctx_new(NULL, &system_roots));
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        http_server_t server = {.reply = {cases[i].reply},
+                                .tls = server_tls,
+                                .close_notify = cases[i].close_notify};
+        REQUIRE(http_server_start(&server));
+        CHECK_EQ_INT(post(&server, tls, TIMEOUT_MS, &response),
+                     cases[i].status);
+        http_server_stop(&server);
+        CHECK(strstr(server.request, "\r\n\r\n" BODY) != NULL);
+        if (cases[i].status == ZEROBUS_STATUS_OK) {
+            CHECK_EQ_INT(response.status, 200);
+            CHECK(response.body && strcmp(response.body, "{}") == 0);
+        }
+        zb_http_response_clear(&response);
+    }
+
+    /* The server's certificate is not among the system's roots. */
+    http_server_t untrusted = {.reply = {cases[0].reply}, .tls = server_tls};
+    REQUIRE(http_server_start(&untrusted));
+    CHECK_EQ_INT(post(&untrusted, system_roots, TIMEOUT_MS, &response),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    http_server_stop(&untrusted);
 
 zb_cleanup:
     zb_http_response_clear(&response);
     zb_tls_ctx_free(tls);
-    SSL_CTX_free(server.tls);
+    zb_tls_ctx_free(system_roots);
+    SSL_CTX_free(server_tls);
 }
 
 int main(void)
@@ -432,6 +477,7 @@ int main(void)
     test_malformed();
     test_limits();
     test_deadline();
+    test_refused();
     test_origin_without_port();
     test_https();
     TEST_MAIN_RETURN();

@@ -14,12 +14,14 @@ enum { HTTP_SERVER_MAX_PIECES = 4 };
 /*
  * Serves connections one at a time until stopped. On each, it reads one
  * request, sends the reply pieces a moment apart, and closes, or with hold
- * first waits for the client to close. Set tls, reply and hold before start.
+ * first waits for the client to close. Set tls, reply, hold and close_notify
+ * before start.
  */
 typedef struct {
     SSL_CTX *tls; /* NULL serves plain HTTP. */
     const char *reply[HTTP_SERVER_MAX_PIECES];
     bool hold;
+    bool close_notify; /* With tls, sends close_notify before closing. */
     uint16_t port;
     size_t served;      /* Connections accepted. */
     char request[8192]; /* The last request. */

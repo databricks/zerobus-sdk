@@ -63,6 +63,9 @@ static void serve_one(http_server_t *server, int socket)
     char byte;
     while (server->hold && server_read(socket, ssl, &byte, 1) > 0) {
     }
+    if (ssl && server->close_notify) {
+        (void)SSL_shutdown(ssl);
+    }
 done:
     SSL_free(ssl);
     close(socket);

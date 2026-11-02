@@ -9,7 +9,9 @@
 #define ZB_HTTP_CLIENT_MAX_BODY (1024u * 1024u)
 
 typedef struct {
-    uint32_t status;
+    uint32_t status; /* The final status, never 1xx. */
+    /* Owned, with a NUL after body_len bytes. The body itself may contain
+     * NUL, so read body_len bytes. */
     char *body;
     size_t body_len;
 } zb_http_response_t;
@@ -21,10 +23,12 @@ typedef struct {
  * Transfer-Encoding and Connection, which the client writes itself.
  *
  * Any HTTP status returns OK and fills *out, for zb_http_response_clear to
- * release. Otherwise returns UNAVAILABLE for a failed or cut-short connection,
- * UNAUTHENTICATED for an untrusted certificate, INTERNAL for a malformed
- * response, UNIMPLEMENTED for a Transfer-Encoding other than chunked, and
- * OUT_OF_RANGE past the size limits. */
+ * release. Otherwise returns UNAVAILABLE for a failed, untrusted or cut-short
+ * connection (over TLS, a body that ends with the connection needs the
+ * server's close_notify), DEADLINE_EXCEEDED once deadline passes, INTERNAL for
+ * a malformed response, UNIMPLEMENTED for a Transfer-Encoding other than
+ * chunked, OUT_OF_RANGE past the size limits, RESOURCE_EXHAUSTED when out of
+ * sockets, and INVALID_ARGUMENT or OUT_OF_MEMORY. */
 zerobus_status_t zb_http_client_post(const zb_tls_ctx_t *tls,
                                      const char *origin, const char *path,
                                      const zerobus_headers_t *headers,
