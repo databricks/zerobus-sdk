@@ -5,6 +5,11 @@
 //! [`descriptor_from_uc_columns`] or [`descriptor_from_uc_schema`] to build that
 //! descriptor on the fly instead of pre-generating a `.proto` file offline.
 //!
+//! Callers that do not already have the metadata can fetch it from the Unity
+//! Catalog REST API with [`fetch_uc_table_schema`], then feed the returned
+//! [`UcTableSchema`] into [`descriptor_from_uc_schema`] (for dynamic protobuf
+//! ingestion) or [`arrow_schema_from_uc_schema`] (for Arrow Flight).
+//!
 //! # Example
 //!
 //! ```no_run
@@ -72,12 +77,15 @@
 //! semantics.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 use prost_types::field_descriptor_proto::{Label, Type as ProtoType};
 use prost_types::{DescriptorProto, FieldDescriptorProto, MessageOptions};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
+
+use crate::{ZerobusError, ZerobusResult};
 
 /// A single column from a Unity Catalog table.
 ///
@@ -191,6 +199,127 @@ impl UcTableSchema {
             schema_name: schema_name.into(),
             columns,
         }
+    }
+}
+
+/// Fetch a table's schema from the Unity Catalog REST API.
+///
+/// Issues `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}`
+/// with `token` as a bearer credential and deserializes the response into a
+/// [`UcTableSchema`]. The returned schema can be converted to a protobuf
+/// descriptor with [`descriptor_from_uc_schema`] (for dynamic protobuf streams)
+/// or to an Arrow schema with [`arrow_schema_from_uc_schema`].
+///
+/// `table_name` is the fully-qualified `catalog.schema.table`. Each
+/// dot-separated part is percent-encoded, so identifiers containing reserved
+/// URI characters (spaces, `#`, `/`, …) are handled correctly.
+///
+/// `token` must be a Databricks access token with permission to read the table's
+/// metadata (e.g. an OAuth client-credentials token with `scope=all-apis`, or a
+/// workspace PAT). This function performs no token minting; obtain the token
+/// through your own OAuth flow.
+///
+/// # Errors
+///
+/// Returns [`ZerobusError::SchemaFetchError`] on a malformed endpoint URL, a
+/// network failure, a non-success HTTP status, or an unparseable response body.
+/// The error's `retryable` flag is set for transient failures (network error,
+/// 5xx except 501, 408, or 429).
+///
+/// # Example
+///
+/// ```no_run
+/// use databricks_zerobus_ingest_sdk::message_descriptor;
+/// use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, fetch_uc_table_schema};
+///
+/// # async fn example(token: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// let schema = fetch_uc_table_schema(
+///     "https://my-workspace.cloud.databricks.com",
+///     "main.analytics.orders",
+///     token,
+/// )
+/// .await?;
+///
+/// // Resolve a descriptor for a dynamic protobuf stream.
+/// let descriptor = message_descriptor(&descriptor_from_uc_schema(&schema)?)?;
+/// # let _ = descriptor;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_uc_table_schema(
+    unity_catalog_url: &str,
+    table_name: &str,
+    token: &str,
+) -> ZerobusResult<UcTableSchema> {
+    let url = format!(
+        "{}/api/2.1/unity-catalog/tables/{}",
+        unity_catalog_url.trim_end_matches('/'),
+        encode_table_path(table_name)
+    );
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| ZerobusError::SchemaFetchError {
+            message: format!("failed to fetch table schema: {e}"),
+            // Network-level failures (timeout, connection refused) are transient.
+            retryable: e.is_timeout() || e.is_connect(),
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ZerobusError::SchemaFetchError {
+            message: format!("Unity Catalog API returned error {status}: {body}"),
+            retryable: schema_fetch_status_is_retryable(status.as_u16()),
+        });
+    }
+
+    response
+        .json::<UcTableSchema>()
+        .await
+        .map_err(|e| ZerobusError::SchemaFetchError {
+            message: format!("failed to parse table schema response: {e}"),
+            retryable: false,
+        })
+}
+
+/// Percent-encode each dot-separated part of a fully-qualified table name,
+/// rejoining with `.`. Every non-alphanumeric byte in a part is escaped, so
+/// reserved URI characters inside quoted Unity Catalog identifiers (spaces, `#`,
+/// `/`, …) do not break URI parsing or address the wrong endpoint, while the `.`
+/// separators between `catalog`, `schema`, and `table` stay literal.
+fn encode_table_path(table_name: &str) -> String {
+    table_name
+        .split('.')
+        .map(|part| {
+            let mut encoded = String::with_capacity(part.len());
+            for &byte in part.as_bytes() {
+                if byte.is_ascii_alphanumeric() {
+                    encoded.push(byte as char);
+                } else {
+                    let _ = write!(encoded, "%{byte:02X}");
+                }
+            }
+            encoded
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Whether a non-success Unity Catalog HTTP status should be retried: 5xx
+/// (except 501 Not Implemented), 408 (Request Timeout), and 429 (Too Many
+/// Requests) are transient; every other 4xx (401, 403, 404, …) and 501 are
+/// permanent.
+fn schema_fetch_status_is_retryable(status: u16) -> bool {
+    match status {
+        408 | 429 => true,
+        501 => false,
+        500..=599 => true,
+        _ => false,
     }
 }
 
@@ -1049,6 +1178,145 @@ mod tests {
             .iter()
             .find(|f| f.name() == name)
             .unwrap_or_else(|| panic!("field '{}' not found in {:?}", name, desc.name()))
+    }
+
+    #[test]
+    fn encode_table_path_escapes_reserved_chars_and_keeps_dots() {
+        // Plain identifiers pass through unchanged, dots stay literal.
+        assert_eq!(
+            encode_table_path("main.analytics.orders"),
+            "main.analytics.orders"
+        );
+        // Reserved URI characters inside each part are percent-encoded; the dot
+        // separators between parts are preserved.
+        assert_eq!(
+            encode_table_path("my cat.sch#ema.t/bl"),
+            "my%20cat.sch%23ema.t%2Fbl"
+        );
+    }
+
+    #[test]
+    fn schema_fetch_retry_classification_matches_http_policy() {
+        // Transient: 5xx (except 501), 408, 429.
+        for status in [500, 502, 503, 504, 408, 429] {
+            assert!(schema_fetch_status_is_retryable(status), "{status}");
+        }
+        // Permanent: 501 and 4xx (other than 408/429).
+        for status in [501, 400, 401, 403, 404] {
+            assert!(!schema_fetch_status_is_retryable(status), "{status}");
+        }
+    }
+
+    /// A one-shot HTTP mock on a background thread that answers the first request
+    /// with `status`/`body`, capturing the request's path for assertions.
+    fn mock_http_once(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Request line is "GET <path> HTTP/1.1".
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let _ = tx.send(path);
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+
+        (base_url, rx)
+    }
+
+    #[tokio::test]
+    async fn fetch_uc_table_schema_parses_response_and_encodes_path() {
+        const SCHEMA: &str = r#"{
+            "name":"t/bl","catalog_name":"my cat","schema_name":"sch#ema",
+            "columns":[{"name":"id","type_name":"LONG","type_text":"bigint","position":0,"nullable":false}]
+        }"#;
+        let (base_url, rx) = mock_http_once(200, SCHEMA);
+
+        let schema = fetch_uc_table_schema(&base_url, "my cat.sch#ema.t/bl", "tok")
+            .await
+            .expect("schema should be fetched");
+
+        assert_eq!(schema.name, "t/bl");
+        assert_eq!(schema.catalog_name, "my cat");
+        assert_eq!(schema.columns.len(), 1);
+
+        // Each table-name part is percent-encoded on the wire; dots stay literal.
+        let path = rx.recv().unwrap();
+        assert_eq!(
+            path,
+            "/api/2.1/unity-catalog/tables/my%20cat.sch%23ema.t%2Fbl"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_uc_table_schema_classifies_http_errors() {
+        // 503 is transient.
+        let (base_url, _rx) = mock_http_once(503, "busy");
+        let err = fetch_uc_table_schema(&base_url, "main.default.logs", "tok")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ZerobusError::SchemaFetchError {
+                    retryable: true,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.is_retryable());
+
+        // 404 is permanent.
+        let (base_url, _rx) = mock_http_once(404, "missing");
+        let err = fetch_uc_table_schema(&base_url, "main.default.logs", "tok")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ZerobusError::SchemaFetchError {
+                    retryable: false,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn fetch_uc_table_schema_errors_on_unparseable_body() {
+        let (base_url, _rx) = mock_http_once(200, "not json");
+        let err = fetch_uc_table_schema(&base_url, "main.default.logs", "tok")
+            .await
+            .unwrap_err();
+        match err {
+            ZerobusError::SchemaFetchError { message, retryable } => {
+                assert!(message.contains("parse"), "unexpected message: {message}");
+                assert!(!retryable);
+            }
+            other => panic!("expected SchemaFetchError, got {other:?}"),
+        }
     }
 
     #[test]

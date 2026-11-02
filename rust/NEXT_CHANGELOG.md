@@ -19,6 +19,12 @@
   `ingest_records()` sends one batch per `InsertRecords` call and returns once it
   is durable. JSON only. Retries are on by default, so a batch can be written
   twice after a timeout; `.recovery(false)` sends each batch at most once.
+- Added `schema::fetch_uc_table_schema`, which fetches a table's schema from the
+  Unity Catalog REST API (`GET /api/2.1/unity-catalog/tables/{table}`) given a
+  bearer token and returns a `UcTableSchema`. Combine it with the existing
+  `descriptor_from_uc_schema` (dynamic protobuf) or `arrow_schema_from_uc_schema`
+  (Arrow Flight) to resolve a table's schema at runtime without pre-generating a
+  `.proto` file.
 
 ### Bug Fixes
 
@@ -58,4 +64,6 @@
 - Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
   `InsertRecords` call fails with a gRPC status. `ZerobusError` is
   `#[non_exhaustive]`, so this is not a breaking change.
-
+- Added the `ZerobusError::SchemaFetchError { message, retryable }` variant,
+  returned by `schema::fetch_uc_table_schema`. The enum is `#[non_exhaustive]`,
+  so this is an additive change.
