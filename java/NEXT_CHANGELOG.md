@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Arrow Flight streams now compress IPC payloads with ZSTD by default.
+  `ArrowStreamConfigurationOptions.ipcCompression()` defaults to `IPCCompressionType.ZSTD` instead
+  of `IPCCompressionType.NONE`, and `setIpcCompression(null)` now resets it to that default. To keep
+  sending uncompressed payloads, pass `IPCCompressionType.NONE` to `ipcCompression(...)` or
+  `setIpcCompression(...)`.
 - Add Avro record format (Beta) via `streamBuilder().avro(schemaJson)`, producing a
   `ZerobusAvroStream`. Ingest `GenericRecord` objects (encoded against the writer schema) or
   pre-encoded Avro datums (`byte[]`), one at a time or in batches. Ingesting record objects requires

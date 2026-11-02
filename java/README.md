@@ -582,7 +582,6 @@ try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
         .table("catalog.schema.table")
         .oauth(clientId, clientSecret)
         .arrow(schema)
-        .ipcCompression(IPCCompressionType.ZSTD)
         .build()
         .join()) {
     // ingest...
@@ -890,7 +889,7 @@ stream.flush();
 |--------|----------|------|------|
 | **Protocol Buffers** | Production systems | Type-safe, compact, fast | Requires schema compilation |
 | **JSON** | Prototyping, flexible schemas | Human-readable, no compilation, clean API | Larger payload, slower |
-| **Arrow Flight** | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, optional IPC compression (LZ4 / ZSTD) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags |
+| **Arrow Flight** | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, IPC compression (ZSTD by default; LZ4 or none optional) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags |
 
 ### JSON Streams (Recommended for JSON)
 
@@ -963,7 +962,7 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `connectionTimeoutMs` | 30000 | Timeout for establishing a gRPC connection (ms) |
-| `ipcCompression` | `IPCCompressionType.NONE` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`) |
+| `ipcCompression` | `IPCCompressionType.ZSTD` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`). Pass `NONE` to send uncompressed payloads |
 | `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = immediate recovery, `>0` = `min(this, server_duration)` ms |
 
 `ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
@@ -1435,7 +1434,7 @@ Example:
 ```java
 ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builder()
     .setMaxInflightBatches(2000)
-    .setIpcCompression(IPCCompressionType.ZSTD)
+    .setIpcCompression(IPCCompressionType.LZ4_FRAME)
     .setRecovery(true)
     .setRecoveryRetries(5)
     .build();
@@ -1449,11 +1448,11 @@ Selects the Arrow IPC compression codec applied to each batch on the wire. Set v
 
 **Values:**
 
-- `NONE` — No compression (default).
+- `NONE` — No compression.
 - `LZ4_FRAME` — LZ4 frame compression. Fast, modest ratio.
-- `ZSTD` — Zstandard. Higher ratio at higher CPU cost.
+- `ZSTD` — Zstandard (default). Higher ratio at higher CPU cost.
 
-Compression trades client CPU for fewer bytes on the wire. Enable only when network bandwidth limits throughput.
+Compression trades client CPU for fewer bytes on the wire. Pass `NONE` if client CPU, not network bandwidth, limits throughput.
 
 ---
 

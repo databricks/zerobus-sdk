@@ -29,7 +29,7 @@ public class ArrowStreamConfigurationOptions {
   private long serverLackOfAckTimeoutMs = 60000;
   private long flushTimeoutMs = 300000;
   private long connectionTimeoutMs = 30000;
-  private IPCCompressionType ipcCompression = IPCCompressionType.NONE;
+  private IPCCompressionType ipcCompression = IPCCompressionType.ZSTD;
   private long streamPausedMaxWaitTimeMs = -1;
 
   private ArrowStreamConfigurationOptions() {}
@@ -176,7 +176,7 @@ public class ArrowStreamConfigurationOptions {
    *   <li>serverLackOfAckTimeoutMs: 60000
    *   <li>flushTimeoutMs: 300000
    *   <li>connectionTimeoutMs: 30000
-   *   <li>ipcCompression: {@link IPCCompressionType#NONE}
+   *   <li>ipcCompression: {@link IPCCompressionType#ZSTD}
    *   <li>streamPausedMaxWaitTimeMs: -1 (wait full server duration)
    * </ul>
    *
@@ -312,17 +312,17 @@ public class ArrowStreamConfigurationOptions {
      * <p>Compression reduces network bandwidth at the cost of CPU. Supported codecs:
      *
      * <ul>
-     *   <li>{@link IPCCompressionType#NONE} - No compression (default)
+     *   <li>{@link IPCCompressionType#NONE} - No compression
      *   <li>{@link IPCCompressionType#LZ4_FRAME} - LZ4 frame compression
-     *   <li>{@link IPCCompressionType#ZSTD} - Zstandard compression
+     *   <li>{@link IPCCompressionType#ZSTD} - Zstandard compression (default)
      * </ul>
      *
-     * @param ipcCompression the compression type to use
+     * @param ipcCompression the compression type to use, or {@code null} for the default
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setIpcCompression(
         IPCCompressionType ipcCompression) {
-      this.ipcCompression = ipcCompression != null ? ipcCompression : IPCCompressionType.NONE;
+      this.ipcCompression = ipcCompression != null ? ipcCompression : defaults.ipcCompression;
       return this;
     }
 
