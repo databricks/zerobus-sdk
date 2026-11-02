@@ -140,10 +140,7 @@ pub enum ZerobusError {
     #[cfg(feature = "avro")]
     #[error("Avro record encoding failed: {0}")]
     AvroEncodingError(String),
-    /// Returned when a unary `InsertRecords` call failed with a gRPC status,
-    /// after retries were exhausted or for a non-retryable code. An attempt
-    /// that ran out of time is reported as `DeadlineExceeded`. A connection
-    /// failure is reported as `Unavailable`.
+    /// Returned when a unary `InsertRecords` call failed with a gRPC status.
     #[error("InsertRecords failed: {0}")]
     UnaryIngestError(GrpcStatus),
 }
@@ -196,7 +193,7 @@ impl ZerobusError {
         ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
     }
 
-    /// Determines whether this error can be automatically recovered through stream recovery.
+    /// Determines whether this error can be automatically recovered by a retry.
     ///
     /// Retryable errors typically indicate transient issues like network failures or
     /// temporary server problems. Non-retryable errors indicate permanent issues like
@@ -257,9 +254,9 @@ impl ZerobusError {
 /// classification. An auth rejection may use one retry from the recovery budget
 /// so a stale credential can be refreshed; subsequent auth rejections remain terminal.
 ///
-/// Shared by both transports (proto `stream/grpc` and Arrow Flight) so their
-/// initial-setup credential-refresh behavior stays identical. It applies only to
-/// initial setup; reconnect paths apply their own retry and credential-refresh policies.
+/// Used for initial stream setup on both transports and for every unary call,
+/// so their credential-refresh behavior stays identical. Stream reconnect paths
+/// apply their own retry and credential-refresh policies.
 pub(crate) fn should_retry_initial_connection(
     error: &ZerobusError,
     recovery_enabled: bool,
@@ -359,19 +356,19 @@ mod tests {
 
     #[test]
     fn unary_ingest_error_is_classified_like_stream_setup_errors() {
-        let unary = ZerobusError::UnaryIngestError;
-        assert!(unary(GrpcStatus::unavailable("x")).is_retryable());
-        assert!(unary(GrpcStatus::deadline_exceeded("x")).is_retryable());
-        assert!(unary(GrpcStatus::internal("x")).is_retryable());
-        assert!(!unary(GrpcStatus::invalid_argument("x")).is_retryable());
-        assert!(!unary(GrpcStatus::new(GrpcCode::NotFound, "x")).is_retryable());
+        use ZerobusError::UnaryIngestError;
+        assert!(UnaryIngestError(GrpcStatus::unavailable("x")).is_retryable());
+        assert!(UnaryIngestError(GrpcStatus::deadline_exceeded("x")).is_retryable());
+        assert!(UnaryIngestError(GrpcStatus::internal("x")).is_retryable());
+        assert!(!UnaryIngestError(GrpcStatus::invalid_argument("x")).is_retryable());
+        assert!(!UnaryIngestError(GrpcStatus::new(GrpcCode::NotFound, "x")).is_retryable());
 
-        assert!(unary(GrpcStatus::unauthenticated("x")).is_auth_rejection());
-        assert!(unary(GrpcStatus::permission_denied("x")).is_auth_rejection());
-        assert!(!unary(GrpcStatus::internal("x")).is_auth_rejection());
+        assert!(UnaryIngestError(GrpcStatus::unauthenticated("x")).is_auth_rejection());
+        assert!(UnaryIngestError(GrpcStatus::permission_denied("x")).is_auth_rejection());
+        assert!(!UnaryIngestError(GrpcStatus::internal("x")).is_auth_rejection());
 
         let mut auth_retry_available = true;
-        let rejection = unary(GrpcStatus::unauthenticated("stale token"));
+        let rejection = UnaryIngestError(GrpcStatus::unauthenticated("stale token"));
         assert!(should_retry_initial_connection(
             &rejection,
             true,

@@ -559,11 +559,7 @@ impl HeadersProvider for NoAuthHeadersProvider {
 }
 
 /// Builds the gRPC request metadata from the headers a [`HeadersProvider`]
-/// returned. Shared by the gRPC stream setup and the unary client, so both send
-/// the same headers and report invalid values with the same errors. Arrow
-/// Flight adds its headers through the Flight client instead.
-///
-/// The `authorization` value is marked sensitive, so it is redacted from debug
+/// returned. The `authorization` value is marked sensitive, so it is redacted from debug
 /// output. `table_name` is used only for logging.
 #[allow(clippy::result_large_err)]
 pub(crate) fn grpc_metadata_from_headers(

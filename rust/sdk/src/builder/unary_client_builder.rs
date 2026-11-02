@@ -123,20 +123,12 @@ impl<'a> UnaryClientBuilder<'a> {
         self
     }
 
-    /// Select JSON records, sent as JSON Lines: one record per line, joined
-    /// with `\n`, with no brackets.
+    /// Select JSON records, sent as JSON Lines: one record per line, with no
+    /// brackets.
     ///
-    /// The records are passed exactly as with [`json`](Self::json), one JSON
-    /// object per record; the SDK does the line framing. A record may contain
-    /// raw line breaks, for example when it is pretty-printed. JSON does not
-    /// allow raw line breaks inside strings (a line break in a value is
-    /// written as the escape `\n`), so a raw one can only be formatting
-    /// between tokens. The SDK replaces each raw `\n` and `\r` with a space
-    /// before sending, which keeps the record's value and keeps it on one
-    /// line. Escaped `\n` in string values are left untouched.
-    ///
-    /// Validation, size limit, retries, and errors work as with `json()`. The
-    /// body is two bytes smaller: one `\n` per separator and no brackets.
+    /// Records are passed as with [`json`](Self::json); the SDK does the line
+    /// framing. Raw line breaks in a record, such as pretty-printing, become
+    /// spaces, which does not change its value.
     pub fn json_lines(mut self) -> Self {
         self.core.set_format(FormatConfig::JsonLines);
         self
@@ -164,24 +156,16 @@ impl<'a> UnaryClientBuilder<'a> {
         self
     }
 
-    /// Set the timeout in milliseconds for each call attempt.
-    ///
-    /// The attempt covers getting the headers, connecting if needed, and
-    /// waiting for the server to confirm the batch is durable. For clients
-    /// authenticated with [`oauth`](Self::oauth) or
-    /// [`federated_auth`](Self::federated_auth), this also caps a proactive
-    /// token refresh at half this value.
+    /// Set the timeout in milliseconds for each call attempt, from getting the
+    /// headers until the server confirms the batch is durable.
     pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
         self.core.set_server_lack_of_ack_timeout_ms(ms);
         self
     }
 
-    /// Set the maximum request body size in bytes allowed per call.
-    ///
-    /// The whole body counts: the record bytes plus what joins them, the
-    /// brackets and commas of the JSON array, or the line breaks of JSON
-    /// Lines. Calls exceeding this limit fail
-    /// fast with [`ZerobusError::InvalidArgument`] before any network I/O.
+    /// Set the maximum request body size in bytes allowed per call, including
+    /// the brackets and separators. Calls exceeding this limit fail fast with
+    /// [`ZerobusError::InvalidArgument`] before any network I/O.
     ///
     /// Defaults to slightly below the 10 MiB server limit.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {

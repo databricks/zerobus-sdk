@@ -562,9 +562,10 @@ struct  _Databricks__Zerobus__InsertRecordsRequest
    */
   char *table_name;
   /*
-   * The raw JSON request body: a JSON array of objects, each representing
-   * one row to insert. The server parses it with serde_json, which preserves
-   * arbitrary-precision integers (i64/u64).
+   * The raw JSON request body, one object per row to insert: either a JSON
+   * array of objects, or JSON Lines (one object per line). The server tells
+   * them apart by the first byte, and parses them with serde_json, which
+   * preserves arbitrary-precision integers (i64/u64).
    * Required, but marked `optional` in proto; presence is enforced by the
    * server at runtime. Maximum total size is 10MB.
    * Example body:
@@ -582,7 +583,6 @@ struct  _Databricks__Zerobus__InsertRecordsRequest
 
 
 /*
- * A message representing the InsertRecords response.
  * Empty: success or failure is carried by the gRPC status code.
  */
 struct  _Databricks__Zerobus__InsertRecordsResponse

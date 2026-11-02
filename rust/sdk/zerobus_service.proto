@@ -374,9 +374,8 @@ message RetireStreamResponse {
  * This message type allows clients to ingest a batch of records.
  */
 message InsertRecordsRequest {
-  // Field 2 / name "records" was previously
-  // `repeated google.protobuf.Struct records = 2;`, which truncated int64
-  // JSON values outside ±2^53. Replaced by `records_json` (field 3).
+  // Field 2 was `repeated google.protobuf.Struct records`; reserved so it is
+  // never reused.
   reserved 2;
   reserved "records";
 
@@ -385,9 +384,10 @@ message InsertRecordsRequest {
   // Required.
   optional string table_name = 1;
 
-  // The raw JSON request body: a JSON array of objects, each representing
-  // one row to insert. The server parses it with serde_json, which preserves
-  // arbitrary-precision integers (i64/u64).
+  // The raw JSON request body, one object per row to insert: either a JSON
+  // array of objects, or JSON Lines (one object per line). The server tells
+  // them apart by the first byte, and parses them with serde_json, which
+  // preserves arbitrary-precision integers (i64/u64).
   //
   // Required, but marked `optional` in proto; presence is enforced by the
   // server at runtime. Maximum total size is 10MB.
@@ -400,10 +400,6 @@ message InsertRecordsRequest {
   optional bytes records_json = 3;
 }
 
-/*
- * A message representing the InsertRecords response.
- *
- * Empty: success or failure is carried by the gRPC status code.
- */
+// Empty: success or failure is carried by the gRPC status code.
 message InsertRecordsResponse {
 }
