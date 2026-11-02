@@ -6,6 +6,8 @@
 #include <netinet/in.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -98,4 +100,13 @@ SSL_CTX *loopback_server_tls(const char *cert_file, const char *key_file,
         SSL_CTX_set_alpn_select_cb(tls, select_h2, NULL);
     }
     return tls;
+}
+
+void loopback_block_sigpipe(void)
+{
+    /* SIGPIPE goes to the thread that writes. */
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    (void)pthread_sigmask(SIG_BLOCK, &blocked, NULL);
 }
