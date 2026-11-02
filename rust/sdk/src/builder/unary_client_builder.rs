@@ -1,4 +1,4 @@
-//! Fluent builder for unary ingestion clients (Beta).
+//! Fluent builder for unary ingestion clients.
 //!
 //! Reached via [`ZerobusSdk::unary_client_builder`](crate::ZerobusSdk::unary_client_builder).
 //! Like [`StreamBuilder`](super::StreamBuilder), it wraps a
@@ -27,7 +27,7 @@ use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
 use crate::unary_client::{UnaryBody, UnaryOptions};
 use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
 
-/// A fluent builder for a unary ingestion client (Beta).
+/// A fluent builder for a unary ingestion client.
 ///
 /// Configures a client bound to one table. The setters have the same names
 /// and defaults as the matching [`StreamBuilder`](crate::StreamBuilder)
@@ -35,8 +35,6 @@ use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
 /// checks at `build()` time that table name, authentication, and format have
 /// been configured. Use [`validate`](Self::validate) to check the builder
 /// state without building the client.
-///
-/// Available behind the `unary` feature. The API is in development.
 #[must_use = "a UnaryClientBuilder does nothing until `.build()` is called"]
 pub struct UnaryClientBuilder<'a> {
     core: ClientBuilderCore<'a>,
