@@ -14,6 +14,12 @@
   more client CPU than `IpcZstd`. With it, `BatchStats::approximate_wire_bytes`
   counts bytes after gRPC compression. The default leaves the wire format
   unchanged.
+- Added `schema::fetch_uc_table_schema`, which fetches a table's schema from the
+  Unity Catalog REST API (`GET /api/2.1/unity-catalog/tables/{table}`) given a
+  bearer token and returns a `UcTableSchema`. Combine it with the existing
+  `descriptor_from_uc_schema` (dynamic protobuf) or `arrow_schema_from_uc_schema`
+  (Arrow Flight) to resolve a table's schema at runtime without pre-generating a
+  `.proto` file.
 
 ### Bug Fixes
 
@@ -33,3 +39,6 @@
   variant is deprecated too and will be removed with the field.
 
 ### API Changes
+- Added the `ZerobusError::SchemaFetchError { message, retryable }` variant,
+  returned by `schema::fetch_uc_table_schema`. The enum is `#[non_exhaustive]`,
+  so this is an additive change.

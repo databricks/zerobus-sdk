@@ -787,6 +787,19 @@ stream.flush().await?; // wait once for all pending acknowledgments
 
 `.dynamic_proto()` takes a resolved `MessageDescriptor`. Get one from `message_descriptor(&proto)` or build it against your own `prost_reflect::DescriptorPool`.
 
+To resolve the schema at runtime from Unity Catalog instead of hand-building columns, fetch it with `schema::fetch_uc_table_schema` (given a Databricks access token) and feed the result into `descriptor_from_uc_schema`:
+
+```rust
+use databricks_zerobus_ingest_sdk::message_descriptor;
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, fetch_uc_table_schema};
+
+let schema = fetch_uc_table_schema(unity_catalog_url, "catalog.schema.orders", token).await?;
+let descriptor = message_descriptor(&descriptor_from_uc_schema(&schema)?)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The same `UcTableSchema` also drives `arrow_schema_from_uc_schema` for Arrow Flight streams.
+
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
 #### Multiplexed gRPC Stream
