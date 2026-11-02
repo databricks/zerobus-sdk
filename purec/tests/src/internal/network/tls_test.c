@@ -3,79 +3,20 @@
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
-#include <openssl/pem.h>
 #include <openssl/ssl.h>
-#include <openssl/x509v3.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "internal/network/tls.h"
+#include "loopback.h"
 #include "test_common.h"
 
 #define CERT_FILE ZB_TEST_DIR "/cert.pem"
 #define KEY_FILE ZB_TEST_DIR "/key.pem"
 
 /* ---- helpers ----------------------------------------------------------- */
-
-/* Writes a new self-signed certificate for localhost and 127.0.0.1 to
- * CERT_FILE, and its key to KEY_FILE. */
-static bool write_certificate(void)
-{
-    EVP_PKEY_CTX *keygen = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-    EVP_PKEY *key = NULL;
-    X509 *cert = X509_new();
-    X509_NAME *name = cert ? X509_get_subject_name(cert) : NULL;
-    X509_EXTENSION *names = NULL;
-    X509V3_CTX names_ctx;
-    BIO *key_out = NULL;
-    BIO *cert_out = NULL;
-
-    bool ok = keygen && name && EVP_PKEY_keygen_init(keygen) == 1 &&
-              EVP_PKEY_CTX_ctrl_str(keygen, "ec_paramgen_curve", "P-256") > 0 &&
-              EVP_PKEY_keygen(keygen, &key) == 1 &&
-              X509_set_version(cert, 2) == 1 &&
-              ASN1_INTEGER_set(X509_get_serialNumber(cert), 1) == 1 &&
-              X509_gmtime_adj(X509_getm_notBefore(cert), 0) &&
-              X509_gmtime_adj(X509_getm_notAfter(cert), 24 * 60 * 60) &&
-              X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                                         (const unsigned char *)"localhost", -1,
-                                         -1, 0) == 1 &&
-              X509_set_issuer_name(cert, name) == 1 &&
-              X509_set_pubkey(cert, key) == 1;
-    if (ok) {
-        X509V3_set_ctx(&names_ctx, cert, cert, NULL, NULL, 0);
-        names = X509V3_EXT_nconf_nid(NULL, &names_ctx, NID_subject_alt_name,
-                                     "DNS:localhost,IP:127.0.0.1");
-        ok = names && X509_add_ext(cert, names, -1) == 1 &&
-             X509_sign(cert, key, EVP_sha256()) > 0 &&
-             (key_out = BIO_new_file(KEY_FILE, "w")) &&
-             (cert_out = BIO_new_file(CERT_FILE, "w")) &&
-             PEM_write_bio_PrivateKey(key_out, key, NULL, NULL, 0, NULL,
-                                      NULL) == 1 &&
-             PEM_write_bio_X509(cert_out, cert) == 1;
-    }
-    BIO_free(cert_out);
-    BIO_free(key_out);
-    X509_EXTENSION_free(names);
-    X509_free(cert);
-    EVP_PKEY_free(key);
-    EVP_PKEY_CTX_free(keygen);
-    return ok;
-}
-
-static int select_h2(SSL *ssl, const unsigned char **out, unsigned char *outlen,
-                     const unsigned char *in, unsigned inlen, void *arg)
-{
-    (void)ssl;
-    (void)arg;
-    static const unsigned char h2[] = {2, 'h', '2'};
-    return SSL_select_next_proto((unsigned char **)out, outlen, h2, sizeof(h2),
-                                 in, inlen) == OPENSSL_NPN_NEGOTIATED
-               ? SSL_TLSEXT_ERR_OK
-               : SSL_TLSEXT_ERR_NOACK;
-}
 
 /* Test server options. Without SERVER_H2, the server selects no protocol. */
 enum {
@@ -87,14 +28,10 @@ enum {
 /* Creates a server for socket with the test certificate. */
 static SSL *server_new(int socket, unsigned options)
 {
-    SSL_CTX *context = SSL_CTX_new(TLS_server_method());
+    SSL_CTX *context =
+        loopback_server_tls(CERT_FILE, KEY_FILE, (options & SERVER_H2) != 0);
     SSL *server = NULL;
-    if (context &&
-        SSL_CTX_use_certificate_file(context, CERT_FILE, SSL_FILETYPE_PEM) &&
-        SSL_CTX_use_PrivateKey_file(context, KEY_FILE, SSL_FILETYPE_PEM)) {
-        if (options & SERVER_H2) {
-            SSL_CTX_set_alpn_select_cb(context, select_h2, NULL);
-        }
+    if (context) {
         if (options & (SERVER_TLS12 | SERVER_TLS12_CBC)) {
             SSL_CTX_set_max_proto_version(context, TLS1_2_VERSION);
         }
@@ -421,7 +358,7 @@ zb_cleanup:
 
 int main(void)
 {
-    if (!write_certificate()) {
+    if (!loopback_write_certificate(CERT_FILE, KEY_FILE)) {
         fprintf(stderr, "  FAIL: could not write the test certificate\n");
         return 1;
     }
