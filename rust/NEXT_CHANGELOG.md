@@ -6,6 +6,22 @@
 
 ### New Features and Improvements
 
+- Added a unary ingestion client for sparse traffic. Each
+  `UnaryClient::ingest_records()` call sends one batch in one `InsertRecords`
+  request and returns once the batch is durable, without opening a stream.
+  Build one with `ZerobusSdk::unary_client_builder()`. JSON only: `.json()`
+  sends the batch as a JSON array, `.json_lines()` as JSON Lines. The client
+  checks that every record is exactly one JSON object and names the index of
+  the first bad record, enforces `max_ingest_payload_bytes` on the whole
+  request body, retries retryable errors per the recovery settings, and bounds
+  each attempt by `server_lack_of_ack_timeout_ms`. All unary clients of one SDK
+  share one connection, separate from streams and unaffected by
+  `connection_per_stream`. It sends HTTP/2 keepalive pings while a call is in
+  flight, so a connection that dropped silently between calls is replaced.
+  For continuous ingestion, keep using streams.
+- The warning for many streams opened for one table now suggests a unary client
+  for sparse traffic.
+
 ### Bug Fixes
 
 ### Documentation
@@ -19,11 +35,23 @@
   `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`, and
   `DATABRICKS_CLIENT_SECRET` environment variables instead of constants in the
   source.
+- Documented the unary client in the Rust README, with a usage section, API
+  reference entries, and a runnable example (`examples/json/unary.rs`).
 
 ### Internal Changes
+
+- Added the `InsertRecords` RPC to the SDK's copy of the service proto and
+  regenerated the purego and purec bindings. The mock server answers it with
+  `Unimplemented`.
 
 ### Breaking Changes
 
 ### Deprecations
 
 ### API Changes
+
+- Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, and
+  `UnaryClient`.
+- Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
+  `InsertRecords` call fails with a gRPC status. `ZerobusError` is
+  `#[non_exhaustive]`, so this is not a breaking change.
