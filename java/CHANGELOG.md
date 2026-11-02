@@ -31,6 +31,9 @@
 
 ### Internal Changes
 
+- Set the JNI crate version to 1.8.0 so the wire user-agent is
+  `zerobus-sdk-java/1.8.0`.
+
 ### Breaking Changes
 
 ### Deprecations
