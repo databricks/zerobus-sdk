@@ -137,7 +137,9 @@ pub(crate) fn record_stream_creation(table_name: &str) {
     if count == CHURN_WARN_THRESHOLD {
         warn!(
             "Zerobus SDK: {} ingest streams opened for table `{}` in the last {}s in this \
-             process. If this is unexpected, check that streams are being reused across records.",
+             process. If this is unexpected, check that streams are being reused across records. \
+             For sparse traffic, a unary client (`ZerobusSdk::unary_client_builder`) needs no \
+             stream.",
             count,
             table_name,
             CHURN_WINDOW_MS / 1000
