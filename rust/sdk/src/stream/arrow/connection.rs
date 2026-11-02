@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
-use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_flight::encode::{FlightDataEncoderBuilder, GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES};
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::{FlightClient, FlightData, PutResult};
@@ -40,6 +40,28 @@ use crate::proxy::{self, ConnectorFactory};
 use crate::stats::{BatchStats, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+/// Flight data size target with IPC compression. arrow-flight's default is 2 MiB.
+const IPC_COMPRESSED_MAX_FLIGHT_DATA_SIZE: usize = 8 * 1024 * 1024;
+
+/// The encoder splits a batch by row count, so one slice can be several times the target when
+/// rows differ in size. IPC compression usually keeps each message far below its uncompressed
+/// size, so the larger target cuts the per-message overhead with little risk. Uncompressed IPC
+/// keeps arrow-flight's default, also with gRPC compression, because gRPC message size limits
+/// apply after decompression.
+fn max_flight_data_size(options: &ArrowStreamConfigurationOptions) -> usize {
+    let ipc_compressed = match options.compression {
+        #[allow(deprecated)]
+        ArrowCompression::FallbackToLegacy => options.ipc_compression.is_some(),
+        ArrowCompression::IpcZstd | ArrowCompression::IpcLz4 => true,
+        ArrowCompression::Uncompressed | ArrowCompression::GrpcZstd => false,
+    };
+    if ipc_compressed {
+        IPC_COMPRESSED_MAX_FLIGHT_DATA_SIZE
+    } else {
+        GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES
+    }
+}
 
 /// The batch currently being encoded: its offset and row count plus uncompressed
 /// buffer bytes and wire bytes accumulated across its FlightData frames.
@@ -560,6 +582,7 @@ impl ZerobusArrowStream {
             FlightDataEncoderBuilder::new()
                 .with_schema(schema)
                 .with_options(ipc_write_options)
+                .with_max_flight_data_size(max_flight_data_size(options))
                 .build(batch_stream)
                 .enumerate()
                 .map(move |(idx, result)| {
@@ -1152,7 +1175,7 @@ mod tests {
 
         // Large enough to split into multiple FlightData frames. A transmission
         // must advance the counter once, regardless of how many frames it uses.
-        const ROWS: usize = 1_100_000;
+        const ROWS: usize = 2_200_000;
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
@@ -1321,7 +1344,7 @@ mod tests {
         use super::super::ArrowCompression;
         use crate::stats::{channel_exporter, StreamStat};
 
-        const ROWS: usize = 1_100_000;
+        const ROWS: usize = 2_200_000;
         let schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "id",
             DataType::Int32,
@@ -1353,6 +1376,7 @@ mod tests {
             let frame_count = FlightDataEncoderBuilder::new()
                 .with_schema(schema.clone())
                 .with_options(super::super::batch::stream_ipc_write_options(&options).unwrap())
+                .with_max_flight_data_size(super::max_flight_data_size(&options))
                 .build(futures::stream::iter([Ok(batch.clone())]))
                 .map(|frame| frame.unwrap())
                 .count()
@@ -1435,6 +1459,94 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn ipc_compressed_batch_under_8_mib_is_not_split() {
+        use arrow_array::{ArrayRef, Int32Array, RecordBatch};
+
+        // 4.4 MB of values: above arrow-flight's 2 MiB default target and below 8 MiB.
+        const ROWS: i32 = 1_100_000;
+        let batch = RecordBatch::try_from_iter([(
+            "id",
+            Arc::new(Int32Array::from_iter_values(0..ROWS)) as ArrayRef,
+        )])
+        .unwrap();
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: batch.schema(),
+        };
+
+        // The default options compress IPC buffers.
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(1);
+        let (body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            None,
+            None,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+        batch_tx
+            .send(Ok(OutboundBatch {
+                offset: 0,
+                send_attempts: None,
+                batch,
+            }))
+            .await
+            .unwrap();
+        drop(batch_tx);
+
+        assert_eq!(body.count().await, 2, "schema and one record-batch message");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn uncompressed_ipc_keeps_default_flight_data_size() {
+        use super::super::ArrowCompression;
+        use super::{max_flight_data_size, GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES};
+
+        let grpc_zstd = ArrowStreamConfigurationOptions {
+            compression: ArrowCompression::GrpcZstd,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        let legacy_uncompressed = ArrowStreamConfigurationOptions {
+            ipc_compression: None,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        assert_eq!(
+            max_flight_data_size(&grpc_zstd),
+            GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES
+        );
+        assert_eq!(
+            max_flight_data_size(&legacy_uncompressed),
+            GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES
+        );
+    }
+
+    #[test]
+    fn ipc_zstd_and_lz4_raise_flight_data_size() {
+        use super::super::ArrowCompression;
+        use super::{max_flight_data_size, IPC_COMPRESSED_MAX_FLIGHT_DATA_SIZE};
+
+        let ipc_zstd = ArrowStreamConfigurationOptions {
+            compression: ArrowCompression::IpcZstd,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        let ipc_lz4 = ArrowStreamConfigurationOptions {
+            compression: ArrowCompression::IpcLz4,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        assert_eq!(
+            max_flight_data_size(&ipc_zstd),
+            IPC_COMPRESSED_MAX_FLIGHT_DATA_SIZE
+        );
+        assert_eq!(
+            max_flight_data_size(&ipc_lz4),
+            IPC_COMPRESSED_MAX_FLIGHT_DATA_SIZE
+        );
     }
 
     #[tokio::test]

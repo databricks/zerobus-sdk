@@ -6039,6 +6039,7 @@ mod arrow_flight_tests {
         // 10 500 rows × 200-byte payload ≈ 2.12 MiB IPC-encoded — safely above the
         // 2 MiB chunking threshold and below tonic's 4 MiB default decode limit.
         // At 2 MiB/chunk this batch requires at least 2 physical Flight messages.
+        // Uncompressed streams keep that threshold; IPC compression raises it.
         const LARGE_BATCH_ROWS: usize = 10_500;
         const PAYLOAD_BYTES_PER_ROW: usize = 200;
 
@@ -6081,6 +6082,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed)
                 .flush_timeout_ms(10_000)
                 .build_arrow()
                 .await?;
@@ -6141,6 +6143,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed)
                 .flush_timeout_ms(10_000)
                 .build_arrow()
                 .await?;
@@ -6201,6 +6204,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed)
                 .flush_timeout_ms(10_000)
                 .build_arrow()
                 .await?;
@@ -6276,6 +6280,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed)
                 .recovery(true)
                 .recovery_retries(3)
                 .recovery_backoff_ms(100)
