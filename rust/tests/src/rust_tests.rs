@@ -3001,6 +3001,61 @@ mod failure_scenarios_tests {
             Ok(())
         }
 
+        /// Idle time before ingestion must not consume the record's ack deadline.
+        #[tokio::test]
+        async fn test_ack_timeout_starts_when_record_is_sent(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ack_timeout_starts_when_record_is_sent");
+
+            const ACK_TIMEOUT_MS: u64 = 1_000;
+            const IDLE_MS: u64 = 800;
+            const ACK_DELAY_MS: u64 = 400;
+
+            let (mock_server, server_url) = start_mock_server().await?;
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_idle_then_send".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: ACK_DELAY_MS,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .build()
+                .await?;
+
+            tokio::time::sleep(std::time::Duration::from_millis(IDLE_MS)).await;
+            let offset = stream.ingest_record_offset(b"some data".to_vec()).await?;
+
+            // The ack arrives after the window that started when the stream opened,
+            // but well within the window that starts when the record is sent.
+            stream.wait_for_offset(offset).await?;
+            assert!(!stream.is_closed());
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_get_unacked_records_after_failure() -> Result<(), Box<dyn std::error::Error>>
         {
