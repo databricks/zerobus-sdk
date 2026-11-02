@@ -1,5 +1,51 @@
 # Version changelog
 
+## Release v1.8.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Arrow Flight streams now compress IPC payloads with ZSTD by default.
+  `ArrowStreamConfigurationOptions.ipcCompression()` defaults to `IPCCompressionType.ZSTD` instead
+  of `IPCCompressionType.NONE`, and `setIpcCompression(null)` now resets it to that default. To keep
+  sending uncompressed payloads, pass `IPCCompressionType.NONE` to `ipcCompression(...)` or
+  `setIpcCompression(...)`.
+- Add Avro record format (Beta) via `streamBuilder().avro(schemaJson)`, producing a
+  `ZerobusAvroStream`. Ingest `GenericRecord` objects (encoded against the writer schema) or
+  pre-encoded Avro datums (`byte[]`), one at a time or in batches. Ingesting record objects requires
+  Java 11+ and the `org.apache.avro:avro` dependency (supplied by the caller, like `arrow-vector`);
+  the pre-encoded `byte[]` path and the rest of the SDK run on Java 8. A record's schema must match
+  the writer schema (field order and namespace matter; metadata is ignored), and encode failures are
+  non-retriable. See the README for the Java value each Avro type expects.
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 3.0.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v3.0.0.
+  Rust 3.0.0 breaking changes (Arrow 60 type mixing, `tonic` types leaving the
+  public API, `TlsConfig`, generated gRPC types, and `EncodedBatch` storage)
+  do not change the Java public API.
+
+### Internal Changes
+
+- Set the JNI crate version to 1.8.0 so the wire user-agent is
+  `zerobus-sdk-java/1.8.0`.
+
+### Breaking Changes
+
+### Deprecations
+
+- `EncodedBatch(List<byte[]>, boolean)` — use `EncodedBatch(List<byte[]>, RecordFormat)` instead; the
+  boolean cannot represent the Avro format (it maps `false` to Protocol Buffers).
+
+### API Changes
+
+- New public API: `RecordFormat` enum; `EncodedBatch.getFormat()` and the
+  `EncodedBatch(List<byte[]>, RecordFormat)` constructor; and `ZerobusSdk.recreateStream(ZerobusAvroStream)`.
+
 ## Release v1.7.0
 
 ### Major Changes
