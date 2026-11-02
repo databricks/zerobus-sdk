@@ -51,7 +51,6 @@ impl GrpcChannelSource {
     /// Makes every channel this source opens send an HTTP/2 PING after
     /// `interval` without a received frame, only while a call is in flight, and
     /// close the connection if the reply takes longer than `timeout`.
-    #[cfg_attr(not(feature = "unary"), allow(dead_code))]
     pub(crate) fn with_keepalive(mut self, interval: Duration, timeout: Duration) -> Self {
         self.keepalive = Some((interval, timeout));
         self

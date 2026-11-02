@@ -8,18 +8,15 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use tonic::transport::Channel;
 use tracing::{error, info, instrument};
 
+use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::grpc_channel::GrpcChannelSource;
 use crate::proxy::ConnectorFactory;
 use crate::stream::ZerobusStream;
 use crate::{StreamBuilder, TlsConfig, ZerobusResult, ZerobusSdkBuilder};
 
-#[cfg(feature = "unary")]
-use tonic::transport::Channel;
-
-#[cfg(feature = "unary")]
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 #[cfg(feature = "arrow-flight")]
 use crate::stream::ZerobusArrowStream;
 
@@ -31,13 +28,11 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 /// How long the unary channel waits without receiving any frame, while a call
 /// is in flight, before it sends an HTTP/2 PING. A third of the default
 /// server acknowledgement timeout.
-#[cfg(feature = "unary")]
 const UNARY_KEEPALIVE_INTERVAL: Duration =
     Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 3);
 
 /// How long the unary channel waits for the PING reply before it closes the
 /// connection. A sixth of the default server acknowledgement timeout.
-#[cfg(feature = "unary")]
 const UNARY_KEEPALIVE_TIMEOUT: Duration =
     Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 6);
 
@@ -74,7 +69,6 @@ pub struct ZerobusSdk {
     /// first use. It is separate from `shared_stream_channel`, so unary clients
     /// never share a connection with streams, whatever `connection_per_stream`
     /// says.
-    #[cfg(feature = "unary")]
     unary_channel: OnceLock<Arc<GrpcChannelSource>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
@@ -174,10 +168,7 @@ impl ZerobusSdk {
         crate::PersistentStreamBuilder::new(StreamBuilder::new(self))
     }
 
-    /// Creates a new builder for a unary ingestion client (Beta).
-    ///
-    /// In development: this API can change. It is available behind the `unary`
-    /// feature.
+    /// Creates a new builder for a unary ingestion client.
     ///
     /// A unary client is bound to one table and sends each batch as a single
     /// request, without opening a stream. It is meant for clients that ingest
@@ -194,7 +185,6 @@ impl ZerobusSdk {
     ///     .build()
     ///     .await?;
     /// ```
-    #[cfg(feature = "unary")]
     pub fn unary_client_builder(&self) -> crate::UnaryClientBuilder<'_> {
         crate::UnaryClientBuilder::new(self)
     }
@@ -222,7 +212,6 @@ impl ZerobusSdk {
             unity_catalog_url,
             workspace_id,
             shared_stream_channel: OnceLock::new(),
-            #[cfg(feature = "unary")]
             unary_channel: OnceLock::new(),
             connection_per_stream,
             tls_config,
@@ -414,7 +403,6 @@ impl ZerobusSdk {
     /// The channel sends HTTP/2 keepalive PINGs only while a call is in flight,
     /// so a connection that died silently between sparse calls is detected and
     /// closed during the next call, and its retry opens a new connection.
-    #[cfg(feature = "unary")]
     pub(crate) async fn get_or_create_unary_channel(
         &self,
     ) -> ZerobusResult<ZerobusClient<Channel>> {
@@ -423,7 +411,6 @@ impl ZerobusSdk {
 
     /// Returns the channel source shared by every unary client of this SDK,
     /// creating it on first use.
-    #[cfg(feature = "unary")]
     fn unary_channel_source(&self) -> Arc<GrpcChannelSource> {
         Arc::clone(self.unary_channel.get_or_init(|| {
             Arc::new(
@@ -443,7 +430,7 @@ impl ZerobusSdk {
     }
 }
 
-#[cfg(all(test, feature = "unary"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
