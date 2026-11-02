@@ -446,9 +446,10 @@ public final class StreamBuilder {
     }
 
     /**
-     * Sets the Arrow IPC compression codec.
+     * Sets the Arrow IPC compression codec. Defaults to {@link IPCCompressionType#ZSTD}; pass
+     * {@link IPCCompressionType#NONE} to send uncompressed payloads.
      *
-     * @param ipcCompression the compression codec to use
+     * @param ipcCompression the compression codec to use, or {@code null} for the default
      * @return this builder for method chaining
      */
     public ArrowStreamBuilder ipcCompression(IPCCompressionType ipcCompression) {

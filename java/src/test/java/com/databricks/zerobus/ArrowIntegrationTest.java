@@ -668,21 +668,21 @@ public class ArrowIntegrationTest {
   }
 
   // ===================================================================================
-  // Test 15: Arrow stream - default compression is NONE
+  // Test 15: Arrow stream - default compression is ZSTD
   // ===================================================================================
 
   @Test
   @Order(15)
-  @DisplayName("Arrow stream - default compression is NONE")
-  void testArrowDefaultCompressionIsNone() {
+  @DisplayName("Arrow stream - default compression is ZSTD")
+  void testArrowDefaultCompressionIsZstd() {
     ArrowStreamConfigurationOptions defaultOptions = ArrowStreamConfigurationOptions.getDefault();
-    assertEquals(IPCCompressionType.NONE, defaultOptions.ipcCompression());
+    assertEquals(IPCCompressionType.ZSTD, defaultOptions.ipcCompression());
 
     ArrowStreamConfigurationOptions builtOptions =
         ArrowStreamConfigurationOptions.builder().build();
-    assertEquals(IPCCompressionType.NONE, builtOptions.ipcCompression());
+    assertEquals(IPCCompressionType.ZSTD, builtOptions.ipcCompression());
 
-    System.out.println("Arrow default compression: NONE verified");
+    System.out.println("Arrow default compression: ZSTD verified");
   }
 
   // ===================================================================================

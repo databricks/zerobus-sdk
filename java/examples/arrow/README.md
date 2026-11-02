@@ -8,7 +8,7 @@ This directory contains examples for ingesting data using `ZerobusArrowStream` v
 - **Apache Arrow native types** - Accepts `VectorSchemaRoot` directly
 - **Zero-overhead queuing** - `ingestBatch()` returns immediately with an offset
 - **Automatic IPC serialization** - VectorSchemaRoot is serialized to Arrow IPC internally
-- **Optional IPC compression** - LZ4 or ZSTD compression on the wire
+- **IPC compression** - ZSTD on the wire by default, with LZ4 or no compression as alternatives
 - **Recovery support** - Unacknowledged batches can be retrieved and re-ingested
 
 ## Dependencies
@@ -123,7 +123,7 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
         .recoveryRetries(5)
         .arrow(schema)
         .maxInflightBatches(2000)
-        .ipcCompression(IPCCompressionType.ZSTD)
+        .ipcCompression(IPCCompressionType.LZ4_FRAME)
         .streamPausedMaxWaitTimeMs(5000)
         .build()
         .join()) {
