@@ -1,5 +1,25 @@
 # Version changelog
 
+## Release v1.8.0
+
+### New Features and Improvements
+
+### Deprecations
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 3.0.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v3.0.0.
+  Rust 3.0.0 breaking changes (Arrow 60 type mixing, `tonic` types leaving the
+  public API, `TlsConfig`, generated gRPC types, and `EncodedBatch` storage)
+  do not change the Go public API.
+
+### Internal Changes
+
+### API Changes
+
 ## Release v1.7.0
 
 ### New Features and Improvements
