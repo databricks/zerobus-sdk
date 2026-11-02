@@ -8,6 +8,7 @@ This directory contains examples demonstrating how to use the Zerobus TypeScript
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
 - [Arrow Flight Examples](arrow/README.md)
+- [Avro Examples](avro/README.md)
 - [Prerequisites](#prerequisites)
 - [Common Code Patterns](#common-code-patterns)
 - [API Styles](#api-styles)
@@ -16,12 +17,13 @@ This directory contains examples demonstrating how to use the Zerobus TypeScript
 
 ## Overview
 
-The SDK supports three serialization formats and two ingestion methods:
+The SDK supports four serialization formats and two ingestion methods:
 
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
 - **[Arrow Flight](arrow/README.md)** - High-performance columnar format for analytics.
+- **[Avro](avro/README.md)** *(Beta)* - Row-oriented encoding against a writer schema; object encoding uses the optional `avsc` dependency.
 
 **Ingestion Methods:**
 - **Single-record** (`ingestRecordOffset`) - Ingest records one at a time

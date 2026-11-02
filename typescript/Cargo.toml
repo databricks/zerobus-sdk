@@ -48,6 +48,8 @@ arrow-flight = [
     "dep:arrow-schema",
     "dep:arrow-ipc"
 ]
+# Avro record format. Enable with: npm run build:avro (pulls apache-avro 0.22, needs Rust 1.88).
+avro = ["databricks-zerobus-ingest-sdk/avro"]
 
 [profile.release]
 lto = true

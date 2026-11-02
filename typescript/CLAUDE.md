@@ -22,15 +22,22 @@ since that limits throughput to one record per round-trip.
 ```
 typescript/
 ├── src/lib.rs        # NAPI-RS bindings (Rust ↔ Node.js bridge)
+├── index.js/.d.ts    # NAPI-generated native binding (gitignored build output)
+├── wrapper.js/.d.ts  # Public entry point: thin JS wrapper over the native binding; encodes
+│                     #   Avro record objects (via the optional `avsc` dependency)
 ├── Cargo.toml        # Rust crate config for NAPI-RS
-├── package.json      # npm package config
+├── package.json      # npm package config (main → wrapper.js)
 ├── test/             # Node.js test runner tests
 ├── examples/         # Usage examples
 ├── schemas/          # Proto schema files for examples
 └── utils/            # Helper utilities
 ```
 
-The native addon compiles to a platform-specific `.node` binary. NAPI-RS generates TypeScript type definitions automatically.
+The native addon compiles to a platform-specific `.node` binary. NAPI-RS generates TypeScript
+type definitions automatically. The package entry point is `wrapper.js` (not the generated
+`index.js`): it encodes Avro record objects to bytes and forwards everything else unchanged.
+The `avro` and `arrow-flight` Cargo features are off by default for a from-source `npm run build`,
+but CI and release builds enable both (`npm run build:all`), so published binaries include them.
 
 ## Build commands
 
@@ -39,7 +46,8 @@ Run from `typescript/`:
 - `npm install` — Install dependencies
 - `npm run build` — Release build
 - `npm run build:debug` — Debug build (faster iteration)
-- `npm run build:arrow` / `npm run build:debug:arrow` — Same builds with Arrow Flight
+- `npm run build:arrow` / `npm run build:avro` — Same builds with Arrow Flight / Avro
+- `npm run build:all` — Release build with both Arrow Flight and Avro (what CI and release use)
 - `npm test` — Run all tests
 - `npm run test:unit` / `npm run test:integration` — Targeted test runs
 - `cargo fmt --all` and `cargo clippy --all-targets --all-features` — Lint/format Rust code
@@ -50,11 +58,11 @@ NAPI-RS bridges Rust types to JavaScript with automatic type conversions. Key co
 
 - **Memory**: NAPI external objects are ref-counted by Node.js GC. Cleanup triggers Rust `Drop`. No explicit free needed, but `close()` should be called to flush.
 - **Async**: Rust futures become JavaScript Promises. The tokio runtime runs on a separate thread pool — Node.js event loop is never blocked.
-- **Payload conversion**: The binding auto-detects payload types:
-  - `Buffer` → proto bytes
-  - `string` → JSON
-  - Objects with `.encode()` → protobuf message (calls encode, passes bytes)
-  - Plain objects → JSON.stringify'd
+- **Payload conversion**: The binding coerces payloads by the stream's record type:
+  - Proto / JSON streams: `Buffer` → proto bytes, `string` → JSON, objects with `.encode()` →
+    protobuf message (calls encode, passes bytes), plain objects → JSON.stringify'd.
+  - Avro streams: `Buffer` → Avro datum. Record objects are encoded to bytes JS-side (by the
+    wrapper, via `avsc`) before they reach the native binding — the native layer only sees bytes.
 - **Error mapping**: `ZerobusError` struct with `message` and `isRetryable` fields, thrown as JS exceptions.
 
 ## Breaking change rules
@@ -83,8 +91,8 @@ The public API is what TypeScript consumers see — the generated `.d.ts` types 
 ## Release
 
 - Version source: `typescript/package.json` (`"version": "x.y.z"`).
-- Tag: `typescript/v<semver>` → triggers `release-typescript.yml` → builds Linux and Windows `.node` binaries with Arrow Flight (`npm run build:arrow`) → publishes to npm.
-- macOS `.node` binaries are supplied via the `macos-binaries-release` workflow input. They must be built with `npm run build:arrow`; `npm run build` omits Arrow Flight.
+- Tag: `typescript/v<semver>` → triggers `release-typescript.yml` → builds Linux and Windows `.node` binaries with Arrow Flight and Avro (`npm run build:all`) → publishes to npm.
+- macOS `.node` binaries are supplied via the `macos-binaries-release` workflow input. They must be built with `npm run build:all`; `npm run build` omits both features.
 - On version bump PR: update version in `package.json`, move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md`, reset `NEXT_CHANGELOG.md`.
 
 ## Platform targets
