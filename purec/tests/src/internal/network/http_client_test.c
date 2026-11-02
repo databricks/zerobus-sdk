@@ -90,15 +90,18 @@ static char *early_hints(size_t count)
 
 static void test_arguments(void)
 {
-    zb_header_t no_name = {"", "c"};
-    zb_header_t bad_name = {"a:b", "c"};
-    zb_header_t bad_value = {"a", "b\r\nc: d"};
-    const zerobus_headers_t none = {0};
-    const zerobus_headers_t bad_headers[] = {
-        {.items = &no_name, .count = 1},
-        {.items = &bad_name, .count = 1},
-        {.items = &bad_value, .count = 1},
+    zb_header_t bad[] = {
+        {"", "c"},
+        {"a:b", "c"},
+        {"a b", "c"},
+        {"a", "b\r\nc: d"},
+        /* The client writes these itself. */
+        {"Host", "example.com"},
+        {"content-length", "0"},
+        {"Transfer-Encoding", "chunked"},
+        {"CONNECTION", "keep-alive"},
     };
+    const zerobus_headers_t none = {0};
     zb_http_response_t response;
     zb_deadline_t deadline = ZB_DEADLINE_IMMEDIATE;
     const char *origin = "http://127.0.0.1:1";
@@ -121,9 +124,10 @@ static void test_arguments(void)
     CHECK_EQ_INT(zb_http_client_post(NULL, origin, PATH, NULL, NULL, 0,
                                      deadline, &response),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
-    for (size_t i = 0; i < sizeof(bad_headers) / sizeof(bad_headers[0]); ++i) {
-        CHECK_EQ_INT(zb_http_client_post(NULL, origin, PATH, &bad_headers[i],
-                                         NULL, 0, deadline, &response),
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        const zerobus_headers_t headers = {.items = &bad[i], .count = 1};
+        CHECK_EQ_INT(zb_http_client_post(NULL, origin, PATH, &headers, NULL, 0,
+                                         deadline, &response),
                      ZEROBUS_STATUS_INVALID_ARGUMENT);
     }
     CHECK_EQ_INT(zb_http_client_post(NULL, origin, PATH, &none, NULL, 1,

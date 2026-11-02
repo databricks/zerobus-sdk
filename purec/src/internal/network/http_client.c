@@ -58,19 +58,41 @@ static const char *find_crlf(const char *p, const char *end)
 
 /* ---- request ------------------------------------------------------------ */
 
-/* Keeps each header on a line of its own, with its name before the ':'. */
+/* Whether name is a non-empty HTTP token (RFC 9110, section 5.6.2). */
+static bool is_token(const char *name)
+{
+    if (!name[0]) {
+        return false;
+    }
+    for (const char *c = name; *c; ++c) {
+        if (!(*c >= '0' && *c <= '9') && !(*c >= 'a' && *c <= 'z') &&
+            !(*c >= 'A' && *c <= 'Z') && !strchr("!#$%&'*+-.^_`|~", *c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Keeps each header on a line of its own, and leaves the headers that frame
+ * the request to the client. */
 static bool headers_are_valid(const zerobus_headers_t *headers)
 {
+    static const char *const framing[] = {"host", "content-length",
+                                          "transfer-encoding", "connection"};
     if (!headers) {
         return false;
     }
     for (size_t i = 0; i < headers->count; ++i) {
         const char *name = headers->items[i].name;
         const char *value = headers->items[i].value;
-        if (!name || !name[0] || strchr(name, ':') || !value ||
-            !zb_is_header_value(zerobus_string_view(name)) ||
+        if (!name || !is_token(name) || !value ||
             !zb_is_header_value(zerobus_string_view(value))) {
             return false;
+        }
+        for (size_t j = 0; j < sizeof(framing) / sizeof(framing[0]); ++j) {
+            if (zb_equals_ignore_case(name, strlen(name), framing[j])) {
+                return false;
+            }
         }
     }
     return true;
