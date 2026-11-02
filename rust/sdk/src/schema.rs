@@ -202,29 +202,13 @@ impl UcTableSchema {
     }
 }
 
-/// Fetch a table's schema from the Unity Catalog REST API.
+/// Fetch a table's schema from the Unity Catalog REST API using a default
+/// [`reqwest::Client`].
 ///
-/// Issues `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}`
-/// with `token` as a bearer credential and deserializes the response into a
-/// [`UcTableSchema`]. The returned schema can be converted to a protobuf
-/// descriptor with [`descriptor_from_uc_schema`] (for dynamic protobuf streams)
-/// or to an Arrow schema with [`arrow_schema_from_uc_schema`].
-///
-/// `table_name` is the fully-qualified `catalog.schema.table`. Each
-/// dot-separated part is percent-encoded, so identifiers containing reserved
-/// URI characters (spaces, `#`, `/`, …) are handled correctly.
-///
-/// `token` must be a Databricks access token with permission to read the table's
-/// metadata (e.g. an OAuth client-credentials token with `scope=all-apis`, or a
-/// workspace PAT). This function performs no token minting; obtain the token
-/// through your own OAuth flow.
-///
-/// # Errors
-///
-/// Returns [`ZerobusError::SchemaFetchError`] on a malformed endpoint URL, a
-/// network failure, a non-success HTTP status, or an unparseable response body.
-/// The error's `retryable` flag is set for transient failures (network error,
-/// 5xx except 501, 408, or 429).
+/// Convenience wrapper over [`fetch_uc_table_schema_with_client`] for callers
+/// that do not need to configure the HTTP client. See that function for the full
+/// contract. Use it directly to supply a client configured with a proxy or a
+/// custom CA.
 ///
 /// # Example
 ///
@@ -251,13 +235,75 @@ pub async fn fetch_uc_table_schema(
     table_name: &str,
     token: &str,
 ) -> ZerobusResult<UcTableSchema> {
+    fetch_uc_table_schema_with_client(
+        &reqwest::Client::new(),
+        unity_catalog_url,
+        table_name,
+        token,
+    )
+    .await
+}
+
+/// Fetch a table's schema from the Unity Catalog REST API using a caller-supplied
+/// [`reqwest::Client`].
+///
+/// Issues `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}`
+/// with `token` as a bearer credential and deserializes the response into a
+/// [`UcTableSchema`]. The returned schema can be converted to a protobuf
+/// descriptor with [`descriptor_from_uc_schema`] (for dynamic protobuf streams)
+/// or to an Arrow schema with [`arrow_schema_from_uc_schema`].
+///
+/// Pass a `client` configured with whatever proxy, TLS roots, or timeouts the
+/// deployment needs; the request reuses it as-is. [`fetch_uc_table_schema`] is a
+/// convenience wrapper that supplies a default client.
+///
+/// `table_name` is the fully-qualified `catalog.schema.table`. Each
+/// dot-separated part is percent-encoded, so identifiers containing reserved
+/// URI characters (spaces, `#`, `/`, …) are handled correctly.
+///
+/// `token` must be a Databricks access token with permission to read the table's
+/// metadata (e.g. an OAuth client-credentials token with `scope=all-apis`, or a
+/// workspace PAT). This function performs no token minting; obtain the token
+/// through your own OAuth flow.
+///
+/// # Errors
+///
+/// Returns [`ZerobusError::SchemaFetchError`] on a malformed endpoint URL, a
+/// network failure, a non-success HTTP status, or an unparseable response body.
+/// The error's `retryable` flag is set for transient failures (network error,
+/// 5xx except 501, 408, or 429).
+///
+/// # Example
+///
+/// ```no_run
+/// use databricks_zerobus_ingest_sdk::schema::fetch_uc_table_schema_with_client;
+///
+/// # async fn example(token: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// let client = reqwest::Client::builder().build()?;
+/// let schema = fetch_uc_table_schema_with_client(
+///     &client,
+///     "https://my-workspace.cloud.databricks.com",
+///     "main.analytics.orders",
+///     token,
+/// )
+/// .await?;
+/// # let _ = schema;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_uc_table_schema_with_client(
+    client: &reqwest::Client,
+    unity_catalog_url: &str,
+    table_name: &str,
+    token: &str,
+) -> ZerobusResult<UcTableSchema> {
     let url = format!(
         "{}/api/2.1/unity-catalog/tables/{}",
         unity_catalog_url.trim_end_matches('/'),
         encode_table_path(table_name)
     );
 
-    let response = reqwest::Client::new()
+    let response = client
         .get(&url)
         .bearer_auth(token)
         .header("Content-Type", "application/json")
@@ -1251,9 +1297,12 @@ mod tests {
         }"#;
         let (base_url, rx) = mock_http_once(200, SCHEMA);
 
-        let schema = fetch_uc_table_schema(&base_url, "my cat.sch#ema.t/bl", "tok")
-            .await
-            .expect("schema should be fetched");
+        // Exercise the caller-supplied-client entry point directly.
+        let client = reqwest::Client::builder().build().unwrap();
+        let schema =
+            fetch_uc_table_schema_with_client(&client, &base_url, "my cat.sch#ema.t/bl", "tok")
+                .await
+                .expect("schema should be fetched");
 
         assert_eq!(schema.name, "t/bl");
         assert_eq!(schema.catalog_name, "my cat");

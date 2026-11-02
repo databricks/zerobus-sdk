@@ -14,9 +14,12 @@
   more client CPU than `IpcZstd`. With it, `BatchStats::approximate_wire_bytes`
   counts bytes after gRPC compression. The default leaves the wire format
   unchanged.
-- Added `schema::fetch_uc_table_schema`, which fetches a table's schema from the
-  Unity Catalog REST API (`GET /api/2.1/unity-catalog/tables/{table}`) given a
-  bearer token and returns a `UcTableSchema`. Combine it with the existing
+- Added `schema::fetch_uc_table_schema` and
+  `schema::fetch_uc_table_schema_with_client`, which fetch a table's schema from
+  the Unity Catalog REST API (`GET /api/2.1/unity-catalog/tables/{table}`) given
+  a bearer token and return a `UcTableSchema`. The `_with_client` variant takes a
+  caller-supplied `reqwest::Client` (for a proxy, custom TLS roots, or timeouts);
+  the other wraps it with a default client. Combine the result with the existing
   `descriptor_from_uc_schema` (dynamic protobuf) or `arrow_schema_from_uc_schema`
   (Arrow Flight) to resolve a table's schema at runtime without pre-generating a
   `.proto` file.

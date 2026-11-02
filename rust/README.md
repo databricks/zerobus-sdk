@@ -798,7 +798,7 @@ let descriptor = message_descriptor(&descriptor_from_uc_schema(&schema)?)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The same `UcTableSchema` also drives `arrow_schema_from_uc_schema` for Arrow Flight streams.
+The same `UcTableSchema` also drives `arrow_schema_from_uc_schema` for Arrow Flight streams. To route the request through a proxy or custom CA, use `fetch_uc_table_schema_with_client` and pass your own configured `reqwest::Client`.
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
