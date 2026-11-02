@@ -1,4 +1,4 @@
-//! Unary ingestion client (Beta): one `InsertRecords` call per batch, no stream.
+//! Unary ingestion client: one `InsertRecords` call per batch, no stream.
 //!
 //! [`UnaryClient::ingest_records`] converts the records, checks that each one is
 //! exactly one valid JSON object, joins them into one JSON array or into JSON
@@ -43,7 +43,7 @@ pub(crate) enum UnaryBody {
     JsonLines,
 }
 
-/// A client that ingests JSON records into one table without opening a stream (Beta).
+/// A client that ingests JSON records into one table without opening a stream.
 ///
 /// Each [`ingest_records`](Self::ingest_records) call sends its batch in one
 /// unary `InsertRecords` request and returns once the server confirms the
@@ -62,8 +62,6 @@ pub(crate) enum UnaryBody {
 /// `Send + Sync`: share it across tasks with an `Arc`, and concurrent calls run
 /// in parallel. It runs no background tasks and has no `close()`; dropping it
 /// is enough.
-///
-/// Available behind the `unary` feature. The API is in development.
 ///
 /// # Examples
 ///

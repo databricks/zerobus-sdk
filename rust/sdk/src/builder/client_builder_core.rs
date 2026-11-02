@@ -52,9 +52,7 @@ enum AuthConfig {
 /// Which record format was selected.
 pub(super) enum FormatConfig {
     Json,
-    /// JSON records sent as JSON Lines. Only the unary builder selects it, so
-    /// it is unused when the `unary` feature is off.
-    #[cfg_attr(not(feature = "unary"), allow(dead_code))]
+    /// JSON records sent as JSON Lines. Only the unary builder selects it.
     JsonLines,
     CompiledProto(Box<prost_types::DescriptorProto>),
     DynamicProto(MessageDescriptor),

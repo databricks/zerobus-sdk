@@ -92,8 +92,6 @@ internal-arrow-c-data = [
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 # Persistent streams with exactly-once semantics (EoS); API is in development.
 eos = []
-# Unary InsertRecords client (Beta), opt-in; API is in development.
-unary = []
 testing = []
 # Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
 # unless enabled; never enabled by FFI/production builds.

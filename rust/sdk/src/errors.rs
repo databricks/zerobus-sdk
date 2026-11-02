@@ -143,9 +143,7 @@ pub enum ZerobusError {
     /// Returned when a unary `InsertRecords` call failed with a gRPC status,
     /// after retries were exhausted or for a non-retryable code. An attempt
     /// that ran out of time is reported as `DeadlineExceeded`. A connection
-    /// failure is reported as `Unavailable`. Available behind the `unary`
-    /// feature.
-    #[cfg(feature = "unary")]
+    /// failure is reported as `Unavailable`.
     #[error("InsertRecords failed: {0}")]
     UnaryIngestError(GrpcStatus),
 }
@@ -231,7 +229,6 @@ impl ZerobusError {
             ZerobusError::AvroSchemaParseError(_) => false,
             #[cfg(feature = "avro")]
             ZerobusError::AvroEncodingError(_) => false,
-            #[cfg(feature = "unary")]
             ZerobusError::UnaryIngestError(status) => {
                 !UNRETRIABLE_STATUS_CODES.contains(&status.code())
             }
@@ -243,17 +240,15 @@ impl ZerobusError {
     /// decide when to invalidate cached credentials so the next attempt
     /// re-derives them.
     pub(crate) fn is_auth_rejection(&self) -> bool {
-        let status = match self {
-            ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status) => {
-                status
-            }
-            #[cfg(feature = "unary")]
-            ZerobusError::UnaryIngestError(status) => status,
-            _ => return false,
-        };
         matches!(
-            status.code(),
-            GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
+            self,
+            ZerobusError::CreateStreamError(status)
+                | ZerobusError::StreamClosedError(status)
+                | ZerobusError::UnaryIngestError(status)
+                if matches!(
+                    status.code(),
+                    GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
+                )
         )
     }
 }
@@ -362,7 +357,6 @@ mod tests {
         assert!(!ZerobusError::TokenFetchError("x".to_string()).is_auth_rejection());
     }
 
-    #[cfg(feature = "unary")]
     #[test]
     fn unary_ingest_error_is_classified_like_stream_setup_errors() {
         let unary = ZerobusError::UnaryIngestError;
