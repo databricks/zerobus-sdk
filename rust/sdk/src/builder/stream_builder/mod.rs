@@ -32,12 +32,10 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
-use tonic::transport::Channel;
-
 use crate::callbacks::AckCallback;
 #[cfg(feature = "arrow-flight")]
 use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_channel::GrpcChannelSource;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{
@@ -200,7 +198,7 @@ pub struct StreamBuilder<'a> {
 /// and `PersistentStreamBuilder::build` / `resume`. Produced by
 /// [`StreamBuilder::prepare_grpc`].
 pub(crate) struct GrpcStreamParts {
-    pub(crate) channel: ZerobusClient<Channel>,
+    pub(crate) channel: Arc<GrpcChannelSource>,
     pub(crate) table_properties: TableProperties,
     pub(crate) headers_provider: Arc<dyn HeadersProvider>,
     /// Stream options with the record type already set from the chosen format.
@@ -683,7 +681,7 @@ impl<'a> StreamBuilder<'a> {
             avro_schema: format.avro_schema,
         };
 
-        let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
+        let channel = self.sdk.grpc_channel_source();
         Ok(GrpcStreamParts {
             channel,
             table_properties,
