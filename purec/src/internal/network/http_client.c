@@ -242,12 +242,21 @@ static bool parse_status_line(const char *line, size_t len,
            *out_status >= 100;
 }
 
+/* OUT_OF_RANGE for any length over the limit, even one too long to parse. */
 static zerobus_status_t parse_content_length(zerobus_string_view_t value,
                                              size_t *out_length)
 {
-    uint32_t length = 0;
-    if (!zb_parse_u32((const uint8_t *)value.data, value.len, &length)) {
+    if (!value.len) {
         return ZEROBUS_STATUS_INTERNAL;
+    }
+    size_t length = 0;
+    for (size_t i = 0; i < value.len; ++i) {
+        if (value.data[i] < '0' || value.data[i] > '9') {
+            return ZEROBUS_STATUS_INTERNAL;
+        }
+        if (length <= ZB_HTTP_CLIENT_MAX_BODY) {
+            length = 10 * length + (size_t)(value.data[i] - '0');
+        }
     }
     if (length > ZB_HTTP_CLIENT_MAX_BODY) {
         return ZEROBUS_STATUS_OUT_OF_RANGE;

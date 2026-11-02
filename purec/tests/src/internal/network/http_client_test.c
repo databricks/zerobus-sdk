@@ -191,6 +191,11 @@ static void test_responses(void)
          "hello"},
         {{"HTTP/1.0 200\r\n\r\nhel", "lo"}, false, 200, "hello"},
         {{"HTTP/1.1 204 No Content\r\n\r\n"}, true, 204, ""},
+        {{"HTTP/1.1 200 OK\r\nContent-Length: 00000000000000000000005\r\n\r\n"
+          "hello"},
+         true,
+         200,
+         "hello"},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         zb_http_response_t response = {0};
@@ -222,6 +227,8 @@ static void test_malformed(void)
         {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
          ZEROBUS_STATUS_UNIMPLEMENTED},
         {"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n",
+         ZEROBUS_STATUS_OUT_OF_RANGE},
+        {"HTTP/1.1 200 OK\r\nContent-Length: 4294967296\r\n\r\n",
          ZEROBUS_STATUS_OUT_OF_RANGE},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
