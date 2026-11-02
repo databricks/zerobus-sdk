@@ -489,7 +489,7 @@ impl ZerobusArrowStream {
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
 
-        let configured_endpoint = tls_config.tls_settings()?.apply(base_endpoint)?;
+        let configured_endpoint = tls_config.tls_settings()?.resolve()?.apply(base_endpoint)?;
         let host = configured_endpoint.uri().host().unwrap_or_default();
         let channel = match proxy::resolve_connector(host, connector_factory)? {
             Some(proxy_connector) => {

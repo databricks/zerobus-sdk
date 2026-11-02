@@ -67,6 +67,7 @@ plotters = { version = "0.3", default-features = false, features = ["svg_backend
 prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
