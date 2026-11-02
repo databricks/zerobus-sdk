@@ -202,8 +202,7 @@ impl<'a> UnaryClientBuilder<'a> {
         let body = match core.format {
             Some(FormatConfig::Json) => UnaryBody::JsonArray,
             Some(FormatConfig::JsonLines) => UnaryBody::JsonLines,
-            // No unary setter selects another format; this guards against one
-            // that would.
+            // Formats that unary clients do not support yet.
             _ => {
                 return Err(ZerobusError::InvalidArgument(
                     "unary clients support only .json() and .json_lines()".into(),
