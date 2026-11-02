@@ -77,14 +77,12 @@ mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
 mod token_cache;
-#[cfg(feature = "unary")]
 mod unary_client;
 
 #[cfg(feature = "avro")]
 pub use apache_avro::types::Value as AvroValue;
 #[cfg(feature = "eos")]
 pub use builder::PersistentStreamBuilder;
-#[cfg(feature = "unary")]
 pub use builder::UnaryClientBuilder;
 pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
@@ -133,7 +131,6 @@ pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
-#[cfg(feature = "unary")]
 pub use unary_client::UnaryClient;
 
 #[cfg(feature = "zeroparser")]
