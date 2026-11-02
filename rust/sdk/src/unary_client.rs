@@ -2,12 +2,12 @@
 //!
 //! [`UnaryClient::ingest_records`] converts the records, checks that each one is
 //! exactly one valid JSON object, joins them into one JSON array or into JSON
-//! Lines (the request's `records_json` body), and sends it with the same retry
-//! policy as initial
-//! stream creation. Each attempt is bounded by `server_lack_of_ack_timeout_ms`.
+//! Lines (the request's `records_json` body), and sends it, retrying retryable
+//! errors. Each attempt is bounded by `server_lack_of_ack_timeout_ms`.
 //! The server answers only once the batch is durable, so a successful call has
 //! nothing left to flush or acknowledge.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,8 +85,8 @@ pub struct UnaryClient {
     options: UnaryOptions,
 }
 
-impl std::fmt::Debug for UnaryClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for UnaryClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnaryClient")
             .field("table_name", &self.table_name)
             .finish_non_exhaustive()
@@ -202,15 +202,13 @@ impl UnaryClient {
         self.send_with_retries(&request).await
     }
 
-    /// Sends the request with the retry policy of initial stream creation:
-    /// retryable errors are retried `recovery_backoff_ms` apart, up to
-    /// `recovery_retries` times, and one auth rejection may spend a retry from the
-    /// same budget so the invalidated credential is re-minted.
+    /// Sends the request, retrying retryable errors `recovery_backoff_ms` apart up
+    /// to `recovery_retries` times. One auth rejection may spend a retry so the
+    /// invalidated credential is re-minted.
     async fn send_with_retries(&self, request: &InsertRecordsRequest) -> ZerobusResult<()> {
         let options = &self.options;
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
-        // Created per call; a stream creates it once, for its initial setup.
         let mut auth_retry_available = options.recovery_retries > 0;
         let mut attempts = 0u32;
         let attempt = || {
@@ -237,14 +235,9 @@ impl UnaryClient {
         RetryIf::spawn(strategy, attempt, should_retry).await
     }
 
-    /// One attempt, bounded by `server_lack_of_ack_timeout_ms`: fetching the
-    /// headers, connecting if the channel has no live connection, sending, and
-    /// waiting for the response.
-    ///
-    /// After an auth rejection it invalidates the credential within the rest of
-    /// the same deadline and keeps the original rejection if the provider stalls,
-    /// as `create_initial_stream_connection` does for streams. A stalled provider
-    /// therefore cannot turn a known auth rejection into a retryable timeout.
+    /// One attempt, bounded by `server_lack_of_ack_timeout_ms`. After an auth
+    /// rejection it invalidates the credential within the rest of that deadline,
+    /// so a stalled provider cannot turn the rejection into a retryable timeout.
     async fn send_attempt(&self, request: &InsertRecordsRequest) -> ZerobusResult<()> {
         let timeout_ms = self.options.server_lack_of_ack_timeout_ms;
         let attempt_timeout = Duration::from_millis(timeout_ms);
@@ -291,10 +284,6 @@ impl UnaryClient {
 
 /// Builds the `records_json` body: the records joined into one JSON array, or
 /// into JSON Lines. Returns `None` for an empty batch, which is not sent.
-///
-/// Runs before any network I/O, in this order: convert the records (a
-/// non-JSON record fails), skip an empty batch, validate each record, check
-/// the body size, then join.
 #[allow(clippy::result_large_err)]
 fn build_request_body<I, T>(
     records: I,
@@ -322,9 +311,7 @@ where
         })
     })?;
 
-    // Unlike on streams, the whole body counts, because the server limits the
-    // whole request: the record bytes plus n - 1 separators, and 2 brackets
-    // for an array.
+    // The server limits the whole body, so the separators and brackets count.
     let record_bytes = records.iter().map(String::len).sum::<usize>();
     let (body_len, shape) = match body_kind {
         UnaryBody::JsonArray => (record_bytes + records.len() + 1, "a JSON array"),
@@ -361,14 +348,9 @@ fn json_record(index: usize, record: PreparedInput) -> ZerobusResult<String> {
     }
 }
 
-/// Checks that `record` is exactly one valid JSON object.
-///
-/// `InsertRecords` carries the whole batch in one field, and joining the
-/// records removes their boundaries: `{"a":1},{"a":2}` would silently become
-/// two rows. Full parsing also stops a request the server would reject from
-/// being sent at all. `IgnoredAny` checks the syntax without building values,
-/// and `from_str` rejects anything after the object. Field names and types are
-/// still checked by the server against the table schema.
+/// Checks that `record` is exactly one valid JSON object. Joining records
+/// removes their boundaries, so `{"a":1},{"a":2}` would otherwise become two
+/// rows. Field names and types are checked by the server.
 fn validate_json_object(record: &str) -> Result<(), String> {
     match record
         .trim_start_matches([' ', '\t', '\n', '\r'])
