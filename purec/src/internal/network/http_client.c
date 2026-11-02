@@ -10,7 +10,9 @@
 #include "internal/network/grpc_utils.h"
 
 #define MAX_HEAD (64u * 1024u)
-#define MAX_BUFFER (MAX_HEAD + ZB_HTTP_CLIENT_MAX_BODY + 1u)
+/* Longest chunk-size or trailer line in a chunked body, with its CRLF. */
+#define MAX_LINE (4u * 1024u)
+#define MAX_BUFFER (MAX_HEAD + ZB_HTTP_CLIENT_MAX_BODY + MAX_LINE)
 #define MIN_BUFFER (16u * 1024u)
 
 /* One request and its response on a connection of their own. */
@@ -22,13 +24,23 @@ typedef struct {
 
 /* How the end of the response body is found. */
 typedef enum {
-    BODY_EMPTY,  /* There is no body. */
-    BODY_LENGTH, /* After content_length bytes. */
-    BODY_CLOSE   /* When the server closes the connection. */
+    BODY_EMPTY,   /* There is no body. */
+    BODY_LENGTH,  /* After content_length bytes. */
+    BODY_CHUNKED, /* After the last chunk and the trailers. */
+    BODY_CLOSE    /* When the server closes the connection. */
 } framing_t;
 
+/* What a chunked body expects next. */
+typedef enum {
+    CHUNK_SIZE,     /* A chunk-size line. */
+    CHUNK_DATA,     /* chunk_left bytes of chunk data. */
+    CHUNK_DATA_END, /* The CRLF after the chunk data. */
+    CHUNK_TRAILERS  /* Trailer lines, up to an empty one. */
+} chunk_state_t;
+
 /* A response being read. The head fills data[0, head_len), and the body
- * follows it. */
+ * follows it. A chunked body is decoded in place, so data[head_len +
+ * body_len, len) is the input not decoded yet. */
 typedef struct {
     char *data;
     size_t len;
@@ -38,6 +50,8 @@ typedef struct {
     uint32_t status;
     framing_t framing;
     size_t content_length;
+    chunk_state_t chunk_state;
+    size_t chunk_left;
     size_t body_len;
     bool done;
 } response_t;
@@ -277,6 +291,7 @@ static zerobus_status_t parse_head(response_t *response, size_t head_len)
         return ZEROBUS_STATUS_INTERNAL;
     }
     bool has_length = false;
+    bool chunked = false;
     size_t length = 0;
     for (const char *line = line_end + 2; line < end; line = line_end + 2) {
         line_end = find_crlf(line, end);
@@ -299,12 +314,25 @@ static zerobus_status_t parse_head(response_t *response, size_t head_len)
             has_length = true;
             length = parsed;
         } else if (zb_equals_ignore_case(line, name_len, "transfer-encoding")) {
-            /* Token responses carry Content-Length instead. */
-            return ZEROBUS_STATUS_UNIMPLEMENTED;
+            /* chunked is the one coding a server may apply unasked. A second
+             * header would apply chunked twice. */
+            if (chunked) {
+                return ZEROBUS_STATUS_INTERNAL;
+            }
+            if (!zb_equals_ignore_case(value.data, value.len, "chunked")) {
+                return ZEROBUS_STATUS_UNIMPLEMENTED;
+            }
+            chunked = true;
         }
+    }
+    /* RFC 9112, section 6.3: both may mean response splitting. */
+    if (chunked && has_length) {
+        return ZEROBUS_STATUS_INTERNAL;
     }
     if (response->status == 204 || response->status == 304) {
         response->framing = BODY_EMPTY;
+    } else if (chunked) {
+        response->framing = BODY_CHUNKED;
     } else if (has_length) {
         response->framing = BODY_LENGTH;
         response->content_length = length;
@@ -342,6 +370,92 @@ static zerobus_status_t parse_final_head(response_t *response)
     }
 }
 
+/* Parses a chunk-size line in [line, end), ignoring any chunk extensions. */
+static zerobus_status_t parse_chunk_size(const char *line, const char *end,
+                                         size_t *out_size)
+{
+    size_t size = 0;
+    const char *p = line;
+    for (; p < end && zb_hex_value(*p) >= 0; ++p) {
+        size = 16 * size + (size_t)zb_hex_value(*p);
+        if (size > ZB_HTTP_CLIENT_MAX_BODY) {
+            return ZEROBUS_STATUS_OUT_OF_RANGE;
+        }
+    }
+    if (p == line || (p < end && *p != ';' && *p != ' ' && *p != '\t')) {
+        return ZEROBUS_STATUS_INTERNAL;
+    }
+    *out_size = size;
+    return ZEROBUS_STATUS_OK;
+}
+
+/* Decodes the chunks that have arrived, moving their data up to the end of
+ * the body, and sets done after the trailers. */
+static zerobus_status_t parse_chunks(response_t *response)
+{
+    char *body = response->data + response->head_len;
+    const char *at = body + response->body_len;
+    const char *end = response->data + response->len;
+    zerobus_status_t status = ZEROBUS_STATUS_OK;
+    while (status == ZEROBUS_STATUS_OK && !response->done && at < end) {
+        if (response->chunk_state == CHUNK_DATA) {
+            size_t len = (size_t)(end - at);
+            if (len > response->chunk_left) {
+                len = response->chunk_left;
+            }
+            memmove(body + response->body_len, at, len);
+            response->body_len += len;
+            response->chunk_left -= len;
+            at += len;
+            if (!response->chunk_left) {
+                response->chunk_state = CHUNK_DATA_END;
+            }
+            continue;
+        }
+        const char *limit = (size_t)(end - at) > MAX_LINE ? at + MAX_LINE : end;
+        const char *line_end = find_crlf(at, limit);
+        if (!line_end) {
+            if ((size_t)(limit - at) == MAX_LINE) {
+                status = ZEROBUS_STATUS_OUT_OF_RANGE;
+            }
+            break;
+        }
+        size_t size = 0;
+        switch (response->chunk_state) {
+        case CHUNK_SIZE:
+            status = parse_chunk_size(at, line_end, &size);
+            if (status != ZEROBUS_STATUS_OK) {
+                break;
+            }
+            if (size > ZB_HTTP_CLIENT_MAX_BODY - response->body_len) {
+                status = ZEROBUS_STATUS_OUT_OF_RANGE;
+            } else {
+                response->chunk_left = size;
+                response->chunk_state = size ? CHUNK_DATA : CHUNK_TRAILERS;
+            }
+            break;
+        case CHUNK_DATA_END:
+            if (line_end != at) {
+                status = ZEROBUS_STATUS_INTERNAL;
+            }
+            response->chunk_state = CHUNK_SIZE;
+            break;
+        case CHUNK_TRAILERS:
+            response->done = line_end == at;
+            break;
+        case CHUNK_DATA:
+            break;
+        }
+        at = line_end + 2;
+    }
+    /* Keeps the input not decoded yet right after the body. */
+    char *rest = body + response->body_len;
+    size_t rest_len = (size_t)(end - at);
+    memmove(rest, at, rest_len);
+    response->len = (size_t)(rest + rest_len - response->data);
+    return status;
+}
+
 /* Parses what has arrived so far, and sets done once the response is
  * complete. */
 static zerobus_status_t parse_response(response_t *response)
@@ -363,6 +477,8 @@ static zerobus_status_t parse_response(response_t *response)
             response->done = true;
         }
         break;
+    case BODY_CHUNKED:
+        return parse_chunks(response);
     case BODY_CLOSE:
         if (received > ZB_HTTP_CLIENT_MAX_BODY) {
             return ZEROBUS_STATUS_OUT_OF_RANGE;

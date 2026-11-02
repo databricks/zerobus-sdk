@@ -23,8 +23,8 @@ typedef struct {
  * Any HTTP status returns OK and fills *out, for zb_http_response_clear to
  * release. Otherwise returns UNAVAILABLE for a failed or cut-short connection,
  * UNAUTHENTICATED for an untrusted certificate, INTERNAL for a malformed
- * response, UNIMPLEMENTED for Transfer-Encoding, and OUT_OF_RANGE past the
- * size limits. */
+ * response, UNIMPLEMENTED for a Transfer-Encoding other than chunked, and
+ * OUT_OF_RANGE past the size limits. */
 zerobus_status_t zb_http_client_post(const zb_tls_ctx_t *tls,
                                      const char *origin, const char *path,
                                      const zerobus_headers_t *headers,

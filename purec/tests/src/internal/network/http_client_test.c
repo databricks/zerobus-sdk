@@ -69,6 +69,32 @@ static char *repeat(const char *prefix, char fill, size_t count)
     return text;
 }
 
+/* Returns a chunked 200 with count chunks of size bytes, chunk i filled with
+ * 'a' + i % 26, or NULL. */
+static char *chunked(size_t count, size_t size)
+{
+    static const char head[] = "HTTP/1.1 200 OK\r\n"
+                               "Transfer-Encoding: chunked\r\n\r\n";
+    static const char last[] = "0\r\n\r\n";
+    char line[32];
+    size_t line_len = (size_t)snprintf(line, sizeof(line), "%zx\r\n", size);
+    char *text =
+        malloc(sizeof(head) + count * (line_len + size + 2) + sizeof(last));
+    if (text) {
+        char *cursor = text;
+        memcpy(cursor, head, sizeof(head) - 1);
+        cursor += sizeof(head) - 1;
+        for (size_t i = 0; i < count; ++i) {
+            memcpy(cursor, line, line_len);
+            memset(cursor + line_len, 'a' + (int)(i % 26), size);
+            memcpy(cursor + line_len + size, "\r\n", 2);
+            cursor += line_len + size + 2;
+        }
+        memcpy(cursor, last, sizeof(last));
+    }
+    return text;
+}
+
 /* Returns count 103 Early Hints responses followed by an empty 200, or
  * NULL. */
 static char *early_hints(size_t count)
@@ -196,6 +222,21 @@ static void test_responses(void)
          true,
          200,
          "hello"},
+        /* Split inside chunk data, a chunk-size line and a CRLF. */
+        {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n3;x=y\r\nhe",
+          "l\r\n00", "2\r\nlo\r", "\n0\r\nTrailer: z\r\n\r\n"},
+         true,
+         200,
+         "hello"},
+        {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+          "A\r\n0123456789\r\n0\r\n\r\n"},
+         true,
+         200,
+         "0123456789"},
+        {{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
+         true,
+         200,
+         ""},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         zb_http_response_t response = {0};
@@ -224,8 +265,31 @@ static void test_malformed(void)
         /* Cut short: the server closes before the body is complete. */
         {"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello",
          ZEROBUS_STATUS_UNAVAILABLE},
-        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
          ZEROBUS_STATUS_UNIMPLEMENTED},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         "Content-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+         ZEROBUS_STATUS_INTERNAL},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+         ZEROBUS_STATUS_INTERNAL},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nx\r\n",
+         ZEROBUS_STATUS_INTERNAL},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n;x\r\n",
+         ZEROBUS_STATUS_INTERNAL},
+        /* More data than the chunk size. */
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         "2\r\nhiX\r\n0\r\n\r\n",
+         ZEROBUS_STATUS_INTERNAL},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+         ZEROBUS_STATUS_UNAVAILABLE},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n",
+         ZEROBUS_STATUS_UNAVAILABLE},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n100001\r\n",
+         ZEROBUS_STATUS_OUT_OF_RANGE},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         "FFFFFFFFFFFFFFFFFFFFFFFF\r\n",
+         ZEROBUS_STATUS_OUT_OF_RANGE},
         {"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n",
          ZEROBUS_STATUS_OUT_OF_RANGE},
         {"HTTP/1.1 200 OK\r\nContent-Length: 4294967296\r\n\r\n",
@@ -249,7 +313,13 @@ static void test_limits(void)
     char *too_long =
         repeat("HTTP/1.1 200 OK\r\n\r\n", 'x', ZB_HTTP_CLIENT_MAX_BODY + 1);
     char *long_head = repeat("HTTP/1.1 200 OK\r\nx: ", 'x', 64 * 1024);
-    REQUIRE(largest && too_long && long_head);
+    /* Many small chunks, so most reads end inside one. */
+    char *largest_chunked = chunked(ZB_HTTP_CLIENT_MAX_BODY / 16, 16);
+    char *too_long_chunked = chunked(2, ZB_HTTP_CLIENT_MAX_BODY / 2 + 1);
+    char *long_chunk_line = repeat(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;", 'x', 4096);
+    REQUIRE(largest && too_long && long_head && largest_chunked &&
+            too_long_chunked && long_chunk_line);
 
     CHECK_OK(exchange((const char *[HTTP_SERVER_MAX_PIECES]){largest}, false,
                       &response));
@@ -262,11 +332,32 @@ static void test_limits(void)
                           false, &response),
                  ZEROBUS_STATUS_OUT_OF_RANGE);
 
+    CHECK_OK(exchange((const char *[HTTP_SERVER_MAX_PIECES]){largest_chunked},
+                      true, &response));
+    CHECK_EQ_INT(response.body_len, ZB_HTTP_CLIENT_MAX_BODY);
+    bool decoded = response.body != NULL;
+    for (size_t i = 0; decoded && i < response.body_len; ++i) {
+        decoded = response.body[i] == 'a' + (int)(i / 16 % 26);
+    }
+    CHECK(decoded);
+    zb_http_response_clear(&response);
+    CHECK_EQ_INT(
+        exchange((const char *[HTTP_SERVER_MAX_PIECES]){too_long_chunked},
+                 false, &response),
+        ZEROBUS_STATUS_OUT_OF_RANGE);
+    CHECK_EQ_INT(
+        exchange((const char *[HTTP_SERVER_MAX_PIECES]){long_chunk_line}, false,
+                 &response),
+        ZEROBUS_STATUS_OUT_OF_RANGE);
+
 zb_cleanup:
     zb_http_response_clear(&response);
     free(largest);
     free(too_long);
     free(long_head);
+    free(largest_chunked);
+    free(too_long_chunked);
+    free(long_chunk_line);
 }
 
 /* The deadline holds against a server that never answers, and against one
