@@ -12,9 +12,10 @@ loop, waits for the last offset, flushes, and closes.
 
 | `ipcCompression` | Behaviour |
 |---|---|
-| `undefined` (default) / `null` | No compression on the wire. |
-| `IpcCompressionType.Lz4Frame` | LZ4_FRAME — fast compression, modest ratio. |
+| `undefined` (default) | Same as `IpcCompressionType.Zstd`. |
 | `IpcCompressionType.Zstd`     | ZSTD — slower but smaller payloads. |
+| `IpcCompressionType.Lz4Frame` | LZ4_FRAME — fast compression, modest ratio. |
+| `IpcCompressionType.None`     | No compression on the wire. |
 
 ## Available Data Types
 

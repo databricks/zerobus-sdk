@@ -530,7 +530,9 @@ describe('Package entry (ESM interop)', () => {
 describe('Arrow Flight exports', () => {
     it('should include the Arrow API when built with arrow-flight', () => {
         assert.strictEqual(ArrowDataType.Int32, 3);
+        assert.strictEqual(IpcCompressionType.None, -1);
         assert.strictEqual(IpcCompressionType.Lz4Frame, 0);
+        assert.strictEqual(IpcCompressionType.Zstd, 1);
         assert.strictEqual(typeof ZerobusArrowStream, 'function');
         assert.strictEqual(typeof ZerobusSdk.prototype.createArrowStream, 'function');
     });
