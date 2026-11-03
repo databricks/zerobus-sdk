@@ -866,7 +866,7 @@ pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfiguratio
         server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
         flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
         connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
-        ipc_compression: -1,
+        ipc_compression: 1,
         stream_paused_max_wait_time_ms: -1,
     }
 }
