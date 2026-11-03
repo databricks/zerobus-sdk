@@ -43,8 +43,8 @@ public interface AckCallback {
    * <p>The offset ID represents the durability acknowledgment up to and including this offset. All
    * records with offset IDs less than or equal to this value have been durably stored.
    *
-   * <p>An exception thrown from this method is logged and discarded; it does not affect later
-   * callbacks.
+   * <p>Implementations should not throw. An exception thrown from this method is logged at ERROR
+   * level through SLF4J, with its stack trace, and later callbacks are still delivered.
    *
    * @param offsetId the offset ID that has been acknowledged
    */
@@ -56,8 +56,8 @@ public interface AckCallback {
    * <p>This method is called when the SDK encounters an error that affects a specific submission
    * offset. The error may be retryable or non-retryable depending on the nature of the failure.
    *
-   * <p>An exception thrown from this method is logged and discarded; it does not affect later
-   * callbacks.
+   * <p>Implementations should not throw. An exception thrown from this method is logged at ERROR
+   * level through SLF4J, with its stack trace, and later callbacks are still delivered.
    *
    * @param offsetId the offset ID that encountered an error
    * @param errorMessage a description of the error that occurred

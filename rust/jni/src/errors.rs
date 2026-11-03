@@ -9,7 +9,8 @@ use jni::objects::{GlobalRef, JObject, JString, JThrowable, JValue};
 use jni::JNIEnv;
 
 /// A Java exception taken off the current thread by [`take_java_exception`].
-pub(crate) struct JavaException {
+pub(crate) struct JavaException<'local> {
+    pub(crate) throwable: JThrowable<'local>,
     pub(crate) message: Option<String>,
     pub(crate) non_retryable: bool,
 }
@@ -20,7 +21,9 @@ pub(crate) struct JavaException {
 /// `jni::errors::Error::JavaException`, before making another JNI call.
 /// Every intermediate exception is cleared, so the thread is left with none
 /// pending even if describing the exception fails.
-pub(crate) fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
+pub(crate) fn take_java_exception<'local>(
+    env: &mut JNIEnv<'local>,
+) -> Option<JavaException<'local>> {
     let throwable = match env.exception_occurred() {
         Ok(throwable) => throwable,
         Err(_) => {
@@ -45,6 +48,7 @@ pub(crate) fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException>
     let _ = env.exception_clear();
 
     Some(JavaException {
+        throwable,
         message,
         non_retryable: explicitly_non_retryable || fatal_error,
     })
