@@ -3,9 +3,12 @@
 //! This module provides a Rust implementation of the SDK's AckCallback trait
 //! that delegates to a Java AckCallback object.
 
+use crate::errors::take_java_exception;
 use crate::runtime::get_jvm;
 use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
+use jni::errors::Error as JniError;
 use jni::objects::{GlobalRef, JValue};
+use jni::JNIEnv;
 use std::sync::Arc;
 
 /// A JNI bridge that implements the Rust AckCallback trait by delegating
@@ -41,7 +44,7 @@ impl AckCallback for JavaAckCallback {
         let callback = self.callback_ref.as_obj();
 
         if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
-            tracing::error!("Failed to call onAck callback: {}", e);
+            report_callback_failure(&mut env, "onAck", e);
         }
     }
 
@@ -60,7 +63,7 @@ impl AckCallback for JavaAckCallback {
         let j_message = match env.new_string(error_message) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("Failed to create error message string: {}", e);
+                report_callback_failure(&mut env, "onError", e);
                 return;
             }
         };
@@ -71,8 +74,24 @@ impl AckCallback for JavaAckCallback {
             "(JLjava/lang/String;)V",
             &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
         ) {
-            tracing::error!("Failed to call onError callback: {}", e);
+            report_callback_failure(&mut env, "onError", e);
         }
+    }
+}
+
+/// Logs a failed callback and clears any Java exception it left pending.
+///
+/// Callbacks run on SDK threads that never return to Java, so nothing else
+/// clears the exception. Left pending, it makes every later JNI call on that
+/// thread fail, including callbacks of other streams that reuse it.
+fn report_callback_failure(env: &mut JNIEnv, method: &str, error: JniError) {
+    if matches!(error, JniError::JavaException) {
+        let detail = take_java_exception(env)
+            .and_then(|exception| exception.message)
+            .unwrap_or_else(|| "Java exception was thrown".to_string());
+        tracing::error!("AckCallback.{method} threw: {detail}");
+    } else {
+        tracing::error!("Failed to call AckCallback.{method}: {error}");
     }
 }
 
