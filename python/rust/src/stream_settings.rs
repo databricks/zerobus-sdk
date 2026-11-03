@@ -2,7 +2,12 @@
 //!
 //! The Python `StreamBuilder` collects settings in pure Python and hands them to the native
 //! layer as one `StreamSettings`. Every setting is optional so the Rust core keeps ownership
-//! of the defaults: an unset value is never forwarded to the builder.
+//! of the defaults: an unset value is never forwarded to the builder. One configuration opens
+//! either an ordinary stream or, after `multiplexed(n)`, a multiplexed stream (Beta).
+//!
+//! Multiplexed ingest calls return a message ID: an opaque `int` that packs the sub-stream
+//! index and that sub-stream's offset. Message IDs of sub-streams 32-63 are negative, so no
+//! return value is reserved as an error sentinel; failures are always raised.
 
 use std::sync::Arc;
 
@@ -10,8 +15,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, HeadersProvider as RustHeadersProvider, StreamBuilder,
-    ZerobusResult, ZerobusSdk as RustSdk, ZerobusStream,
+    AckCallback as RustAckCallback, HeadersProvider as RustHeadersProvider, MessageId,
+    MultiplexedStream, StreamBuilder, ZerobusResult, ZerobusSdk as RustSdk, ZerobusStream,
 };
 
 use crate::auth::HeadersProviderWrapper;
@@ -100,6 +105,20 @@ impl StreamSettings {
             stream_paused_max_wait_time_ms_set,
             stream_paused_max_wait_time_ms,
         }
+    }
+}
+
+/// Bridges a Python `AckCallback` to the mux's `AckCallback<MessageId>`; the Python
+/// callback's `offset` argument receives `MessageId::raw()`.
+struct MultiplexedAckCallbackWrapper(AckCallbackWrapper);
+
+impl RustAckCallback<MessageId> for MultiplexedAckCallbackWrapper {
+    fn on_ack(&self, message_id: MessageId) {
+        self.0.on_ack(message_id.raw());
+    }
+
+    fn on_error(&self, message_id: MessageId, error_message: &str) {
+        self.0.on_error(message_id.raw(), error_message);
     }
 }
 
@@ -245,5 +264,25 @@ impl StreamConfig {
     /// Open an ordinary stream.
     pub(crate) async fn open(self, sdk: &RustSdk) -> ZerobusResult<ZerobusStream> {
         self.apply(sdk).build().await
+    }
+
+    /// Open every sub-stream of a multiplexed stream (Beta).
+    ///
+    /// `ack_callback` is the multiplexed callback, which receives message IDs. The stream
+    /// count, the in-flight budget, and a misplaced ordinary callback are validated by the
+    /// Rust core, so its error is the single source of truth for their limits.
+    pub(crate) async fn open_multiplexed(
+        self,
+        sdk: &RustSdk,
+        stream_count: usize,
+        ack_callback: Option<Py<AckCallback>>,
+    ) -> ZerobusResult<MultiplexedStream> {
+        let mut b = self.apply(sdk);
+        if let Some(cb) = ack_callback {
+            b = b.multiplexed_ack_callback(Arc::new(MultiplexedAckCallbackWrapper(
+                AckCallbackWrapper::new(cb),
+            )));
+        }
+        b.multiplexed(stream_count).build().await
     }
 }

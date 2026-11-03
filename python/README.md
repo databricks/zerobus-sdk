@@ -17,6 +17,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
   - [Acknowledgments and throughput](#acknowledgments-and-throughput)
 - [Persistent Streams](#persistent-streams)
 - [Stream Builder](#stream-builder)
+- [Multiplexed Streams (Beta)](#multiplexed-streams-beta)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -66,6 +67,7 @@ The Zerobus Python SDK is a thin wrapper around the [Zerobus Rust SDK](../rust/)
 - **Multiple serialization formats** - JSON, Protocol Buffers, Avro, and Arrow Flight ingestion
 - **OAuth 2.0 authentication** - Secure authentication with client credentials, automatically refreshed
 - **Acknowledgment callbacks** - Receive notifications when records are acknowledged or encounter errors
+- **Multiplexed streams (Beta)** - Spread ingestion across up to 64 sub-streams to one table
 - **Flexible configuration** - Fine-tune timeouts, retries, and recovery behavior
 
 ## Installation
@@ -488,6 +490,55 @@ is a coroutine. The builder has these setters: `table`, `oauth`, `headers_provid
 `max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
 `callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`. Unset values use the SDK
 defaults. For external-IdP federation, use `create_stream(auth=...)`.
+
+## Multiplexed Streams (Beta)
+
+A single stream is ordered, which caps its throughput. When one stream is the bottleneck and
+you do not need a global order, a multiplexed stream opens several sub-streams to one table
+and distributes records round-robin across them. Records keep their order within a
+sub-stream, but there is no order across sub-streams.
+
+Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
+Multiplexed streams support JSON, protobuf, and Avro records, with OAuth or a custom headers
+provider. For JSON, first migrate to protobuf and measure again before multiplexing.
+
+```python
+stream = (
+    sdk.stream_builder()
+    .table("catalog.schema.events")
+    .oauth(client_id, client_secret)
+    .compiled_proto(record_pb2.AirQuality.DESCRIPTOR.file.serialized_pb)
+    .multiplexed(4)
+    .build()
+)
+
+for record in records:
+    stream.ingest_record(record)  # queues only; returns a message ID
+stream.flush()  # confirms every sub-stream once
+stream.close()
+```
+
+- `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned
+  `MultiplexedStreamBuilder` captures the configuration as it is at that point and only has
+  `ack_callback()` and `build()`. `max_inflight_requests` is a budget for the whole stream,
+  divided evenly across sub-streams, so it must be at least `n`.
+- `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
+  identifies the sub-stream and the record's position in it. Message IDs are not ordered and
+  may be negative. Pass one to `wait_for_message_id()` on the same stream; use `flush()` to
+  confirm everything.
+- A batch from `ingest_records()` lands on one sub-stream, and one message ID covers it.
+- Register an `AckCallback` with `multiplexed(n).ack_callback(callback)`. It is shared by
+  every sub-stream; its `offset` argument receives the message ID, and sub-streams may call
+  it concurrently. `ack_callback()` on the stream builder itself is for ordinary streams and
+  is rejected for multiplexed streams.
+- Opening is atomic: each sub-stream opens after a random delay of up to one second, and if
+  any fails, the others are closed and `build()` raises.
+- After a sub-stream fails, the stream rejects new records. `get_unacked_records()` and
+  `get_unacked_batches()` close the stream if needed and return the records that were never
+  acknowledged, across every sub-stream, so you can ingest them into a new stream. There is no
+  `recreate_stream()` for multiplexed streams.
+
+See `examples/sync_example_multiplexed.py` and `examples/async_example_multiplexed.py`.
 
 ## Configuration
 

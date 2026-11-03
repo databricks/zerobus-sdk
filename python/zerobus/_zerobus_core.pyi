@@ -438,6 +438,47 @@ class sync:
             """Flush pending records and close the stream."""
             ...
 
+    class MultiplexedStream:
+        """A stream that distributes records round-robin across several sub-streams (Beta).
+
+        Opened by ``ZerobusSdk.open_multiplexed_stream()``; users create it with
+        ``ZerobusSdk.stream_builder()...multiplexed(n).build()``. Ingest methods return an opaque message
+        ID, which is not ordered and may be negative.
+        """
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure."""
+            ...
+
+        def ingest_record(self, payload: Any) -> int:
+            """Queue a record on the next sub-stream and return its message ID."""
+            ...
+
+        def ingest_records(self, payloads: Any) -> Optional[int]:
+            """Queue a batch on one sub-stream and return its message ID, or ``None`` for an empty batch."""
+            ...
+
+        def wait_for_message_id(self, message_id: int) -> None:
+            """Wait until the record or batch behind ``message_id`` is acknowledged."""
+            ...
+
+        def flush(self) -> None:
+            """Wait until every sub-stream's pending records are acknowledged."""
+            ...
+
+        def close(self) -> None:
+            """Flush pending records and close every sub-stream."""
+            ...
+
+        def get_unacked_records(self) -> List[bytes]:
+            """Unacknowledged records across every sub-stream. Closes the stream first."""
+            ...
+
+        def get_unacked_batches(self) -> List[List[bytes]]:
+            """Unacknowledged batches across every sub-stream. Closes the stream first."""
+            ...
+
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
@@ -456,6 +497,19 @@ class sync:
             settings: StreamSettings,
         ) -> "ZerobusStream":
             """Open an ordinary stream configured by ``stream_builder()``."""
+            ...
+
+        def open_multiplexed_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+            stream_count: int,
+            ack_callback: Optional[AckCallback] = None,
+        ) -> "MultiplexedStream":
+            """Open every sub-stream of a multiplexed stream configured by ``stream_builder()`` (Beta).
+
+            ``ack_callback`` receives message IDs.
+            """
             ...
 
         def __init__(
@@ -687,6 +741,47 @@ class aio:
             """Flush pending records and close the stream."""
             ...
 
+    class MultiplexedStream:
+        """A stream that distributes records round-robin across several sub-streams (Beta).
+
+        Opened by ``ZerobusSdk.open_multiplexed_stream()``; users create it with
+        ``ZerobusSdk.stream_builder()...multiplexed(n).build()``. Ingest methods return an opaque message
+        ID, which is not ordered and may be negative.
+        """
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure."""
+            ...
+
+        async def ingest_record(self, payload: Any) -> int:
+            """Queue a record on the next sub-stream and return its message ID."""
+            ...
+
+        async def ingest_records(self, payloads: Any) -> Optional[int]:
+            """Queue a batch on one sub-stream and return its message ID, or ``None`` for an empty batch."""
+            ...
+
+        async def wait_for_message_id(self, message_id: int) -> None:
+            """Wait until the record or batch behind ``message_id`` is acknowledged."""
+            ...
+
+        async def flush(self) -> None:
+            """Wait until every sub-stream's pending records are acknowledged."""
+            ...
+
+        async def close(self) -> None:
+            """Flush pending records and close every sub-stream."""
+            ...
+
+        async def get_unacked_records(self) -> List[bytes]:
+            """Unacknowledged records across every sub-stream. Closes the stream first."""
+            ...
+
+        async def get_unacked_batches(self) -> List[List[bytes]]:
+            """Unacknowledged batches across every sub-stream. Closes the stream first."""
+            ...
+
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
 
@@ -705,6 +800,19 @@ class aio:
             settings: StreamSettings,
         ) -> "ZerobusStream":
             """Open an ordinary stream configured by ``stream_builder()``."""
+            ...
+
+        async def open_multiplexed_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+            stream_count: int,
+            ack_callback: Optional[AckCallback] = None,
+        ) -> "MultiplexedStream":
+            """Open every sub-stream of a multiplexed stream configured by ``stream_builder()`` (Beta).
+
+            ``ack_callback`` receives message IDs.
+            """
             ...
 
         def __init__(

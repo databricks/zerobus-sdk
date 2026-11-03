@@ -42,12 +42,13 @@ from typing import Iterator, Optional
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
-from zerobus.sdk.shared.stream_builder import _GrpcStreamBuilderBase
+from zerobus.sdk.shared.stream_builder import _GrpcStreamBuilderBase, _MultiplexedStreamBuilderBase
 
 # Import base Rust SDK classes
 _RustZerobusSdk = _core.sync.ZerobusSdk
 _RustZerobusStream = _core.sync.ZerobusStream
 PersistentStream = _core.sync.PersistentStream
+_RustMultiplexedStream = _core.sync.MultiplexedStream
 
 
 class ZerobusStream:
@@ -278,11 +279,141 @@ class PersistentStreamBuilder(_PersistentStreamBuilderBase):
         return self._sdk.open_persistent_stream(table_properties, settings, self._check_stream_id(stream_id))
 
 
+class MultiplexedStream:
+    """
+    A stream that distributes records round-robin across several sub-streams (Beta).
+
+    Create one with ``ZerobusSdk.stream_builder()``, then ``multiplexed(n)`` and ``build()``.
+    Ingest in a loop, then call ``flush()`` once to confirm durability. Records keep their order
+    within a sub-stream, but there is no order across sub-streams.
+
+    Ingest methods return a message ID: an opaque ``int`` that identifies the sub-stream and
+    the record's position in it. Message IDs are not ordered and may be negative. Pass one to
+    ``wait_for_message_id()`` on this stream; do not compare them or use them with another
+    stream.
+
+    Once a sub-stream fails, the stream rejects new records. Recover the unacknowledged ones
+    with ``get_unacked_records()`` or ``get_unacked_batches()`` and ingest them into a new
+    stream. Handles Avro encoding transparently on an Avro stream.
+    """
+
+    def __init__(self, rust_stream: _RustMultiplexedStream, avro_encoder=None):
+        self._inner = rust_stream
+        self._avro = avro_encoder  # AvroEncoder for an Avro stream, else None
+
+    def _encode_payload(self, payload):
+        """Encode payload to Avro bytes on an Avro stream; else pass through."""
+        return payload if self._avro is None else self._avro.encode(payload)
+
+    def _encode_payloads(self, payloads):
+        """Encode a batch on an Avro stream; else pass through."""
+        return payloads if self._avro is None else self._avro.encode_batch(payloads)
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the stream is closed, by ``close()`` or by a sub-stream failure."""
+        return self._inner.is_closed
+
+    def ingest_record(self, payload) -> int:
+        """Queue a record on the next sub-stream and return its message ID.
+
+        Returns as soon as the record is queued; the SDK sends it and tracks its
+        acknowledgment in the background. The idiomatic flow is to ingest in a loop and call
+        ``flush()`` once to confirm durability (or use an ``AckCallback``). If the selected
+        sub-stream is at capacity, this waits for it to drain rather than rerouting.
+        """
+        return self._inner.ingest_record(self._encode_payload(payload))
+
+    def ingest_records(self, payloads) -> Optional[int]:
+        """Queue a batch on one sub-stream and return one message ID for it.
+
+        Returns ``None`` for an empty batch.
+        """
+        return self._inner.ingest_records(self._encode_payloads(payloads))
+
+    def wait_for_message_id(self, message_id: int) -> None:
+        """Block until the record or batch behind ``message_id`` is acknowledged.
+
+        Use when a specific record must be confirmed before continuing. Unlike offsets,
+        message IDs are not ordered, so acknowledging one says nothing about the others. For
+        bulk durability, ingest in a loop and call ``flush()`` once.
+        """
+        return self._inner.wait_for_message_id(message_id)
+
+    def flush(self) -> None:
+        """Flush every sub-stream, blocking until all pending records are acknowledged.
+
+        The idiomatic way to confirm durability: ingest in a loop, then call ``flush()``
+        once to confirm everything queued so far is committed.
+        """
+        return self._inner.flush()
+
+    def close(self) -> None:
+        """Flush pending records and close every sub-stream."""
+        return self._inner.close()
+
+    def get_unacked_records(self) -> Iterator[bytes]:
+        """
+        Get iterator of unacknowledged records, across every sub-stream.
+
+        Closes the stream first if it is still open, so the result is complete. Avro
+        records are returned as encoded bytes.
+
+        Returns:
+            Iterator[bytes]: Iterator yielding record payloads that were ingested but not acknowledged.
+        """
+        return iter(self._inner.get_unacked_records())
+
+    def get_unacked_batches(self) -> Iterator[list[bytes]]:
+        """
+        Get iterator of unacknowledged batches, across every sub-stream.
+
+        Closes the stream first if it is still open, so the result is complete.
+
+        Returns:
+            Iterator[List[bytes]]: Iterator yielding batches, where each batch is a list of record payloads.
+        """
+        return iter(self._inner.get_unacked_batches())
+
+
+class MultiplexedStreamBuilder(_MultiplexedStreamBuilderBase):
+    """Builds a multiplexed stream (Beta). Returned by ``StreamBuilder.multiplexed(n)``.
+
+    Example:
+        >>> stream = (
+        ...     sdk.stream_builder()
+        ...     .table("catalog.schema.events")
+        ...     .oauth("client-id", "client-secret")
+        ...     .compiled_proto(record_pb2.DESCRIPTOR.serialized_pb)
+        ...     .multiplexed(4)
+        ...     .build()
+        ... )
+        >>> for record in records:
+        ...     stream.ingest_record(record)
+        >>> stream.flush()
+    """
+
+    def build(self) -> MultiplexedStream:
+        """Open every sub-stream. Opening is atomic: if any sub-stream fails, the others are closed.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set, or if
+                ``ack_callback()`` was set on the stream builder instead of here.
+        """
+        from zerobus.sdk.shared.avro import make_encoder
+
+        table_properties, settings, stream_count, ack_callback = self._native_args()
+        avro_encoder = make_encoder(table_properties.avro_schema)
+        native = self._base._sdk.open_multiplexed_stream(table_properties, settings, stream_count, ack_callback)
+        return MultiplexedStream(native, avro_encoder)
+
+
 class StreamBuilder(_GrpcStreamBuilderBase):
     """Fluent builder for a stream, mirroring the Rust SDK's ``stream_builder()``.
 
     Obtain one from ``ZerobusSdk.stream_builder()``, set the table, authentication, and
-    record format, then call ``build()``.
+    record format, then call ``build()`` for an ordinary stream, or ``multiplexed(n)`` and
+    then ``build()`` for a multiplexed stream (Beta).
 
     Example:
         >>> stream = (
@@ -296,6 +427,8 @@ class StreamBuilder(_GrpcStreamBuilderBase):
         ...     stream.ingest_record_offset(record)
         >>> stream.flush()
     """
+
+    _MULTIPLEXED_BUILDER = MultiplexedStreamBuilder
 
     def build(self) -> ZerobusStream:
         """Open an ordinary stream.
@@ -474,8 +607,9 @@ class ZerobusSdk:
         Start building a stream, mirroring the Rust SDK's ``stream_builder()``.
 
         Set the table, authentication (OAuth or a custom headers provider), and record format
-        (JSON, protobuf, or Avro), then call ``build()``. For external-IdP federation, use
-        ``create_stream(auth=...)``.
+        (JSON, protobuf, or Avro), then call ``build()`` for an ordinary stream, or
+        ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta). For
+        external-IdP federation, use ``create_stream(auth=...)``.
         """
         return StreamBuilder(self._inner)
 
@@ -503,6 +637,8 @@ __all__ = [
     "PersistentStream",
     "PersistentStreamBuilder",
     "StreamBuilder",
+    "MultiplexedStream",
+    "MultiplexedStreamBuilder",
     "ZerobusArrowStream",
     "RecordAcknowledgment",
     "TableProperties",
