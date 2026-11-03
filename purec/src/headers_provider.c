@@ -302,7 +302,7 @@ oauth_get_headers(void *user_data, zerobus_headers_t *headers)
     zb_fetched_token_t token = {0};
     zerobus_error_t *error = NULL;
     zerobus_status_t status = zb_oauth_fetch_token(
-        sdk->uc_tls_context, sdk->uc_endpoint, sdk->workspace_id, stream->table,
+        sdk->tls_context, sdk->uc_endpoint, sdk->workspace_id, stream->table,
         state->client_id, state->client_secret,
         zb_deadline_after_ms(stream->config.recovery_timeout_ms), &token,
         &error);

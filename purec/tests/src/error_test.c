@@ -77,6 +77,12 @@ static void test_error_is_retryable(void)
     CHECK(!zerobus_error_is_retryable(range));
     zerobus_error_free(range);
 
+    /* The stream does not recover from running out of memory either. */
+    zerobus_error_t *oom = zb_error_newf(ZEROBUS_STATUS_OUT_OF_MEMORY, "oom");
+    CHECK(oom != NULL);
+    CHECK(!zerobus_error_is_retryable(oom));
+    zerobus_error_free(oom);
+
     /* Transient transport failures are retryable. */
     zerobus_error_t *internal = zb_error_newf(ZEROBUS_STATUS_INTERNAL, "blip");
     CHECK(internal != NULL);

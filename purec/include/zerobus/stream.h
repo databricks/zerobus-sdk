@@ -28,6 +28,7 @@ ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_new(
     zerobus_sdk_t *sdk, zerobus_stream_builder_t **out_builder,
     zerobus_error_t **out_error);
 
+/* Sets the table, as catalog.schema.table in printable ASCII. Required. */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL zerobus_stream_builder_set_table(
     zerobus_stream_builder_t *builder, zerobus_string_view_t table_name,
     zerobus_error_t **out_error);

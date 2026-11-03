@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "internal/landing_zone.h"
+#include "internal/platform/concurrency.h"
 #include "zerobus/common.h"
 
 /* Stream options, each field is documented at its setter in zerobus/stream.h.
@@ -41,8 +43,30 @@ struct zerobus_stream {
     char *table;
     zb_stream_config_t config;
     zerobus_headers_provider_t *headers_provider; /* owned reference */
+    zb_landing_zone_t *zone;
 
     atomic_bool closed; /* set by close, rejects ingest once true */
+
+    /* Highest acknowledged offset, -1 before the first. Written by the
+     * receiver, which then broadcasts acked_changed under mutex while
+     * flush_waiters is nonzero. */
+    _Atomic zerobus_offset_t acked;
+    atomic_uint flush_waiters;
+    zb_cond_t acked_changed;
+
+    /* Guards the state the stream's threads share: the stream's own, and its
+     * current attempt's fields marked so in internal/stream/workers.h. One
+     * lock covers both so that the supervisor can wait for a change to either
+     * in a single wait, such as a worker finishing or a close. changed is
+     * broadcast on every change to it. */
+    zb_mutex_t mutex;
+    zb_cond_t changed;
+    bool opened; /* The first open finished, with open_status. */
+    zerobus_status_t open_status;
+    zerobus_status_t failure; /* Terminal failure; OK while usable. */
+    char *failure_message;
+    bool finishing; /* Close flushed: end the call cleanly, then stop. */
+    bool aborting;  /* Free, or a close whose flush failed: stop at once. */
 };
 
 #endif /* ZB_STREAM_H */

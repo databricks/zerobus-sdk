@@ -1,9 +1,7 @@
 #include "oauth.h"
 
 #include <jansson.h>
-#include <stdarg.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,32 +25,6 @@ void zb_fetched_token_clear(zb_fetched_token_t *token)
 }
 
 /* ---- helpers ----------------------------------------------------------- */
-
-/* Returns a new printf-formatted string, or NULL on failure. */
-static char *format(const char *fmt, ...)
-#if defined(__GNUC__)
-    __attribute__((format(printf, 1, 2)))
-#endif
-    ;
-
-static char *format(const char *fmt, ...)
-{
-    va_list args;
-    va_start(args, fmt);
-    int len = vsnprintf(NULL, 0, fmt, args);
-    va_end(args);
-    if (len < 0) {
-        return NULL;
-    }
-    char *text = (char *)malloc((size_t)len + 1);
-    if (text == NULL) {
-        return NULL;
-    }
-    va_start(args, fmt);
-    vsnprintf(text, (size_t)len + 1, fmt, args);
-    va_end(args);
-    return text;
-}
 
 static char *base64_encode(const unsigned char *data, size_t len)
 {
@@ -156,7 +128,8 @@ static char *authorization_details(const char *table)
     char *schema = json_quote(table, (size_t)(table_dot - table));
     char *full_name = json_quote(table, strlen(table));
     char *text = catalog != NULL && schema != NULL && full_name != NULL
-                     ? format(AUTHORIZATION_DETAILS, catalog, schema, full_name)
+                     ? zb_strdup_printf(AUTHORIZATION_DETAILS, catalog, schema,
+                                        full_name)
                      : NULL;
     free(catalog);
     free(schema);
@@ -167,9 +140,10 @@ static char *authorization_details(const char *table)
 static bool add_field(char **form, const char *name, const char *value)
 {
     char *encoded = form_encode(value);
-    char *grown = encoded != NULL ? format("%s%s%s=%s", *form ? *form : "",
-                                           *form ? "&" : "", name, encoded)
-                                  : NULL;
+    char *grown = encoded != NULL
+                      ? zb_strdup_printf("%s%s%s=%s", *form ? *form : "",
+                                         *form ? "&" : "", name, encoded)
+                      : NULL;
     free(encoded);
     free(*form);
     *form = grown;
@@ -192,13 +166,14 @@ static zerobus_status_t build_request(const char *workspace_id,
                                       zerobus_headers_t *headers,
                                       char **out_body)
 {
-    char *credentials = format("%s:%s", client_id, client_secret);
+    char *credentials = zb_strdup_printf("%s:%s", client_id, client_secret);
     char *encoded = credentials != NULL
                         ? base64_encode((const unsigned char *)credentials,
                                         strlen(credentials))
                         : NULL;
-    char *authorization = encoded != NULL ? format("Basic %s", encoded) : NULL;
-    char *resource = format(
+    char *authorization =
+        encoded != NULL ? zb_strdup_printf("Basic %s", encoded) : NULL;
+    char *resource = zb_strdup_printf(
         "api://databricks/workspaces/%s/zerobusDirectWriteApi", workspace_id);
     char *details = authorization_details(table);
     char *body = NULL;

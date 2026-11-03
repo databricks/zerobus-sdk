@@ -1,4 +1,6 @@
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -379,6 +381,25 @@ char *zb_strdup(const char *s)
         return NULL;
     }
     return zb_strndup(s, strlen(s));
+}
+
+char *zb_strdup_printf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(NULL, 0, format, args);
+    va_end(args);
+    if (len < 0) {
+        return NULL;
+    }
+    char *text = (char *)malloc((size_t)len + 1);
+    if (text == NULL) {
+        return NULL;
+    }
+    va_start(args, format);
+    (void)vsnprintf(text, (size_t)len + 1, format, args);
+    va_end(args);
+    return text;
 }
 
 /*

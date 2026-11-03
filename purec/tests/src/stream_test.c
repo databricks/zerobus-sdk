@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "internal/common/utils.h"
 #include "internal/platform/concurrency.h"
 #include "test_common.h"
 
@@ -210,6 +211,20 @@ static void test_stream_builder_validation(void)
         ZEROBUS_STATUS_INVALID_ARGUMENT);
     zerobus_error_free(err);
     err = NULL;
+
+    /* Not a header value: a control character, or a non-ASCII one. */
+    static const char *const unsendable[] = {"cat.sch.t\nx",
+                                             "cat.sch.t\xc3\xa9"};
+    for (size_t i = 0; i < sizeof(unsendable) / sizeof(unsendable[0]); ++i) {
+        CHECK_EQ_INT(
+            zerobus_stream_builder_set_table(stb, sv(unsendable[i]), &err),
+            ZEROBUS_STATUS_INVALID_ARGUMENT);
+        CHECK(err != NULL && zb_view_equals(zerobus_error_message(err),
+                                            "table name must be printable "
+                                            "ASCII"));
+        zerobus_error_free(err);
+        err = NULL;
+    }
 
     /* Empty credentials. */
     CHECK_EQ_INT(
@@ -656,6 +671,9 @@ static void test_concurrent_sdk_child_ownership(void)
                                                     sv("c.s.t"), NULL));
         REQUIRE_OK(zerobus_stream_builder_set_oauth(
             contexts[i].builder, sv("id"), sv("secret"), NULL));
+        /* Each of the many builds allocates a landing zone: keep it small. */
+        REQUIRE_OK(zerobus_stream_builder_set_max_inflight_requests(
+            contexts[i].builder, 4, NULL));
         REQUIRE_OK(zb_thread_create(&threads[i], build_and_free_streams,
                                     &contexts[i]));
         created++;

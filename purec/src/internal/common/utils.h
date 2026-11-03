@@ -107,6 +107,13 @@ char *zb_strdup_view(zerobus_string_view_t view);
 /* zb_strndup(s, strlen(s)), except a NULL s yields NULL. */
 char *zb_strdup(const char *s);
 
+/* A new printf-formatted string, or NULL on failure. */
+char *zb_strdup_printf(const char *format, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+
 /* Overwrite len bytes at p in a way the optimizer may not elide. Used for OAuth
  * secrets before freeing. NULL-safe. */
 void zb_secure_zero(void *p, size_t len);

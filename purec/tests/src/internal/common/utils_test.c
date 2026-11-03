@@ -361,6 +361,26 @@ static void test_strdup(void)
     CHECK(zb_strdup(NULL) == NULL);
 }
 
+/* The result is exactly as long as the formatted text, however long. */
+static void test_strdup_printf(void)
+{
+    char *text = zb_strdup_printf("%s %u%s", "status", 7u, "");
+    CHECK(text != NULL && strcmp(text, "status 7") == 0);
+    free(text);
+
+    char *empty = zb_strdup_printf("%s", "");
+    CHECK(empty != NULL && empty[0] == '\0');
+    free(empty);
+
+    char long_arg[1000];
+    memset(long_arg, 'x', sizeof(long_arg) - 1);
+    long_arg[sizeof(long_arg) - 1] = '\0';
+    char *long_text = zb_strdup_printf("<%s>", long_arg);
+    CHECK(long_text != NULL && strlen(long_text) == sizeof(long_arg) + 1 &&
+          long_text[0] == '<' && long_text[sizeof(long_arg)] == '>');
+    free(long_text);
+}
+
 static void test_secure(void)
 {
     char *p = NULL;
@@ -398,6 +418,7 @@ int main(void)
     test_url_validate();
     test_host_labels();
     test_strdup();
+    test_strdup_printf();
     test_secure();
     TEST_MAIN_RETURN();
 }
