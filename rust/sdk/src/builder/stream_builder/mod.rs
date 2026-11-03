@@ -244,7 +244,6 @@ impl<'a> StreamBuilder<'a> {
     /// Enable or disable automatic stream recovery.
     pub fn recovery(mut self, enabled: bool) -> Self {
         self.core.set_recovery(enabled);
-        self.sync_shared_settings();
         self
     }
 
@@ -266,21 +265,18 @@ impl<'a> StreamBuilder<'a> {
     /// Set the backoff time in milliseconds between recovery retries.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
         self.core.set_recovery_backoff_ms(ms);
-        self.sync_shared_settings();
         self
     }
 
     /// Set the maximum number of recovery retry attempts.
     pub fn recovery_retries(mut self, n: u32) -> Self {
         self.core.set_recovery_retries(n);
-        self.sync_shared_settings();
         self
     }
 
     /// Set the timeout in milliseconds for server acknowledgement.
     pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
         self.core.set_server_lack_of_ack_timeout_ms(ms);
-        self.sync_shared_settings();
         self
     }
 
@@ -318,7 +314,6 @@ impl<'a> StreamBuilder<'a> {
     /// and have no client-side payload-size enforcement.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
         self.core.set_max_ingest_payload_bytes(bytes);
-        self.sync_shared_settings();
         self
     }
 
@@ -413,24 +408,30 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Copy the settings owned by the core into the gRPC and Arrow configs.
-    ///
-    /// The core is the source of truth. The stream constructors still read the
-    /// two config structs, so every shared setter mirrors into them right away.
-    /// Arrow has no payload limit, so `max_ingest_payload_bytes` goes to gRPC only.
-    fn sync_shared_settings(&mut self) {
+    /// The gRPC stream options, with the settings the core owns copied in.
+    fn grpc_options(&self) -> StreamConfigurationOptions {
         let core = &self.core;
-        self.grpc_config.recovery = core.recovery;
-        self.grpc_config.recovery_retries = core.recovery_retries;
-        self.grpc_config.recovery_backoff_ms = core.recovery_backoff_ms;
-        self.grpc_config.server_lack_of_ack_timeout_ms = core.server_lack_of_ack_timeout_ms;
-        self.grpc_config.max_ingest_payload_bytes = core.max_ingest_payload_bytes;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.recovery = core.recovery;
-            self.arrow_config.recovery_retries = core.recovery_retries;
-            self.arrow_config.recovery_backoff_ms = core.recovery_backoff_ms;
-            self.arrow_config.server_lack_of_ack_timeout_ms = core.server_lack_of_ack_timeout_ms;
+        StreamConfigurationOptions {
+            recovery: core.recovery,
+            recovery_retries: core.recovery_retries,
+            recovery_backoff_ms: core.recovery_backoff_ms,
+            server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
+            max_ingest_payload_bytes: core.max_ingest_payload_bytes,
+            ..self.grpc_config.clone()
+        }
+    }
+
+    /// The Arrow stream options, with the settings the core owns copied in.
+    /// Arrow has no payload limit, so `max_ingest_payload_bytes` is not copied.
+    #[cfg(feature = "arrow-flight")]
+    fn arrow_options(&self) -> ArrowStreamConfigurationOptions {
+        let core = &self.core;
+        ArrowStreamConfigurationOptions {
+            recovery: core.recovery,
+            recovery_retries: core.recovery_retries,
+            recovery_backoff_ms: core.recovery_backoff_ms,
+            server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
+            ..self.arrow_config.clone()
         }
     }
 
@@ -517,6 +518,7 @@ impl<'a> StreamBuilder<'a> {
         let headers_provider = self.resolve_headers_provider()?;
 
         self.grpc_config.record_type = format.record_type;
+        let config = self.grpc_options();
         let table_properties = TableProperties {
             table_name: self.core.table_name,
             descriptor_proto: format.descriptor_proto,
@@ -530,7 +532,7 @@ impl<'a> StreamBuilder<'a> {
             channel,
             table_properties,
             headers_provider,
-            config: self.grpc_config,
+            config,
         })
     }
 
@@ -548,6 +550,7 @@ impl<'a> StreamBuilder<'a> {
         self.warn_arrow_ignored_options();
 
         let headers_provider = self.resolve_headers_provider()?;
+        let options = self.arrow_options();
 
         let table_properties = ArrowTableProperties {
             table_name: self.core.table_name,
@@ -561,7 +564,7 @@ impl<'a> StreamBuilder<'a> {
             self.core.sdk.connector_factory.clone(),
             table_properties,
             headers_provider,
-            self.arrow_config,
+            options,
             Arc::clone(&self.core.sdk.sdk_identifier),
             self.stats_exporter,
         )
@@ -610,7 +613,7 @@ impl<'a> StreamBuilder<'a> {
     fn warn_arrow_ignored_options(&self) {
         // `max_ingest_payload_bytes` only applies to JSON and Protocol Buffer streams; warn if the
         // user changed it from the default before building an Arrow stream.
-        if self.grpc_config.max_ingest_payload_bytes
+        if self.core.max_ingest_payload_bytes
             != StreamConfigurationOptions::default().max_ingest_payload_bytes
         {
             warn_payload_limit_ignored_for_arrow();

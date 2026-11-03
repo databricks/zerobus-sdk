@@ -217,7 +217,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
-        let mut options = self.inner.grpc_config;
+        let mut options = self.inner.grpc_options();
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
@@ -276,12 +276,12 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .expect("capacity was validated");
         let inner = self.inner;
         inner.warn_arrow_ignored_options();
+        let mut options = inner.arrow_options();
+        options.max_inflight_batches = capacity;
         let table_properties = super::ArrowTableProperties {
             table_name: inner.core.table_name,
             schema,
         };
-        let mut options = inner.arrow_config;
-        options.max_inflight_batches = capacity;
         let sdk = inner.core.sdk;
         let opens = delays
             .into_iter()
