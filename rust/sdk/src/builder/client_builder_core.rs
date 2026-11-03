@@ -1,13 +1,14 @@
 //! Builder state shared by every client kind that targets one table.
 //!
-//! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`], and
-//! its public setters write the core's fields. The core holds the SDK, the
-//! table name, the authentication choice, the record format, recovery on or
-//! off, the retry count and backoff, the server acknowledgement timeout, and
-//! the payload limit, which Arrow Flight streams ignore. Each wrapper decides
-//! which formats it exposes and how it reports a missing one. Settings that
-//! only streams have (in-flight limits, flush and recovery-attempt timeouts,
-//! callbacks) stay in the stream builder.
+//! [`StreamBuilder`](super::StreamBuilder) and
+//! [`UnaryClientBuilder`](super::UnaryClientBuilder) each wrap a
+//! [`ClientBuilderCore`], and their public setters write the core's fields. The
+//! core holds the SDK, the table name, the authentication choice, the record
+//! format, recovery on or off, the retry count and backoff, the server
+//! acknowledgement timeout, and the payload limit, which Arrow Flight streams
+//! ignore. Each wrapper decides which formats it exposes and how it reports a
+//! missing one. Settings that only streams have (in-flight limits, flush and
+//! recovery-attempt timeouts, callbacks) stay in the stream builder.
 //!
 //! Authentication is private: set it through the `set_*` auth methods.
 //! `resolve_headers_provider()` turns it into a headers provider.
