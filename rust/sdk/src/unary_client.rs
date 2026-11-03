@@ -197,7 +197,7 @@ impl UnaryClient {
         debug!(body_bytes = records_json.len(), "Sending InsertRecords");
         let request = InsertRecordsRequest {
             table_name: Some(self.table_name.clone()),
-            records_json: Some(records_json),
+            records_json: Some(records_json.into()),
         };
         self.send_with_retries(&request).await
     }
@@ -210,6 +210,11 @@ impl UnaryClient {
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
         let mut auth_retry_available = options.recovery_retries > 0;
+        let max_attempts = if options.recovery {
+            options.recovery_retries.saturating_add(1)
+        } else {
+            1
+        };
         let mut attempts = 0u32;
         let attempt = || {
             attempts += 1;
@@ -219,7 +224,7 @@ impl UnaryClient {
                 if let Err(e) = &result {
                     warn!(
                         attempt = attempt_no,
-                        max_attempts = options.recovery_retries.saturating_add(1),
+                        max_attempts,
                         retryable = e.is_retryable(),
                         backoff_ms = options.recovery_backoff_ms,
                         "InsertRecords attempt failed: {}",
@@ -303,15 +308,8 @@ where
         return Ok(None);
     }
 
-    records.iter().enumerate().try_for_each(|(index, record)| {
-        validate_json_object(record).map_err(|problem| {
-            ZerobusError::InvalidArgument(format!(
-                "record {index} is not a single JSON object: {problem}"
-            ))
-        })
-    })?;
-
     // The server limits the whole body, so the separators and brackets count.
+    // Checked before validation, which parses every record.
     let record_bytes = records.iter().map(String::len).sum::<usize>();
     let (body_len, shape) = match body_kind {
         UnaryBody::JsonArray => (record_bytes + records.len() + 1, "a JSON array"),
@@ -323,18 +321,38 @@ where
         )));
     }
 
-    let body = match body_kind {
-        UnaryBody::JsonArray => format!("[{}]", records.join(",")),
-        UnaryBody::JsonLines => records
-            .iter()
+    records.iter().enumerate().try_for_each(|(index, record)| {
+        validate_json_object(record).map_err(|problem| {
+            ZerobusError::InvalidArgument(format!(
+                "record {index} is not a single JSON object: {problem}"
+            ))
+        })
+    })?;
+
+    let (open, separator, close): (&[u8], u8, &[u8]) = match body_kind {
+        UnaryBody::JsonArray => (b"[", b',', b"]"),
+        UnaryBody::JsonLines => (b"", b'\n', b""),
+    };
+    let mut body = Vec::with_capacity(body_len);
+    body.extend_from_slice(open);
+    records.iter().enumerate().for_each(|(index, record)| {
+        if index > 0 {
+            body.push(separator);
+        }
+        match body_kind {
+            UnaryBody::JsonArray => body.extend_from_slice(record.as_bytes()),
             // A validated record has raw line breaks only between tokens, where
             // a space means the same, so this keeps its value and keeps it on
             // one line.
-            .map(|record| record.replace(['\n', '\r'], " "))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    Ok(Some(body.into_bytes()))
+            UnaryBody::JsonLines => body.extend(record.bytes().map(|byte| match byte {
+                b'\n' | b'\r' => b' ',
+                other => other,
+            })),
+        }
+    });
+    body.extend_from_slice(close);
+    debug_assert_eq!(body.len(), body_len);
+    Ok(Some(body))
 }
 
 /// Extracts the JSON text of record `index`, or fails if it is not a JSON record.
@@ -480,6 +498,13 @@ mod tests {
             msg.contains("5 bytes") && msg.contains("JSON Lines"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn size_limit_is_checked_before_records_are_parsed() {
+        let records: Vec<PreparedInput> = vec![JsonString("{not json".to_string()).into()];
+        let msg = invalid_argument(build_request_body(records, 5, UnaryBody::JsonArray));
+        assert!(msg.contains("payload too large"), "{msg}");
     }
 
     #[test]
