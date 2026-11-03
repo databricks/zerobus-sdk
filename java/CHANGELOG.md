@@ -1,5 +1,32 @@
 # Version changelog
 
+## Release v1.8.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 3.1.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v3.1.0.
+
+### Internal Changes
+
+- Bump `central-publishing-maven-plugin` from 0.11.0 to 0.12.0 so the Maven
+  Central deployment bundle no longer includes Maven 3.10 local-repository
+  files that caused Central to reject the upload.
+- Set the JNI crate version to 1.8.1 so the wire user-agent is
+  `zerobus-sdk-java/1.8.1`.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v1.8.0
 
 ### Major Changes
