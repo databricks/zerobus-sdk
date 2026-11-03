@@ -1,15 +1,18 @@
 //! Builder state shared by every client kind that targets one table.
 //!
-//! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`] and
-//! forwards its public setters to it. The core holds only what is independent
-//! of the transport: the SDK, the table name, the authentication choice, and
-//! the record format. Each wrapper decides which formats it exposes and how it
-//! reports a missing one.
+//! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`], and
+//! its public setters write the core's fields. The core holds only what is
+//! independent of the transport: the SDK, the table name, the authentication
+//! choice, and the record format. Each wrapper decides which formats it exposes
+//! and how it reports a missing one.
 //!
-//! The core also holds the settings that every client kind honors: recovery on
-//! or off, retry count and backoff, the server acknowledgement timeout, and the
-//! per-call payload limit. Settings that only streams have (in-flight limits,
-//! flush and recovery-attempt timeouts, callbacks) stay in the stream builder.
+//! The core also holds the retry settings: recovery on or off, retry count and
+//! backoff, and the server acknowledgement timeout. It holds the per-call
+//! payload limit too, which Arrow Flight streams ignore. Settings that only
+//! streams have (in-flight limits, flush and recovery-attempt timeouts,
+//! callbacks) stay in the stream builder. Authentication stays private: set it
+//! through the `set_*` auth methods and read it only through
+//! `resolve_headers_provider()`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -148,10 +151,6 @@ impl<'a> ClientBuilderCore<'a> {
         }
     }
 
-    pub(super) fn set_table(&mut self, table_name: String) {
-        self.table_name = table_name;
-    }
-
     pub(super) fn set_oauth(&mut self, client_id: String, client_secret: String) {
         self.auth = Some(AuthConfig::OAuth {
             client_id,
@@ -177,30 +176,6 @@ impl<'a> ClientBuilderCore<'a> {
     #[cfg(feature = "testing")]
     pub(super) fn set_no_auth(&mut self) {
         self.auth = Some(AuthConfig::NoAuth);
-    }
-
-    pub(super) fn set_format(&mut self, format: FormatConfig) {
-        self.format = Some(format);
-    }
-
-    pub(super) fn set_recovery(&mut self, enabled: bool) {
-        self.recovery = enabled;
-    }
-
-    pub(super) fn set_recovery_retries(&mut self, n: u32) {
-        self.recovery_retries = n;
-    }
-
-    pub(super) fn set_recovery_backoff_ms(&mut self, ms: u64) {
-        self.recovery_backoff_ms = ms;
-    }
-
-    pub(super) fn set_server_lack_of_ack_timeout_ms(&mut self, ms: u64) {
-        self.server_lack_of_ack_timeout_ms = ms;
-    }
-
-    pub(super) fn set_max_ingest_payload_bytes(&mut self, bytes: usize) {
-        self.max_ingest_payload_bytes = bytes;
     }
 
     /// Name of the configured auth kind, for `Debug` output.
