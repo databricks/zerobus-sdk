@@ -11,8 +11,8 @@
 //! `ephemeral.rs` holds `build()`, and `multiplexed.rs` holds `multiplexed()`
 //! and `multiplexed_ack_callback()`. Persistent streams do not support
 //! multiplexing or Arrow Flight. The Arrow Flight setters and `build_arrow()`
-//! are still in this file. The table and authentication state lives in
-//! [`ClientBuilderCore`], which the public setters forward to.
+//! are still in this file. The table, authentication, record format, and retry
+//! settings live in [`ClientBuilderCore`], which the public setters write.
 //!
 //! # Examples
 //!
@@ -98,8 +98,12 @@ use crate::stream::{
 #[must_use = "a StreamBuilder does nothing until `.build()` is called"]
 pub struct StreamBuilder<'a> {
     core: ClientBuilderCore<'a>,
+    /// Stream-only gRPC settings. Its copies of the core's settings are stale
+    /// until [`grpc_options`](Self::grpc_options) fills them in at build time.
     grpc_config: StreamConfigurationOptions,
     multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
+    /// Stream-only Arrow settings. Its copies of the core's settings are stale
+    /// until [`arrow_options`](Self::arrow_options) fills them in at build time.
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
@@ -148,7 +152,7 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the fully-qualified Unity Catalog table name (e.g., `"catalog.schema.table"`).
     pub fn table(mut self, table_name: impl Into<String>) -> Self {
-        self.core.set_table(table_name.into());
+        self.core.table_name = table_name.into();
         self
     }
 
@@ -197,14 +201,13 @@ impl<'a> StreamBuilder<'a> {
 
     /// Select JSON record format.
     pub fn json(mut self) -> Self {
-        self.core.set_format(FormatConfig::Json);
+        self.core.format = Some(FormatConfig::Json);
         self
     }
 
     /// Select compiled protobuf record format.
     pub fn compiled_proto(mut self, descriptor: prost_types::DescriptorProto) -> Self {
-        self.core
-            .set_format(FormatConfig::CompiledProto(Box::new(descriptor)));
+        self.core.format = Some(FormatConfig::CompiledProto(Box::new(descriptor)));
         self
     }
 
@@ -219,14 +222,14 @@ impl<'a> StreamBuilder<'a> {
     /// Fill records with [`DynamicRecord`](crate::DynamicRecord). Wire-identical to
     /// [`compiled_proto`](Self::compiled_proto).
     pub fn dynamic_proto(mut self, descriptor: MessageDescriptor) -> Self {
-        self.core.set_format(FormatConfig::DynamicProto(descriptor));
+        self.core.format = Some(FormatConfig::DynamicProto(descriptor));
         self
     }
 
     /// Select Arrow Flight record format.
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
-        self.core.set_format(FormatConfig::Arrow(schema));
+        self.core.format = Some(FormatConfig::Arrow(schema));
         self
     }
 
@@ -237,13 +240,13 @@ impl<'a> StreamBuilder<'a> {
     /// ([`AvroBytes`](crate::AvroBytes)).
     #[cfg(feature = "avro")]
     pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
-        self.core.set_format(FormatConfig::Avro(schema_json.into()));
+        self.core.format = Some(FormatConfig::Avro(schema_json.into()));
         self
     }
 
     /// Enable or disable automatic stream recovery.
     pub fn recovery(mut self, enabled: bool) -> Self {
-        self.core.set_recovery(enabled);
+        self.core.recovery = enabled;
         self
     }
 
@@ -264,19 +267,19 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the backoff time in milliseconds between recovery retries.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
-        self.core.set_recovery_backoff_ms(ms);
+        self.core.recovery_backoff_ms = ms;
         self
     }
 
     /// Set the maximum number of recovery retry attempts.
     pub fn recovery_retries(mut self, n: u32) -> Self {
-        self.core.set_recovery_retries(n);
+        self.core.recovery_retries = n;
         self
     }
 
     /// Set the timeout in milliseconds for server acknowledgement.
     pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
-        self.core.set_server_lack_of_ack_timeout_ms(ms);
+        self.core.server_lack_of_ack_timeout_ms = ms;
         self
     }
 
@@ -313,7 +316,7 @@ impl<'a> StreamBuilder<'a> {
     /// Arrow Flight streams (built with `build_arrow()`) do not read this value
     /// and have no client-side payload-size enforcement.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
-        self.core.set_max_ingest_payload_bytes(bytes);
+        self.core.max_ingest_payload_bytes = bytes;
         self
     }
 
@@ -517,8 +520,8 @@ impl<'a> StreamBuilder<'a> {
             .into_grpc()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        self.grpc_config.record_type = format.record_type;
-        let config = self.grpc_options();
+        let mut config = self.grpc_options();
+        config.record_type = format.record_type;
         let table_properties = TableProperties {
             table_name: self.core.table_name,
             descriptor_proto: format.descriptor_proto,
@@ -614,7 +617,7 @@ impl<'a> StreamBuilder<'a> {
         // `max_ingest_payload_bytes` only applies to JSON and Protocol Buffer streams; warn if the
         // user changed it from the default before building an Arrow stream.
         if self.core.max_ingest_payload_bytes
-            != StreamConfigurationOptions::default().max_ingest_payload_bytes
+            != crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
         {
             warn_payload_limit_ignored_for_arrow();
         }

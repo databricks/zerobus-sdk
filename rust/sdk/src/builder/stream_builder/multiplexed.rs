@@ -204,7 +204,6 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .take()
             .expect("format was validated")
             .into_grpc()?;
-        self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
             table_name: self.inner.core.table_name.clone(),
@@ -218,6 +217,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
         let mut options = self.inner.grpc_options();
+        options.record_type = format.record_type;
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
