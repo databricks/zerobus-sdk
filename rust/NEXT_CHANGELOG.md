@@ -34,6 +34,13 @@
 
 ### Bug Fixes
 
+- An endpoint that isn't a valid URI now gives a non-retryable
+  `ZerobusError::InvalidZerobusEndpointError`, and an SDK identifier that isn't
+  a valid `user-agent` header value gives a non-retryable
+  `ZerobusError::InvalidArgument`. Both used to give a retryable
+  `ChannelCreationError`, so Arrow Flight stream creation retried them until
+  the recovery retries ran out.
+
 ### Documentation
 
 ### Internal Changes

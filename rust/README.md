@@ -1329,16 +1329,17 @@ Auto-recovered if `recovery` is enabled:
 - Connection timeouts
 - Temporary server errors
 - Stream closed by server
+- `ChannelCreationError` - The SDK couldn't open a channel, for example while TLS certificate files are being replaced
 
 ### Non-Retryable Errors
 Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
+- `InvalidZerobusEndpointError` - The Zerobus endpoint isn't a valid URI
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `InvalidSchema` (Arrow Flight) - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
-- `ChannelCreationError` - Failed to establish TLS connection
 
 `Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
 require manual intervention. During initial stream setup only, if recovery is enabled

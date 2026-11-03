@@ -86,12 +86,7 @@ impl GrpcChannelSource {
     }
 
     fn open(&self, tls: &ResolvedTls<'_>) -> ZerobusResult<OpenChannel> {
-        let endpoint = Endpoint::from_shared(self.endpoint.clone())
-            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
-            .user_agent(self.sdk_identifier.as_ref())
-            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
-
-        let endpoint = tls.apply(endpoint)?;
+        let endpoint = tls.apply(base_endpoint(&self.endpoint, &self.sdk_identifier)?)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
         let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
         let channel = match proxy_connector {
@@ -106,6 +101,15 @@ impl GrpcChannelSource {
             tls: tls.fingerprint(),
         })
     }
+}
+
+/// Parses `endpoint` and sets the `user-agent` header. Both fail the same way on
+/// every attempt, so the errors are not retryable.
+pub(crate) fn base_endpoint(endpoint: &str, sdk_identifier: &str) -> ZerobusResult<Endpoint> {
+    Endpoint::from_shared(endpoint.to_string())
+        .map_err(|err| ZerobusError::InvalidZerobusEndpointError(format!("{endpoint}: {err}")))?
+        .user_agent(sdk_identifier)
+        .map_err(|err| ZerobusError::InvalidArgument(err.to_string()))
 }
 
 #[cfg(test)]
@@ -149,9 +153,17 @@ mod tests {
     }
 
     fn source(tls_config: Arc<SwitchableTlsConfig>) -> GrpcChannelSource {
+        source_for("https://localhost:443", "zerobus-test", tls_config)
+    }
+
+    fn source_for(
+        endpoint: &str,
+        sdk_identifier: &str,
+        tls_config: Arc<SwitchableTlsConfig>,
+    ) -> GrpcChannelSource {
         GrpcChannelSource::new(
-            "https://localhost:443".to_string(),
-            Arc::from("zerobus-test"),
+            endpoint.to_string(),
+            Arc::from(sdk_identifier),
             tls_config,
             None,
         )
@@ -226,5 +238,30 @@ mod tests {
 
         assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
         assert!(source.current.lock().await.is_none());
+    }
+
+    /// The first open runs inside the stream's retry loop, so an endpoint or a
+    /// `user-agent` that can never work must not be retryable.
+    #[tokio::test]
+    async fn first_client_call_reports_an_invalid_endpoint_or_user_agent_as_not_retryable() {
+        let tls = || SwitchableTlsConfig::new(TlsSettings::new());
+
+        let err = source_for("https://bad host.example.com", "zerobus-test", tls())
+            .client()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ZerobusError::InvalidZerobusEndpointError(_)),
+            "{err:?}"
+        );
+        assert!(!err.is_retryable());
+        assert!(err.to_string().contains("bad host.example.com"), "{err}");
+
+        let err = source_for("https://localhost:443", "zerobus-test\n", tls())
+            .client()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
+        assert!(!err.is_retryable());
     }
 }
