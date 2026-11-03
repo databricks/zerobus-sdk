@@ -8,6 +8,7 @@ mod async_wrapper;
 mod auth;
 mod common;
 mod persistent;
+mod stream_settings;
 mod sync_wrapper;
 
 #[pymodule]
@@ -33,6 +34,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<common::TableProperties>()?;
     m.add_class::<common::AckCallback>()?;
     m.add_class::<persistent::PersistentStreamSettings>()?;
+    m.add_class::<stream_settings::StreamSettings>()?;
 
     // Add exception types
     m.add(

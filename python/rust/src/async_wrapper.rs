@@ -20,6 +20,7 @@ use crate::common::{
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
+use crate::stream_settings::{StreamConfig, StreamSettings};
 
 // =============================================================================
 // STREAM-BUILDER HELPERS
@@ -596,6 +597,28 @@ impl ZerobusSdk {
                 resume_watermark: stream.resume_watermark(),
                 inner: Arc::new(RwLock::new(stream)),
                 format,
+            })
+        })
+    }
+
+    /// Open an ordinary stream configured by `stream_builder()` (async)
+    fn open_stream<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: &TableProperties,
+        settings: &StreamSettings,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let sdk = self.inner.clone();
+        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let format = config.format();
+
+        future_into_py(py, async move {
+            let sdk_guard = sdk.read().await;
+            let stream = config.open(&sdk_guard).await.map_err(map_error)?;
+            Ok(ZerobusStream {
+                inner: Arc::new(RwLock::new(stream)),
+                format,
+                idp_holder: None,
             })
         })
     }
