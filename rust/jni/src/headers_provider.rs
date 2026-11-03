@@ -1,7 +1,7 @@
 //! JNI bridge for the Java HeadersProvider interface.
 
+use crate::errors::take_java_exception;
 use crate::runtime::get_jvm;
-use crate::{as_jclass, get_class_cache};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError, ZerobusResult};
 use jni::errors::Error as JniError;
@@ -237,51 +237,6 @@ fn java_call_error(env: &mut JNIEnv<'_>, method: &str, error: JniError) -> Zerob
     } else {
         provider_retryable_error(format!("{method} failed: {error}"))
     }
-}
-
-struct JavaException {
-    message: Option<String>,
-    non_retryable: bool,
-}
-
-fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
-    let throwable = match env.exception_occurred() {
-        Ok(throwable) => throwable,
-        Err(_) => {
-            let _ = env.exception_clear();
-            return None;
-        }
-    };
-    let _ = env.exception_clear();
-
-    let explicitly_non_retryable = env
-        .is_instance_of(
-            &throwable,
-            as_jclass(&get_class_cache().non_retriable_exception_class),
-        )
-        .unwrap_or(false);
-    let _ = env.exception_clear();
-    let fatal_error = env
-        .is_instance_of(&throwable, as_jclass(&get_class_cache().error_class))
-        .unwrap_or(false);
-    let _ = env.exception_clear();
-    let message = extract_throwable_string(env, &throwable);
-    let _ = env.exception_clear();
-
-    Some(JavaException {
-        message,
-        non_retryable: explicitly_non_retryable || fatal_error,
-    })
-}
-
-fn extract_throwable_string(env: &mut JNIEnv<'_>, throwable: &JObject<'_>) -> Option<String> {
-    let message = env
-        .call_method(throwable, "toString", "()Ljava/lang/String;", &[])
-        .ok()?
-        .l()
-        .ok()?;
-    let message = JString::from(message);
-    env.get_string(&message).ok().map(Into::into)
 }
 
 fn provider_invalid_argument(message: impl Into<String>) -> ZerobusError {

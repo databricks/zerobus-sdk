@@ -73,6 +73,7 @@ JNI is the most manual of all the bindings. Key considerations:
 - **Async bridge**: `CompletableFuture` bridges Rust futures to Java. Stream creation and acknowledgment waiting return futures.
 - **Thread safety**: The Java SDK is **not thread-safe**. Do not share SDK or stream instances across threads without external synchronization.
 - **Native library loading** (`NativeLoader.java`): Detects OS + arch, extracts the correct `.so`/`.dylib`/`.dll` from the JAR classpath to a temp directory, loads via `System.load()`. Marked `deleteOnExit()`.
+- **Pending Java exceptions**: When Rust calls into Java (`call_method`, `new_object`, `new_string`, ...) and the call fails with `jni::errors::Error::JavaException`, clear it with `errors::take_java_exception` before making any other JNI call on that thread. SDK threads attached with `attach_current_thread_as_daemon` never return to Java, so nothing else clears the exception; left pending, it makes every later JNI call on that reused thread fail. Logging the `Err` is not enough.
 
 ## Breaking change rules
 

@@ -1,14 +1,17 @@
-//! Native test helpers for classloader isolation testing.
+//! Native test helpers for JNI integration testing.
 //!
 //! These JNI functions are used by `ClassLoaderIsolationTest` to verify that
 //! class references work correctly from daemon threads, even when the system
-//! classloader cannot see the SDK classes.
+//! classloader cannot see the SDK classes, and by the callback native tests to
+//! drive Java callbacks from SDK-owned threads.
 
+use crate::callbacks::JavaAckCallback;
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
 use crate::runtime::{get_jvm, get_runtime};
-use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError};
+use databricks_zerobus_ingest_sdk::{AckCallback, HeadersProvider, ZerobusError};
 use jni::objects::{JClass, JObject, JString};
+use jni::sys::jint;
 use jni::JNIEnv;
 use std::sync::Arc;
 use std::time::Duration;
@@ -267,6 +270,48 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
             Ok(Err(error)) => format!("second provider call failed: {error}"),
             Err(_) => "second provider call timed out".to_string(),
         }
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Drives `JavaAckCallback` from one SDK-owned thread, as the SDK's callback worker does.
+///
+/// Every Java callback may throw; each later call must still reach Java, and no
+/// exception may be left pending on the thread.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAckCallbackExceptions<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+    acks: jint,
+) -> JObject<'local> {
+    let callback_ref = match env.new_global_ref(callback) {
+        Ok(callback_ref) => callback_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        tokio::task::spawn_blocking(move || {
+            let callback = JavaAckCallback::new(callback_ref);
+            for offset in 0..i64::from(acks) {
+                callback.on_ack(offset);
+            }
+            callback.on_error(i64::from(acks), "ack failed");
+
+            let env = match get_jvm().attach_current_thread_as_daemon() {
+                Ok(env) => env,
+                Err(error) => return format!("failed to attach thread: {error}"),
+            };
+            if env.exception_check().unwrap_or(true) {
+                return "a Java exception was left pending on the callback thread".to_string();
+            }
+            "OK".to_string()
+        })
+        .await
+        .unwrap_or_else(|error| format!("callback task failed: {error}"))
     });
 
     test_result(&mut env, result)
