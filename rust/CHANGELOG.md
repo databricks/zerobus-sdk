@@ -1,5 +1,30 @@
 # Version changelog
 
+## Release v3.1.1
+
+### Major Changes
+
+### New Features and Improvements
+
+- Added the `webpki-version-floor` Cargo feature, enabled by default. It
+  carries the `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.11 minimum
+  versions added in 3.0.0, which stop trusting the compromised eMudhra (emSign)
+  CAs. Default builds are unchanged. Builds with `default-features = false` no
+  longer require those versions, so they must enable `webpki-version-floor` or
+  get the eMudhra distrust some other way.
+
+### Bug Fixes
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v3.1.0
 
 ### Major Changes

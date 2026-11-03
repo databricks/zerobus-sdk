@@ -73,6 +73,8 @@ cargo add tokio --features macros,rt-multi-thread
 
 > **What's in the crates.io package?** The published crate contains only the core Zerobus ingestion SDK. Tools for schema generation (`tools/generate_files`) and working examples (`examples/`) are only available in the [GitHub repository](https://github.com/databricks/zerobus-sdk). You'll need to clone the repo to generate protobuf schemas from your Unity Catalog tables.
 
+The default `webpki-version-floor` feature requires `rustls-webpki` 0.103.16 or later and `webpki-roots` 1.0.11 or later, which stop trusting the compromised eMudhra (emSign) CAs. The SDK does not use these crates itself; the feature only raises their minimum versions in your dependency graph. If you set `default-features = false`, add `webpki-version-floor` back to `features` unless you get the eMudhra distrust some other way.
+
 ### For Local Development
 
 Clone the repository and use a path dependency:
