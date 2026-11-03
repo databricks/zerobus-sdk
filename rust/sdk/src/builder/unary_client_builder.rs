@@ -60,7 +60,7 @@ impl<'a> UnaryClientBuilder<'a> {
 
     /// Set the fully-qualified Unity Catalog table name (e.g., `"catalog.schema.table"`).
     pub fn table(mut self, table_name: impl Into<String>) -> Self {
-        self.core.set_table(table_name.into());
+        self.core.table_name = table_name.into();
         self
     }
 
@@ -119,7 +119,7 @@ impl<'a> UnaryClientBuilder<'a> {
     /// send the same records as JSON Lines instead. The last format setter
     /// called wins.
     pub fn json(mut self) -> Self {
-        self.core.set_format(FormatConfig::Json);
+        self.core.format = Some(FormatConfig::Json);
         self
     }
 
@@ -130,7 +130,7 @@ impl<'a> UnaryClientBuilder<'a> {
     /// framing. Raw line breaks in a record, such as pretty-printing, become
     /// spaces, which does not change its value.
     pub fn json_lines(mut self) -> Self {
-        self.core.set_format(FormatConfig::JsonLines);
+        self.core.format = Some(FormatConfig::JsonLines);
         self
     }
 
@@ -140,26 +140,26 @@ impl<'a> UnaryClientBuilder<'a> {
     /// again, so a batch may be written more than once (at-least-once). With
     /// retries off, a batch is never sent twice.
     pub fn recovery(mut self, enabled: bool) -> Self {
-        self.core.set_recovery(enabled);
+        self.core.recovery = enabled;
         self
     }
 
     /// Set the backoff time in milliseconds between retries of a failed call.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
-        self.core.set_recovery_backoff_ms(ms);
+        self.core.recovery_backoff_ms = ms;
         self
     }
 
     /// Set the maximum number of retries of a failed call.
     pub fn recovery_retries(mut self, n: u32) -> Self {
-        self.core.set_recovery_retries(n);
+        self.core.recovery_retries = n;
         self
     }
 
     /// Set the timeout in milliseconds for each call attempt, from getting the
     /// headers until the server confirms the batch is durable.
     pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
-        self.core.set_server_lack_of_ack_timeout_ms(ms);
+        self.core.server_lack_of_ack_timeout_ms = ms;
         self
     }
 
@@ -169,7 +169,7 @@ impl<'a> UnaryClientBuilder<'a> {
     ///
     /// Defaults to slightly below the 10 MiB server limit.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
-        self.core.set_max_ingest_payload_bytes(bytes);
+        self.core.max_ingest_payload_bytes = bytes;
         self
     }
 
