@@ -20,7 +20,6 @@ use tokio::time::{timeout, timeout_at, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use std::sync::Mutex as StdMutex;
@@ -35,6 +34,7 @@ use super::{
     ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
+use crate::grpc_channel;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::{insert_header_metadata, HeadersProvider};
 use crate::offset_generator::OffsetId;
@@ -482,10 +482,7 @@ impl ZerobusArrowStream {
     ) -> ZerobusResult<FlightClient<CompressedSizeChannel>> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
-        let base_endpoint = Channel::from_shared(endpoint.to_string())
-            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
-            .user_agent(sdk_identifier)
-            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+        let base_endpoint = grpc_channel::base_endpoint(endpoint, sdk_identifier)?
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
 
