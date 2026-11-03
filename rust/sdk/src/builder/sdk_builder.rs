@@ -36,6 +36,8 @@ pub struct ZerobusSdkBuilder {
     token_cache_enabled: bool,
     token_refresh_buffer: Duration,
     connection_per_stream: bool,
+    #[cfg(feature = "testing")]
+    unary_keepalive: Option<(Duration, Duration)>,
 }
 
 impl ZerobusSdkBuilder {
@@ -53,6 +55,8 @@ impl ZerobusSdkBuilder {
             token_cache_enabled: true,
             token_refresh_buffer: DEFAULT_REFRESH_BUFFER,
             connection_per_stream: true,
+            #[cfg(feature = "testing")]
+            unary_keepalive: None,
         }
     }
 
@@ -105,6 +109,16 @@ impl ZerobusSdkBuilder {
     #[cfg(feature = "testing")]
     pub fn no_tls(mut self) -> Self {
         self.tls_config = Some(Arc::new(NoTlsConfig));
+        self
+    }
+
+    /// Set the HTTP/2 keepalive interval and timeout of the unary channel.
+    ///
+    /// Intended only for tests that need a dead connection detected quickly.
+    /// Available behind the `testing` feature flag.
+    #[cfg(feature = "testing")]
+    pub fn unary_keepalive(mut self, interval: Duration, timeout: Duration) -> Self {
+        self.unary_keepalive = Some((interval, timeout));
         self
     }
 
@@ -288,7 +302,8 @@ impl ZerobusSdkBuilder {
             None => Arc::from(sdk_prefix),
         };
 
-        Ok(ZerobusSdk::new_with_config(
+        #[allow(unused_mut)]
+        let mut sdk = ZerobusSdk::new_with_config(
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
@@ -298,7 +313,12 @@ impl ZerobusSdkBuilder {
             self.token_cache_enabled,
             self.token_refresh_buffer,
             self.connection_per_stream,
-        ))
+        );
+        #[cfg(feature = "testing")]
+        if let Some(keepalive) = self.unary_keepalive {
+            sdk.unary_keepalive = keepalive;
+        }
+        Ok(sdk)
     }
 }
 
