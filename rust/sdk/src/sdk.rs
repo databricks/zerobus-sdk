@@ -68,6 +68,9 @@ pub struct ZerobusSdk {
     /// It is separate from `shared_stream_channel`, so unary clients never
     /// share a connection with streams, whatever `connection_per_stream` says.
     unary_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+    /// HTTP/2 keepalive interval and timeout of the unary channel. Fixed in
+    /// production; tests shorten them through the SDK builder.
+    pub(crate) unary_keepalive: (Duration, Duration),
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -211,6 +214,7 @@ impl ZerobusSdk {
             workspace_id,
             shared_stream_channel: tokio::sync::Mutex::new(None),
             unary_channel: tokio::sync::Mutex::new(None),
+            unary_keepalive: (UNARY_KEEPALIVE_INTERVAL, UNARY_KEEPALIVE_TIMEOUT),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -400,10 +404,11 @@ impl ZerobusSdk {
     pub(crate) async fn get_or_create_unary_channel(
         &self,
     ) -> ZerobusResult<ZerobusClient<Channel>> {
+        let (interval, timeout) = self.unary_keepalive;
         self.get_or_create_shared_channel(&self.unary_channel, |endpoint| {
             endpoint
-                .http2_keep_alive_interval(UNARY_KEEPALIVE_INTERVAL)
-                .keep_alive_timeout(UNARY_KEEPALIVE_TIMEOUT)
+                .http2_keep_alive_interval(interval)
+                .keep_alive_timeout(timeout)
                 .keep_alive_while_idle(false)
         })
         .await
