@@ -8,6 +8,8 @@ fn main() {
     env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
     tonic_prost_build::configure()
         .build_server(false)
+        // Unary retries clone the request; `Bytes` shares the body instead of copying it.
+        .bytes(".databricks.zerobus.InsertRecordsRequest.records_json")
         .compile_protos(&["zerobus_service.proto"], &["."])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 
