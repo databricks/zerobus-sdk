@@ -1284,9 +1284,11 @@ use databricks_zerobus_ingest_sdk::{
 #[cfg(feature = "arrow-flight")]
 #[napi]
 pub enum IpcCompressionType {
+    /// No compression - send uncompressed payloads
+    None = -1,
     /// LZ4 frame compression - fast compression with moderate ratio
     Lz4Frame = 0,
-    /// Zstandard compression - better compression ratio, slightly slower
+    /// Zstandard compression - better compression ratio, slightly slower. This is the default.
     Zstd = 1,
 }
 
@@ -1328,7 +1330,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 30,000 (30 seconds)
     pub connection_timeout_ms: Option<u32>,
 
-    /// Optional IPC compression type (0 = LZ4Frame, 1 = Zstd, undefined = no compression)
+    /// IPC compression type (-1 = None, 0 = Lz4Frame, 1 = Zstd).
+    /// Default: Zstd
     pub ipc_compression: Option<i32>,
 }
 
@@ -1340,9 +1343,9 @@ pub struct ArrowStreamConfigurationOptions {
 #[cfg(feature = "arrow-flight")]
 fn map_ipc_compression(value: Option<i32>) -> ArrowCompression {
     match value {
+        Some(-1) => ArrowCompression::Uncompressed,
         Some(0) => ArrowCompression::IpcLz4,
-        Some(1) => ArrowCompression::IpcZstd,
-        _ => ArrowCompression::Uncompressed,
+        _ => ArrowCompression::IpcZstd,
     }
 }
 
