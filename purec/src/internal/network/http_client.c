@@ -91,8 +91,9 @@ static bool is_token(const char *name)
  * the request to the client. */
 static bool headers_are_valid(const zerobus_headers_t *headers)
 {
-    static const char *const framing[] = {"host", "content-length",
-                                          "transfer-encoding", "connection"};
+    static const char *const framing[] = {"host", "content-type",
+                                          "content-length", "transfer-encoding",
+                                          "connection"};
     if (!headers) {
         return false;
     }
@@ -125,9 +126,11 @@ static zerobus_status_t format_request(const char *authority, const char *path,
                                        const char *body, size_t body_len,
                                        char **out, size_t *out_len)
 {
-    static const char format[] = "POST %s HTTP/1.1\r\nHost: %s\r\n"
-                                 "Content-Length: %zu\r\n"
-                                 "Connection: close\r\n";
+    static const char format[] =
+        "POST %s HTTP/1.1\r\nHost: %s\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n";
     int start = snprintf(NULL, 0, format, path, authority, body_len);
     if (start < 0) {
         return ZEROBUS_STATUS_INTERNAL;

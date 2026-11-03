@@ -1,9 +1,12 @@
 #ifndef ZB_STREAM_H
 #define ZB_STREAM_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "zerobus/common.h"
 
 /* Stream options, each field is documented at its setter in zerobus/stream.h.
  */
@@ -31,6 +34,15 @@ static const zb_stream_config_t zb_stream_config_default = {
     .flush_timeout_ms = 300000,
     .stream_paused_max_wait_time_ms = UINT64_MAX,
     .max_ingest_payload_bytes = 10u * 1024u * 1024u - 64u * 1024u,
+};
+
+struct zerobus_stream {
+    zerobus_sdk_t *sdk; /* owned reference */
+    char *table;
+    zb_stream_config_t config;
+    zerobus_headers_provider_t *headers_provider; /* owned reference */
+
+    atomic_bool closed; /* set by close, rejects ingest once true */
 };
 
 #endif /* ZB_STREAM_H */
