@@ -24,15 +24,15 @@ use crate::stream::ZerobusArrowStream;
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
 /// How long the unary channel waits without receiving any frame, while a call
-/// is in flight, before it sends an HTTP/2 PING. A third of the default
-/// server acknowledgement timeout.
-const UNARY_KEEPALIVE_INTERVAL: Duration =
-    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 3);
+/// is in flight, before it sends an HTTP/2 PING. A silently dropped connection
+/// is closed about this long plus [`UNARY_KEEPALIVE_TIMEOUT`] after its last
+/// frame, instead of when the kernel stops retransmitting, which takes about
+/// 15 minutes with Linux defaults.
+const UNARY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long the unary channel waits for the PING reply before it closes the
-/// connection. A sixth of the default server acknowledgement timeout.
-const UNARY_KEEPALIVE_TIMEOUT: Duration =
-    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 6);
+/// connection.
+const UNARY_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
@@ -465,12 +465,6 @@ mod tests {
             crate::token_cache::DEFAULT_REFRESH_BUFFER,
             connection_per_stream,
         )
-    }
-
-    #[test]
-    fn unary_keepalive_is_a_third_and_a_sixth_of_the_default_ack_timeout() {
-        assert_eq!(UNARY_KEEPALIVE_INTERVAL, Duration::from_secs(20));
-        assert_eq!(UNARY_KEEPALIVE_TIMEOUT, Duration::from_secs(10));
     }
 
     #[tokio::test]
