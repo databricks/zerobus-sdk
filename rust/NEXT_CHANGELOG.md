@@ -35,6 +35,12 @@
   (such as `cargo test --workspace` and `--all-features` builds), and the test
   mock server's build script regenerates its code on any change to that proto.
   Both used to keep the stale generated code until the next clean build.
+- Added integration tests for the unary client against the mock server, which
+  now scripts `InsertRecords` replies and records each call. They cover the
+  request body and headers, client-side validation, retries and their backoff,
+  authentication and headers provider failures, timeouts, connection sharing,
+  reconnects, HTTP/2 keepalive through a black-holing proxy, and concurrent
+  calls from many tasks and OS threads.
 
 ### Breaking Changes
 
