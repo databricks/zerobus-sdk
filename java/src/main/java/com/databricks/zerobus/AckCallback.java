@@ -44,7 +44,8 @@ public interface AckCallback {
    * records with offset IDs less than or equal to this value have been durably stored.
    *
    * <p>Implementations should not throw. An exception thrown from this method is logged at ERROR
-   * level through SLF4J, with its stack trace, and later callbacks are still delivered.
+   * level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging, is
+   * visible only when an SLF4J binding is configured. Later callbacks are still delivered.
    *
    * @param offsetId the offset ID that has been acknowledged
    */
@@ -57,7 +58,8 @@ public interface AckCallback {
    * offset. The error may be retryable or non-retryable depending on the nature of the failure.
    *
    * <p>Implementations should not throw. An exception thrown from this method is logged at ERROR
-   * level through SLF4J, with its stack trace, and later callbacks are still delivered.
+   * level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging, is
+   * visible only when an SLF4J binding is configured. Later callbacks are still delivered.
    *
    * @param offsetId the offset ID that encountered an error
    * @param errorMessage a description of the error that occurred

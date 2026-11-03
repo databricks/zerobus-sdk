@@ -42,11 +42,12 @@ impl AckCallback for JavaAckCallback {
             }
         };
 
-        let callback = self.callback_ref.as_obj();
-
-        if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
-            report_callback_failure(&mut env, "onAck", e);
-        }
+        run_in_local_frame(&mut env, "onAck", |env| {
+            let callback = self.callback_ref.as_obj();
+            if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
+                report_callback_failure(env, "onAck", e);
+            }
+        });
     }
 
     fn on_error(&self, offset_id: OffsetId, error_message: &str) {
@@ -59,24 +60,48 @@ impl AckCallback for JavaAckCallback {
             }
         };
 
-        let callback = self.callback_ref.as_obj();
-
-        let j_message = match env.new_string(error_message) {
-            Ok(s) => s,
-            Err(e) => {
-                report_callback_failure(&mut env, "onError", e);
-                return;
+        run_in_local_frame(&mut env, "onError", |env| {
+            let callback = self.callback_ref.as_obj();
+            let j_message = match env.new_string(error_message) {
+                Ok(s) => s,
+                Err(e) => {
+                    report_callback_failure(env, "onError", e);
+                    return;
+                }
+            };
+            if let Err(e) = env.call_method(
+                callback,
+                "onError",
+                "(JLjava/lang/String;)V",
+                &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
+            ) {
+                report_callback_failure(env, "onError", e);
             }
-        };
+        });
+    }
+}
 
-        if let Err(e) = env.call_method(
-            callback,
-            "onError",
-            "(JLjava/lang/String;)V",
-            &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
-        ) {
-            report_callback_failure(&mut env, "onError", e);
-        }
+/// Local references one callback creates, including failure reporting.
+const CALLBACK_LOCAL_FRAME_CAPACITY: i32 = 16;
+
+/// Runs a callback's JNI work inside a local frame that frees its local references.
+///
+/// Callbacks run on SDK threads that never return to Java. Without a frame,
+/// every local reference created here (the error message, a thrown exception
+/// and its description) would stay alive, keeping those objects reachable,
+/// until the thread exits.
+fn run_in_local_frame(env: &mut JNIEnv, method: &str, f: impl FnOnce(&mut JNIEnv)) {
+    let result = env.with_local_frame(
+        CALLBACK_LOCAL_FRAME_CAPACITY,
+        |env| -> jni::errors::Result<()> {
+            f(env);
+            Ok(())
+        },
+    );
+    if let Err(error) = result {
+        // Pushing a frame fails only when the JVM is out of memory, which also throws.
+        let _ = env.exception_clear();
+        tracing::error!("Failed to call AckCallback.{method}: {error}");
     }
 }
 
