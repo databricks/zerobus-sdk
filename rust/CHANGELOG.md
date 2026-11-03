@@ -1,6 +1,6 @@
 # Version changelog
 
-## Release v3.2.0
+## Release v3.1.1
 
 ### Major Changes
 
