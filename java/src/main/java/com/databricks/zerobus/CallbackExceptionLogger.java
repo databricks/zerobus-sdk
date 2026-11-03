@@ -6,7 +6,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Logs exceptions thrown by user callbacks that the native layer invokes on SDK threads.
  *
- * <p>Called only from native code, which caches this class when the library loads.
+ * <p>Called only from native code, which caches this class when the library loads. The logger is
+ * named after {@link AckCallback} so the entries appear under the interface users implement.
  */
 final class CallbackExceptionLogger {
   private static final Logger logger = LoggerFactory.getLogger(AckCallback.class);
