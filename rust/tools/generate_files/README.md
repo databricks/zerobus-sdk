@@ -31,11 +31,9 @@ This tool fetches table schema information from Unity Catalog and generates:
 
 ## How to use
 
-**Note** 
-
-For AWS your `uc-endpoint` should be in the following format `https://<your-workspace>.cloud.databricks.com`.
-
-For Azure your `uc-endpoint` should be in the following format `https://<your-workspace>.azuredatabricks.net`.
+Use the workspace URL from the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for `uc-endpoint`.
 
 ### Basic example
 
@@ -63,7 +61,7 @@ cargo run -- \
 
 ## Command Line Arguments
 
-- `--uc-endpoint` - Unity Catalog endpoint URL (e.g., "https://<your-workspace>.cloud.databricks.com")
+- `--uc-endpoint` - Databricks workspace URL used for Unity Catalog
 - `--client-id` - OAuth client ID for authentication
 - `--client-secret` - OAuth client secret for authentication
 - `--table` - Full table name in format "catalog.schema.table_name"
@@ -90,4 +88,3 @@ When you run the tool, it generates:
 - `MAP<_, ARRAY<_>>` - use `MAP<_, STRUCT<a: ARRAY<_>>>` instead.
 - `ARRAY<MAP<_, _>>` - use `ARRAY<STRUCT<m: MAP<_, _>>>` instead.
 - `ARRAY<ARRAY<_>>` - use `ARRAY<STRUCT<a: ARRAY<_>>>` instead.
-

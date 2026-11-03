@@ -8,12 +8,16 @@ PureGo requires Go 1.25 or later.
 
 ## Quick start
 
+In these snippets, `serverEndpoint` is your Zerobus server endpoint and `workspaceURL` is your
+workspace URL. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the format on each cloud.
+
 ```go
 import "github.com/databricks/zerobus-sdk/purego/zerobus"
 
 sdk, err := zerobus.New(
-    "https://your-workspace.zerobus.region.cloud.databricks.com",
-    "https://your-workspace.cloud.databricks.com",
+    serverEndpoint,
+    workspaceURL,
 )
 if err != nil {
     log.Fatal(err)

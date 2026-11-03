@@ -12,6 +12,8 @@ This directory contains examples for ingesting data using `ZerobusProtoStream`.
 
 ## Building and Running
 
+Find the endpoint values in the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id).
+
 ```bash
 cd examples
 SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
@@ -26,8 +28,8 @@ javac -d . -cp "$SDK_JAR" \
   proto/BatchIngestionExample.java
 
 # Set environment variables
-export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://<workspace>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.table"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
@@ -155,7 +157,7 @@ Use the SDK's built-in tool to generate proto from Unity Catalog:
 
 ```bash
 java -jar zerobus-ingest-sdk-*-jar-with-dependencies.jar \
-  --uc-endpoint "https://workspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table" \

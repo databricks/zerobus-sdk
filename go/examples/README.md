@@ -35,9 +35,12 @@ Create a service principal with `SELECT` and `MODIFY` permissions on the table. 
 
 ### 3. Set Environment Variables
 
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the endpoint and workspace URL formats on each cloud:
+
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 export ZEROBUS_TABLE_NAME="catalog.schema.air_quality"

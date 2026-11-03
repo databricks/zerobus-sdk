@@ -38,12 +38,14 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Example Usage</h3>
  *
- * <p>Use {@link #streamBuilder()} to create streams:
+ * <p>Use {@link #streamBuilder()} to create streams. Find cloud-specific endpoint formats in the <a
+ * href="https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id">connection
+ * URL table</a>:
  *
  * <pre>{@code
  * try (ZerobusSdk sdk = new ZerobusSdk(
- *         "https://server-endpoint.databricks.com",
- *         "https://workspace.databricks.com")) {
+ *         serverEndpoint,
+ *         workspaceUrl)) {
  *
  *     // For Protocol Buffer ingestion:
  *     try (ZerobusProtoStream protoStream = sdk.streamBuilder()
@@ -96,7 +98,7 @@ public class ZerobusSdk implements AutoCloseable {
    * Creates a new ZerobusSdk instance.
    *
    * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
-   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param unityCatalogEndpoint The Databricks workspace URL, used for Unity Catalog and OAuth.
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
@@ -107,7 +109,7 @@ public class ZerobusSdk implements AutoCloseable {
    * Creates a new ZerobusSdk instance with configurable connection ownership.
    *
    * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
-   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param unityCatalogEndpoint The Databricks workspace URL, used for Unity Catalog and OAuth.
    * @param connectionPerStream Whether every JSON/protobuf stream receives a dedicated gRPC
    *     connection. Pass {@code false} to share one connection across streams.
    * @throws ZerobusException if the SDK cannot be initialized
@@ -121,7 +123,7 @@ public class ZerobusSdk implements AutoCloseable {
    * Creates a new ZerobusSdk instance with an optional application identifier.
    *
    * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
-   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param unityCatalogEndpoint The Databricks workspace URL, used for Unity Catalog and OAuth.
    * @param applicationName Optional application identifier appended to the HTTP {@code user-agent}
    *     header, conventionally {@code "<product>/<version>"} (e.g. {@code "my-app/1.0"}). When set,
    *     the header becomes {@code "zerobus-sdk-java/<version> <applicationName>"}. Pass {@code
@@ -143,7 +145,7 @@ public class ZerobusSdk implements AutoCloseable {
    * connection ownership.
    *
    * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
-   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param unityCatalogEndpoint The Databricks workspace URL, used for Unity Catalog and OAuth.
    * @param applicationName Optional application identifier appended to the HTTP {@code user-agent}
    *     header, or {@code null} to omit.
    * @param connectionPerStream Whether every JSON/protobuf stream receives a dedicated gRPC

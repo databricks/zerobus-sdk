@@ -14,10 +14,10 @@ Requirements:
 
 import asyncio
 import logging
-import os
 import time
 
 import pyarrow as pa
+from example_config import required_env
 
 from zerobus.sdk.aio import ZerobusSdk
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions
@@ -27,17 +27,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-# Configuration - update these with your values
-SERVER_ENDPOINT = os.getenv(
-    "ZEROBUS_SERVER_ENDPOINT",
-    "https://your-shard-id.zerobus.region.cloud.databricks.com",
-)
-UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
-TABLE_NAME = os.getenv("ZEROBUS_TABLE_NAME", "catalog.schema.table")
-
-# For OAuth authentication
-CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID", "your-oauth-client-id")
-CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET", "your-oauth-client-secret")
+SERVER_ENDPOINT = required_env("ZEROBUS_SERVER_ENDPOINT")
+WORKSPACE_URL = required_env("DATABRICKS_WORKSPACE_URL")
+TABLE_NAME = required_env("ZEROBUS_TABLE_NAME")
+CLIENT_ID = required_env("DATABRICKS_CLIENT_ID")
+CLIENT_SECRET = required_env("DATABRICKS_CLIENT_SECRET")
 
 # Number of batches to ingest
 NUM_BATCHES = 10
@@ -73,22 +67,9 @@ async def main():
     print("Starting asynchronous ingestion example (Arrow Flight Mode)...")
     print("=" * 60)
 
-    # Check if credentials are configured
-    if CLIENT_ID == "your-oauth-client-id" or CLIENT_SECRET == "your-oauth-client-secret":
-        logger.error("Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables")
-        return
-
-    if SERVER_ENDPOINT == "https://your-shard-id.zerobus.region.cloud.databricks.com":
-        logger.error("Please set ZEROBUS_SERVER_ENDPOINT environment variable")
-        return
-
-    if TABLE_NAME == "catalog.schema.table":
-        logger.error("Please set ZEROBUS_TABLE_NAME environment variable")
-        return
-
     try:
         # Step 1: Initialize the SDK
-        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
+        sdk = ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL, application_name="my-app/1.0")
         logger.info("SDK initialized")
 
         # Step 2: Configure arrow stream options (all optional, shown with defaults)

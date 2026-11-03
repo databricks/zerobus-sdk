@@ -20,7 +20,7 @@ mod token_factory;
 #[derive(Parser, Debug)]
 #[command(about = "Generate proto files from UC table schemas")]
 struct Args {
-    /// Unity Catalog endpoint URL (e.g., https://your-workspace.cloud.databricks.com)
+    /// Databricks workspace URL used for Unity Catalog
     #[arg(long = "uc-endpoint")]
     uc_endpoint: String,
 

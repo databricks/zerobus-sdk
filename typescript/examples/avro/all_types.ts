@@ -7,12 +7,13 @@
  */
 
 import { ZerobusSdk, StreamConfigurationOptions, TableProperties, RecordType } from '../../wrapper';
+import { requiredEnv } from '../config';
 
-const SERVER_ENDPOINT = process.env.ZEROBUS_SERVER_ENDPOINT || 'https://your-workspace-id.zerobus.region.cloud.databricks.com';
-const DATABRICKS_WORKSPACE_URL = process.env.DATABRICKS_WORKSPACE_URL || 'https://your-workspace.cloud.databricks.com';
-const TABLE_NAME = process.env.ZEROBUS_TABLE_NAME || 'catalog.schema.table';
-const CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || 'your-oauth-client-id';
-const CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || 'your-oauth-client-secret';
+const SERVER_ENDPOINT = requiredEnv('ZEROBUS_SERVER_ENDPOINT');
+const WORKSPACE_URL = requiredEnv('DATABRICKS_WORKSPACE_URL');
+const TABLE_NAME = requiredEnv('ZEROBUS_TABLE_NAME');
+const CLIENT_ID = requiredEnv('DATABRICKS_CLIENT_ID');
+const CLIENT_SECRET = requiredEnv('DATABRICKS_CLIENT_SECRET');
 
 // Writer schema with every supported Avro type.
 const AVRO_SCHEMA = JSON.stringify({
@@ -86,7 +87,7 @@ async function main() {
     console.log('Avro Type Reference Example');
     console.log('='.repeat(60));
 
-    const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+    const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
     const tableProperties: TableProperties = { tableName: TABLE_NAME, avroSchema: AVRO_SCHEMA };
     const options: StreamConfigurationOptions = { recordType: RecordType.Avro, recovery: true };
 

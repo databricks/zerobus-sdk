@@ -128,17 +128,25 @@ pip install "databricks-zerobus-ingest-sdk[avro]"
 
 ### Option 1: JSON (Simplest)
 
+The snippets read the connection settings from environment variables. See the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the
+`ZEROBUS_SERVER_ENDPOINT` and `DATABRICKS_WORKSPACE_URL` formats on each cloud.
+
 **Synchronous:**
 
 ```python
+import os
+
 from zerobus.sdk.sync import ZerobusSdk
 from zerobus.sdk.shared import TableProperties
 
-server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
-workspace_url = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com"
+server_endpoint = os.environ["ZEROBUS_SERVER_ENDPOINT"]
+workspace_url = os.environ["DATABRICKS_WORKSPACE_URL"]
+client_id = os.environ["DATABRICKS_CLIENT_ID"]
+client_secret = os.environ["DATABRICKS_CLIENT_SECRET"]
 
 sdk = ZerobusSdk(server_endpoint, workspace_url)
-table_properties = TableProperties("main.default.air_quality")
+table_properties = TableProperties(os.environ["ZEROBUS_TABLE_NAME"])
 stream = sdk.create_stream(client_id, client_secret, table_properties)
 
 try:
@@ -157,15 +165,19 @@ finally:
 
 ```python
 import asyncio
+import os
+
 from zerobus.sdk.aio import ZerobusSdk
 from zerobus.sdk.shared import TableProperties
 
 async def main():
-    server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
-    workspace_url = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com"
+    server_endpoint = os.environ["ZEROBUS_SERVER_ENDPOINT"]
+    workspace_url = os.environ["DATABRICKS_WORKSPACE_URL"]
+    client_id = os.environ["DATABRICKS_CLIENT_ID"]
+    client_secret = os.environ["DATABRICKS_CLIENT_SECRET"]
 
     sdk = ZerobusSdk(server_endpoint, workspace_url)
-    table_properties = TableProperties("main.default.air_quality")
+    table_properties = TableProperties(os.environ["ZEROBUS_TABLE_NAME"])
     stream = await sdk.create_stream(client_id, client_secret, table_properties)
 
     try:
@@ -234,7 +246,7 @@ Alternatively, generate the schema automatically from an existing Unity Catalog 
 
 ```bash
 python -m zerobus.tools.generate_proto \
-    --uc-endpoint "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com" \
+    --uc-endpoint "<your-databricks-workspace-url>" \
     --client-id "your-client-id" \
     --client-secret "your-client-secret" \
     --table "main.default.air_quality" \
@@ -613,8 +625,8 @@ Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from
 
 ```python
 sdk = ZerobusSdk(
-    host="https://<workspace>.zerobus.<region>.cloud.databricks.com",
-    unity_catalog_url="https://<workspace-host>",
+    host=server_endpoint,
+    unity_catalog_url=workspace_url,
     application_name="my-app/1.0",
     connection_per_stream=True,
 )

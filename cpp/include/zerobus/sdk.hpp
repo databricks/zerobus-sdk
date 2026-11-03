@@ -28,9 +28,11 @@ class Sdk;
 
 /// Fluent builder for `Sdk`. Obtain one from `Sdk::builder()`.
 ///
-/// At minimum, set `endpoint()`. The Unity Catalog URL is required for the
+/// At minimum, set `endpoint()`. The workspace URL is required for the
 /// OAuth client-credentials path but optional when a custom `HeadersProvider`
-/// supplies authentication.
+/// supplies authentication. For the endpoint and workspace URL formats on each
+/// cloud, see
+/// https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id
 class SdkBuilder {
  public:
   SdkBuilder();
@@ -43,7 +45,8 @@ class SdkBuilder {
 
   /// Zerobus gRPC endpoint URL (required).
   SdkBuilder& endpoint(const std::string& value);
-  /// Unity Catalog URL. Optional when using a custom headers provider.
+  /// Databricks workspace URL, used for Unity Catalog and OAuth. Optional
+  /// when using a custom headers provider.
   SdkBuilder& unity_catalog_url(const std::string& value);
   /// Override the SDK prefix of the `user-agent` header. Defaults to
   /// `zerobus-sdk-cpp/<version>`.

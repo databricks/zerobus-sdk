@@ -28,8 +28,8 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 /// ```rust,ignore
 /// // Create SDK using the builder
 /// let sdk = ZerobusSdk::builder()
-///     .endpoint("https://your-workspace.zerobus.region.cloud.databricks.com")
-///     .unity_catalog_url("https://your-workspace.cloud.databricks.com")
+///     .endpoint(server_endpoint)
+///     .unity_catalog_url(workspace_url)
 ///     .build()?;
 ///
 /// // Create a stream via the stream builder
@@ -73,10 +73,12 @@ impl ZerobusSdk {
     ///
     /// ```no_run
     /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    /// let server_endpoint = std::env::var("ZEROBUS_SERVER_ENDPOINT").expect("endpoint must be set");
+    /// let workspace_url = std::env::var("DATABRICKS_WORKSPACE_URL").expect("workspace URL must be set");
     ///
     /// let sdk = ZerobusSdk::builder()
-    ///     .endpoint("https://workspace.zerobus.databricks.com")
-    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+    ///     .endpoint(server_endpoint)
+    ///     .unity_catalog_url(workspace_url)
     ///     .build()?;
     /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
     /// ```
