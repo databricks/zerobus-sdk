@@ -3,11 +3,12 @@
 //! This module provides a Rust implementation of the SDK's AckCallback trait
 //! that delegates to a Java AckCallback object.
 
+use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::take_java_exception;
 use crate::runtime::get_jvm;
 use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
 use jni::errors::Error as JniError;
-use jni::objects::{GlobalRef, JValue};
+use jni::objects::{GlobalRef, JThrowable, JValue};
 use jni::JNIEnv;
 use std::sync::Arc;
 
@@ -79,20 +80,43 @@ impl AckCallback for JavaAckCallback {
     }
 }
 
-/// Logs a failed callback and clears any Java exception it left pending.
+/// Clears the Java exception a failed callback left pending and logs it through SLF4J.
 ///
 /// Callbacks run on SDK threads that never return to Java, so nothing else
 /// clears the exception. Left pending, it makes every later JNI call on that
 /// thread fail, including callbacks of other streams that reuse it.
 fn report_callback_failure(env: &mut JNIEnv, method: &str, error: JniError) {
-    if matches!(error, JniError::JavaException) {
-        let detail = take_java_exception(env)
-            .and_then(|exception| exception.message)
-            .unwrap_or_else(|| "Java exception was thrown".to_string());
-        tracing::error!("AckCallback.{method} threw: {detail}");
-    } else {
+    if !matches!(error, JniError::JavaException) {
         tracing::error!("Failed to call AckCallback.{method}: {error}");
+        return;
     }
+    let Some(exception) = take_java_exception(env) else {
+        tracing::error!("AckCallback.{method} threw an exception that could not be read");
+        return;
+    };
+    if let Err(log_error) = log_callback_exception(env, method, &exception.throwable) {
+        let _ = env.exception_clear();
+        tracing::error!(
+            "AckCallback.{method} threw: {}; logging it failed: {log_error}",
+            exception.message.as_deref().unwrap_or("unknown exception"),
+        );
+    }
+}
+
+/// Logs a callback's exception, with its stack trace, through the Java SDK's SLF4J logger.
+fn log_callback_exception(
+    env: &mut JNIEnv,
+    method: &str,
+    throwable: &JThrowable,
+) -> jni::errors::Result<()> {
+    let callback = env.new_string(format!("AckCallback.{method}"))?;
+    env.call_static_method(
+        as_jclass(&get_class_cache().callback_exception_logger_class),
+        "log",
+        "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+        &[JValue::Object(&callback), JValue::Object(throwable)],
+    )?;
+    Ok(())
 }
 
 // Safety: The GlobalRef is thread-safe and the JVM can be accessed from any thread

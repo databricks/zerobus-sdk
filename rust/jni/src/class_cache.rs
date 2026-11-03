@@ -29,6 +29,8 @@ pub struct CachedClasses {
     pub array_list_class: GlobalRef,
     /// `com.databricks.zerobus.EncodedBatch`
     pub encoded_batch_class: GlobalRef,
+    /// `com.databricks.zerobus.CallbackExceptionLogger`
+    pub callback_exception_logger_class: GlobalRef,
 }
 
 static CLASS_CACHE: OnceLock<CachedClasses> = OnceLock::new();
@@ -47,6 +49,10 @@ pub fn init_class_cache(env: &mut JNIEnv) -> Result<(), String> {
         completable_future_class: find_and_cache(env, "java/util/concurrent/CompletableFuture")?,
         array_list_class: find_and_cache(env, "java/util/ArrayList")?,
         encoded_batch_class: find_and_cache(env, "com/databricks/zerobus/EncodedBatch")?,
+        callback_exception_logger_class: find_and_cache(
+            env,
+            "com/databricks/zerobus/CallbackExceptionLogger",
+        )?,
     };
 
     CLASS_CACHE
