@@ -13,6 +13,14 @@ package com.databricks.zerobus;
  * <p>Implementations should be thread-safe as callbacks may be invoked from multiple threads.
  * Callbacks should be lightweight to avoid blocking the internal processing threads.
  *
+ * <p>Callbacks run on internal SDK threads, so they must not call stream methods that block on
+ * native work: {@code ingestRecordOffset}, {@code ingestRecordsOffset}, {@code ingestBatch}
+ * (Arrow), {@code waitForOffset}, {@code flush}, {@code close}, {@code isClosed}, {@code
+ * getUnackedRecords}, and {@code getUnackedBatches}, as well as {@code ZerobusSdk.recreateStream}
+ * and {@code recreateArrowStream}, which can call them. Called from a callback, these throw {@link
+ * IllegalStateException}; hand such work to another thread instead. Methods that only return a
+ * {@code CompletableFuture}, such as the deprecated {@code ingestRecord}, are not affected.
+ *
  * <p>Example usage:
  *
  * <pre>{@code

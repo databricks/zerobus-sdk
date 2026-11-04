@@ -5,7 +5,7 @@
 
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::take_java_exception;
-use crate::runtime::get_jvm;
+use crate::runtime::{get_jvm, CallbackScope};
 use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
 use jni::errors::Error as JniError;
 use jni::objects::{GlobalRef, JThrowable, JValue};
@@ -44,7 +44,11 @@ impl AckCallback for JavaAckCallback {
 
         run_in_local_frame(&mut env, "onAck", |env| {
             let callback = self.callback_ref.as_obj();
-            if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
+            let result = {
+                let _scope = CallbackScope::enter();
+                env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)])
+            };
+            if let Err(e) = result {
                 report_callback_failure(env, "onAck", e);
             }
         });
@@ -69,12 +73,16 @@ impl AckCallback for JavaAckCallback {
                     return;
                 }
             };
-            if let Err(e) = env.call_method(
-                callback,
-                "onError",
-                "(JLjava/lang/String;)V",
-                &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
-            ) {
+            let result = {
+                let _scope = CallbackScope::enter();
+                env.call_method(
+                    callback,
+                    "onError",
+                    "(JLjava/lang/String;)V",
+                    &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
+                )
+            };
+            if let Err(e) = result {
                 report_callback_failure(env, "onError", e);
             }
         });

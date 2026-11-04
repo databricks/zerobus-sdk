@@ -4,9 +4,80 @@
 //! appropriate Java exceptions.
 
 use crate::class_cache::{as_jclass, get_class_cache};
+use crate::runtime::{BlockingCallInCallback, BLOCKING_CALL_IN_CALLBACK_MESSAGE};
 use databricks_zerobus_ingest_sdk::ZerobusError;
 use jni::objects::{GlobalRef, JObject, JString, JThrowable, JValue};
 use jni::JNIEnv;
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// Runs the body of a JNI entry point, converting a panic into a Java exception.
+///
+/// A panic must not reach the `extern "system"` boundary: Rust aborts the
+/// process there, taking the whole JVM down. Each entry point is a thin wrapper
+/// that passes its arguments to the original function through this guard. On
+/// panic it throws a Java exception (unless the body already left one pending)
+/// and returns `R::default()`, which Java ignores while an exception is pending.
+pub(crate) fn guard<'local, R: Default>(
+    env: JNIEnv<'local>,
+    body: impl FnOnce(JNIEnv<'local>) -> R,
+) -> R {
+    guard_or(env, R::default(), body)
+}
+
+/// Like [`guard`], but returns `on_panic`: pass the entry point's usual error
+/// value (such as `-1` for offsets) for the case where throwing itself fails.
+pub(crate) fn guard_or<'local, R>(
+    mut env: JNIEnv<'local>,
+    on_panic: R,
+    body: impl FnOnce(JNIEnv<'local>) -> R,
+) -> R {
+    // SAFETY: the clone is used only by `body`, on this thread, within this
+    // native call; `env` is used again only after `body` has unwound.
+    let body_env = unsafe { env.unsafe_clone() };
+    match catch_unwind(AssertUnwindSafe(|| body(body_env))) {
+        Ok(value) => value,
+        Err(payload) => {
+            throw_from_panic(&mut env, payload.as_ref());
+            on_panic
+        }
+    }
+}
+
+/// Throws the Java exception for a panic caught by [`guard_or`].
+///
+/// A blocking call made from inside a callback becomes an
+/// `IllegalStateException`; any other panic becomes a `NonRetriableException`.
+pub(crate) fn throw_from_panic(env: &mut JNIEnv, payload: &(dyn Any + Send)) {
+    if payload.is::<BlockingCallInCallback>() {
+        if env.exception_check().unwrap_or(false) {
+            return;
+        }
+        let class = &get_class_cache().illegal_state_exception_class;
+        match create_exception(env, class, BLOCKING_CALL_IN_CALLBACK_MESSAGE) {
+            Some(exception) => {
+                if let Err(e) = env.throw(exception) {
+                    tracing::error!("Failed to throw IllegalStateException: {}", e);
+                }
+            }
+            None => tracing::error!("Failed to create IllegalStateException"),
+        }
+        return;
+    }
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|message| message.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    tracing::error!("Panic in Zerobus native code: {detail}");
+    if env.exception_check().unwrap_or(false) {
+        return;
+    }
+    throw_non_retriable_exception(
+        env,
+        &format!("Internal error in Zerobus native code: {detail}"),
+    );
+}
 
 /// A Java exception taken off the current thread by [`take_java_exception`].
 pub(crate) struct JavaException<'local> {

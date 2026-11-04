@@ -5,7 +5,7 @@
 
 use crate::async_bridge::{create_completable_future, spawn_and_complete_void};
 use crate::class_cache::{as_jclass, get_class_cache};
-use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::errors::{guard, guard_or, throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
 use databricks_zerobus_ingest_sdk::ZerobusStream;
 use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord, RecordType};
@@ -90,10 +90,14 @@ async fn close_native_stream(
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeDestroy<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_destroy(env, _class, handle))
+}
+
+fn native_destroy<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong) {
     if handle != 0 {
         // Safety: handle was created by createStream
         unsafe {
@@ -110,6 +114,15 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeDestr
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecord<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    payload: JByteArray<'local>,
+) -> JObject<'local> {
+    guard(env, |env| native_ingest_record(env, _obj, handle, payload))
+}
+
+fn native_ingest_record<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -182,6 +195,17 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordOffset<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    payload: JByteArray<'local>,
+) -> jlong {
+    guard_or(env, -1, |env| {
+        native_ingest_record_offset(env, _obj, handle, payload)
+    })
+}
+
+fn native_ingest_record_offset<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -239,6 +263,17 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordsOffset<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    payloads: JObject<'local>,
+) -> jlong {
+    guard_or(env, -1, |env| {
+        native_ingest_records_offset(env, _obj, handle, payloads)
+    })
+}
+
+fn native_ingest_records_offset<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -328,6 +363,15 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeWaitForOffset<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    offset: jlong,
+) {
+    guard(env, |env| native_wait_for_offset(env, _obj, handle, offset))
+}
+
+fn native_wait_for_offset<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -361,10 +405,14 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeWaitF
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeFlush<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_flush(env, _obj, handle))
+}
+
+fn native_flush<'local>(mut env: JNIEnv<'local>, _obj: JObject<'local>, handle: jlong) {
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
@@ -393,10 +441,14 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeFlush
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_close(env, _obj, handle))
+}
+
+fn native_close<'local>(mut env: JNIEnv<'local>, _obj: JObject<'local>, handle: jlong) {
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
@@ -416,6 +468,14 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClosed<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> jboolean {
+    guard(env, |env| native_is_closed(env, _obj, handle))
+}
+
+fn native_is_closed<'local>(
     _env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -456,6 +516,14 @@ fn unsupported_record_type_error() -> databricks_zerobus_ingest_sdk::ZerobusErro
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedRecords<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| native_get_unacked_records(env, _obj, handle))
+}
+
+fn native_get_unacked_records<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -543,6 +611,14 @@ mod tests;
 pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUnackedBatches<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| native_get_unacked_batches(env, _obj, handle))
+}
+
+fn native_get_unacked_batches<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
