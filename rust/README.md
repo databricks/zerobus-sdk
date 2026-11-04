@@ -233,6 +233,8 @@ zerobus_rust_sdk/
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
 │   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
+│   │   ├── unary_tests.rs              # Unary client test suite
+│   │   ├── unary_live_tests.rs         # Unary client against a real server
 │   │   └── utils.rs                    # Shared test utilities
 │   └── Cargo.toml
 │
@@ -1556,6 +1558,12 @@ Run tests with logs:
 
 ```bash
 cargo test -p tests -- --nocapture
+```
+
+`tests/src/unary_live_tests.rs` tests the unary client against a real Zerobus server instead. Like the Java, TypeScript and C++ integration tests, it runs only when `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are set, and otherwise passes without doing anything. The table needs the columns `device_name STRING, temp INT, humidity BIGINT`:
+
+```bash
+cargo test -p tests --test unary_live_tests -- --nocapture
 ```
 
 ## Best Practices

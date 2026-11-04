@@ -39,8 +39,16 @@
 ### Internal Changes
 
 - Added the `InsertRecords` RPC to the SDK's copy of the service proto and
-  regenerated the purego and purec bindings. The mock server answers it with
-  `Unimplemented`.
+  regenerated the purego and purec bindings.
+- Added integration tests for the unary client against the mock server, which
+  now scripts `InsertRecords` replies and records each call. They cover the
+  request body and headers, client-side validation, retries and their backoff,
+  authentication and headers provider failures, timeouts, connection sharing,
+  reconnects, HTTP/2 keepalive through a black-holing proxy, and concurrent
+  calls from many tasks and OS threads.
+- Added live tests for the unary client against a real Zerobus server. Like
+  the Java, TypeScript and C++ integration tests, they run only when the
+  connection environment variables are set.
 
 ### Breaking Changes
 
