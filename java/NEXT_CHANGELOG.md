@@ -23,3 +23,8 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `ZerobusSdk.forTestingNoTls` (Beta, testing only) for the Layer-1 conformance
+  harness. It connects over plaintext to an `http://` endpoint. The native no-TLS path is
+  gated behind the JNI `testing` feature; without it the method throws `ZerobusException`.
+  Never use it against a real endpoint.

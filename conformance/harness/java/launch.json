@@ -1,0 +1,5 @@
+{
+  "argv": ["java", "-jar", "{harness_dir}/target/zerobus-testing-harness-java.jar"],
+  "artifact": "{harness_dir}/target/zerobus-testing-harness-java.jar",
+  "build_hint": "build zerobus-jni --features testing, stage the .so, mvn install the SDK, then mvn package in conformance/harness/java"
+}
