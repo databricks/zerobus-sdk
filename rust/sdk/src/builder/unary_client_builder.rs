@@ -1,0 +1,344 @@
+//! Fluent builder for unary ingestion clients.
+//!
+//! Reached via [`ZerobusSdk::unary_client_builder`](crate::ZerobusSdk::unary_client_builder).
+//! Like [`StreamBuilder`](super::StreamBuilder), it wraps a
+//! [`ClientBuilderCore`], which holds the table, auth, format, retry, and
+//! payload-limit settings. It offers only the setters that apply to a unary
+//! call.
+//!
+//! # Examples
+//!
+//! ```rust,ignore
+//! let client = sdk
+//!     .unary_client_builder()
+//!     .table("catalog.schema.events")
+//!     .oauth("client-id", "client-secret")
+//!     .json()
+//!     .build()
+//!     .await?;
+//! ```
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::client_builder_core::{ClientBuilderCore, FormatConfig};
+use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
+use crate::unary_client::{UnaryBody, UnaryOptions};
+use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
+
+/// A fluent builder for a unary ingestion client.
+///
+/// Configures a client bound to one table. The setters have the same names
+/// and defaults as the matching [`StreamBuilder`](crate::StreamBuilder)
+/// setters; settings that only apply to streams are not offered. The builder
+/// checks at `build()` time that table name, authentication, and format have
+/// been configured. Use [`validate`](Self::validate) to check the builder
+/// state without building the client.
+#[must_use = "a UnaryClientBuilder does nothing until `.build()` is called"]
+pub struct UnaryClientBuilder<'a> {
+    core: ClientBuilderCore<'a>,
+}
+
+impl fmt::Debug for UnaryClientBuilder<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnaryClientBuilder")
+            .field("table_name", &self.core.table_name)
+            .field("auth", &self.core.auth_kind())
+            .field("format", &self.core.format_kind())
+            .finish_non_exhaustive()
+    }
+}
+
+#[allow(clippy::result_large_err)]
+impl<'a> UnaryClientBuilder<'a> {
+    pub(crate) fn new(sdk: &'a ZerobusSdk) -> Self {
+        Self {
+            core: ClientBuilderCore::new(sdk),
+        }
+    }
+
+    /// Set the fully-qualified Unity Catalog table name (e.g., `"catalog.schema.table"`).
+    pub fn table(mut self, table_name: impl Into<String>) -> Self {
+        self.core.table_name = table_name.into();
+        self
+    }
+
+    /// Authenticate with OAuth client credentials.
+    pub fn oauth(mut self, client_id: impl Into<String>, client_secret: impl Into<String>) -> Self {
+        self.core.set_oauth(client_id.into(), client_secret.into());
+        self
+    }
+
+    /// Authenticate with external-IdP federation (RFC 8693).
+    ///
+    /// `client_id`: `None` for account-level federation; a Databricks service
+    /// principal id for workload identity federation (accepts `None`, a
+    /// `String`, or `Some(..)`).
+    ///
+    /// The shared token cache is partitioned automatically so distinct
+    /// identities used from one SDK instance never serve each other's token:
+    /// workload keys by `client_id`, and account-level keys by the
+    /// `idp_token_supplier`'s stable identity. Clone one supplier across streams
+    /// and unary clients to share its cached token; pass a distinct supplier to
+    /// isolate.
+    pub fn federated_auth(
+        mut self,
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: impl Into<Option<String>>,
+    ) -> Self {
+        self.core
+            .set_federated_auth(idp_token_supplier, client_id.into());
+        self
+    }
+
+    /// Authenticate with a custom headers provider.
+    ///
+    /// The client calls the provider before every call attempt, while a stream
+    /// calls it only when the stream is opened or recovered. It should be cheap
+    /// or cache its result. The built-in OAuth and federated providers cache
+    /// tokens.
+    pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
+        self.core.set_headers_provider(provider);
+        self
+    }
+
+    /// Use a no-op headers provider that sends no authentication credentials.
+    ///
+    /// Intended only for local testing against a Zerobus endpoint that does not
+    /// enforce authentication. Available behind the `testing` feature flag.
+    #[cfg(feature = "testing")]
+    pub fn no_auth(mut self) -> Self {
+        self.core.set_no_auth();
+        self
+    }
+
+    /// Select JSON records, sent as one JSON array: `[r0,r1,...]`.
+    ///
+    /// Unary calls support only JSON. Use [`json_lines`](Self::json_lines) to
+    /// send the same records as JSON Lines instead. The last format setter
+    /// called wins.
+    pub fn json(mut self) -> Self {
+        self.core.format = Some(FormatConfig::Json);
+        self
+    }
+
+    /// Select JSON records, sent as JSON Lines: one record per line, with no
+    /// brackets.
+    ///
+    /// Records are passed as with [`json`](Self::json); the SDK does the line
+    /// framing. Raw line breaks in a record, such as pretty-printing, become
+    /// spaces, which does not change its value.
+    pub fn json_lines(mut self) -> Self {
+        self.core.format = Some(FormatConfig::JsonLines);
+        self
+    }
+
+    /// Enable or disable automatic retries of a failed call.
+    ///
+    /// With retries on, a call that failed with a retryable error is sent
+    /// again, so a batch may be written more than once (at-least-once). With
+    /// retries off, a batch is never sent twice.
+    pub fn recovery(mut self, enabled: bool) -> Self {
+        self.core.recovery = enabled;
+        self
+    }
+
+    /// Set the backoff time in milliseconds between retries of a failed call.
+    pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
+        self.core.recovery_backoff_ms = ms;
+        self
+    }
+
+    /// Set the maximum number of retries of a failed call.
+    pub fn recovery_retries(mut self, n: u32) -> Self {
+        self.core.recovery_retries = n;
+        self
+    }
+
+    /// Set the timeout in milliseconds for each call attempt, from getting the
+    /// headers until the server confirms the batch is durable.
+    pub fn server_lack_of_ack_timeout_ms(mut self, ms: u64) -> Self {
+        self.core.server_lack_of_ack_timeout_ms = ms;
+        self
+    }
+
+    /// Set the maximum request body size in bytes allowed per call, including
+    /// the brackets and separators. Calls exceeding this limit fail fast with
+    /// [`ZerobusError::InvalidArgument`] before any network I/O.
+    ///
+    /// Defaults to slightly below the 10 MiB server limit.
+    pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
+        self.core.max_ingest_payload_bytes = bytes;
+        self
+    }
+
+    /// Validate the builder configuration without building the client.
+    ///
+    /// Checks that table name, authentication, and format have been set, in
+    /// that order, like [`StreamBuilder::validate`](crate::StreamBuilder::validate).
+    /// Performs no network I/O.
+    pub fn validate(&self) -> ZerobusResult<()> {
+        self.core.validate_target()?;
+        if self.core.format.is_none() {
+            return Err(ZerobusError::InvalidArgument(
+                "record format is required: call .json() or .json_lines()".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the client.
+    ///
+    /// Validates the configuration like [`validate`](Self::validate), resolves
+    /// the authentication into a headers provider, and gets the SDK's shared
+    /// unary connection. The connection opens lazily on the first call, so
+    /// `build()` sends nothing; it is async because it may wait for another
+    /// task that is creating the shared connection.
+    pub async fn build(self) -> ZerobusResult<UnaryClient> {
+        self.validate()?;
+
+        let core = self.core;
+        let body = match core.format {
+            Some(FormatConfig::Json) => UnaryBody::JsonArray,
+            Some(FormatConfig::JsonLines) => UnaryBody::JsonLines,
+            // Formats that unary clients do not support yet.
+            _ => {
+                return Err(ZerobusError::InvalidArgument(
+                    "unary clients support only .json() and .json_lines()".into(),
+                ))
+            }
+        };
+        // A unary call has one timeout per attempt, so a proactive token
+        // refresh gets half of it, as a stream's refresh gets half of its
+        // recovery timeout.
+        let refresh_timeout = Duration::from_millis(core.server_lack_of_ack_timeout_ms) / 2;
+        let headers_provider = core.resolve_headers_provider(refresh_timeout)?;
+        let channel = core.sdk.get_or_create_unary_channel().await?;
+
+        Ok(UnaryClient::new(
+            channel,
+            core.table_name,
+            headers_provider,
+            UnaryOptions {
+                recovery: core.recovery,
+                recovery_retries: core.recovery_retries,
+                recovery_backoff_ms: core.recovery_backoff_ms,
+                server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
+                max_ingest_payload_bytes: core.max_ingest_payload_bytes,
+                body,
+            },
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sdk() -> ZerobusSdk {
+        ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            "http://localhost:5678".to_string(),
+            "test-workspace".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            true,
+        )
+    }
+
+    fn invalid_argument(result: ZerobusResult<()>) -> String {
+        match result {
+            Err(ZerobusError::InvalidArgument(msg)) => msg,
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_complete_configuration() {
+        let sdk = test_sdk();
+        let builder = sdk.unary_client_builder().table("t").oauth("a", "b").json();
+        assert!(builder.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_reports_table_then_auth_then_format() {
+        let sdk = test_sdk();
+
+        let msg = invalid_argument(sdk.unary_client_builder().validate());
+        assert!(msg.contains(".table()"), "{msg}");
+
+        let msg = invalid_argument(sdk.unary_client_builder().table("t").json().validate());
+        assert!(msg.contains(".oauth()"), "{msg}");
+
+        let msg = invalid_argument(
+            sdk.unary_client_builder()
+                .table("t")
+                .oauth("a", "b")
+                .validate(),
+        );
+        assert_eq!(
+            msg,
+            "record format is required: call .json() or .json_lines()"
+        );
+    }
+
+    #[test]
+    fn json_lines_is_a_format_and_the_last_format_setter_wins() {
+        let sdk = test_sdk();
+        let lines = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json_lines();
+        assert!(lines.validate().is_ok());
+        assert!(format!("{lines:?}").contains("JsonLines"));
+
+        let array = lines.json();
+        assert!(format!("{array:?}").contains("\"Json\""));
+    }
+
+    #[tokio::test]
+    async fn build_validates_first_and_sends_nothing() {
+        let sdk = test_sdk();
+        let error = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("a", "b")
+            .build()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json() or .json_lines()"),
+            "{error:?}"
+        );
+
+        // Nothing listens on the test endpoint; build() succeeds because the
+        // connection opens only on the first call.
+        let client = sdk
+            .unary_client_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .json()
+            .build()
+            .await
+            .unwrap();
+        assert!(format!("{client:?}").contains("catalog.schema.table"));
+    }
+
+    #[test]
+    fn debug_shows_kinds_without_secrets() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("id", "super-secret")
+            .json();
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("OAuth") && debug.contains("Json"), "{debug}");
+        assert!(!debug.contains("super-secret"), "{debug}");
+    }
+}

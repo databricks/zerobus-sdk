@@ -15,8 +15,8 @@ use databricks::zerobus::{
     zerobus_server::{Zerobus, ZerobusServer},
     CloseStreamSignal, CreateIngestStreamRequest, CreateIngestStreamResponse,
     EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordRequest, IngestRecordResponse,
-    PersistentStreamRequest, PersistentStreamResponse, ResumeIngestStreamResponse,
-    RetireStreamRequest, RetireStreamResponse,
+    InsertRecordsRequest, InsertRecordsResponse, PersistentStreamRequest, PersistentStreamResponse,
+    ResumeIngestStreamResponse, RetireStreamRequest, RetireStreamResponse,
 };
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
@@ -736,6 +736,16 @@ impl Zerobus for MockZerobusServer {
     ) -> Result<Response<RetireStreamResponse>, Status> {
         Err(Status::unimplemented(
             "RetireStream is not implemented in the mock server",
+        ))
+    }
+
+    /// Not exercised by the existing tests; returns `Unimplemented`.
+    async fn insert_records(
+        &self,
+        _request: Request<InsertRecordsRequest>,
+    ) -> Result<Response<InsertRecordsResponse>, Status> {
+        Err(Status::unimplemented(
+            "InsertRecords is not implemented in the mock server",
         ))
     }
 }

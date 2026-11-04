@@ -140,6 +140,10 @@ pub enum ZerobusError {
     #[cfg(feature = "avro")]
     #[error("Avro record encoding failed: {0}")]
     AvroEncodingError(String),
+    /// Returned when a unary `InsertRecords` call failed with a gRPC status, or
+    /// when an attempt timed out (`DeadlineExceeded`).
+    #[error("InsertRecords failed: {0}")]
+    UnaryIngestError(GrpcStatus),
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -190,7 +194,7 @@ impl ZerobusError {
         ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
     }
 
-    /// Determines whether this error can be automatically recovered through stream recovery.
+    /// Determines whether this error can be automatically recovered by a retry.
     ///
     /// Retryable errors typically indicate transient issues like network failures or
     /// temporary server problems. Non-retryable errors indicate permanent issues like
@@ -223,6 +227,9 @@ impl ZerobusError {
             ZerobusError::AvroSchemaParseError(_) => false,
             #[cfg(feature = "avro")]
             ZerobusError::AvroEncodingError(_) => false,
+            ZerobusError::UnaryIngestError(status) => {
+                !UNRETRIABLE_STATUS_CODES.contains(&status.code())
+            }
         }
     }
 
@@ -233,7 +240,9 @@ impl ZerobusError {
     pub(crate) fn is_auth_rejection(&self) -> bool {
         matches!(
             self,
-            ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status)
+            ZerobusError::CreateStreamError(status)
+                | ZerobusError::StreamClosedError(status)
+                | ZerobusError::UnaryIngestError(status)
                 if matches!(
                     status.code(),
                     GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
@@ -246,9 +255,9 @@ impl ZerobusError {
 /// classification. An auth rejection may use one retry from the recovery budget
 /// so a stale credential can be refreshed; subsequent auth rejections remain terminal.
 ///
-/// Shared by both transports (proto `stream/grpc` and Arrow Flight) so their
-/// initial-setup credential-refresh behavior stays identical. It applies only to
-/// initial setup; reconnect paths apply their own retry and credential-refresh policies.
+/// Used for initial stream setup on both transports and for every unary call,
+/// so their credential-refresh behavior stays identical. Stream reconnect paths
+/// apply their own retry and credential-refresh policies.
 pub(crate) fn should_retry_initial_connection(
     error: &ZerobusError,
     recovery_enabled: bool,
@@ -346,8 +355,35 @@ mod tests {
         assert!(!ZerobusError::TokenFetchError("x".to_string()).is_auth_rejection());
     }
 
+    #[test]
+    fn unary_ingest_error_is_classified_like_stream_setup_errors() {
+        use ZerobusError::UnaryIngestError;
+        assert!(UnaryIngestError(GrpcStatus::unavailable("x")).is_retryable());
+        assert!(UnaryIngestError(GrpcStatus::deadline_exceeded("x")).is_retryable());
+        assert!(UnaryIngestError(GrpcStatus::internal("x")).is_retryable());
+        assert!(!UnaryIngestError(GrpcStatus::invalid_argument("x")).is_retryable());
+        assert!(!UnaryIngestError(GrpcStatus::new(GrpcCode::NotFound, "x")).is_retryable());
+
+        assert!(UnaryIngestError(GrpcStatus::unauthenticated("x")).is_auth_rejection());
+        assert!(UnaryIngestError(GrpcStatus::permission_denied("x")).is_auth_rejection());
+        assert!(!UnaryIngestError(GrpcStatus::internal("x")).is_auth_rejection());
+
+        let mut auth_retry_available = true;
+        let rejection = UnaryIngestError(GrpcStatus::unauthenticated("stale token"));
+        assert!(should_retry_initial_connection(
+            &rejection,
+            true,
+            &mut auth_retry_available
+        ));
+        assert!(!should_retry_initial_connection(
+            &rejection,
+            true,
+            &mut auth_retry_available
+        ));
+    }
+
     /// The language bindings surface `ZerobusError::to_string()`. Pins the full
-    /// message of both status-carrying variants to the text that the
+    /// message of the two stream status-carrying variants to the text that the
     /// `tonic::Status`-based variants produced, so the move to `GrpcStatus`
     /// does not change the strings users see.
     #[test]

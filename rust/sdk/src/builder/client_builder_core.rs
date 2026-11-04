@@ -1,13 +1,14 @@
 //! Builder state shared by every client kind that targets one table.
 //!
-//! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`], and
-//! its public setters write the core's fields. The core holds the SDK, the
-//! table name, the authentication choice, the record format, recovery on or
-//! off, the retry count and backoff, the server acknowledgement timeout, and
-//! the payload limit, which Arrow Flight streams ignore. Each wrapper decides
-//! which formats it exposes and how it reports a missing one. Settings that
-//! only streams have (in-flight limits, flush and recovery-attempt timeouts,
-//! callbacks) stay in the stream builder.
+//! [`StreamBuilder`](super::StreamBuilder) and
+//! [`UnaryClientBuilder`](super::UnaryClientBuilder) each wrap a
+//! [`ClientBuilderCore`], and their public setters write the core's fields. The
+//! core holds the SDK, the table name, the authentication choice, the record
+//! format, recovery on or off, the retry count and backoff, the server
+//! acknowledgement timeout, and the payload limit, which Arrow Flight streams
+//! ignore. Each wrapper decides which formats it exposes and how it reports a
+//! missing one. Settings that only streams have (in-flight limits, flush and
+//! recovery-attempt timeouts, callbacks) stay in the stream builder.
 //!
 //! Authentication is private: set it through the `set_*` auth methods.
 //! `resolve_headers_provider()` turns it into a headers provider.
@@ -52,6 +53,8 @@ enum AuthConfig {
 /// Which record format was selected.
 pub(super) enum FormatConfig {
     Json,
+    /// JSON records sent as JSON Lines. Only the unary builder selects it.
+    JsonLines,
     CompiledProto(Box<prost_types::DescriptorProto>),
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
@@ -73,6 +76,12 @@ impl FormatConfig {
     pub(super) fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
         let (record_type, descriptor_proto, message_descriptor) = match self {
             Self::Json => (RecordType::Json, None, None),
+            // No stream setter selects it; this guards against one that would.
+            Self::JsonLines => {
+                return Err(ZerobusError::InvalidArgument(
+                    "JSON Lines is supported only by unary clients".into(),
+                ));
+            }
             Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
             Self::DynamicProto(descriptor) => (
                 RecordType::Proto,
@@ -192,6 +201,7 @@ impl<'a> ClientBuilderCore<'a> {
     pub(super) fn format_kind(&self) -> &'static str {
         match &self.format {
             Some(FormatConfig::Json) => "Json",
+            Some(FormatConfig::JsonLines) => "JsonLines",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]

@@ -532,7 +532,7 @@ impl<'a> StreamBuilder<'a> {
             avro_schema: format.avro_schema,
         };
 
-        let channel = self.core.sdk.get_or_create_channel_zerobus_client().await?;
+        let channel = self.core.sdk.get_or_create_stream_channel().await?;
         Ok(GrpcStreamParts {
             channel,
             table_properties,

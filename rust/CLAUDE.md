@@ -33,6 +33,8 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
 - `landing_zone.rs` — Batches records before sending over gRPC
 - `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`; `AvroRecord`/`AvroBytes` and the `PreparedInput` ingest payload (Avro types behind `avro`)
+- `unary_client.rs` and `builder/unary_client_builder.rs` — Unary `InsertRecords` client for sparse traffic: one call per batch, no stream. All unary clients of an SDK share one channel (`ZerobusSdk::get_or_create_unary_channel`), separate from streams
+- `builder/client_builder_core.rs` — Table, auth, format, and retry settings shared by `StreamBuilder` and `UnaryClientBuilder`
 - `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules
   (behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
 
