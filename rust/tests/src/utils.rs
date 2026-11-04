@@ -75,6 +75,18 @@ impl HeadersProvider for TestHeadersProvider {
     }
 }
 
+/// A headers provider that also sends a base64-encoded `-bin` header.
+pub struct BinaryHeadersProvider(pub &'static str);
+
+#[async_trait]
+impl HeadersProvider for BinaryHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let mut headers = TestHeadersProvider::default().get_headers().await?;
+        headers.insert("x-test-bin", self.0.to_string());
+        Ok(headers)
+    }
+}
+
 /// A headers provider that counts header fetches and `invalidate()` calls, for asserting
 /// credential re-mint behavior on auth failures.
 #[derive(Default)]
