@@ -154,8 +154,8 @@ impl UnaryClient {
     ///
     /// * `InvalidArgument` - A record that is not JSON (e.g. `ProtoMessage`), a
     ///   record that is not exactly one valid JSON object, or a batch whose
-    ///   request body is larger than `max_ingest_payload_bytes`. The message names
-    ///   the 0-based index of the first bad record. Nothing is sent.
+    ///   request body is larger than `max_ingest_payload_bytes`. For a bad record,
+    ///   the message names its 0-based index. Nothing is sent.
     /// * `UnaryIngestError` - The server rejected the batch, the connection failed,
     ///   or an attempt timed out (`DeadlineExceeded`), after retries are exhausted.
     /// * Errors from the headers provider, such as `TokenFetchError`.
