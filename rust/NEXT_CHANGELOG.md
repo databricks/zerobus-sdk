@@ -16,15 +16,13 @@
   Build one with `ZerobusSdk::unary_client_builder()`. JSON only: `.json()`
   sends the batch as a JSON array, `.json_lines()` as JSON Lines. The client
   checks that every record is exactly one JSON object and names the index of
-  the first bad record, enforces `max_ingest_payload_bytes` on the whole
+  a bad record, enforces `max_ingest_payload_bytes` on the whole
   request body, retries retryable errors per the recovery settings, and bounds
   each attempt by `server_lack_of_ack_timeout_ms`. All unary clients of one SDK
   share one connection, separate from streams and unaffected by
   `connection_per_stream`. It sends HTTP/2 keepalive pings while a call is in
   flight, so a connection that dropped silently between calls is replaced.
   For continuous ingestion, keep using streams.
-- The warning for many streams opened for one table now suggests a unary client
-  for sparse traffic.
 
 ### Bug Fixes
 

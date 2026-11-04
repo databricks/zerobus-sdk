@@ -23,11 +23,13 @@ use crate::stream::ZerobusArrowStream;
 /// application suffix.
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
-/// How long the unary channel waits without receiving any frame, while a call
-/// is in flight, before it sends an HTTP/2 PING. A silently dropped connection
-/// is closed about this long plus [`UNARY_KEEPALIVE_TIMEOUT`] after its last
-/// frame, instead of when the kernel stops retransmitting, which takes about
-/// 15 minutes with Linux defaults.
+/// How long the unary channel waits without receiving any frame before it
+/// sends an HTTP/2 PING. It pings only while a call is in flight, so a call
+/// that starts after a longer idle gap pings at once. A silently dropped
+/// connection is closed [`UNARY_KEEPALIVE_TIMEOUT`] after such a call starts,
+/// and otherwise at most this long plus that timeout after its last frame,
+/// instead of when the kernel stops retransmitting, which takes about 15
+/// minutes with Linux defaults.
 const UNARY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long the unary channel waits for the PING reply before it closes the
