@@ -66,6 +66,32 @@ mod construction_tests {
     use super::*;
 
     #[tokio::test]
+    async fn builder_applies_shared_settings_to_every_lane(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let limit = 1024;
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = create_test_sdk(&server_url).await?;
+        let mux = sdk
+            .stream_builder()
+            .table("builder.schema.shared_settings")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap())
+            .max_ingest_payload_bytes(limit)
+            .multiplexed(2)
+            .build()
+            .await?;
+
+        let result = mux.ingest_record(vec![0u8; limit + 1]).await;
+
+        assert!(
+            matches!(result, Err(ZerobusError::InvalidArgument(_))),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builder_respects_connection_per_stream() -> Result<(), Box<dyn std::error::Error>> {
         const TABLE: &str = "builder.schema.connections";
 

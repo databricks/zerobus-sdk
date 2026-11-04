@@ -1,18 +1,16 @@
 //! Builder state shared by every client kind that targets one table.
 //!
 //! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`], and
-//! its public setters write the core's fields. The core holds only what is
-//! independent of the transport: the SDK, the table name, the authentication
-//! choice, and the record format. Each wrapper decides which formats it exposes
-//! and how it reports a missing one.
+//! its public setters write the core's fields. The core holds the SDK, the
+//! table name, the authentication choice, the record format, recovery on or
+//! off, the retry count and backoff, the server acknowledgement timeout, and
+//! the payload limit, which Arrow Flight streams ignore. Each wrapper decides
+//! which formats it exposes and how it reports a missing one. Settings that
+//! only streams have (in-flight limits, flush and recovery-attempt timeouts,
+//! callbacks) stay in the stream builder.
 //!
-//! The core also holds the retry settings: recovery on or off, retry count and
-//! backoff, and the server acknowledgement timeout. It holds the per-call
-//! payload limit too, which Arrow Flight streams ignore. Settings that only
-//! streams have (in-flight limits, flush and recovery-attempt timeouts,
-//! callbacks) stay in the stream builder. Authentication stays private: set it
-//! through the `set_*` auth methods and read it only through
-//! `resolve_headers_provider()`.
+//! Authentication is private: set it through the `set_*` auth methods.
+//! `resolve_headers_provider()` turns it into a headers provider.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,7 +121,7 @@ const fn missing_auth_error() -> &'static str {
 }
 
 /// Target, format, and retry settings shared by the client builders.
-pub(crate) struct ClientBuilderCore<'a> {
+pub(super) struct ClientBuilderCore<'a> {
     pub(super) sdk: &'a ZerobusSdk,
     pub(super) table_name: String,
     auth: Option<AuthConfig>,
