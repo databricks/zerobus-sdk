@@ -11,8 +11,9 @@
 //! `ephemeral.rs` holds `build()`, and `multiplexed.rs` holds `multiplexed()`
 //! and `multiplexed_ack_callback()`. Persistent streams do not support
 //! multiplexing or Arrow Flight. The Arrow Flight setters and `build_arrow()`
-//! are still in this file. The table, authentication, record format, and retry
-//! settings live in [`ClientBuilderCore`], which the public setters write.
+//! are still in this file. The table, authentication, record format, recovery,
+//! retry count and backoff, acknowledgement timeout, and payload limit live in
+//! [`ClientBuilderCore`], which the public setters write.
 //!
 //! # Examples
 //!
@@ -252,10 +253,11 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the timeout in milliseconds for each recovery attempt.
     ///
-    /// For streams authenticated with [`oauth`](Self::oauth), this also caps a
-    /// proactive OAuth token refresh at half this value, but only when the cached
-    /// token has more life left than that cap, so a stalled endpoint falls back
-    /// before the attempt deadline. Very near expiry the refresh runs unbounded.
+    /// For streams authenticated with [`oauth`](Self::oauth) or
+    /// [`federated_auth`](Self::federated_auth), this also caps a proactive
+    /// token refresh at half this value, but only when the cached token has more
+    /// life left than that cap, so a stalled endpoint falls back before the
+    /// attempt deadline. Very near expiry the refresh runs unbounded.
     pub fn recovery_timeout_ms(mut self, ms: u64) -> Self {
         self.grpc_config.recovery_timeout_ms = ms;
         #[cfg(feature = "arrow-flight")]
@@ -492,7 +494,7 @@ impl<'a> StreamBuilder<'a> {
     fn resolve_headers_provider(&self) -> ZerobusResult<Arc<dyn HeadersProvider>> {
         // Give a proactive refresh half the recovery timeout so a stalled
         // refresh falls back to the cached token before the setup deadline
-        // cancels the request. Both recovery-timeout setters write the gRPC
+        // cancels the request. The recovery-timeout setter writes the gRPC
         // and Arrow configs in lockstep, so grpc_config is a valid single
         // source even for an Arrow stream; revisit if a per-transport
         // recovery timeout is ever added.
