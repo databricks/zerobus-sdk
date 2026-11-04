@@ -53,6 +53,7 @@ jobs:
           filters: |
             rust:
               - 'rust/**'
+              - 'conformance/mock_server/**'
               - '.github/workflows/ci-rust.yml'
             java:
               - 'java/**'
