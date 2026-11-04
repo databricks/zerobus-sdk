@@ -25,6 +25,8 @@
 
 ### Internal Changes
 
+- Added testing-only `noTls` (`ZerobusSdkOptions`) and `noAuth` (stream options) paths for the Layer-1 conformance test harness, gated behind the `testing` feature. They disable TLS and auth and must never be used against a real endpoint; they are absent from released packages.
+
 ### Breaking Changes
 
 ### Deprecations
