@@ -97,25 +97,25 @@ stream.close();
 
 ## IPC Compression
 
-Arrow IPC payloads can be compressed on the wire. Enable compression only when
-network bandwidth limits throughput — it reduces bytes on the wire at the cost of
-client CPU. Set `ArrowStreamOptions::ipc_compression` and pass the options to
+Arrow IPC payloads are compressed on the wire with ZSTD by default. Compression
+reduces bytes on the wire at the cost of client CPU. To pick another codec, set
+`ArrowStreamOptions::ipc_compression` and pass the options to
 `create_arrow_stream`:
 
 ```cpp
 zerobus::ArrowStreamOptions opts;
-opts.ipc_compression = zerobus::IpcCompression::Zstd;   // or Lz4Frame
+opts.ipc_compression = zerobus::IpcCompression::Lz4Frame;   // or NoCompression
 
 zerobus::ArrowStream stream = sdk.create_arrow_stream(
     table_name, schema_ipc, client_id, client_secret, opts);
 ```
 
+- `Zstd` (the default) — higher compression ratio, more CPU per batch.
 - `Lz4Frame` — fast, low CPU overhead, modest compression ratio.
-- `Zstd` — higher compression ratio, more CPU per batch.
-- `NoCompression` (the default) — no compression.
+- `NoCompression` — no compression.
 
 `arrow_ingest.cpp` shows this as a commented-out option on
-`ArrowStreamOptions`; uncomment it to enable compression.
+`ArrowStreamOptions`; uncomment it to change the codec.
 
 ## Adapting for Your Custom Table
 
