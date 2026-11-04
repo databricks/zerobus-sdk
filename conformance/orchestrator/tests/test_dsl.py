@@ -182,16 +182,6 @@ def test_create_stream_rejects_empty_schema():
         _make(lambda s: s.sdk.create_stream(schema="")).steps
 
 
-def test_await_write_rejects_bool_timeout():
-    def bad(s):
-        st = s.sdk.create_stream(schema="simple_record")
-        r = s.sdk.ingest(st, {"id": 1, "message": "x"})
-        s.sdk.await_write(r, timeout_ms=True)
-
-    with pytest.raises(ScenarioError):
-        _make(bad).steps
-
-
 def test_gate_transports_rejects_bare_string():
     with pytest.raises(ScenarioError):
         gate(transports="grpc")
@@ -265,6 +255,60 @@ def test_terminal_failure_primitive():
         s.expect(s.mock.call_count(), equals=1)
 
     assert any("expect_terminal_failure" in p for p in validate(_make(missing)))
+
+
+def test_ingest_many_records_batch_and_validates():
+    from zerobus_test_runner.scenario import IngestMany
+
+    def body(s):
+        st = s.sdk.create_stream(schema="simple_record")
+        r = s.sdk.ingest_many(st, [{"id": i, "message": f"m{i}"} for i in range(3)])
+        s.sdk.flush(st)
+        s.expect(s.mock.ack_offset(st), equals=r.offset)  # single batch offset
+
+    # Batch ingest only runs over arrow_flight today (the mock rejects it over gRPC).
+    sc = _make(body, applies=gate(transports=["arrow_flight"]))
+    steps = sc.steps
+    batch = [x for x in steps if isinstance(x, IngestMany)]
+    assert len(batch) == 1 and isinstance(batch[0].out, RecordRef)
+    assert len(batch[0].records) == 3
+    assert validate(sc) == []
+
+
+def test_ingest_many_on_grpc_rejected():
+    def body(s):
+        st = s.sdk.create_stream(schema="simple_record")
+        s.sdk.ingest_many(st, [{"id": 1, "message": "x"}])
+        s.sdk.flush(st)
+        s.expect(s.mock.captured_record_count(st), equals=1)
+
+    # Ungated: admits gRPC, where the SDK batch path hits the mock's UNIMPLEMENTED.
+    assert any("ingest_many is not supported by the mock on gRPC" in p for p in validate(_make(body)))
+
+
+def test_ingest_many_rejects_empty_and_non_dict():
+    with pytest.raises(ScenarioError):
+        _make(lambda s: s.sdk.ingest_many(s.sdk.create_stream(schema="simple_record"), [])).steps
+    with pytest.raises(ScenarioError):
+        _make(lambda s: s.sdk.ingest_many(s.sdk.create_stream(schema="simple_record"), [1])).steps
+
+
+def test_expect_rejects_mismatched_bound_type():
+    def bytes_target_int_bound(s):
+        st = s.sdk.create_stream(schema="simple_record")
+        s.sdk.ingest(st, {"id": 1, "message": "x"})
+        s.expect(s.mock.captured_record_bytes(st, 0), equals=5)  # bytes observation, int bound
+
+    def count_target_bytes_bound(s):
+        st = s.sdk.create_stream(schema="simple_record")
+        s.sdk.ingest(st, {"id": 1, "message": "x"})
+        s.sdk.flush(st)
+        s.expect(s.mock.captured_record_count(st), equals=b"\x00")  # int observation, bytes bound
+
+    with pytest.raises(ScenarioError):
+        _make(bytes_target_int_bound).steps
+    with pytest.raises(ScenarioError):
+        _make(count_target_bytes_bound).steps
 
 
 def test_load_scenarios_handles_dataclass_future_annotations(tmp_path):

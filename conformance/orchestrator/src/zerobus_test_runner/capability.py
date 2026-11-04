@@ -45,9 +45,10 @@ CAPABILITIES = {
     "purego": Capability(frozenset({"grpc"}), frozenset({"proto", "json"})),
 }
 
-# Tuples whose harness is actually implemented; anything else passing gates 1-3 is reported
-# UNSUPPORTED (never faked). grpc+proto is wired for every harnessed SDK (cgo go has no harness
-# yet, so it is absent here); the rest are partial.
+# Tuples whose harness is actually implemented; a tuple that passes gates 1-3 but is not here is
+# reported NOT_WIRED (distinct from UNSUPPORTED, which means the SDK does not ship it at all).
+# grpc+proto is wired for every harnessed SDK (cgo go has no harness, so it is absent here); the
+# rest are partial.
 WIRED = frozenset(
     {(sdk, "grpc", "proto") for sdk in ("rust", "python", "typescript", "java", "cpp", "dotnet", "purego")}
     # avro wired only where supported (rust, python)
@@ -62,7 +63,8 @@ class State(str, Enum):
     FAIL = "FAIL"
     ERROR = "ERROR"
     NA = "N-A"
-    UNSUPPORTED = "UNSUPPORTED"
+    UNSUPPORTED = "UNSUPPORTED"  # the SDK does not ship this transport/format
+    NOT_WIRED = "NOT-WIRED"  # the SDK ships it, but the conformance harness has not wired it yet
     INVALID = "INVALID"
 
 
@@ -85,6 +87,11 @@ def is_valid(transport: str, fmt: str) -> bool:
 def is_supported(sdk: str, transport: str, fmt: str) -> bool:
     cap = CAPABILITIES.get(sdk)
     return cap is not None and transport in cap.transports and fmt in cap.formats
+
+
+def is_wired(sdk: str, transport: str, fmt: str) -> bool:
+    """Whether the conformance harness implements this tuple (vs. merely the SDK shipping it)."""
+    return (sdk, transport, fmt) in WIRED
 
 
 def valid_tuples() -> list[tuple[str, str]]:
@@ -118,10 +125,10 @@ def classify(
     gate: "Optional[Gate]",
     schema_formats: Iterable[str],
 ) -> Classification:
-    """Full placement for one scenario: gates 1-3, then wiring (first slice)."""
+    """Full placement for one scenario: gates 1-3, then wiring."""
     terminal = admits(sdk, transport, fmt, gate, schema_formats)
     if terminal is not None:
         return terminal
-    if (sdk, transport, fmt) not in WIRED:
-        return Classification(State.UNSUPPORTED, f"not wired in this slice (TODO): {sdk}/{transport}/{fmt}")
+    if not is_wired(sdk, transport, fmt):
+        return Classification(State.NOT_WIRED, f"no conformance harness yet: {sdk}/{transport}/{fmt}")
     return Classification(None)
