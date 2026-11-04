@@ -1,0 +1,5 @@
+{
+  "argv": ["{repo_root}/python/.venv/bin/python", "-m", "zerobus_harness"],
+  "env": {"PYTHONPATH": "{harness_dir}/src"},
+  "build_hint": "cd python && .venv/bin/python -m maturin develop --features testing"
+}
