@@ -4,6 +4,11 @@
 
 ### New Features and Improvements
 
+- Arrow Flight streams now compress IPC payloads with ZSTD by default.
+  `DefaultArrowStreamConfigurationOptions()` sets `IPCCompression` to `IPCCompressionZstd`, and the
+  zero value `IPCCompressionDefault` and nil options also mean ZSTD instead of no compression. To
+  keep sending uncompressed payloads, set `IPCCompression` to `IPCCompressionNone`.
+
 ### Deprecations
 
 ### Bug Fixes
