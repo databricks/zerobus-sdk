@@ -56,6 +56,7 @@ class AckCallbackNativeTest {
   @Test
   void thrownExceptionIsNotRetainedAfterCallback() throws InterruptedException {
     assumeTrue(NativeLoader.isLoaded(), "Native library not available");
+    assumeExplicitGcCollects();
     AtomicReference<WeakReference<Throwable>> thrown = new AtomicReference<>();
 
     AckCallback callback =
@@ -80,6 +81,7 @@ class AckCallbackNativeTest {
   @Test
   void errorMessageIsNotRetainedAfterCallback() throws InterruptedException {
     assumeTrue(NativeLoader.isLoaded(), "Native library not available");
+    assumeExplicitGcCollects();
     AtomicReference<WeakReference<String>> message = new AtomicReference<>();
 
     AckCallback callback =
@@ -122,6 +124,15 @@ class AckCallbackNativeTest {
     assertEquals("OK", NativeTestHelper.nativeTestAckCallbackExceptions(callback, 3));
     assertEquals(3, acks.get());
     assertEquals(1, errors.get());
+  }
+
+  /**
+   * Skips the test when {@code System.gc()} does not collect garbage (for example under {@code
+   * -XX:+DisableExplicitGC}), so the leak tests cannot fail for that reason.
+   */
+  private static void assumeExplicitGcCollects() throws InterruptedException {
+    WeakReference<Object> control = new WeakReference<>(new Object());
+    assumeTrue(isCollected(control), "System.gc() does not collect garbage in this JVM");
   }
 
   /** Forces garbage collections until {@code ref} is cleared, for up to about a second. */
