@@ -20,6 +20,11 @@
 
 ### Internal Changes
 
+- Added testing-only `no_tls` (sync `ZerobusSdk`) and `no_auth` (`create_stream`)
+  paths for the Layer-1 conformance test harness, gated behind the `testing` feature
+  (`maturin build --features testing`). They disable TLS and auth and must never be
+  used against a real endpoint; they are absent from released wheels.
+
 ### Breaking Changes
 
 ### Deprecations
