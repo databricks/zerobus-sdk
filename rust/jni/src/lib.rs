@@ -37,9 +37,17 @@ const JNI_VERSION: jint = jni::sys::JNI_VERSION_1_8;
 /// Called by the JVM when the native library is loaded.
 ///
 /// This function initializes the Tokio runtime that will be used for all async
-/// operations in the Zerobus SDK.
+/// operations in the Zerobus SDK. A panic during initialization fails the load
+/// (`System.load` throws `UnsatisfiedLinkError`) instead of aborting the JVM.
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_load(vm))).unwrap_or_else(|_| {
+        tracing::error!("Panic while loading the Zerobus JNI library");
+        jni::sys::JNI_ERR
+    })
+}
+
+fn on_load(vm: JavaVM) -> jint {
     // Initialize the global Tokio runtime
     runtime::init_runtime();
 

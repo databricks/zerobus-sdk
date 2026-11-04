@@ -7,8 +7,9 @@
 
 use crate::callbacks::JavaAckCallback;
 use crate::class_cache::{as_jclass, get_class_cache};
+use crate::errors::guard;
 use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
-use crate::runtime::{get_jvm, get_runtime};
+use crate::runtime::{block_on, get_jvm, get_runtime};
 use databricks_zerobus_ingest_sdk::{AckCallback, HeadersProvider, ZerobusError};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::jint;
@@ -25,6 +26,16 @@ use std::time::Duration;
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFindClassFromDaemonThread<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    class_name: JString<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_find_class_from_daemon_thread(env, _class, class_name)
+    })
+}
+
+fn native_test_find_class_from_daemon_thread<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     class_name: JString<'local>,
@@ -105,6 +116,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFindClassFromDaemonThreadCached<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    class_name: JString<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_find_class_from_daemon_thread_cached(env, _class, class_name)
+    })
+}
+
+fn native_test_find_class_from_daemon_thread_cached<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     class_name: JString<'local>,
@@ -173,6 +194,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderCallbacks<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_headers_provider_callbacks(env, _class, provider)
+    })
+}
+
+fn native_test_headers_provider_callbacks<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     provider: JObject<'local>,
@@ -242,6 +273,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderSerialization<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_headers_provider_serialization(env, _class, provider)
+    })
+}
+
+fn native_test_headers_provider_serialization<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     provider: JObject<'local>,
@@ -275,6 +316,70 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
     test_result(&mut env, result)
 }
 
+/// Panics inside a JNI entry point.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestPanic<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    guard(env, |_env| panic!("test panic"))
+}
+
+/// Blocks on the SDK runtime, as the blocking stream methods (`flush`, `close`, ...) do.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestBlockOn<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    guard(env, |_env| block_on(async {}))
+}
+
+/// Runs `task.run()` on a Tokio worker thread, where the SDK invokes ack callbacks.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestRunOnRuntimeWorker<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    task: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_run_on_runtime_worker(env, _class, task)
+    })
+}
+
+fn native_test_run_on_runtime_worker<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    task: JObject<'local>,
+) -> JObject<'local> {
+    let task_ref = match env.new_global_ref(task) {
+        Ok(task_ref) => task_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        get_runtime()
+            .spawn(async move {
+                let mut env = match get_jvm().attach_current_thread_as_daemon() {
+                    Ok(env) => env,
+                    Err(error) => return format!("failed to attach thread: {error}"),
+                };
+                match env.call_method(task_ref.as_obj(), "run", "()V", &[]) {
+                    Ok(_) => "OK".to_string(),
+                    Err(error) => {
+                        let _ = env.exception_clear();
+                        format!("task failed: {error}")
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|error| format!("worker task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
 /// Drives `JavaAckCallback` from one SDK-owned thread, as the SDK's callback worker does.
 ///
 /// Every Java callback may throw; each later call must still reach Java, and no
@@ -283,6 +388,17 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAckCallbackExceptions<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+    acks: jint,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_ack_callback_exceptions(env, _class, callback, acks)
+    })
+}
+
+fn native_test_ack_callback_exceptions<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     callback: JObject<'local>,
@@ -312,6 +428,46 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAc
         })
         .await
         .unwrap_or_else(|error| format!("callback task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Invokes `callback.onAck` and then `callback.onError` through `JavaAckCallback`
+/// on a Tokio worker thread, exactly as the SDK delivers acknowledgments.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAckCallbackOnRuntimeWorker<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_ack_callback_on_runtime_worker(env, _class, callback)
+    })
+}
+
+fn native_test_ack_callback_on_runtime_worker<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+) -> JObject<'local> {
+    let callback_ref = match env.new_global_ref(callback) {
+        Ok(callback_ref) => callback_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        get_runtime()
+            .spawn(async move {
+                let callback = JavaAckCallback::new(callback_ref);
+                callback.on_ack(0);
+                callback.on_error(1, "ack failed");
+                "OK".to_string()
+            })
+            .await
+            .unwrap_or_else(|error| format!("worker task failed: {error}"))
     });
 
     test_result(&mut env, result)

@@ -4,7 +4,7 @@
 
 use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
-use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::errors::{guard, throw_from_zerobus_error, throw_zerobus_exception};
 use crate::headers_provider::JavaHeadersProvider;
 use crate::options::{
     apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
@@ -28,10 +28,10 @@ const NATIVE_ABI_VERSION: jint = 1;
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_NativeLoader_nativeAbiVersion<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jint {
-    NATIVE_ABI_VERSION
+    guard(env, |_env| NATIVE_ABI_VERSION)
 }
 
 /// Native SDK handle stored in Java.
@@ -127,6 +127,24 @@ fn create_sdk<'local>(
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+) -> jlong {
+    guard(env, |env| {
+        native_create(
+            env,
+            _class,
+            server_endpoint,
+            unity_catalog_endpoint,
+            application_name,
+        )
+    })
+}
+
+fn native_create<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     server_endpoint: JString<'local>,
@@ -152,6 +170,26 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithConnectionPerStream<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+) -> jlong {
+    guard(env, |env| {
+        native_create_with_connection_per_stream(
+            env,
+            _class,
+            server_endpoint,
+            unity_catalog_endpoint,
+            application_name,
+            connection_per_stream,
+        )
+    })
+}
+
+fn native_create_with_connection_per_stream<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     server_endpoint: JString<'local>,
@@ -176,10 +214,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithCo
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_destroy(env, _class, handle))
+}
+
+fn native_destroy<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong) {
     if handle != 0 {
         // Safety: handle was created by nativeCreate
         unsafe {
@@ -203,6 +245,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 ///     int formatCode
 /// );
 /// ```
+// Not guarded itself: it only forwards to a guarded entry point.
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream<'local>(
     env: JNIEnv<'local>,
@@ -235,6 +278,37 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStreamWithHeadersProvider<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
+    client_id: JString<'local>,
+    client_secret: JString<'local>,
+    headers_provider: JObject<'local>,
+    options: JObject<'local>,
+    format_code: jint,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_create_stream_with_headers_provider(
+            env,
+            _obj,
+            sdk_handle,
+            table_name,
+            descriptor_proto,
+            avro_schema,
+            client_id,
+            client_secret,
+            headers_provider,
+            options,
+            format_code,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_create_stream_with_headers_provider<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,
@@ -432,6 +506,17 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStream<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    stream_handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_recreate_stream(env, _obj, sdk_handle, stream_handle)
+    })
+}
+
+fn native_recreate_stream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,
@@ -509,6 +594,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
 ///     Object options
 /// );
 /// ```
+// Not guarded itself: it only forwards to a guarded entry point.
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStream<'local>(
     env: JNIEnv<'local>,
@@ -537,6 +623,33 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStreamWithHeadersProvider<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    arrow_schema: JByteArray<'local>,
+    client_id: JString<'local>,
+    client_secret: JString<'local>,
+    headers_provider: JObject<'local>,
+    options: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_create_arrow_stream_with_headers_provider(
+            env,
+            _obj,
+            sdk_handle,
+            table_name,
+            arrow_schema,
+            client_id,
+            client_secret,
+            headers_provider,
+            options,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_create_arrow_stream_with_headers_provider<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,
@@ -679,6 +792,17 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateArrowStream<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    stream_handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_recreate_arrow_stream(env, _obj, sdk_handle, stream_handle)
+    })
+}
+
+fn native_recreate_arrow_stream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,
