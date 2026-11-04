@@ -140,7 +140,8 @@ pub enum ZerobusError {
     #[cfg(feature = "avro")]
     #[error("Avro record encoding failed: {0}")]
     AvroEncodingError(String),
-    /// Returned when a unary `InsertRecords` call failed with a gRPC status.
+    /// Returned when a unary `InsertRecords` call failed with a gRPC status, or
+    /// when an attempt timed out (`DeadlineExceeded`).
     #[error("InsertRecords failed: {0}")]
     UnaryIngestError(GrpcStatus),
 }
@@ -382,7 +383,7 @@ mod tests {
     }
 
     /// The language bindings surface `ZerobusError::to_string()`. Pins the full
-    /// message of both status-carrying variants to the text that the
+    /// message of the two stream status-carrying variants to the text that the
     /// `tonic::Status`-based variants produced, so the move to `GrpcStatus`
     /// does not change the strings users see.
     #[test]

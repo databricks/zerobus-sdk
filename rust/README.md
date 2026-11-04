@@ -1204,11 +1204,11 @@ Build the client once per table and reuse it. `build()` sends nothing; the conne
 How a call behaves:
 
 - **All-or-nothing:** one invalid record rejects the whole batch.
-- **Validation:** every record must be exactly one JSON object. Otherwise the call fails with `InvalidArgument`, names the 0-based index of the first bad record, and sends nothing. Field names and types are checked by the server.
+- **Validation:** every record must be exactly one JSON object. Otherwise the call fails with `InvalidArgument`, names the 0-based index of a bad record, and sends nothing. Field names and types are checked by the server.
 - **Size limit:** `max_ingest_payload_bytes` applies to the whole request body, including the brackets and separators. A larger batch fails with `InvalidArgument` before any network I/O.
 - **Retries:** a retryable error is retried `recovery_retries` times, `recovery_backoff_ms` apart. A retried batch can be written twice if an earlier attempt reached the server (at-least-once). With `recovery(false)`, nothing is retried, so the SDK never writes a batch twice.
 - **Timeout:** `server_lack_of_ack_timeout_ms` bounds each attempt, from getting the headers until the server confirms the batch.
-- **Errors:** a failed call returns `ZerobusError::UnaryIngestError` with the gRPC status. An attempt that timed out has `GrpcCode::DeadlineExceeded`.
+- **Errors:** a failed call returns `ZerobusError::UnaryIngestError` with the gRPC status. An attempt that timed out has `GrpcCode::DeadlineExceeded`. If getting the headers fails, the call returns the headers provider's error instead, such as `TokenFetchError`, after retrying it if it is retryable.
 - **Records:** the same JSON record types as streams: `JsonValue`, `JsonString`, or `String`.
 
 **Connection:** all unary clients of one SDK share one HTTP/2 connection, separate from streams and unaffected by `connection_per_stream`. While a call is in flight, the connection sends keepalive pings, so a connection that dropped silently between calls is detected and the retry opens a new one. Many threads writing many tables through their own unary clients share that one connection; for that much traffic, use streams.

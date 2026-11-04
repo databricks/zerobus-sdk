@@ -207,8 +207,8 @@ Batch of 3 records is durable
 ```rust
 let client = sdk
     .unary_client_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .json()
     .build()
     .await?;
