@@ -21,7 +21,7 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 
 ## Overview
 
-The SDK supports four ingestion formats and two ingestion methods:
+The SDK supports four ingestion formats and four ingestion methods:
 
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.

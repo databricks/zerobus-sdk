@@ -9,6 +9,10 @@ use std::error::Error;
 use databricks_zerobus_ingest_sdk::{JsonValue, ZerobusSdk};
 use serde::Serialize;
 
+#[path = "../config.rs"]
+mod config;
+use config::ExampleConfig;
+
 #[derive(Serialize)]
 struct Order {
     id: i32,
@@ -21,25 +25,19 @@ struct Order {
     updated_at: i64,
 }
 
-// Change these constants to match your workspace and table.
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     let sdk = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     // Build the client once and reuse it for every call to this table.
     let client = sdk
         .unary_client_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .json()
         .build()
         .await?;
