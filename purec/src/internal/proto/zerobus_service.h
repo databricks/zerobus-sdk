@@ -71,6 +71,10 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
                               zerobus_string_view_t json_record,
                               uint8_t **out_data, size_t *out_len);
 
+/* The bytes a record of len takes in a JSON batch: its field tag, its length
+ * prefix and its data. */
+size_t zb_proto_json_batch_record_size(size_t len);
+
 /* Encode EphemeralStreamRequest{ingest_record_batch: {offset_id, json_batch:
  * {records}}} from the request's records. Each record, and ownership, as for
  * zb_proto_encode_ingest_record. */

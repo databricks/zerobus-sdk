@@ -5,7 +5,8 @@
 
 # Code the tests share, from tests/src/_support, which is also on their include
 # path. Every test links it.
-add_library(zerobus_test_support STATIC src/_support/http_server.c
+add_library(zerobus_test_support STATIC src/_support/fake_zerobus.c
+                                        src/_support/http_server.c
                                         src/_support/loopback.c)
 target_include_directories(zerobus_test_support PUBLIC src/_support)
 target_link_libraries(zerobus_test_support PUBLIC zerobus_c_testing)

@@ -162,6 +162,11 @@ zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
     return ZEROBUS_STATUS_OK;
 }
 
+size_t zb_proto_json_batch_record_size(size_t len)
+{
+    return 1 + varint_size(len) + len;
+}
+
 zerobus_status_t zb_proto_encode_json_batch(zerobus_offset_t offset_id,
                                             const zb_ingest_request_t *request,
                                             uint8_t **out_data, size_t *out_len)
@@ -175,7 +180,7 @@ zerobus_status_t zb_proto_encode_json_batch(zerobus_offset_t offset_id,
         if (records[i].len > ZB_MAX_ENCODED_PAYLOAD) {
             return ZEROBUS_STATUS_INVALID_ARGUMENT;
         }
-        size_t field = 1 + varint_size(records[i].len) + records[i].len;
+        size_t field = zb_proto_json_batch_record_size(records[i].len);
         if (field > ZB_MAX_ENCODED_PAYLOAD - records_len) {
             return ZEROBUS_STATUS_INVALID_ARGUMENT;
         }
