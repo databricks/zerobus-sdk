@@ -1,0 +1,4 @@
+# Conformance tree build/run output (generated, never committed)
+.runs/
+schemas/*/build/
+__pycache__/
