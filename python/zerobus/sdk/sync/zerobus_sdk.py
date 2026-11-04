@@ -6,11 +6,14 @@ into Databricks tables via the Zerobus service. The implementation is backed by 
 Rust core for optimal performance while maintaining a Pythonic API.
 
 Example:
+    >>> import os
     >>> from zerobus.sdk.sync import ZerobusSdk, TableProperties
+    >>> server_endpoint = os.environ["ZEROBUS_SERVER_ENDPOINT"]
+    >>> workspace_url = os.environ["DATABRICKS_WORKSPACE_URL"]
     >>>
     >>> sdk = ZerobusSdk(
-    ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     host=server_endpoint,
+    ...     unity_catalog_url=workspace_url,
     ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
@@ -288,9 +291,9 @@ class ZerobusSdk:
         Create a Zerobus SDK instance.
 
         Args:
-            host: Zerobus endpoint URL
-                (e.g. "https://<workspace>.zerobus.<region>.cloud.databricks.com").
-            unity_catalog_url: Unity Catalog URL used for OAuth.
+            host: Zerobus server endpoint URL. For the format on each cloud, see
+                https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id.
+            unity_catalog_url: Databricks workspace URL used for Unity Catalog and OAuth.
             application_name: Optional caller identifier (conventionally
                 "<product>/<version>") appended to the HTTP user-agent header on
                 gRPC requests toward the Zerobus server.

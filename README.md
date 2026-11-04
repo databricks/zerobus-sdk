@@ -42,18 +42,33 @@ We try to provide prebuilt native binaries for the following platforms:
 
 Before using any SDK, you need the following:
 
-### 1. Workspace URL and Workspace ID
+### 1. Connection URLs and Workspace ID
 
-After logging into your Databricks workspace, look at the browser URL:
+Every SDK takes two URLs: the Databricks workspace URL, used for Unity Catalog and OAuth,
+and the Zerobus server endpoint, used for ingestion. Their format depends on the cloud
+that hosts your workspace:
 
-```
-https://<databricks-instance>.cloud.databricks.com/o=<workspace-id>
-```
+| Cloud | Databricks workspace URL | Zerobus server endpoint |
+| ----- | ------------------------ | ----------------------- |
+| AWS | `https://<databricks-instance>.cloud.databricks.com` | `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` |
+| Azure | `https://<databricks-instance>.azuredatabricks.net` | `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` |
+| GCP | `https://<databricks-instance>.gcp.databricks.com` | `https://<workspace-id>.zerobus.<region>.gcp.databricks.com` |
 
-- **Workspace URL**: The part before `/o=` (e.g., `https://dbc-a1b2c3d4-e5f6.cloud.databricks.com`)
-- **Workspace ID**: The part after `/o=` (e.g., `1234567890123456`)
+After logging into your workspace, look at the browser URL, for example
+`https://<databricks-instance>.cloud.databricks.com/?o=<workspace-id>`:
 
-> **Note:** The examples above show AWS endpoints (`.cloud.databricks.com`). For Azure deployments, the workspace URL will be `https://<databricks-instance>.azuredatabricks.net`.
+- Workspace URL: everything before `/?o=`. Use it exactly as shown.
+- Workspace ID: the number after `o=`. If the browser URL has no `o=` parameter, copy
+  the ID from the account console or the workspace details page.
+- Region: the cloud region the workspace is deployed in, such as `us-west-2` on AWS,
+  `eastus2` on Azure, or `us-east1` on GCP.
+
+The Zerobus endpoint is built from the workspace ID and region, not from the workspace
+host. On GCP, for example, the workspace URL `https://1234567890123456.0.gcp.databricks.com`
+pairs with the endpoint `https://1234567890123456.zerobus.us-east1.gcp.databricks.com`.
+
+Pass both values as complete URLs, including `https://`, for consistent behavior across
+SDKs.
 
 ### 2. Create a Delta Table
 

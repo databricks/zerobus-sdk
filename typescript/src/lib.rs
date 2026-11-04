@@ -886,8 +886,8 @@ pub struct ZerobusSdkOptions {
 ///
 /// ```typescript
 /// const sdk = new ZerobusSdk(
-///   "https://workspace-id.zerobus.region.cloud.databricks.com",
-///   "https://workspace.cloud.databricks.com",
+///   process.env.ZEROBUS_SERVER_ENDPOINT!,
+///   process.env.DATABRICKS_WORKSPACE_URL!,
 ///   { applicationName: "my-app/1.0" }
 /// );
 ///
@@ -912,10 +912,9 @@ impl ZerobusSdk {
     ///
     /// # Arguments
     ///
-    /// * `zerobus_endpoint` - The Zerobus API endpoint URL
-    ///   (e.g., "https://workspace-id.zerobus.region.cloud.databricks.com")
-    /// * `unity_catalog_url` - The Unity Catalog endpoint URL
-    ///   (e.g., "https://workspace.cloud.databricks.com")
+    /// * `zerobus_endpoint` - The Zerobus API endpoint URL. See the repository's
+    ///   [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id).
+    /// * `unity_catalog_url` - The Databricks workspace URL used for Unity Catalog.
     /// * `options` - Optional SDK configuration (see `ZerobusSdkOptions`),
     ///   including `applicationName` for server-side attribution and
     ///   `connectionPerStream` for connection ownership.

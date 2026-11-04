@@ -107,24 +107,24 @@ Ingestion is asynchronous. `ingestRecordOffset()` (and `ingestRecordsOffset()`) 
 
 JSON mode is the simplest way to get started. You don't need to define or compile protobuf schemas, but you must explicitly specify `RecordType.Json`.
 
+The snippets read the connection settings from environment variables. See the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the
+`ZEROBUS_SERVER_ENDPOINT` and `DATABRICKS_WORKSPACE_URL` formats on each cloud.
+
 ```typescript
 import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 
 async function main(): Promise<void> {
 // Configuration
-// For AWS:
-const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
-const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
-// For Azure:
-// const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.azuredatabricks.net';
-// const workspaceUrl = 'https://<workspace-name>.azuredatabricks.net';
+const serverEndpoint = process.env.ZEROBUS_SERVER_ENDPOINT!;
+const workspaceUrl = process.env.DATABRICKS_WORKSPACE_URL!;
 
-const tableName = 'main.default.air_quality';
+const tableName = process.env.ZEROBUS_TABLE_NAME!;
 const clientId = process.env.DATABRICKS_CLIENT_ID!;
 const clientSecret = process.env.DATABRICKS_CLIENT_SECRET!;
 
 // Initialize SDK
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
+const sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
 // Configure table properties (no descriptor needed for JSON)
 const tableProperties = { tableName };
@@ -287,9 +287,9 @@ import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descri
 
 async function main(): Promise<void> {
 // Configuration
-const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
-const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
-const tableName = 'main.default.air_quality';
+const serverEndpoint = process.env.ZEROBUS_SERVER_ENDPOINT!;
+const workspaceUrl = process.env.DATABRICKS_WORKSPACE_URL!;
+const tableName = process.env.ZEROBUS_TABLE_NAME!;
 const clientId = process.env.DATABRICKS_CLIENT_ID!;
 const clientSecret = process.env.DATABRICKS_CLIENT_SECRET!;
 
@@ -301,7 +301,7 @@ const descriptorBase64 = loadDescriptorProto({
 });
 
 // Initialize SDK
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
+const sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
 // Configure table properties with protobuf descriptor
 const tableProperties = {
@@ -490,7 +490,7 @@ takes its schema default if it has one — a field without a default is required
 ```typescript
 import { ZerobusSdk, TableProperties, RecordType } from '@databricks/zerobus-ingest-sdk';
 
-const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
 
 // The writer schema lives on TableProperties and selects the Avro record format.
 const avroSchema = JSON.stringify({
@@ -537,8 +537,8 @@ Run these commands from the cloned repository's `typescript` directory:
 
 ```bash
 # Set environment variables
-export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://<workspace-name>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 export ZEROBUS_TABLE_NAME="main.default.air_quality"
@@ -621,7 +621,7 @@ The SDK uses OAuth 2.0 Client Credentials for authentication:
 ```typescript
 import { ZerobusSdk } from '@databricks/zerobus-ingest-sdk';
 
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
+const sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
 // Create stream with OAuth authentication
 const stream = await sdk.createStream(
@@ -797,8 +797,8 @@ new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string, options?: Zerob
 ```
 
 **Parameters:**
-- `zerobusEndpoint` (string) - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` for AWS, or `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` for Azure)
-- `unityCatalogUrl` (string) - The Unity Catalog endpoint (your workspace URL)
+- `zerobusEndpoint` (string) - The Zerobus gRPC endpoint. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id).
+- `unityCatalogUrl` (string) - Your Databricks workspace URL, used for Unity Catalog and OAuth
 - `options` (ZerobusSdkOptions, optional) - Additional SDK configuration:
   - `applicationName` (string, optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). The header becomes `zerobus-sdk-ts/<version> <applicationName>`, enabling server-side attribution.
   - `connectionPerStream` (boolean, optional) - Gives each JSON/protobuf stream

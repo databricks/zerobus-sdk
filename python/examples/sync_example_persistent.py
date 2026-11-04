@@ -18,23 +18,25 @@ import json
 import logging
 import os
 
+from example_config import required_env
+
 from zerobus.sdk.sync import ZerobusSdk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-SERVER_ENDPOINT = os.getenv("ZEROBUS_SERVER_ENDPOINT", "https://your-shard-id.zerobus.region.cloud.databricks.com")
-UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
-TABLE_NAME = os.getenv("ZEROBUS_TABLE_NAME", "catalog.schema.table")
-CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID", "your-oauth-client-id")
-CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET", "your-oauth-client-secret")
+SERVER_ENDPOINT = required_env("ZEROBUS_SERVER_ENDPOINT")
+WORKSPACE_URL = required_env("DATABRICKS_WORKSPACE_URL")
+TABLE_NAME = required_env("ZEROBUS_TABLE_NAME")
+CLIENT_ID = required_env("DATABRICKS_CLIENT_ID")
+CLIENT_SECRET = required_env("DATABRICKS_CLIENT_SECRET")
 STREAM_ID = os.getenv("ZEROBUS_PERSISTENT_STREAM_ID")
 
 NUM_RECORDS = 100
 
 
 def main():
-    sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT)
+    sdk = ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL)
     builder = sdk.persistent_stream_builder().table(TABLE_NAME).oauth(CLIENT_ID, CLIENT_SECRET).json()
 
     if STREAM_ID:

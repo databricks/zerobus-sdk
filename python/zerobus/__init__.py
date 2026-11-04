@@ -5,7 +5,10 @@ High-performance SDK for ingesting records into Databricks tables via the Zerobu
 This version is backed by a Rust core for optimal performance while maintaining a Pythonic API.
 
 Example (Sync):
+    >>> import os
     >>> from zerobus import ZerobusSdk, TableProperties, AckCallback
+    >>> server_endpoint = os.environ["ZEROBUS_SERVER_ENDPOINT"]
+    >>> workspace_url = os.environ["DATABRICKS_WORKSPACE_URL"]
     >>>
     >>> # Define a custom callback
     >>> class MyCallback(AckCallback):
@@ -13,8 +16,8 @@ Example (Sync):
     ...         print(f"Submission acknowledged at offset {offset}")
     >>>
     >>> sdk = ZerobusSdk(
-    ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     host=server_endpoint,
+    ...     unity_catalog_url=workspace_url,
     ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
@@ -32,12 +35,15 @@ Example (Sync):
 
 Example (Async):
     >>> import asyncio
+    >>> import os
     >>> from zerobus.sdk.aio import ZerobusSdk, TableProperties
+    >>> server_endpoint = os.environ["ZEROBUS_SERVER_ENDPOINT"]
+    >>> workspace_url = os.environ["DATABRICKS_WORKSPACE_URL"]
     >>>
     >>> async def main():
     ...     sdk = ZerobusSdk(
-    ...         host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...         unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...         host=server_endpoint,
+    ...         unity_catalog_url=workspace_url,
     ...         application_name="my-app/1.0",
     ...     )
     ...     props = TableProperties("catalog.schema.table")

@@ -65,11 +65,12 @@ CREATE TABLE catalog.schema.air_quality (
 
 ### 3. Configure Environment Variables
 
-Set the following environment variables:
+Set the following environment variables. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the endpoint and workspace URL formats on each cloud:
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.air_quality"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
@@ -82,7 +83,7 @@ All examples follow the same general flow:
 ### 1. Initialize SDK
 
 ```typescript
-const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
 ```
 
 ### 2. Configure Table Properties

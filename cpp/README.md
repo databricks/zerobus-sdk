@@ -175,14 +175,18 @@ the last offset, not each one.
 
 ## Quickstart
 
+In these snippets, `server_endpoint` is your Zerobus server endpoint and `workspace_url` is your
+workspace URL. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the format on each cloud.
+
 ### JSON ingestion
 
 ```cpp
 #include "zerobus/zerobus.hpp"
 
 zerobus::Sdk sdk = zerobus::Sdk::builder()
-                       .endpoint("https://<id>.zerobus.<region>.cloud.databricks.com")
-                       .unity_catalog_url("https://<workspace>.cloud.databricks.com")
+                       .endpoint(server_endpoint)
+                       .unity_catalog_url(workspace_url)
                        .application_name("my-app")
                        .build();
 
@@ -429,7 +433,7 @@ schema, authenticated with the OAuth client credentials. It lives in the
 ```bash
 cd ../rust/tools/generate_files
 cargo run -- \
-  --uc-endpoint "https://<workspace>.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "$DATABRICKS_CLIENT_ID" \
   --client-secret "$DATABRICKS_CLIENT_SECRET" \
   --table "catalog.schema.table" \

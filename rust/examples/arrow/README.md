@@ -29,7 +29,7 @@ Send multiple rows per `RecordBatch`. Start with natural application-sized batch
 
 ## Running the Example
 
-1. Configure credentials in `src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -65,8 +65,8 @@ let schema = Arc::new(ArrowSchema::new(vec![
 
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .arrow(schema.clone())
     .build_arrow()
     .await?;
@@ -136,8 +136,8 @@ use databricks_zerobus_ingest_sdk::ArrowCompression;
 
 let stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .arrow(schema)
     .compression(ArrowCompression::IpcZstd)  // same as the default
     .build_arrow()
@@ -191,7 +191,8 @@ let batch = RecordBatch::try_new(
 )?;
 ```
 
-**3. Update table name and credentials** in the constants at the top of `main.rs`.
+**3. Configure the environment variables** listed in the
+[examples prerequisites](../README.md#3-configure-credentials).
 
 > **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK
 > validates the schema when the stream is created. A mismatch fails fast with a
@@ -206,9 +207,10 @@ run the [`arrow_multiplexed`](multiplexed.rs) example:
 cargo run -p example_arrow --example arrow_multiplexed
 ```
 
-Set its credentials and table constants first. The table needs nullable `id BIGINT`
-and `customer_name STRING` columns. The example queues 100 batches of 1,000 rows
-across four lanes, then calls `flush()` once and closes all lanes.
+Export the [environment variables](../README.md#3-configure-credentials) first. The
+table needs nullable `id BIGINT` and `customer_name STRING` columns. The example queues
+100 batches of 1,000 rows across four lanes, then calls `flush()` once and closes all
+lanes.
 
 Construction uses `.arrow(schema).max_inflight_batches(100).multiplexed(4).build_arrow()`.
 The budget is mux-wide: each lane can retain 25 pending batches. Whole batches route

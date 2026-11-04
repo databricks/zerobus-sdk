@@ -23,9 +23,13 @@ The tool is **packaged within the Zerobus SDK JAR**, so users can run it directl
 - Java 8 or higher
 - Zerobus SDK JAR (built with `mvn package -Dzerobus.skipNativeLibCheck=true`)
 - OAuth client ID and client secret with access to Unity Catalog
-- Access to a Unity Catalog endpoint
+- Access to a Databricks workspace with Unity Catalog
 
 ## Usage
+
+Use the workspace URL from the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for `--uc-endpoint`.
 
 ### Method 1: Using the Helper Script (Recommended for Development)
 
@@ -37,7 +41,7 @@ mvn package -Dzerobus.skipNativeLibCheck=true
 
 # Then run the tool
 ./tools/generate_proto.sh \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \
@@ -53,7 +57,7 @@ If you have downloaded the SDK JAR without the source code:
 # Using the shaded JAR (includes all dependencies)
 java -cp zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   com.databricks.zerobus.tools.GenerateProto \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \
@@ -66,7 +70,7 @@ Or, if the JAR has a Main-Class manifest entry (which it does):
 ```bash
 # Even simpler - just use -jar flag
 java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \
@@ -78,7 +82,7 @@ java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--uc-endpoint` | Yes | Unity Catalog endpoint URL (e.g., `https://your-workspace.cloud.databricks.com`) |
+| `--uc-endpoint` | Yes | Databricks workspace URL used for Unity Catalog |
 | `--client-id` | Yes | OAuth client ID for authentication |
 | `--client-secret` | Yes | OAuth client secret for authentication |
 | `--table` | Yes | Full table name in format `catalog.schema.table_name` |
@@ -114,7 +118,7 @@ Generate a proto file for a simple table:
 **From the SDK JAR:**
 ```bash
 java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
-  --uc-endpoint "https://myworkspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "abc123" \
   --client-secret "secret123" \
   --table "my_catalog.my_schema.users" \
@@ -124,7 +128,7 @@ java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
 **Or, if you have the source repository:**
 ```bash
 ./tools/generate_proto.sh \
-  --uc-endpoint "https://myworkspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "abc123" \
   --client-secret "secret123" \
   --table "my_catalog.my_schema.users" \
@@ -150,7 +154,7 @@ Specify a custom message name:
 
 ```bash
 java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
-  --uc-endpoint "https://myworkspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "abc123" \
   --client-secret "secret123" \
   --table "my_catalog.my_schema.events" \
@@ -164,7 +168,7 @@ The tool handles complex types like arrays and maps:
 
 ```bash
 java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
-  --uc-endpoint "https://myworkspace.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "abc123" \
   --client-secret "secret123" \
   --table "my_catalog.my_schema.products" \

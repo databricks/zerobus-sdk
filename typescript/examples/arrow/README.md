@@ -57,7 +57,9 @@ const offset = await stream.ingestBatch(ipc);
 
 ## Run
 
-Build with Arrow Flight and run the example:
+1. Set environment variables (see [Prerequisites](../README.md#prerequisites))
+
+2. Build with Arrow Flight and run the example:
 
 ```bash
 npm run build:debug:arrow

@@ -85,22 +85,20 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 ### 3. Configure Credentials
 
-Edit the source file (`batch.rs` or `single.rs`) for your chosen example and update these constants:
+Every example reads its connection settings and credentials from environment variables
+through the shared [`config.rs`](config.rs) helper. Use the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+to find the values for your cloud, then export:
 
-```rust
-const DATABRICKS_WORKSPACE_URL: &str = "https://your-workspace.cloud.databricks.com";
-const TABLE_NAME: &str = "catalog.schema.orders";
-const DATABRICKS_CLIENT_ID: &str = "your-client-id";
-const DATABRICKS_CLIENT_SECRET: &str = "your-client-secret";
-const SERVER_ENDPOINT: &str = "https://workspace-id.zerobus.region.cloud.databricks.com";
+```bash
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
+export ZEROBUS_TABLE_NAME="catalog.schema.orders"
+export DATABRICKS_CLIENT_ID="<your-oauth-client-id>"
+export DATABRICKS_CLIENT_SECRET="<your-oauth-client-secret>"
 ```
 
-**How to get these values:**
-- **DATABRICKS_WORKSPACE_URL** - Your Databricks workspace URL (Unity Catalog endpoint)
-- **TABLE_NAME** - Full table name in format `catalog.schema.table`
-- **DATABRICKS_CLIENT_ID** - OAuth 2.0 client ID from your service principal
-- **DATABRICKS_CLIENT_SECRET** - OAuth 2.0 client secret from your service principal
-- **SERVER_ENDPOINT** - Zerobus ingestion endpoint (usually `https://<workspace-id>.zerobus.<region>.databricks.com`)
+`ZEROBUS_TABLE_NAME` is the full table name in `catalog.schema.table` form. The
+client ID and secret are the OAuth credentials for the service principal.
 
 ## Common Code Patterns
 
@@ -110,8 +108,8 @@ All examples follow the same general flow:
 
 ```rust
 let sdk = ZerobusSdk::builder()
-    .endpoint(SERVER_ENDPOINT)
-    .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+    .endpoint(&config.server_endpoint)
+    .unity_catalog_url(&config.workspace_url)
     .build()?;
 ```
 
@@ -121,8 +119,8 @@ let sdk = ZerobusSdk::builder()
 ```rust
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .json()
     .max_inflight_requests(100)
     .build()
@@ -139,8 +137,8 @@ let descriptor_proto = load_descriptor_proto(
 
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .compiled_proto(descriptor_proto)
     .max_inflight_requests(100)
     .build()
@@ -160,8 +158,8 @@ let schema = Arc::new(ArrowSchema::new(vec![
 
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .arrow(schema)
     .max_inflight_batches(100)
     .build_arrow()
@@ -274,9 +272,9 @@ if let Some(offset) = stream.ingest_records_offset(records).await? {
 
 **Possible causes:**
 - OAuth credentials expired or invalid
-- Incorrect Unity Catalog endpoint
+- Incorrect workspace URL
 
-**Solution:** Regenerate your service principal credentials and verify the endpoint URL.
+**Solution:** Regenerate your service principal credentials and verify the workspace URL.
 
 ### Error: JSON parsing errors (JSON example only)
 

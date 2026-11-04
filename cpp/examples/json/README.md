@@ -42,8 +42,8 @@ Both open a JSON stream by setting `StreamOptions::record_type` to
 1. Export the connection settings — see [Prerequisites](../README.md#prerequisites)
    for what each one is:
    ```bash
-   export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
-   export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+   export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+   export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
    export ZEROBUS_TABLE_NAME="catalog.schema.orders"
    export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
    export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"

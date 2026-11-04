@@ -65,7 +65,7 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 ### Running the Example
 
-1. Configure credentials in `compiled/single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -124,8 +124,8 @@ let descriptor_proto = load_descriptor_proto(
 
 let stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .compiled_proto(descriptor_proto)
     .build()
     .await?;
@@ -135,7 +135,7 @@ let stream = sdk
 
 ### Running the Example
 
-1. Configure credentials in `compiled/batch.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -220,7 +220,7 @@ field-by-field with `DynamicRecord`.
 
 ### Running the Example
 
-1. Configure credentials in `dynamic/single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -246,8 +246,8 @@ let descriptor = message_descriptor(&descriptor_proto)?;
 
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .dynamic_proto(descriptor)
     .build()
     .await?;
@@ -308,7 +308,7 @@ Run this from the repository root directory:
 cd tools/generate_files
 
 cargo run -- \
-  --uc-endpoint "https://<your-workspace>.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "<your-client-id>" \
   --client-secret "<your-client-secret>" \
   --table "<catalog.schema.your_table>" \
@@ -378,4 +378,5 @@ ProtoMessage(TableInventory {
 })
 ```
 
-**4. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.
+**4. Configure the environment variables** listed in the
+[examples prerequisites](../README.md#3-configure-credentials).

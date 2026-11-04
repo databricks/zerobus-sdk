@@ -120,6 +120,7 @@ Run from the SDK directory.
 - A user-facing change updates `NEXT_CHANGELOG.md` (template sections vary per SDK), README, `examples/`, and API docs (doc comments / Python `.pyi` stubs / JSDoc / Javadoc / godoc).
 - Call breaking changes out under `### Breaking Changes` (where the template has it) with migration steps; deprecations need a replacement and timeline.
 - Examples must run as written; fix a defect rather than documenting it.
+- Cloud-specific workspace and Zerobus endpoint URL formats live only in the top-level `README.md` table ("Connection URLs and Workspace ID"); elsewhere, link to it and use placeholders. Examples read `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET`, and docs call the Unity Catalog URL the "workspace URL".
 - Lead every example, doc comment, and test with loop-then-`flush()`, never a per-record wait.
 - Releases are per-SDK, tag-triggered — use the `zerobus-sdk-release:*` skills; finalizing moves `NEXT_CHANGELOG.md` into `CHANGELOG.md` and resets it with the next header.
 - Native libs release independently: Go needs an `ffi/v*`, Java a `jni/v*`, before picking up core changes; C++ builds the FFI from source and bundles the archive.

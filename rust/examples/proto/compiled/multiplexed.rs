@@ -10,11 +10,9 @@ pub mod orders {
 }
 use crate::orders::TableOrders;
 
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
+#[path = "../../config.rs"]
+mod config;
+use config::ExampleConfig;
 
 struct AckLogger;
 
@@ -30,20 +28,21 @@ impl AckCallback<MessageId> for AckLogger {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     let descriptor = load_descriptor_proto(
         include_bytes!("output/orders.descriptor"),
         "orders.proto",
         "table_Orders",
     );
     let sdk = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     let mut stream = sdk
         .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .compiled_proto(descriptor)
         .max_inflight_requests(10_000)
         .multiplexed_ack_callback(Arc::new(AckLogger))

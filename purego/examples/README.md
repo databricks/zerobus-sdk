@@ -40,11 +40,12 @@ Create a service principal with `SELECT` and `MODIFY` on the table and an OAuth 
 
 ### 3. Configure connection info
 
-Export these before running:
+Export these before running. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the endpoint and workspace URL formats on each cloud:
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.orders"
 export DATABRICKS_CLIENT_ID="<oauth-client-id>"
 export DATABRICKS_CLIENT_SECRET="<oauth-client-secret>"

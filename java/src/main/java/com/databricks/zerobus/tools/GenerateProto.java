@@ -35,7 +35,7 @@ public class GenerateProto {
 
   private static final String USAGE =
       "Usage: java GenerateProto \n"
-          + "  --uc-endpoint <endpoint>      Unity Catalog endpoint URL\n"
+          + "  --uc-endpoint <endpoint>      Databricks workspace URL\n"
           + "  --client-id <id>              OAuth client ID\n"
           + "  --client-secret <secret>      OAuth client secret\n"
           + "  --table <catalog.schema.table> Full table name\n"
@@ -44,7 +44,7 @@ public class GenerateProto {
           + "\n"
           + "Examples:\n"
           + "  java GenerateProto \\\n"
-          + "    --uc-endpoint \"https://your-workspace.cloud.databricks.com\" \\\n"
+          + "    --uc-endpoint \"<your-databricks-workspace-url>\" \\\n"
           + "    --client-id \"your-client-id\" \\\n"
           + "    --client-secret \"your-client-secret\" \\\n"
           + "    --table \"catalog.schema.table_name\" \\\n"
