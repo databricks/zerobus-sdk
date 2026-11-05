@@ -58,8 +58,7 @@ static const char *decoded(char *buffer, const char *s)
 
 static bool metadata_ok(const char *name, const char *value)
 {
-    const zb_metadata_t header = {sv(name), sv(value)};
-    return zb_is_valid_grpc_metadata(&header);
+    return zb_is_valid_grpc_metadata(sv(name), sv(value));
 }
 
 /* ---- message framing --------------------------------------------------- */
@@ -357,19 +356,16 @@ static void test_valid_target(void)
 
 static void test_valid_metadata(void)
 {
-    const zb_metadata_t no_name = {{NULL, 0}, sv("v")};
-    const zb_metadata_t no_value = {sv("x-a"), {NULL, 0}};
-    const zb_metadata_t null_value = {sv("x-a"), {NULL, 1}};
-    const zb_metadata_t nul_value = {sv("x-a"), {"a\0b", 3}};
+    const zerobus_string_view_t none = {NULL, 0};
 
     CHECK(metadata_ok("x-a", "v"));
     CHECK(metadata_ok("authorization", "Bearer token"));
     CHECK(metadata_ok("a_b.c-9", " ~")); /* every allowed name char kind */
     CHECK(metadata_ok("x-a", ""));
-    CHECK(zb_is_valid_grpc_metadata(&no_value));
+    CHECK(zb_is_valid_grpc_metadata(sv("x-a"), none));
 
     /* Names are lowercase tokens. */
-    CHECK(!zb_is_valid_grpc_metadata(&no_name));
+    CHECK(!zb_is_valid_grpc_metadata(none, sv("v")));
     CHECK(!metadata_ok("", "v"));
     CHECK(!metadata_ok("Upper", "v"));
     CHECK(!metadata_ok("x a", "v"));
@@ -395,23 +391,27 @@ static void test_valid_metadata(void)
     CHECK(!metadata_ok("x-a", "a\r\nb"));
     CHECK(!metadata_ok("x-a", "\t"));
     CHECK(!metadata_ok("x-a", "\x7f"));
-    CHECK(!zb_is_valid_grpc_metadata(&nul_value));
-    CHECK(!zb_is_valid_grpc_metadata(&null_value));
+    CHECK(!zb_is_valid_grpc_metadata(sv("x-a"),
+                                     (zerobus_string_view_t){"a\0b", 3}));
+    CHECK(!zb_is_valid_grpc_metadata(sv("x-a"),
+                                     (zerobus_string_view_t){NULL, 1}));
 }
 
 static void test_make_nv(void)
 {
-    const zb_metadata_t plain = {sv("x-a"), sv("v")};
-    const zb_metadata_t secret = {sv("authorization"), sv("Bearer token")};
+    const zerobus_string_view_t name = sv("x-a");
+    const zerobus_string_view_t value = sv("v");
 
-    /* The field borrows the metadata's bytes. */
-    nghttp2_nv nv = zb_make_nghttp2_nv(&plain);
-    CHECK((const void *)nv.name == (const void *)plain.name.data);
-    CHECK((const void *)nv.value == (const void *)plain.value.data);
+    /* The field borrows the header's bytes. */
+    nghttp2_nv nv = zb_make_nghttp2_nv(name, value);
+    CHECK((const void *)nv.name == (const void *)name.data);
+    CHECK((const void *)nv.value == (const void *)value.data);
     CHECK(nv.namelen == 3 && nv.valuelen == 1);
     CHECK_EQ_INT(nv.flags, NGHTTP2_NV_FLAG_NONE);
     /* The credential is never indexed, so HPACK tables do not keep it. */
-    CHECK_EQ_INT(zb_make_nghttp2_nv(&secret).flags, NGHTTP2_NV_FLAG_NO_INDEX);
+    CHECK_EQ_INT(
+        zb_make_nghttp2_nv(sv("authorization"), sv("Bearer token")).flags,
+        NGHTTP2_NV_FLAG_NO_INDEX);
 }
 
 int main(void)

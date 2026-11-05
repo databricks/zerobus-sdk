@@ -48,7 +48,7 @@ The SDK supports three approaches for passing JSON data:
 
 ### Running the Example
 
-1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -100,8 +100,8 @@ stream.flush().await?;
 ```rust
 let stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .json()
     .build()
     .await?;
@@ -111,7 +111,7 @@ let stream = sdk
 
 ### Running the Example
 
-1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -212,4 +212,5 @@ let json = r#"{
 }"#.to_string();
 ```
 
-**3. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.
+**3. Configure the environment variables** listed in the
+[examples prerequisites](../README.md#3-configure-credentials).

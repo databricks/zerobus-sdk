@@ -20,8 +20,8 @@
 // Create an SDK instance and stream:
 //
 //	sdk, err := zerobus.NewZerobusSdkWithOptions(
-//	    "https://your-shard.zerobus.databricks.com",
-//	    "https://your-workspace.databricks.com",
+//	    serverEndpoint,
+//	    workspaceURL,
 //	    zerobus.WithApplicationName("my-app/1.0"),
 //	)
 //	if err != nil {
@@ -188,12 +188,16 @@ func WithConnectionPerStream(enabled bool) SdkOption {
 // NewZerobusSdk creates a new SDK instance.
 //
 // Parameters:
-//   - zerobusEndpoint: The gRPC endpoint for the Zerobus service (e.g., "https://zerobus.databricks.com")
-//   - unityCatalogURL: The Unity Catalog URL for OAuth token acquisition (e.g., "https://workspace.databricks.com")
+//   - zerobusEndpoint: The gRPC endpoint for the Zerobus service
+//   - unityCatalogURL: The Databricks workspace URL for OAuth token acquisition
+//
+// See the [connection URL table] for cloud-specific formats.
 //
 // Returns an error if:
 //   - Invalid endpoint URLs
-//   - Unable to extract workspace ID from Unity Catalog URL
+//   - Unable to extract workspace ID from the Zerobus endpoint
+//
+// [connection URL table]: https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id
 func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error) {
 	return newZerobusSdk(zerobusEndpoint, unityCatalogURL, sdkOptions{})
 }
@@ -213,8 +217,8 @@ func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error)
 // Example:
 //
 //	sdk, err := zerobus.NewZerobusSdkWithOptions(
-//	    "https://workspace.zerobus.databricks.com",
-//	    "https://workspace.cloud.databricks.com",
+//	    serverEndpoint,
+//	    workspaceURL,
 //	    zerobus.WithApplicationName("my-app/1.0"),
 //	)
 func NewZerobusSdkWithOptions(

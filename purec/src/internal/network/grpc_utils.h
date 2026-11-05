@@ -63,11 +63,13 @@ bool zb_add_http2_header_bytes(size_t *total, size_t name_len, size_t value_len,
  * value: non-empty visible ASCII without '#'. */
 bool zb_is_valid_grpc_target(zerobus_string_view_t value, bool authority);
 
-/* Checks one caller metadata entry: a lowercase gRPC header name, other than
- * the grpc-* names and headers that the transport owns or HTTP/2 forbids, with
- * a printable-ASCII value. */
-bool zb_is_valid_grpc_metadata(const zb_metadata_t *header);
+/* Checks one caller header: a lowercase gRPC header name, other than the
+ * grpc-* names and headers that the transport owns or HTTP/2 forbids, with a
+ * printable-ASCII value. */
+bool zb_is_valid_grpc_metadata(zerobus_string_view_t name,
+                               zerobus_string_view_t value);
 
-nghttp2_nv zb_make_nghttp2_nv(const zb_metadata_t *header);
+nghttp2_nv zb_make_nghttp2_nv(zerobus_string_view_t name,
+                              zerobus_string_view_t value);
 
 #endif /* ZB_NETWORK_GRPC_UTILS_H */

@@ -57,7 +57,8 @@ ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_error_status(const zerobus_error_t *error);
 
 /* Whether retrying the failed operation may succeed (a transient failure).
- * Derived from the status code. False for a NULL error.
+ * Derived from the status code. False for a NULL error. For a call on a failed
+ * stream, it tells whether a new stream may succeed; see zerobus/stream.h.
  *
  * Temporary status-based classification until the transport core defines
  * retryability precisely. */

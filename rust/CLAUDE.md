@@ -73,6 +73,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
   must not depend on its API stability.
 - `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
 - `testing` — Test utilities.
+- `webpki-version-floor` — On by default. Sets minimum `rustls-webpki` and `webpki-roots` versions that distrust the compromised eMudhra CAs; the crates are not imported. Bindings must keep it enabled.
 
 ## Error handling
 

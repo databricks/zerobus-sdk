@@ -256,6 +256,12 @@ zerobus_status_t zb_wakeup_drain(zb_wakeup_t *wakeup)
     if (status != ZEROBUS_STATUS_OK) {
         return status;
     }
+    /* Signal writes only while not pending, and only a drain clears pending,
+     * so the pipe is empty: skip the read. */
+    if (!wakeup->pending) {
+        (void)zb_mutex_unlock(&wakeup->mutex);
+        return ZEROBUS_STATUS_OK;
+    }
     uint8_t bytes[256];
     for (;;) {
         ssize_t result = read(wakeup->reader, bytes, sizeof(bytes));
@@ -271,6 +277,16 @@ zerobus_status_t zb_wakeup_drain(zb_wakeup_t *wakeup)
     }
     (void)zb_mutex_unlock(&wakeup->mutex);
     return status;
+}
+
+bool zb_wakeup_pending(zb_wakeup_t *wakeup)
+{
+    if (!wakeup || zb_mutex_lock(&wakeup->mutex) != ZEROBUS_STATUS_OK) {
+        return false;
+    }
+    bool pending = wakeup->pending;
+    (void)zb_mutex_unlock(&wakeup->mutex);
+    return pending;
 }
 
 static int poll_timeout(zb_deadline_t deadline)

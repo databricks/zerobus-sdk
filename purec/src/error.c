@@ -96,23 +96,26 @@ zerobus_status_t zerobus_error_status(const zerobus_error_t *error)
 
 /* Temporary status-based classification until the transport core defines
  * retryability precisely. */
-bool zerobus_error_is_retryable(const zerobus_error_t *error)
+bool zb_status_is_retryable(zerobus_status_t status)
 {
-    if (error == NULL) {
-        return false;
-    }
-    switch (error->code) {
+    switch (status) {
     case ZEROBUS_STATUS_INVALID_ARGUMENT:
     case ZEROBUS_STATUS_FAILED_PRECONDITION:
     case ZEROBUS_STATUS_UNAUTHENTICATED:
     case ZEROBUS_STATUS_PERMISSION_DENIED:
     case ZEROBUS_STATUS_NOT_FOUND:
     case ZEROBUS_STATUS_UNIMPLEMENTED:
+    case ZEROBUS_STATUS_OUT_OF_MEMORY:
     case ZEROBUS_STATUS_OUT_OF_RANGE:
         return false;
     default:
         return true;
     }
+}
+
+bool zerobus_error_is_retryable(const zerobus_error_t *error)
+{
+    return error != NULL && zb_status_is_retryable(error->code);
 }
 
 void zerobus_error_free(zerobus_error_t *error)

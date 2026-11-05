@@ -1,6 +1,8 @@
 #include <limits.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "error.h"
 #include "internal/common/utils.h"
@@ -9,21 +11,13 @@
 #include "zerobus/sdk.h"
 
 #define DEFAULT_TOKEN_REFRESH_BUFFER_MS 300000
+/* ZEROBUS_VERSION comes from the CMake project version. */
+#define SDK_IDENTIFIER "zerobus-sdk-c/" ZEROBUS_VERSION
 
 struct zerobus_sdk_builder {
     char *endpoint;         /* zerobus endpoint, owned */
     char *uc_endpoint;      /* unity catalog endpoint, owned */
     char *application_name; /* owned, NULL when unset */
-    uint64_t token_refresh_buffer_ms;
-    bool connection_per_stream;
-};
-
-struct zerobus_sdk {
-    atomic_size_t ref_cnt;
-    /* Independent copies of the validated configuration. */
-    char *endpoint;
-    char *uc_endpoint;
-    char *application_name;
     uint64_t token_refresh_buffer_ms;
     bool connection_per_stream;
 };
@@ -215,7 +209,7 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     }
 
     /* Endpoints and options were validated when set.
-     * TODO: initialize shared TLS/OAuth/transport state. */
+     * TODO: shared transport state. */
     zerobus_sdk_t *sdk = (zerobus_sdk_t *)calloc(1, sizeof(*sdk));
     if (sdk == NULL) {
         ZB_ERROR("SDK allocation failed");
@@ -227,11 +221,47 @@ zerobus_status_t zerobus_sdk_builder_build(const zerobus_sdk_builder_t *builder,
     sdk->application_name = zb_strdup(builder->application_name);
     sdk->token_refresh_buffer_ms = builder->token_refresh_buffer_ms;
     sdk->connection_per_stream = builder->connection_per_stream;
+    const char *host = strstr(builder->endpoint, "://") + 3;
+    sdk->workspace_id = zb_strndup(host, strcspn(host, ".:"));
+    /* The endpoint has no path and no IPv6 literal, so any ':' after the
+     * host starts a valid port. */
+    size_t host_len = strcspn(host, ":");
+    sdk->host = zb_strndup(host, host_len);
+    sdk->plaintext = !zb_starts_with(builder->endpoint,
+                                     strlen(builder->endpoint), "https://");
+    uint32_t port = sdk->plaintext ? 80 : 443;
+    if (host[host_len] == ':') {
+        (void)zb_parse_u32((const uint8_t *)host + host_len + 1,
+                           strlen(host + host_len + 1), &port);
+    }
+    sdk->port = (uint16_t)port;
+    size_t agent_len =
+        sizeof(SDK_IDENTIFIER) + (builder->application_name != NULL
+                                      ? 1 + strlen(builder->application_name)
+                                      : 0);
+    sdk->user_agent = (char *)malloc(agent_len);
+    if (sdk->user_agent != NULL) {
+        (void)snprintf(
+            sdk->user_agent, agent_len, "%s%s%s", SDK_IDENTIFIER,
+            builder->application_name != NULL ? " " : "",
+            builder->application_name != NULL ? builder->application_name : "");
+    }
     if (sdk->endpoint == NULL || sdk->uc_endpoint == NULL ||
-        (builder->application_name != NULL && sdk->application_name == NULL)) {
+        sdk->workspace_id == NULL ||
+        (builder->application_name != NULL && sdk->application_name == NULL) ||
+        sdk->host == NULL || sdk->user_agent == NULL) {
         ZB_ERROR("SDK configuration allocation failed");
         zerobus_sdk_free(sdk);
         return ZEROBUS_STATUS_OUT_OF_MEMORY;
+    }
+    if (!sdk->plaintext ||
+        zb_starts_with(sdk->uc_endpoint, strlen(sdk->uc_endpoint),
+                       "https://")) {
+        zerobus_status_t status = zb_tls_ctx_new(NULL, &sdk->tls_context);
+        if (status != ZEROBUS_STATUS_OK) {
+            zerobus_sdk_free(sdk);
+            return zb_fail(out_error, status, "setting up TLS failed");
+        }
     }
 
     *out_sdk = sdk;
@@ -270,6 +300,10 @@ void zerobus_sdk_free(zerobus_sdk_t *sdk)
     free(sdk->endpoint);
     free(sdk->uc_endpoint);
     free(sdk->application_name);
+    free(sdk->workspace_id);
+    free(sdk->host);
+    zb_tls_ctx_free(sdk->tls_context);
+    free(sdk->user_agent);
     free(sdk);
     ZB_DEBUG("SDK freed");
 }

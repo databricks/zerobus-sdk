@@ -3,9 +3,9 @@ using Databricks.Zerobus.Examples;
 using Google.Protobuf;
 
 // Get configuration from environment.
-var zerobusEndpoint = Environment.GetEnvironmentVariable("ZEROBUS_SERVER_ENDPOINT")
+var serverEndpoint = Environment.GetEnvironmentVariable("ZEROBUS_SERVER_ENDPOINT")
     ?? throw new InvalidOperationException("ZEROBUS_SERVER_ENDPOINT not set");
-var unityCatalogUrl = Environment.GetEnvironmentVariable("DATABRICKS_WORKSPACE_URL")
+var workspaceUrl = Environment.GetEnvironmentVariable("DATABRICKS_WORKSPACE_URL")
     ?? throw new InvalidOperationException("DATABRICKS_WORKSPACE_URL not set");
 var clientId = Environment.GetEnvironmentVariable("DATABRICKS_CLIENT_ID")
     ?? throw new InvalidOperationException("DATABRICKS_CLIENT_ID not set");
@@ -19,8 +19,8 @@ byte[] descriptorProto = MyMessage.Descriptor.ToProto().ToByteArray();
 
 // Create SDK instance.
 using var sdk = ZerobusSdk.CreateBuilder()
-    .Endpoint(zerobusEndpoint)
-    .UnityCatalogUrl(unityCatalogUrl)
+    .Endpoint(serverEndpoint)
+    .UnityCatalogUrl(workspaceUrl)
     .Build();
 
 // Configure stream options for protobuf.

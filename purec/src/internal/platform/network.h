@@ -48,6 +48,7 @@ zerobus_status_t zb_wakeup_new(zb_wakeup_t **out_wakeup);
 void zb_wakeup_free(zb_wakeup_t *wakeup);
 zerobus_status_t zb_wakeup_signal(zb_wakeup_t *wakeup);
 zerobus_status_t zb_wakeup_drain(zb_wakeup_t *wakeup);
+bool zb_wakeup_pending(zb_wakeup_t *wakeup);
 
 /* Sleeps until the socket is ready for one of interest->events, the wakeup is
  * signalled, or the deadline passes. *out_events receives the socket's ready

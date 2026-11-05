@@ -38,7 +38,7 @@ type OAuthTokenProvider struct {
 	clientID     string
 	clientSecret string
 	workspaceID  string
-	ucEndpoint   string // e.g. "https://workspace.databricks.com"
+	ucEndpoint   string // Databricks workspace URL
 
 	cache  *tokenCache
 	client *http.Client
@@ -126,7 +126,7 @@ func WithLogger(l *slog.Logger) OAuthOption {
 //
 // zerobusEndpoint is the Zerobus service URL. The workspace ID used in OAuth
 // resource audience is derived from its host prefix.
-// ucEndpoint is the workspace URL (e.g. "https://my-workspace.databricks.com").
+// ucEndpoint is the Databricks workspace URL.
 func NewOAuthTokenProvider(
 	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
 	opts ...OAuthOption,

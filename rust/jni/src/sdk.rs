@@ -12,11 +12,27 @@ use crate::options::{
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
-use databricks_zerobus_ingest_sdk::ZerobusSdk;
+use databricks_zerobus_ingest_sdk::{RecordType, ZerobusSdk};
 use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::{jboolean, jlong, JNI_FALSE};
+use jni::sys::{jboolean, jint, jlong, JNI_FALSE};
 use jni::JNIEnv;
 use std::sync::Arc;
+
+/// Native ABI version; bump in lockstep with Java's `NativeLoader.EXPECTED_NATIVE_ABI` whenever
+/// native method signatures change, so a stale library is rejected at load.
+const NATIVE_ABI_VERSION: jint = 1;
+
+/// # JNI Signature
+/// ```java
+/// private static native int nativeAbiVersion();
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeLoader_nativeAbiVersion<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jint {
+    NATIVE_ABI_VERSION
+}
 
 /// Native SDK handle stored in Java.
 pub struct NativeSdkHandle {
@@ -180,10 +196,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 ///     long sdkHandle,
 ///     String tableName,
 ///     byte[] descriptorProto,
+///     String avroSchemaJson,
 ///     String clientId,
 ///     String clientSecret,
 ///     Object options,
-///     boolean isJson
+///     int formatCode
 /// );
 /// ```
 #[no_mangle]
@@ -193,10 +210,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
     sdk_handle: jlong,
     table_name: JString<'local>,
     descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
     client_id: JString<'local>,
     client_secret: JString<'local>,
     options: JObject<'local>,
-    is_json: jboolean,
+    format_code: jint,
 ) -> JObject<'local> {
     Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStreamWithHeadersProvider(
         env,
@@ -204,11 +222,12 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         sdk_handle,
         table_name,
         descriptor_proto,
+        avro_schema,
         client_id,
         client_secret,
         JObject::null(),
         options,
-        is_json,
+        format_code,
     )
 }
 
@@ -221,11 +240,12 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
     sdk_handle: jlong,
     table_name: JString<'local>,
     descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
     client_id: JString<'local>,
     client_secret: JString<'local>,
     headers_provider: JObject<'local>,
     options: JObject<'local>,
-    is_json: jboolean,
+    format_code: jint,
 ) -> JObject<'local> {
     // Create the CompletableFuture to return
     let future = match create_completable_future(&mut env) {
@@ -298,7 +318,21 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         }
     };
 
-    let json_records = is_json != JNI_FALSE;
+    // Avro writer schema (JSON); only present for Avro streams.
+    #[cfg(feature = "avro")]
+    let avro_schema_json: Option<String> = if avro_schema.is_null() {
+        None
+    } else {
+        match env.get_string(&avro_schema) {
+            Ok(s) => Some(s.into()),
+            Err(e) => {
+                throw_zerobus_exception(&mut env, &format!("Invalid Avro schema: {}", e));
+                return JObject::null();
+            }
+        }
+    };
+    #[cfg(not(feature = "avro"))]
+    let _ = &avro_schema; // unused without the feature, but kept to match the Java signature
 
     let extracted_options = if options.is_null() {
         None
@@ -340,15 +374,36 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 Some(provider) => base.headers_provider(provider),
                 None => base.oauth(credentials.0.clone(), credentials.1.clone()),
             };
-            let mut builder = if json_records {
-                base.json()
-            } else {
-                let desc = descriptor_proto.ok_or_else(|| {
-                    databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                        "Proto descriptor is required for Proto record type".to_string(),
-                    )
-                })?;
-                base.compiled_proto(desc)
+            // Map the wire format code to the builder, mirroring the FFI layer's integer
+            // dispatch. `RecordType` no longer derives `TryFrom<i32>`, and its `Avro` variant
+            // only exists with the `avro` feature, so match on the code (its discriminant).
+            let (record_type, mut builder) = match format_code {
+                code if code == RecordType::Proto as jint => {
+                    let desc = descriptor_proto.ok_or_else(|| {
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Proto descriptor is required for Proto record type".to_string(),
+                        )
+                    })?;
+                    (RecordType::Proto, base.compiled_proto(desc))
+                }
+                code if code == RecordType::Json as jint => (RecordType::Json, base.json()),
+                #[cfg(feature = "avro")]
+                code if code == RecordType::Avro as jint => {
+                    let schema = avro_schema_json.ok_or_else(|| {
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Avro schema is required for Avro record type".to_string(),
+                        )
+                    })?;
+                    (RecordType::Avro, base.avro(schema))
+                }
+                _ => {
+                    return Err(
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
+                            "Unsupported record format code: {}",
+                            format_code
+                        )),
+                    );
+                }
             };
             if let Some(opts) = extracted_options {
                 builder = apply_stream_options(builder, opts);
@@ -358,6 +413,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
 
             Ok(NativeStreamHandle::new(
                 stream,
+                record_type,
                 credentials.0,
                 credentials.1,
             ))
@@ -406,6 +462,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
     let stream = unsafe { NativeStreamHandle::borrow_from_raw(stream_handle) };
     let client_id = stream.client_id.clone();
     let client_secret = stream.client_secret.clone();
+    let record_type = stream.record_type;
 
     // Take the stream out of the handle for recreation
     let old_stream = {
@@ -428,6 +485,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
             let new_stream = sdk_arc.recreate_stream(&old_stream).await?;
             Ok(NativeStreamHandle::new(
                 new_stream,
+                record_type,
                 client_id,
                 client_secret,
             ))

@@ -14,21 +14,21 @@ import (
 
 func main() {
 	// Get configuration from environment
-	zerobusEndpoint := os.Getenv("ZEROBUS_SERVER_ENDPOINT")
-	unityCatalogURL := os.Getenv("DATABRICKS_WORKSPACE_URL")
+	serverEndpoint := os.Getenv("ZEROBUS_SERVER_ENDPOINT")
+	workspaceURL := os.Getenv("DATABRICKS_WORKSPACE_URL")
 	clientID := os.Getenv("DATABRICKS_CLIENT_ID")
 	clientSecret := os.Getenv("DATABRICKS_CLIENT_SECRET")
 	tableName := os.Getenv("ZEROBUS_TABLE_NAME")
 
-	if zerobusEndpoint == "" || unityCatalogURL == "" || clientID == "" || clientSecret == "" || tableName == "" {
+	if serverEndpoint == "" || workspaceURL == "" || clientID == "" || clientSecret == "" || tableName == "" {
 		log.Fatal("Missing required environment variables")
 	}
 
 	// WithApplicationName is optional. It appends an application identifier to
 	// the Go SDK user-agent sent to Zerobus.
 	sdk, err := zerobus.NewZerobusSdkWithOptions(
-		zerobusEndpoint,
-		unityCatalogURL,
+		serverEndpoint,
+		workspaceURL,
 		zerobus.WithApplicationName("my-app/1.0"),
 	)
 	if err != nil {

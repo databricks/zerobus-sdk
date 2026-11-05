@@ -1,7 +1,6 @@
 /* Network platform tests over loopback TCP and local socket pairs only. */
 #define _GNU_SOURCE
 
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -10,32 +9,12 @@
 #include <unistd.h>
 
 #include "internal/platform/network.h"
+#include "loopback.h"
 #include "test_common.h"
 
 enum { WAIT_TIMEOUT_MS = 5000, SHORT_TIMEOUT_MS = 50 };
 
 /* ---- helpers ----------------------------------------------------------- */
-
-/* Listens on an ephemeral loopback port. The kernel completes connections in
- * the backlog, so tests never need to accept them. */
-static int listen_loopback(uint16_t *out_port)
-{
-    struct sockaddr_in address = {.sin_family = AF_INET,
-                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    socklen_t len = sizeof(address);
-    int listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener < 0) {
-        return -1;
-    }
-    if (bind(listener, (struct sockaddr *)&address, len) != 0 ||
-        listen(listener, 4) != 0 ||
-        getsockname(listener, (struct sockaddr *)&address, &len) != 0) {
-        close(listener);
-        return -1;
-    }
-    *out_port = ntohs(address.sin_port);
-    return listener;
-}
 
 /* Connects to the next address the way the I/O owner does: start, wait for
  * WRITE, then finish. The caller closes *out_socket if it was set. */
@@ -92,6 +71,7 @@ static void test_arguments(void)
     CHECK_EQ_INT(zb_wakeup_new(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_wakeup_signal(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
     CHECK_EQ_INT(zb_wakeup_drain(NULL), ZEROBUS_STATUS_INVALID_ARGUMENT);
+    CHECK(!zb_wakeup_pending(NULL));
     CHECK_EQ_INT(zb_net_wait(&interest, NULL, &events),
                  ZEROBUS_STATUS_INVALID_ARGUMENT);
     zb_net_addresses_free(NULL);
@@ -123,7 +103,7 @@ static void test_connect(void)
     zb_socket_t connection = ZB_SOCKET_INVALID;
     zb_socket_t refused = ZB_SOCKET_INVALID;
     uint16_t port = 0;
-    int listener = listen_loopback(&port);
+    int listener = loopback_listen(&port);
     int nodelay = 0;
     socklen_t len = sizeof(nodelay);
     REQUIRE(listener >= 0);
@@ -265,11 +245,15 @@ static void test_wakeup(void)
 
     /* Signals coalesce: they end even an infinite wait, and one drain clears
      * them all. */
+    CHECK(!zb_wakeup_pending(wakeup));
     CHECK_OK(zb_wakeup_signal(wakeup));
     CHECK_OK(zb_wakeup_signal(wakeup));
+    CHECK(zb_wakeup_pending(wakeup));
     idle.deadline = ZB_DEADLINE_INFINITE;
     CHECK_OK(zb_net_wait(&idle, wakeup, &events));
+    CHECK(zb_wakeup_pending(wakeup));
     CHECK_OK(zb_wakeup_drain(wakeup));
+    CHECK(!zb_wakeup_pending(wakeup));
     idle.deadline = zb_deadline_after_ms(SHORT_TIMEOUT_MS);
     CHECK_OK(zb_net_wait(&idle, wakeup, &events));
     CHECK(zb_deadline_expired(idle.deadline));

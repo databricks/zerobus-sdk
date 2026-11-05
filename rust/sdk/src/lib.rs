@@ -109,8 +109,8 @@ pub use record_types::PreparedInput;
 #[cfg(feature = "avro")]
 pub use record_types::{AvroBytes, AvroEncodedRecord, AvroRecord};
 pub use record_types::{
-    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+    BatchRecords, BatchRecordsIntoIter, EncodedBatch, EncodedBatchIter, EncodedRecord,
+    JsonEncodedRecord, JsonString, JsonValue, ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{
     ZerobusSdk, DEFAULT_HTTP2_KEEPALIVE_INTERVAL, DEFAULT_HTTP2_KEEPALIVE_TIMEOUT,
@@ -125,8 +125,8 @@ pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
 #[cfg(feature = "arrow-flight")]
 pub use stream::{
-    ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch, TimeUnit,
-    ZerobusArrowStream,
+    ArrowCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch,
+    TimeUnit, ZerobusArrowStream,
 };
 pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]

@@ -34,6 +34,12 @@
 
 ### Behavior Changes
 
+- Arrow Flight streams now compress IPC payloads with ZSTD by default.
+  `zerobus_arrow_get_default_config()` returns `ipc_compression = 1` (ZSTD) instead of `-1`
+  (no compression), and passing `options = NULL` to `zerobus_sdk_create_arrow_stream` or
+  `zerobus_sdk_create_arrow_stream_with_headers_provider` also uses ZSTD. Set
+  `ipc_compression = -1` to keep sending uncompressed payloads.
+
 ### Breaking Changes
 
 ### Deprecations

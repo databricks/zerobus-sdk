@@ -10,8 +10,8 @@ use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream, ZerobusError as RustError,
-    ZerobusSdk as RustSdk,
+    ArrowCompression, StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream,
+    ZerobusError as RustError, ZerobusSdk as RustSdk,
 };
 
 use crate::auth::HeadersProviderWrapper;
@@ -107,11 +107,11 @@ impl IPCCompression {
 }
 
 impl IPCCompression {
-    fn to_rust(self) -> Option<arrow_ipc::CompressionType> {
+    fn to_rust(self) -> ArrowCompression {
         match self {
-            IPCCompression::Uncompressed => None,
-            IPCCompression::LZ4Frame => Some(arrow_ipc::CompressionType::LZ4_FRAME),
-            IPCCompression::Zstd => Some(arrow_ipc::CompressionType::ZSTD),
+            IPCCompression::Uncompressed => ArrowCompression::Uncompressed,
+            IPCCompression::LZ4Frame => ArrowCompression::IpcLz4,
+            IPCCompression::Zstd => ArrowCompression::IpcZstd,
         }
     }
 }
@@ -281,7 +281,7 @@ impl ArrowStreamConfigurationOptions {
             .server_lack_of_ack_timeout_ms(self.server_lack_of_ack_timeout_ms as u64)
             .flush_timeout_ms(self.flush_timeout_ms as u64)
             .connection_timeout_ms(self.connection_timeout_ms as u64)
-            .ipc_compression(self.ipc_compression.to_rust())
+            .compression(self.ipc_compression.to_rust())
             .stream_paused_max_wait_time_ms(self.stream_paused_max_wait_time_ms.map(|v| v as u64));
         Ok(b)
     }

@@ -1,4 +1,6 @@
 /* Unit tests for the SDK builder and SDK handle (sdk.c). */
+#include <string.h>
+
 #include "sdk.h"
 #include "test_common.h"
 
@@ -164,6 +166,121 @@ static void test_sdk_build_ok(void)
 
     zerobus_sdk_builder_free(b);
     zerobus_sdk_free(sdk);
+}
+
+/* The workspace id is the first label of the Zerobus endpoint's host. */
+static void test_sdk_workspace_id(void)
+{
+    const char *const endpoints[] = {
+        "https://6051921418418893.zerobus.us-west-2.cloud.databricks.com:443",
+        "http://localhost:50051",
+    };
+    const char *const ids[] = {"6051921418418893", "localhost"};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+        zerobus_sdk_builder_t *b = NULL;
+        zerobus_sdk_t *sdk = NULL;
+        CHECK_OK(zerobus_sdk_builder_new(&b, NULL));
+        CHECK_OK(zerobus_sdk_builder_set_endpoint(b, sv(endpoints[i]), NULL));
+        CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+            b, sv("https://ws.cloud.databricks.com"), NULL));
+        CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+        CHECK(sdk != NULL && strcmp(sdk->workspace_id, ids[i]) == 0);
+        zerobus_sdk_builder_free(b);
+        zerobus_sdk_free(sdk);
+    }
+}
+
+/* The SDK gets one TLS context if either endpoint is https, and none if
+ * both are http. */
+static void test_sdk_tls_context(void)
+{
+    static const struct {
+        const char *endpoint;
+        const char *uc_endpoint;
+        bool tls;
+    } cases[] = {
+        {"https://ws.zerobus.us-west-2.cloud.databricks.com",
+         "https://ws.cloud.databricks.com", true},
+        {"http://localhost:50051", "https://ws.cloud.databricks.com", true},
+        {"https://ws.zerobus.us-west-2.cloud.databricks.com",
+         "http://localhost:8080", true},
+        {"http://localhost:50051", "http://localhost:8080", false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        zerobus_sdk_builder_t *b = NULL;
+        zerobus_sdk_t *sdk = NULL;
+        CHECK_OK(zerobus_sdk_builder_new(&b, NULL));
+        CHECK_OK(
+            zerobus_sdk_builder_set_endpoint(b, sv(cases[i].endpoint), NULL));
+        CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+            b, sv(cases[i].uc_endpoint), NULL));
+        CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+        CHECK(sdk != NULL && (sdk->tls_context != NULL) == cases[i].tls);
+        zerobus_sdk_builder_free(b);
+        zerobus_sdk_free(sdk);
+    }
+}
+
+/* The Zerobus endpoint gives the host, the port, with the scheme's default
+ * when none is given, and the scheme. */
+static void test_sdk_endpoint_parts(void)
+{
+    static const struct {
+        const char *endpoint;
+        const char *host;
+        uint16_t port;
+        bool plaintext;
+    } cases[] = {
+        {"https://ws.zerobus.us-west-2.cloud.databricks.com",
+         "ws.zerobus.us-west-2.cloud.databricks.com", 443, false},
+        {"https://localhost:8443", "localhost", 8443, false},
+        {"http://localhost", "localhost", 80, true},
+        {"http://localhost:50051", "localhost", 50051, true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        zerobus_sdk_builder_t *b = NULL;
+        zerobus_sdk_t *sdk = NULL;
+        CHECK_OK(zerobus_sdk_builder_new(&b, NULL));
+        CHECK_OK(
+            zerobus_sdk_builder_set_endpoint(b, sv(cases[i].endpoint), NULL));
+        CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+            b, sv("https://ws.cloud.databricks.com"), NULL));
+        CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+        CHECK(sdk != NULL && strcmp(sdk->host, cases[i].host) == 0 &&
+              sdk->port == cases[i].port &&
+              sdk->plaintext == cases[i].plaintext);
+        zerobus_sdk_builder_free(b);
+        zerobus_sdk_free(sdk);
+    }
+}
+
+/* The user agent names the SDK and its version, then the application, if
+ * one is set. */
+static void test_sdk_user_agent(void)
+{
+    const char *const names[] = {NULL, "my-app/1.0"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        zerobus_sdk_builder_t *b = NULL;
+        zerobus_sdk_t *sdk = NULL;
+        CHECK_OK(zerobus_sdk_builder_new(&b, NULL));
+        CHECK_OK(zerobus_sdk_builder_set_endpoint(
+            b, sv("https://ws.zerobus.us-west-2.cloud.databricks.com"), NULL));
+        CHECK_OK(zerobus_sdk_builder_set_unity_catalog_endpoint(
+            b, sv("https://ws.cloud.databricks.com"), NULL));
+        if (names[i] != NULL) {
+            CHECK_OK(zerobus_sdk_builder_set_application_name(b, sv(names[i]),
+                                                              NULL));
+        }
+        CHECK_OK(zerobus_sdk_builder_build(b, &sdk, NULL));
+        const char *agent = sdk != NULL ? sdk->user_agent : "";
+        const char *space = strchr(agent, ' ');
+        CHECK(strncmp(agent, "zerobus-sdk-c/", 14) == 0 && agent[14] != '\0');
+        CHECK(names[i] == NULL
+                  ? space == NULL
+                  : space != NULL && strcmp(space + 1, names[i]) == 0);
+        zerobus_sdk_builder_free(b);
+        zerobus_sdk_free(sdk);
+    }
 }
 
 /* A rejected setter is transactional: it leaves the previous value in place. */
@@ -371,6 +488,10 @@ int main(void)
     test_sdk_builder_endpoint_rules();
     test_sdk_builder_edges();
     test_sdk_build_ok();
+    test_sdk_workspace_id();
+    test_sdk_tls_context();
+    test_sdk_endpoint_parts();
+    test_sdk_user_agent();
     test_sdk_setter_transactional();
     test_sdk_options();
     test_sdk_free_null_safe();

@@ -11,8 +11,8 @@ import (
 // queue every record without waiting, then confirm durability once at the end.
 func ExampleStream_ingestThenFlush() {
 	sdk, err := zerobus.New(
-		"https://your-workspace.zerobus.region.cloud.databricks.com",
-		"https://your-workspace.cloud.databricks.com",
+		serverEndpoint(),
+		workspaceURL(),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -41,8 +41,8 @@ func ExampleStream_ingestThenFlush() {
 // Flush, and flush periodically to bound in-flight memory.
 func ExampleStream_ackCallback() {
 	sdk, err := zerobus.New(
-		"https://your-workspace.zerobus.region.cloud.databricks.com",
-		"https://your-workspace.cloud.databricks.com",
+		serverEndpoint(),
+		workspaceURL(),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -75,8 +75,8 @@ func ExampleStream_ackCallback() {
 // WithProto and hand IngestRecordOffset the marshaled protobuf bytes.
 func ExampleStream_proto() {
 	sdk, err := zerobus.New(
-		"https://your-workspace.zerobus.region.cloud.databricks.com",
-		"https://your-workspace.cloud.databricks.com",
+		serverEndpoint(),
+		workspaceURL(),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -119,6 +119,8 @@ func (logAckCallback) OnError(offset int64, err error) {
 }
 
 // Stand-ins so the examples compile without external configuration.
+func serverEndpoint() string  { return "" }
+func workspaceURL() string    { return "" }
 func clientID() string        { return "" }
 func clientSecret() string    { return "" }
 func descriptorProto() []byte { return nil }

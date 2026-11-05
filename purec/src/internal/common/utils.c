@@ -1,4 +1,6 @@
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,6 +90,11 @@ bool zb_view_equals(zerobus_string_view_t value, const char *literal)
             (value.data != NULL && memcmp(value.data, literal, len) == 0));
 }
 
+bool zb_equals_ignore_case(const char *s, size_t len, const char *lower)
+{
+    return strlen(lower) == len && zb_starts_with(s, len, lower);
+}
+
 bool zb_is_header_value(zerobus_string_view_t view)
 {
     if (view.data == NULL) {
@@ -104,20 +111,30 @@ bool zb_is_header_value(zerobus_string_view_t view)
 
 /* ---- parsing ----------------------------------------------------------- */
 
-bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
+bool zb_parse_u64(const uint8_t *value, size_t len, uint64_t *out)
 {
     if (len == 0) {
         return false;
     }
-    uint32_t res = 0;
+    uint64_t res = 0;
     for (size_t i = 0; i < len; ++i) {
-        uint32_t c = (uint32_t)(value[i] - '0');
-        if (value[i] < '0' || value[i] > '9' || res > (UINT32_MAX - c) / 10) {
+        uint64_t c = (uint64_t)(value[i] - '0');
+        if (value[i] < '0' || value[i] > '9' || res > (UINT64_MAX - c) / 10) {
             return false;
         }
         res = res * 10 + c;
     }
     *out = res;
+    return true;
+}
+
+bool zb_parse_u32(const uint8_t *value, size_t len, uint32_t *out)
+{
+    uint64_t res = 0;
+    if (!zb_parse_u64(value, len, &res) || res > UINT32_MAX) {
+        return false;
+    }
+    *out = (uint32_t)res;
     return true;
 }
 
@@ -364,6 +381,25 @@ char *zb_strdup(const char *s)
         return NULL;
     }
     return zb_strndup(s, strlen(s));
+}
+
+char *zb_strdup_printf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(NULL, 0, format, args);
+    va_end(args);
+    if (len < 0) {
+        return NULL;
+    }
+    char *text = (char *)malloc((size_t)len + 1);
+    if (text == NULL) {
+        return NULL;
+    }
+    va_start(args, format);
+    (void)vsnprintf(text, (size_t)len + 1, format, args);
+    va_end(args);
+    return text;
 }
 
 /*
