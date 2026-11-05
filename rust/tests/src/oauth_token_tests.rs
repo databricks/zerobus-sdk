@@ -322,6 +322,130 @@ mod token_minting_and_caching_tests {
     }
 }
 
+/// `DefaultTokenFactory::get_token_with_expiry`, the standalone token utility.
+mod direct_token_tests {
+    use super::*;
+    use databricks_zerobus_ingest_sdk::{DefaultTokenFactory, OAuthToken};
+    use std::time::SystemTime;
+
+    async fn get_token(uc_url: &str, table_name: &str) -> Result<OAuthToken, ZerobusError> {
+        DefaultTokenFactory::get_token_with_expiry(
+            uc_url,
+            table_name,
+            CLIENT_ID,
+            CLIENT_SECRET,
+            WORKSPACE_ID,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn returns_token_and_expiry() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+        oauth
+            .set_responses(vec![MockTokenResponse::ok("token-1")])
+            .await;
+
+        let before = SystemTime::now();
+        let token = get_token(&uc_url, TABLE_NAME).await.unwrap();
+        let after = SystemTime::now();
+
+        assert_eq!(token.access_token, "token-1");
+        let expires_at = token.expires_at.expect("expires_in was reported");
+        let ttl = Duration::from_secs(3600);
+        assert!(expires_at >= before + ttl && expires_at <= after + ttl);
+    }
+
+    #[tokio::test]
+    async fn missing_expires_in_yields_no_expiry() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+        oauth
+            .set_responses(vec![MockTokenResponse::ok("token-1").with_expires_in(None)])
+            .await;
+
+        let token = get_token(&uc_url, TABLE_NAME).await.unwrap();
+
+        assert_eq!(token.access_token, "token-1");
+        assert_eq!(token.expires_at, None);
+    }
+
+    #[tokio::test]
+    async fn every_call_mints() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+        oauth
+            .set_responses(vec![
+                MockTokenResponse::ok("token-1"),
+                MockTokenResponse::ok("token-2"),
+            ])
+            .await;
+
+        let first = get_token(&uc_url, TABLE_NAME).await.unwrap();
+        let second = get_token(&uc_url, TABLE_NAME).await.unwrap();
+
+        assert_eq!(first.access_token, "token-1");
+        assert_eq!(second.access_token, "token-2");
+        assert_eq!(oauth.mint_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn classifies_http_errors() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+        oauth
+            .set_responses(vec![
+                MockTokenResponse::error(401, "unauthorized"),
+                MockTokenResponse::error(503, "unavailable"),
+            ])
+            .await;
+
+        let client_err = get_token(&uc_url, TABLE_NAME).await.unwrap_err();
+        assert!(
+            matches!(client_err, ZerobusError::InvalidUCTokenError(_)),
+            "got {client_err:?}"
+        );
+        assert!(!client_err.is_retryable());
+
+        let server_err = get_token(&uc_url, TABLE_NAME).await.unwrap_err();
+        assert!(
+            matches!(server_err, ZerobusError::TokenFetchError(_)),
+            "got {server_err:?}"
+        );
+        assert!(server_err.is_retryable());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unresponsive_endpoint_times_out_as_retryable() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+        oauth.set_responses(vec![MockTokenResponse::Hang]).await;
+
+        let err = get_token(&uc_url, TABLE_NAME).await.unwrap_err();
+
+        assert!(
+            matches!(err, ZerobusError::TokenFetchError(ref msg) if msg.contains("timed out")),
+            "got {err:?}"
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn invalid_table_name_fails_without_a_request() {
+        setup_tracing();
+        let (oauth, uc_url) = start_mock_oauth_server().await;
+
+        let err = get_token(&uc_url, "not-a-table").await.unwrap_err();
+
+        assert!(
+            matches!(err, ZerobusError::InvalidTableName(_)),
+            "got {err:?}"
+        );
+        assert_eq!(oauth.mint_count(), 0);
+    }
+}
+
 /// The whole chain: SDK stream creation minting from mock UC and connecting to
 /// the mock gRPC data plane.
 mod stream_creation_tests {

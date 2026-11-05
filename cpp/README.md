@@ -268,6 +268,51 @@ auto provider = std::make_shared<MyProvider>();
 zerobus::Stream stream = sdk.create_stream(table, provider, options);
 ```
 
+### OAuth tokens for other clients
+
+`zerobus::get_token()` mints the same table-scoped OAuth token the SDK uses for
+its streams and returns a `zerobus::OAuthToken` with `access_token` and
+`expires_at` (empty if the server reported no lifetime). Use it to authenticate
+clients of Zerobus' other
+[API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols),
+such as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints
+a new token, so call it from the client's refresh hook.
+
+For example, a librdkafka producer writing to Zerobus'
+[Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka)
+(configured with `security.protocol=SASL_SSL` and `sasl.mechanisms=OAUTHBEARER`)
+can refresh its token like this:
+
+```cpp
+class ZerobusTokenRefresh : public RdKafka::OAuthBearerTokenRefreshCb {
+ public:
+  void oauthbearer_token_refresh_cb(RdKafka::Handle* handle,
+                                    const std::string&) override {
+    try {
+      zerobus::OAuthToken token = zerobus::get_token(
+          workspace_url, table_name, client_id, client_secret, workspace_id);
+      auto lifetime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             token.expires_at.value().time_since_epoch())
+                             .count();
+      std::string errstr;
+      if (handle->oauthbearer_set_token(token.access_token, lifetime_ms,
+                                        client_id, {}, errstr) !=
+          RdKafka::ERR_NO_ERROR) {
+        handle->oauthbearer_set_token_failure(errstr);
+      }
+    } catch (const std::exception& e) {
+      handle->oauthbearer_set_token_failure(e.what());
+    }
+  }
+  // workspace_url, table_name, client_id, client_secret, workspace_id members
+};
+// conf->set("oauthbearer_token_refresh_cb", &refresh_cb, errstr);
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the workspace URL and workspace ID, and the Zerobus Kafka documentation
+linked above for the rest of the producer setup.
+
 ### Error handling
 
 ```cpp
@@ -328,6 +373,7 @@ canonical version):
 | `zerobus::ArrowStream` | Arrow Flight ingestion stream |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |
 | `zerobus::HeadersProvider` | Custom authentication headers |
+| `zerobus::get_token` / `zerobus::OAuthToken` | Table-scoped OAuth token for other clients |
 | `zerobus::AckCallback` | Async ack/error notifications (`AckCallback::from` adapts lambdas) |
 | `zerobus::StreamOptions` / `zerobus::ArrowStreamOptions` | Stream configuration |
 | `zerobus::ZerobusException` | Thrown on any failure; `is_retryable()` |

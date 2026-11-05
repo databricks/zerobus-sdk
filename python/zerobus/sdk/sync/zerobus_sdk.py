@@ -41,6 +41,7 @@ from typing import Iterator, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared.oauth import OAuthToken, _from_native
 from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
 
 # Import base Rust SDK classes
@@ -442,6 +443,39 @@ class ZerobusSdk:
         return ZerobusStream(rust_stream, avro_encoder=old_stream._avro)
 
 
+def get_token(
+    workspace_url: str,
+    table_name: str,
+    client_id: str,
+    client_secret: str,
+    workspace_id: str,
+) -> OAuthToken:
+    """
+    Fetch a Zerobus-scoped OAuth token for use outside the SDK's own streams.
+
+    Mints the same token the SDK uses for its streams (OAuth client credentials,
+    scoped to writing ``table_name``), for clients that take an OAuth token
+    callback, e.g. a Kafka producer using SASL/OAUTHBEARER. Each call fetches a
+    new token; there is no caching, so call it from the client's refresh hook.
+
+    Args:
+        workspace_url: The Databricks workspace URL.
+        table_name: The target table, as ``catalog.schema.table``.
+        client_id: The service principal's OAuth client ID.
+        client_secret: The service principal's OAuth client secret.
+        workspace_id: The numeric workspace ID.
+
+    Returns:
+        The token and its expiry.
+
+    Raises:
+        NonRetriableException: The input is invalid or the token endpoint rejected
+            the request (for example, bad credentials or missing table privileges).
+        ZerobusException: The token endpoint was unreachable or failed (retryable).
+    """
+    return _from_native(_core.get_token(workspace_url, table_name, client_id, client_secret, workspace_id))
+
+
 # Direct re-exports
 RecordAcknowledgment = _core.sync.RecordAcknowledgment
 
@@ -466,6 +500,8 @@ __all__ = [
     "RecordType",
     "AckCallback",
     "HeadersProvider",
+    "OAuthToken",
+    "get_token",
     "ZerobusException",
     "NonRetriableException",
 ]

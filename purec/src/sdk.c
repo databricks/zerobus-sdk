@@ -60,9 +60,8 @@ static zerobus_status_t check_setter_args(const zerobus_sdk_builder_t *builder,
     return ZEROBUS_STATUS_OK;
 }
 
-/* Accepts a bare http(s)://host[:port] origin for both endpoints */
-static bool validate_endpoint(zerobus_string_view_t endpoint, const char *label,
-                              zerobus_error_t **out_error)
+bool zb_validate_endpoint(zerobus_string_view_t endpoint, const char *label,
+                          zerobus_error_t **out_error)
 {
     const char *fmt;
     switch (zb_url_validate(endpoint)) {
@@ -107,7 +106,8 @@ zerobus_sdk_builder_set_endpoint(zerobus_sdk_builder_t *builder,
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "zerobus endpoint must be non-empty valid UTF-8");
     }
-    if (!validate_endpoint(zerobus_endpoint, "zerobus endpoint", out_error)) {
+    if (!zb_validate_endpoint(zerobus_endpoint, "zerobus endpoint",
+                              out_error)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (!zb_replace_string(&builder->endpoint, zerobus_endpoint)) {
@@ -129,8 +129,8 @@ zerobus_status_t zerobus_sdk_builder_set_unity_catalog_endpoint(
         return zb_fail(out_error, ZEROBUS_STATUS_INVALID_ARGUMENT,
                        "unity catalog endpoint must be non-empty valid UTF-8");
     }
-    if (!validate_endpoint(unity_catalog_endpoint, "unity catalog endpoint",
-                           out_error)) {
+    if (!zb_validate_endpoint(unity_catalog_endpoint, "unity catalog endpoint",
+                              out_error)) {
         return ZEROBUS_STATUS_INVALID_ARGUMENT;
     }
     if (!zb_replace_string(&builder->uc_endpoint, unity_catalog_endpoint)) {

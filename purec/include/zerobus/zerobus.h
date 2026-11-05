@@ -2,7 +2,7 @@
  * Zerobus Pure C SDK — public API umbrella header.
  *
  * Includes the whole public surface. Per-area headers can be included directly:
- * common.h, error.h, headers_provider.h, sdk.h, stream.h.
+ * common.h, error.h, headers_provider.h, oauth.h, sdk.h, stream.h.
  *
  * The SDK is under early development: the API may still change before 1.0.
  *
@@ -29,6 +29,7 @@
 #include "zerobus/common.h"           // IWYU pragma: export
 #include "zerobus/error.h"            // IWYU pragma: export
 #include "zerobus/headers_provider.h" // IWYU pragma: export
+#include "zerobus/oauth.h"            // IWYU pragma: export
 #include "zerobus/sdk.h"              // IWYU pragma: export
 #include "zerobus/stream.h"           // IWYU pragma: export
 

@@ -63,7 +63,8 @@ Example (Async):
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
 from zerobus.sdk.shared.auth import FederatedToken
-from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
+from zerobus.sdk.shared.oauth import OAuthToken
+from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream, get_token
 
 __version__ = "1.6.1"
 
@@ -94,6 +95,8 @@ __all__ = [
     # Authentication
     "HeadersProvider",
     "FederatedToken",
+    "OAuthToken",
+    "get_token",
     # Exceptions
     "ZerobusException",
     "NonRetriableException",

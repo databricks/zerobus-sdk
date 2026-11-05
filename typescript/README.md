@@ -661,6 +661,37 @@ const stream = await sdk.createStream(
 
 **Note:** The SDK automatically adds the `user-agent` header if not provided.
 
+### OAuth Tokens for Other Clients
+
+`getToken()` mints the same table-scoped OAuth token the SDK uses for its streams and resolves to an `OAuthToken` with `accessToken` and `expiresAt` (a `Date`, or `undefined` if the server reported no lifetime). Use it to authenticate clients of Zerobus' other [API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols), such as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints a new token, so call it from the client's refresh hook.
+
+For example, a [KafkaJS](https://kafka.js.org/) producer writing to Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka) can authenticate with SASL/OAUTHBEARER:
+
+```typescript
+import { Kafka } from 'kafkajs';
+import { getToken } from '@databricks/zerobus-ingest-sdk';
+
+const kafka = new Kafka({
+  brokers: [bootstrapServer],
+  ssl: true,
+  sasl: {
+    mechanism: 'oauthbearer',
+    oauthBearerProvider: async () => {
+      const token = await getToken(
+        process.env.DATABRICKS_WORKSPACE_URL!,
+        process.env.ZEROBUS_TABLE_NAME!,
+        process.env.DATABRICKS_CLIENT_ID!,
+        process.env.DATABRICKS_CLIENT_SECRET!,
+        workspaceId
+      );
+      return { value: token.accessToken };
+    },
+  },
+});
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above for the rest of the producer setup.
+
 ## Configuration
 
 ### Stream Configuration Options

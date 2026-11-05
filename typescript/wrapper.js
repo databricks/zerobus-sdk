@@ -51,6 +51,23 @@ class ZerobusSdk {
   }
 }
 
+class OAuthToken {
+  constructor(accessToken, expiresAt) {
+    this.accessToken = accessToken;
+    this.expiresAt = expiresAt;
+  }
+  [Symbol.for('nodejs.util.inspect.custom')]() {
+    const expiresAt = this.expiresAt === undefined ? 'undefined' : this.expiresAt.toISOString();
+    return `OAuthToken { accessToken: '<redacted>', expiresAt: ${expiresAt} }`;
+  }
+}
+
+async function getToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId) {
+  const raw = await native.getToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId);
+  const expiresAt = raw.expiresAtMs == null ? undefined : new Date(raw.expiresAtMs);
+  return new OAuthToken(raw.accessToken, expiresAt);
+}
+
 // Forward Arrow Flight only when the native binding was built with it, so feature
 // detection on the wrapper matches the native surface.
 if (typeof native.ZerobusSdk.prototype.createArrowStream === 'function') {
@@ -71,3 +88,5 @@ module.exports.ArrowDataType = native.ArrowDataType;
 module.exports.ZerobusArrowStream = native.ZerobusArrowStream;
 module.exports.ZerobusSdk = ZerobusSdk;
 module.exports.ZerobusStream = ZerobusStream;
+module.exports.OAuthToken = OAuthToken;
+module.exports.getToken = getToken;

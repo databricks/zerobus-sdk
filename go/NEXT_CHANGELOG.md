@@ -4,6 +4,11 @@
 
 ### New Features and Improvements
 
+- `GetToken` returns the table-scoped OAuth token the SDK uses for its streams,
+  with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
+
 ### Deprecations
 
 ### Bug Fixes
@@ -19,3 +24,7 @@
 ### Internal Changes
 
 ### API Changes
+
+- Add `GetToken(workspaceURL, tableName, clientID, clientSecret, workspaceID)` and
+  the `OAuthToken` type (`AccessToken`, `ExpiresAt`), whose `String` and `GoString`
+  redact the access token.

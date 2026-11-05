@@ -7,6 +7,10 @@
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Call `ZerobusSdk.CreateBuilder().ConnectionPerStream(false)` to share one
   HTTP/2 connection across streams.
+- `ZerobusSdk.GetToken` returns the table-scoped OAuth token the SDK uses for its
+  streams, with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
 
 ### Deprecations
 
@@ -46,3 +50,7 @@
 - Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
 
 ### API Changes
+
+- Added static `ZerobusSdk.GetToken(string workspaceUrl, string tableName, string clientId, string clientSecret, string workspaceId)`
+  and the `OAuthToken` class (`AccessToken`, `ExpiresAt`). Tracks the new FFI
+  functions `zerobus_get_token` and `zerobus_free_token`.

@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- `ZerobusSdk.getToken()` returns the table-scoped OAuth token the SDK uses for its
+  streams, with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
+
 ### Bug Fixes
 
 ### Documentation
@@ -23,3 +28,7 @@
 ### Deprecations
 
 ### API Changes
+
+- Add static `ZerobusSdk.getToken(String workspaceUrl, String tableName, String clientId,
+  String clientSecret, String workspaceId)` and the `OAuthToken` class
+  (`getAccessToken()`, `getExpiresAt()`), whose `toString()` redacts the access token.

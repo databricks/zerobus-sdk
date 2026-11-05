@@ -3,6 +3,7 @@ using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -158,6 +159,60 @@ public sealed class MockServerFixture : IAsyncDisposable
             ?? throw new InvalidOperationException("No server URL was bound.");
 
         return new MockServerFixture(mockServer, serverUrl, app);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _app.StopAsync();
+        await _app.DisposeAsync();
+    }
+}
+
+/// <summary>
+/// Serves a fixed response on <c>POST /oidc/v1/token</c>, the workspace OAuth token endpoint.
+/// </summary>
+public sealed class TokenEndpointFixture : IAsyncDisposable
+{
+    public string WorkspaceUrl { get; }
+
+    private readonly WebApplication _app;
+
+    private TokenEndpointFixture(string workspaceUrl, WebApplication app)
+    {
+        WorkspaceUrl = workspaceUrl;
+        _app = app;
+    }
+
+    /// <summary>
+    /// Starts a token endpoint on a random available port that answers every request
+    /// with <paramref name="statusCode"/> and <paramref name="body"/>.
+    /// </summary>
+    public static async Task<TokenEndpointFixture> StartAsync(int statusCode, string body)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.Listen(IPAddress.Loopback, 0, listenOptions =>
+            {
+                listenOptions.Protocols = HttpProtocols.Http1;
+            });
+        });
+
+        var app = builder.Build();
+        app.MapPost("/oidc/v1/token", async context =>
+        {
+            context.Response.StatusCode = statusCode;
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync(body);
+        });
+
+        await app.StartAsync();
+
+        var workspaceUrl = app.Urls.FirstOrDefault()
+            ?? throw new InvalidOperationException("No server URL was bound.");
+
+        return new TokenEndpointFixture(workspaceUrl, app);
     }
 
     public async ValueTask DisposeAsync()

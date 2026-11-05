@@ -31,4 +31,10 @@ struct zerobus_sdk {
 /* Caller must hold a live, non-NULL SDK reference; release with sdk_free. */
 void zb_sdk_ref(zerobus_sdk_t *sdk);
 
+/* Whether endpoint is a bare http(s)://host[:port] origin. If not, sets
+ * *out_error, when out_error is non-NULL, to an INVALID_ARGUMENT error that
+ * names the endpoint by label. */
+bool zb_validate_endpoint(zerobus_string_view_t endpoint, const char *label,
+                          zerobus_error_t **out_error);
+
 #endif /* ZB_SDK_H */

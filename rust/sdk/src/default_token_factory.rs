@@ -28,7 +28,8 @@ pub(crate) enum MintReason {
     Refresh,
     /// Token caching is disabled, so every stream creation mints.
     CacheDisabled,
-    /// Minted outside the cache via the public `get_token`.
+    /// Minted outside the cache via the public `get_token` /
+    /// `get_token_with_expiry`.
     Direct,
 }
 
@@ -40,6 +41,33 @@ impl MintReason {
             MintReason::CacheDisabled => "cache_disabled",
             MintReason::Direct => "direct",
         }
+    }
+}
+
+/// Bounds a standalone mint; stream creation is bounded by its recovery timeout.
+const DIRECT_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A Zerobus-scoped OAuth 2.0 access token and its expiry, returned by
+/// [`DefaultTokenFactory::get_token_with_expiry`].
+///
+/// `Debug` redacts the token so it can't leak into logs.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OAuthToken {
+    /// The OAuth 2.0 access token, sent as `Bearer <access_token>`.
+    pub access_token: String,
+    /// When the token expires, or `None` if the server reported no lifetime.
+    /// Measured from when the request was sent, so it never overstates the
+    /// token's validity.
+    pub expires_at: Option<SystemTime>,
+}
+
+impl std::fmt::Debug for OAuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthToken")
+            .field("access_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
     }
 }
 
@@ -66,7 +94,7 @@ impl DefaultTokenFactory {
     ///
     /// # Errors
     ///
-    /// * `InvalidUCTokenError` - If the token request fails or returns invalid data
+    /// Same as [`get_token_with_expiry`](Self::get_token_with_expiry).
     pub async fn get_token(
         uc_endpoint: &str,
         table_name: &str,
@@ -74,16 +102,69 @@ impl DefaultTokenFactory {
         client_secret: &str,
         workspace_id: &str,
     ) -> ZerobusResult<String> {
-        Self::fetch_token(
+        Self::get_token_with_expiry(
+            uc_endpoint,
+            table_name,
+            client_id,
+            client_secret,
+            workspace_id,
+        )
+        .await
+        .map(|token| token.access_token)
+    }
+
+    /// Like [`get_token`](Self::get_token), but also returns when the token
+    /// expires.
+    ///
+    /// Use it to plug Zerobus authentication into any client that takes an
+    /// OAuth token callback, such as a Kafka client's SASL/OAUTHBEARER token
+    /// provider. Every call mints a fresh token, so let the client decide when
+    /// to call it (for example, on reconnect or shortly before `expires_at`).
+    ///
+    /// # Arguments
+    ///
+    /// * `uc_endpoint` - Databricks workspace URL
+    /// * `table_name` - Full table name in format "catalog.schema.table"
+    /// * `client_id` - OAuth client ID
+    /// * `client_secret` - OAuth client secret
+    /// * `workspace_id` - Databricks workspace ID
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidTableName` - If the table name is not "catalog.schema.table"
+    /// * `InvalidUCTokenError` - If the token request is rejected or returns invalid data
+    /// * `TokenFetchError` - If the token endpoint is unreachable, returns a 5xx, or
+    ///   doesn't respond within 30 seconds (retryable)
+    pub async fn get_token_with_expiry(
+        uc_endpoint: &str,
+        table_name: &str,
+        client_id: &str,
+        client_secret: &str,
+        workspace_id: &str,
+    ) -> ZerobusResult<OAuthToken> {
+        let requested_at = SystemTime::now();
+        let fetch = Self::fetch_token(
             uc_endpoint,
             table_name,
             client_id,
             client_secret,
             workspace_id,
             MintReason::Direct,
-        )
-        .await
-        .map(|fetched| fetched.token)
+        );
+        let fetched = tokio::time::timeout(DIRECT_TOKEN_TIMEOUT, fetch)
+            .await
+            .map_err(|_| {
+                ZerobusError::TokenFetchError(format!(
+                    "Token request timed out after {}s",
+                    DIRECT_TOKEN_TIMEOUT.as_secs()
+                ))
+            })??;
+        Ok(OAuthToken {
+            access_token: fetched.token,
+            expires_at: fetched
+                .expires_in
+                .and_then(|ttl| requested_at.checked_add(ttl)),
+        })
     }
 
     /// Obtains an OAuth 2.0 access token along with its reported lifetime.
@@ -562,6 +643,17 @@ impl DefaultTokenFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_token_debug_redacts_access_token() {
+        let token = OAuthToken {
+            access_token: "secret-token-value".to_string(),
+            expires_at: None,
+        };
+        let debug = format!("{token:?}");
+        assert!(!debug.contains("secret-token-value"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+    }
 
     #[test]
     fn test_parse_table_name_valid() {

@@ -18,6 +18,10 @@
   descriptor declares, so callers can inspect a table's columns without parsing
   the descriptor themselves. It accepts the bytes returned by
   `FetchProtoDescriptorFromUC` or passed to `WithProto`.
+- `GetToken` returns the table-scoped OAuth token that `CreateStream` uses, with
+  its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
 
 ### Bug Fixes
 
@@ -67,3 +71,7 @@
 ### Deprecations
 
 ### API Changes
+
+- Add `GetToken(ctx, workspaceURL, tableName, clientID, clientSecret,
+  workspaceID)` and the `OAuthToken` type (`AccessToken`, `ExpiresAt`), whose
+  `String` and `GoString` redact the access token.

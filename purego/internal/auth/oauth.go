@@ -35,13 +35,9 @@ import (
 //
 // OAuthTokenProvider is safe for concurrent use.
 type OAuthTokenProvider struct {
-	clientID     string
-	clientSecret string
-	workspaceID  string
-	ucEndpoint   string // Databricks workspace URL
+	clientCredentials
 
 	cache  *tokenCache
-	client *http.Client
 	logger *slog.Logger
 
 	// cacheOpts are applied to the provider's own default cache. They are
@@ -49,6 +45,18 @@ type OAuthTokenProvider struct {
 	// that cache owns its own configuration.
 	cacheOpts []CacheOption
 }
+
+// clientCredentials is everything a single client-credentials mint needs.
+type clientCredentials struct {
+	clientID     string
+	clientSecret string
+	workspaceID  string
+	ucEndpoint   string // Databricks workspace URL
+	client       *http.Client
+}
+
+// defaultHTTPTimeout bounds a token request made with the default HTTP client.
+const defaultHTTPTimeout = 30 * time.Second
 
 // OAuthOption configures an [OAuthTokenProvider].
 type OAuthOption func(*OAuthTokenProvider)
@@ -131,18 +139,9 @@ func NewOAuthTokenProvider(
 	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
 	opts ...OAuthOption,
 ) (*OAuthTokenProvider, error) {
-	ucEndpoint = strings.TrimRight(strings.TrimSpace(ucEndpoint), "/")
-	if ucEndpoint == "" {
-		return nil, fmt.Errorf("auth: oauth: ucEndpoint is required")
-	}
-	if err := validateEndpoint(ucEndpoint); err != nil {
+	ucEndpoint, err := validateClientCredentials(ucEndpoint, clientID, clientSecret)
+	if err != nil {
 		return nil, fmt.Errorf("auth: oauth: %w", err)
-	}
-	if clientID == "" {
-		return nil, fmt.Errorf("auth: oauth: clientID is required")
-	}
-	if clientSecret == "" {
-		return nil, fmt.Errorf("auth: oauth: clientSecret is required")
 	}
 	workspaceID, err := deriveWorkspaceIDFromEndpoint(zerobusEndpoint)
 	if err != nil {
@@ -150,12 +149,14 @@ func NewOAuthTokenProvider(
 	}
 
 	p := &OAuthTokenProvider{
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		workspaceID:  workspaceID,
-		ucEndpoint:   ucEndpoint,
-		client:       &http.Client{Timeout: 30 * time.Second},
-		logger:       slog.New(slog.DiscardHandler),
+		clientCredentials: clientCredentials{
+			clientID:     clientID,
+			clientSecret: clientSecret,
+			workspaceID:  workspaceID,
+			ucEndpoint:   ucEndpoint,
+			client:       &http.Client{Timeout: defaultHTTPTimeout},
+		},
+		logger: slog.New(slog.DiscardHandler),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -203,8 +204,8 @@ func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (strin
 
 // tokenAudience is the resource audience a minted token is bound to. It depends
 // on the workspace and is sent as the OAuth request's resource field.
-func (p *OAuthTokenProvider) tokenAudience() string {
-	return fmt.Sprintf("api://databricks/workspaces/%s/zerobusDirectWriteApi", p.workspaceID)
+func (c *clientCredentials) tokenAudience() string {
+	return fmt.Sprintf("api://databricks/workspaces/%s/zerobusDirectWriteApi", c.workspaceID)
 }
 
 // cacheScope discriminates cache entries that share credentials and table but
@@ -231,6 +232,48 @@ func (p *OAuthTokenProvider) FetchToken(ctx context.Context, tableName string) (
 		return "", newExpiredOnArrivalError()
 	}
 	return fetched.token, nil
+}
+
+// MintToken mints one token for tableName without a provider or cache, so
+// every call issues a fresh request. expiresAt is anchored to just before the
+// request is sent, so it never overstates the token's lifetime; it is zero
+// when the server reports no usable expires_in.
+//
+// Invalid input fails before any request with a plain error; a failed request
+// returns a [*TokenError] carrying its retryability.
+func MintToken(
+	ctx context.Context,
+	ucEndpoint, tableName, clientID, clientSecret, workspaceID string,
+) (token string, expiresAt time.Time, err error) {
+	ucEndpoint, err = validateClientCredentials(ucEndpoint, clientID, clientSecret)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("auth: oauth: %w", err)
+	}
+	tableName = strings.TrimSpace(tableName)
+	if err := validateTableName(tableName); err != nil {
+		return "", time.Time{}, fmt.Errorf("auth: oauth: %w", err)
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "", time.Time{}, fmt.Errorf("auth: oauth: workspaceID is required")
+	}
+
+	c := clientCredentials{
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		workspaceID:  workspaceID,
+		ucEndpoint:   ucEndpoint,
+		client:       &http.Client{Timeout: defaultHTTPTimeout},
+	}
+	sentAt := time.Now()
+	fetched, err := c.fetchToken(ctx, tableName)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if fetched.expiresIn != nil {
+		expiresAt = sentAt.Add(*fetched.expiresIn)
+	}
+	return fetched.token, expiresAt, nil
 }
 
 // mint fetches a token and emits structured observability for the outcome. It
@@ -295,7 +338,7 @@ const maxTokenResponseBytes = 4096
 
 // fetchToken performs the OAuth 2.0 client credentials request against Unity
 // Catalog's OIDC token endpoint.
-func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (fetchedToken, error) {
+func (c *clientCredentials) fetchToken(ctx context.Context, tableName string) (fetchedToken, error) {
 	catalog, schema, _, err := parseTableName(tableName)
 	if err != nil {
 		return fetchedToken{}, err
@@ -309,24 +352,24 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	form := url.Values{
 		"grant_type":            {"client_credentials"},
 		"scope":                 {"all-apis"},
-		"resource":              {p.tokenAudience()},
+		"resource":              {c.tokenAudience()},
 		"authorization_details": {authDetails},
 	}
 
-	tokenURL := p.ucEndpoint + "/oidc/v1/token"
+	tokenURL := c.ucEndpoint + "/oidc/v1/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("build token request: %v", err), retryable: false, cause: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth(p.clientID, p.clientSecret)
+	req.SetBasicAuth(c.clientID, c.clientSecret)
 
 	// Don't follow redirects: a same-host https→http redirect would re-send the
 	// client credentials in the clear, since Go re-attaches them without checking
 	// the scheme. A token endpoint has no reason to redirect, so one surfaces as a
 	// non-success response and fails through classifyHTTPError. Copy the client so
 	// a caller-supplied one (WithHTTPClient) is not mutated.
-	client := *p.client
+	client := *c.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -583,6 +626,25 @@ func isUsableAsHeader(token string) bool {
 		}
 	}
 	return token != ""
+}
+
+// validateClientCredentials checks the inputs every client-credentials mint
+// needs and returns ucEndpoint normalized (trimmed, no trailing slash).
+func validateClientCredentials(ucEndpoint, clientID, clientSecret string) (string, error) {
+	ucEndpoint = strings.TrimRight(strings.TrimSpace(ucEndpoint), "/")
+	if ucEndpoint == "" {
+		return "", fmt.Errorf("ucEndpoint is required")
+	}
+	if err := validateEndpoint(ucEndpoint); err != nil {
+		return "", err
+	}
+	if clientID == "" {
+		return "", fmt.Errorf("clientID is required")
+	}
+	if clientSecret == "" {
+		return "", fmt.Errorf("clientSecret is required")
+	}
+	return ucEndpoint, nil
 }
 
 // validateEndpoint requires an https UC endpoint so client credentials never

@@ -99,6 +99,7 @@ set(ZEROBUS_SOURCES
   src/internal/stream/receiver.c
   src/error.c
   src/headers_provider.c
+  src/oauth.c
   src/sdk.c
   src/stream.c
 

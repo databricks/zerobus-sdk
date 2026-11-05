@@ -65,6 +65,63 @@ public sealed class ZerobusSdk : IDisposable
     public static ZerobusSdkBuilder CreateBuilder() => new();
 
     /// <summary>
+    /// Fetches a Zerobus-scoped OAuth 2.0 access token with the client credentials flow.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Use it to authenticate any client that takes an OAuth token callback, such as a Kafka
+    /// client's SASL/OAUTHBEARER token refresh handler. Every call mints a new token; nothing is
+    /// cached, so let the client decide when to call it (for example, on reconnect or shortly
+    /// before <see cref="OAuthToken.ExpiresAt"/>).
+    /// </para>
+    /// <para>
+    /// Needs no <see cref="ZerobusSdk"/> instance. Blocks until the token endpoint responds, for at most 30 seconds.
+    /// </para>
+    /// </remarks>
+    /// <param name="workspaceUrl">
+    /// The Databricks workspace URL. See the
+    /// <see href="https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id">connection URL table</see>.
+    /// </param>
+    /// <param name="tableName">
+    /// Fully qualified table name in the form <c>catalog.schema.table</c> that the token is scoped to.
+    /// </param>
+    /// <param name="clientId">OAuth 2.0 client ID.</param>
+    /// <param name="clientSecret">OAuth 2.0 client secret.</param>
+    /// <param name="workspaceId">The Databricks workspace ID.</param>
+    /// <returns>The access token and its expiry.</returns>
+    /// <exception cref="ArgumentNullException">Thrown if any argument is <c>null</c>.</exception>
+    /// <exception cref="ZerobusException">
+    /// Thrown if the token cannot be fetched. <see cref="ZerobusException.IsRetryable"/> is
+    /// <c>false</c> for invalid input or a rejected request (for example, bad credentials or an
+    /// invalid table name) and <c>true</c> for network errors and server (5xx) errors.
+    /// </exception>
+    /// <example>
+    /// <code>
+    /// var token = ZerobusSdk.GetToken(
+    ///     workspaceUrl,
+    ///     "catalog.schema.table",
+    ///     clientId,
+    ///     clientSecret,
+    ///     workspaceId);
+    /// </code>
+    /// </example>
+    public static OAuthToken GetToken(
+        string workspaceUrl,
+        string tableName,
+        string clientId,
+        string clientSecret,
+        string workspaceId)
+    {
+        ArgumentNullException.ThrowIfNull(workspaceUrl);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+        ArgumentNullException.ThrowIfNull(workspaceId);
+
+        return NativeInterop.GetToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId);
+    }
+
+    /// <summary>
     /// Creates a new JSON or Protocol Buffer stream for ingesting records into a Databricks table.
     /// Uses OAuth 2.0 client credentials flow for authentication.
     /// </summary>

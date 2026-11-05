@@ -118,6 +118,16 @@ internal struct CRecordArray
 }
 
 /// <summary>
+/// A Zerobus-scoped OAuth access token filled by zerobus_get_token.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CZerobusToken
+{
+    public IntPtr AccessToken;    // char* — must be freed with zerobus_free_token
+    public ulong ExpiresAtUnixMs; // 0 if the server reported no lifetime
+}
+
+/// <summary>
 /// Callback signature for the headers provider.
 /// Matches: CHeaders (*HeadersProviderCallback)(void* user_data)
 /// </summary>
@@ -478,4 +488,20 @@ internal static partial class NativeMethods
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_free")]
     public static extern void SdkBuilderFree(IntPtr builder);
+
+    // --- OAuth token ---
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_get_token")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool GetToken(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string workspaceUrl,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientSecret,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string workspaceId,
+        ref CZerobusToken token,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_free_token")]
+    public static extern void FreeToken(ref CZerobusToken token);
 }
