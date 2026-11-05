@@ -84,6 +84,37 @@ public class ZerobusSdkBuilderTests
         Assert.That(sdk, Is.Not.Null);
     }
 
+    [TestCase(60, 20, 45)]
+    [TestCase(0, 0, 0)]
+    public void KeepAlive_Build_Succeeds(int intervalSeconds, int timeoutSeconds, int tcpIdleSeconds)
+    {
+        var builder = ZerobusSdk.CreateBuilder()
+            .Endpoint("https://zerobus.databricks.com")
+            .UnityCatalogUrl("https://workspace.databricks.com")
+            .Http2KeepAlive(TimeSpan.FromSeconds(intervalSeconds), TimeSpan.FromSeconds(timeoutSeconds))
+            .TcpKeepAlive(TimeSpan.FromSeconds(tcpIdleSeconds));
+
+        using var sdk = builder.Build();
+        Assert.That(sdk, Is.Not.Null);
+    }
+
+    [Test]
+    public void Http2KeepAlive_NegativeValue_ThrowsArgumentOutOfRangeException()
+    {
+        using var builder = ZerobusSdk.CreateBuilder();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => builder.Http2KeepAlive(TimeSpan.FromSeconds(-1), TimeSpan.Zero));
+        Assert.Throws<ArgumentOutOfRangeException>(() => builder.Http2KeepAlive(TimeSpan.Zero, TimeSpan.FromSeconds(-1)));
+    }
+
+    [Test]
+    public void TcpKeepAlive_NegativeValue_ThrowsArgumentOutOfRangeException()
+    {
+        using var builder = ZerobusSdk.CreateBuilder();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => builder.TcpKeepAlive(TimeSpan.FromSeconds(-1)));
+    }
+
     // -------------------------------------------------------------------------
     // Null argument guards
     // -------------------------------------------------------------------------
@@ -176,6 +207,16 @@ public class ZerobusSdkBuilderTests
         builder.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => builder.ConnectionPerStream(false));
+    }
+
+    [Test]
+    public void KeepAlive_AfterDispose_ThrowsObjectDisposedException()
+    {
+        var builder = ZerobusSdk.CreateBuilder();
+        builder.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => builder.Http2KeepAlive(TimeSpan.Zero, TimeSpan.Zero));
+        Assert.Throws<ObjectDisposedException>(() => builder.TcpKeepAlive(TimeSpan.Zero));
     }
 
     [Test]

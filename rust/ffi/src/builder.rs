@@ -5,6 +5,7 @@ use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk, ZerobusSdkBuilder};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
+use std::time::Duration;
 
 // ============================================================================
 // ZerobusSdkBuilder FFI
@@ -148,6 +149,43 @@ pub extern "C" fn zerobus_sdk_builder_connection_per_stream(
 ) {
     ffi_guard(ptr::null_mut(), (), move || unsafe {
         with_builder(builder, |b| b.connection_per_stream(enabled))
+    })
+}
+
+/// Configures HTTP/2 keepalive PINGs on JSON/protobuf gRPC connections.
+/// `interval_ms == 0` disables PINGs. `timeout_ms == 0` keeps the default
+/// timeout. Enabled by default (30 s interval, 10 s timeout). No-op on null.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_builder_http2_keepalive(
+    builder: *mut CZerobusSdkBuilder,
+    interval_ms: u64,
+    timeout_ms: u64,
+) {
+    ffi_guard(ptr::null_mut(), (), move || unsafe {
+        with_builder(builder, |b| {
+            let interval = (interval_ms > 0).then(|| Duration::from_millis(interval_ms));
+            let b = b.http2_keepalive_interval(interval);
+            if timeout_ms > 0 {
+                b.http2_keepalive_timeout(Duration::from_millis(timeout_ms))
+            } else {
+                b
+            }
+        })
+    })
+}
+
+/// Configures the TCP keepalive idle time on JSON/protobuf gRPC sockets.
+/// `idle_ms == 0` disables TCP keepalive. Enabled by default (30 s). No-op on
+/// null.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_builder_tcp_keepalive(
+    builder: *mut CZerobusSdkBuilder,
+    idle_ms: u64,
+) {
+    ffi_guard(ptr::null_mut(), (), move || unsafe {
+        with_builder(builder, |b| {
+            b.tcp_keepalive((idle_ms > 0).then(|| Duration::from_millis(idle_ms)))
+        })
     })
 }
 
