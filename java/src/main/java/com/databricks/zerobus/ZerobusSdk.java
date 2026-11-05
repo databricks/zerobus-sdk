@@ -2,6 +2,7 @@ package com.databricks.zerobus;
 
 import com.google.protobuf.Message;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -182,6 +183,41 @@ public class ZerobusSdk implements AutoCloseable {
    */
   public StreamBuilder streamBuilder() {
     return new StreamBuilder(this);
+  }
+
+  // ==================== OAuth Token ====================
+
+  /**
+   * Fetches a Zerobus-scoped OAuth access token with the client credentials flow.
+   *
+   * <p>Use it to authenticate any client that takes an OAuth token callback, such as a Kafka
+   * client's SASL/OAUTHBEARER login callback handler. Every call mints a new token; nothing is
+   * cached, so let the client decide when to call it (for example, on reconnect or shortly before
+   * {@link OAuthToken#getExpiresAt()}). Blocks until the token endpoint responds, for at most 30
+   * seconds.
+   *
+   * @param workspaceUrl The Databricks workspace URL.
+   * @param tableName The full table name ({@code catalog.schema.table}) the token is scoped to.
+   * @param clientId The OAuth client ID.
+   * @param clientSecret The OAuth client secret.
+   * @param workspaceId The Databricks workspace ID.
+   * @return the access token and its expiry
+   * @throws NonRetriableException if the request is invalid or rejected (for example, bad
+   *     credentials or an invalid table name)
+   * @throws ZerobusException if the token endpoint is unreachable or returns a server error
+   */
+  public static OAuthToken getToken(
+      String workspaceUrl,
+      String tableName,
+      String clientId,
+      String clientSecret,
+      String workspaceId)
+      throws ZerobusException {
+    long[] expiresAtOut = new long[1];
+    String accessToken =
+        nativeGetToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId, expiresAtOut);
+    Instant expiresAt = expiresAtOut[0] == 0 ? null : Instant.ofEpochMilli(expiresAtOut[0]);
+    return new OAuthToken(accessToken, expiresAt);
   }
 
   // ==================== Proto Stream Creation ====================
@@ -1090,6 +1126,15 @@ public class ZerobusSdk implements AutoCloseable {
       boolean connectionPerStream);
 
   private static native void nativeDestroy(long handle);
+
+  private static native String nativeGetToken(
+      String workspaceUrl,
+      String tableName,
+      String clientId,
+      String clientSecret,
+      String workspaceId,
+      long[] expiresAtOut)
+      throws ZerobusException;
 
   private native CompletableFuture<Long> nativeCreateStream(
       long sdkHandle,

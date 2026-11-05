@@ -234,6 +234,22 @@ typedef struct CZerobusProtoSchema {
   uint8_t _private[0];
 } CZerobusProtoSchema;
 
+/**
+ * A Zerobus-scoped OAuth access token returned by `zerobus_get_token`.
+ * Release it with `zerobus_free_token`.
+ */
+typedef struct CZerobusToken {
+  /**
+   * NUL-terminated OAuth access token, sent as `Bearer <access_token>`.
+   */
+  char *access_token;
+  /**
+   * Expiry as Unix epoch milliseconds, or 0 if the server reported no
+   * lifetime. Measured from when the request was sent.
+   */
+  uint64_t expires_at_unix_ms;
+} CZerobusToken;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -899,6 +915,36 @@ void zerobus_free_proto_bytes(uint8_t *data, uintptr_t len);
  * must not race any of them.
  */
 void zerobus_proto_schema_free(struct CZerobusProtoSchema *schema);
+
+/**
+ * Fetch a Zerobus-scoped OAuth access token with the client credentials flow.
+ *
+ * Use it to authenticate any client that takes an OAuth token callback, such
+ * as a Kafka client's SASL/OAUTHBEARER token provider. Every call mints a new
+ * token; nothing is cached.
+ *
+ * `workspace_url` is the Databricks workspace URL, `table_name` the full
+ * `catalog.schema.table` name the token is scoped to, and `workspace_id` the
+ * Databricks workspace ID. Blocks until the token endpoint responds, for at
+ * most 30 seconds.
+ *
+ * On success returns true and fills `out_token`; release it with
+ * `zerobus_free_token`. On failure returns false, leaves `out_token` zeroed,
+ * and fills `result` (free its message with `zerobus_free_error_message`).
+ */
+bool zerobus_get_token(const char *workspace_url,
+                       const char *table_name,
+                       const char *client_id,
+                       const char *client_secret,
+                       const char *workspace_id,
+                       struct CZerobusToken *out_token,
+                       struct CResult *result);
+
+/**
+ * Free a token filled by `zerobus_get_token` and reset it to empty. Safe to
+ * call on a null pointer or an already-freed (zeroed) token.
+ */
+void zerobus_free_token(struct CZerobusToken *token);
 
 #ifdef __cplusplus
 }  // extern "C"

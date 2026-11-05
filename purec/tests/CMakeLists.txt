@@ -32,6 +32,7 @@ endfunction()
 
 zerobus_add_test(error_test)
 zerobus_add_test(headers_provider_test)
+zerobus_add_test(oauth_test)
 zerobus_add_test(sdk_test)
 zerobus_add_test(stream_test)
 zerobus_add_test(internal/landing_zone_test)
@@ -58,14 +59,14 @@ set_tests_properties(internal_platform_log_test PROPERTIES ENVIRONMENT
 
 # Suppresses TSan's lock-order report from inside libcrypto, for the tests
 # that use OpenSSL; see tsan.supp. Replaces CI's TSAN_OPTIONS for them.
-set_tests_properties(sdk_test stream_test
+set_tests_properties(sdk_test stream_test oauth_test
                      internal_network_tls_test internal_network_connection_test
                      internal_network_transport_test internal_network_http_client_test
                      PROPERTIES ENVIRONMENT
   "TSAN_OPTIONS=halt_on_error=1 suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp")
 
 # A synchronization regression must fail instead of hanging the test suite.
-set_tests_properties(sdk_test stream_test headers_provider_test
+set_tests_properties(sdk_test stream_test headers_provider_test oauth_test
                      internal_platform_concurrency_test
                      internal_common_queue_test internal_landing_zone_test
                      internal_network_grpc_test internal_platform_network_test

@@ -84,7 +84,7 @@ pub use apache_avro::types::Value as AvroValue;
 pub use builder::PersistentStreamBuilder;
 pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
-pub use default_token_factory::DefaultTokenFactory;
+pub use default_token_factory::{DefaultTokenFactory, OAuthToken};
 pub use dynamic_proto::{
     message_descriptor, missing_required_fields, DynamicMessage, DynamicRecord, IntoDynamicValue,
     MessageDescriptor, Value,

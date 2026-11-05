@@ -505,6 +505,54 @@ async fn example(sdk: ZerobusSdk) -> ZerobusResult<()> {
 }
 ```
 
+### OAuth Tokens for Other Clients
+
+`DefaultTokenFactory::get_token_with_expiry` mints the same table-scoped OAuth token the SDK uses for its streams and returns it with its expiry. Use it to authenticate clients of Zerobus' other [API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols), such as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints a new token, so call it from the client's refresh hook.
+
+For example, an [rdkafka](https://crates.io/crates/rdkafka) producer writing to Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka) can authenticate with SASL/OAUTHBEARER:
+
+```rust
+use databricks_zerobus_ingest_sdk::DefaultTokenFactory;
+use rdkafka::client::{ClientContext, OAuthToken as KafkaToken};
+use std::time::UNIX_EPOCH;
+
+struct ZerobusAuth {
+    runtime: tokio::runtime::Handle,
+    workspace_url: String, // see the connection URL table linked below
+    table_name: String,
+    client_id: String,
+    client_secret: String,
+    workspace_id: String,
+}
+
+impl ClientContext for ZerobusAuth {
+    const ENABLE_REFRESH_OAUTH_TOKEN: bool = true;
+
+    fn generate_oauth_token(
+        &self,
+        _config: Option<&str>,
+    ) -> Result<KafkaToken, Box<dyn std::error::Error>> {
+        let token = self.runtime.block_on(DefaultTokenFactory::get_token_with_expiry(
+            &self.workspace_url,
+            &self.table_name,
+            &self.client_id,
+            &self.client_secret,
+            &self.workspace_id,
+        ))?;
+        let expires_at = token.expires_at.ok_or("token has no expiry")?;
+        Ok(KafkaToken {
+            token: token.access_token,
+            principal_name: self.client_id.clone(),
+            lifetime_ms: expires_at.duration_since(UNIX_EPOCH)?.as_millis() as i64,
+        })
+    }
+}
+// Set security.protocol=SASL_SSL and sasl.mechanism=OAUTHBEARER, and create the
+// producer with ZerobusAuth as its context.
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above for the rest of the producer setup.
+
 ## Usage Guide
 
 The SDK supports these approaches for data serialization:

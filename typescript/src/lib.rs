@@ -868,6 +868,42 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
     }
 }
 
+/// Native result of `getToken`; `wrapper.js` exposes it as the `OAuthToken` class.
+#[napi(object, js_name = "OAuthToken")]
+pub struct NativeOAuthToken {
+    pub access_token: String,
+    /// Milliseconds since the Unix epoch; absent if the server reported no lifetime.
+    pub expires_at_ms: Option<f64>,
+}
+
+/// Native `getToken`; `wrapper.js` wraps it to return an `OAuthToken`.
+#[napi]
+pub async fn get_token(
+    workspace_url: String,
+    table_name: String,
+    client_id: String,
+    client_secret: String,
+    workspace_id: String,
+) -> Result<NativeOAuthToken> {
+    let token = DefaultTokenFactory::get_token_with_expiry(
+        &workspace_url,
+        &table_name,
+        &client_id,
+        &client_secret,
+        &workspace_id,
+    )
+    .await
+    .map_err(|e| Error::from_reason(format!("Failed to get token: {}", e)))?;
+    let expires_at_ms = token
+        .expires_at
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64);
+    Ok(NativeOAuthToken {
+        access_token: token.access_token,
+        expires_at_ms,
+    })
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct ZerobusSdkOptions {

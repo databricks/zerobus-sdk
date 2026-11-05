@@ -17,6 +17,7 @@
 #include "zerobus/record.hpp"
 #include "zerobus/sdk.hpp"
 #include "zerobus/stream.hpp"
+#include "zerobus/token.hpp"
 #include "zerobus/version.hpp"
 
 #endif  // ZEROBUS_HPP

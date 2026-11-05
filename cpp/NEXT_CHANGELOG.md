@@ -8,6 +8,10 @@
   `ArrowStreamOptions::ipc_compression` defaults to `IpcCompression::Zstd` instead of
   `IpcCompression::NoCompression`. To keep sending uncompressed payloads, set it to
   `IpcCompression::NoCompression`.
+- `zerobus::get_token()` returns the table-scoped OAuth token the SDK uses for its
+  streams, with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
 
 ### Bug Fixes
 
@@ -26,3 +30,6 @@
 ### Deprecations
 
 ### API Changes
+
+- Add `zerobus::get_token` and the `zerobus::OAuthToken` struct (`access_token`,
+  `expires_at`) in `zerobus/token.hpp`, included by `zerobus/zerobus.hpp`.

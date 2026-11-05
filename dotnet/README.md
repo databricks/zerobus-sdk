@@ -180,6 +180,11 @@ stream. The input `stream` is disposed during recreation and must not be used af
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
 
+#### `GetToken`
+
+Static. Mints a table-scoped OAuth token and its expiry. See
+[OAuth tokens for other clients](#oauth-tokens-for-other-clients).
+
 ### `JsonZerobusStream` and `ProtoZerobusStream`
 
 Typed stream wrappers expose only the matching ingest overloads while preserving the
@@ -393,6 +398,60 @@ catch (ZerobusException ex)
     Console.WriteLine($"Fatal error: {ex.RawMessage}");
 }
 ```
+
+## OAuth tokens for other clients
+
+`ZerobusSdk.GetToken` mints the same table-scoped OAuth token the SDK uses for its
+streams and returns an `OAuthToken` with `AccessToken` and `ExpiresAt` (`null` if the
+server reported no lifetime). Use it to authenticate clients of Zerobus' other
+[API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols), such
+as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints a new token, so
+call it from the client's refresh hook. It blocks for at most 30 seconds and throws
+`ZerobusException` on failure.
+
+For example, a [Confluent.Kafka](https://www.nuget.org/packages/Confluent.Kafka) producer
+writing to Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka)
+can authenticate with SASL/OAUTHBEARER:
+
+```csharp
+using Confluent.Kafka;
+using Databricks.Zerobus;
+
+var workspaceUrl = Environment.GetEnvironmentVariable("DATABRICKS_WORKSPACE_URL")!;
+var workspaceId = "<workspace-id>";
+var tableName = Environment.GetEnvironmentVariable("ZEROBUS_TABLE_NAME")!;
+var clientId = Environment.GetEnvironmentVariable("DATABRICKS_CLIENT_ID")!;
+var clientSecret = Environment.GetEnvironmentVariable("DATABRICKS_CLIENT_SECRET")!;
+
+var config = new ProducerConfig
+{
+    BootstrapServers = bootstrapServers,
+    SecurityProtocol = SecurityProtocol.SaslSsl,
+    SaslMechanism = SaslMechanism.OAuthBearer,
+    Acks = Acks.All,
+};
+
+using var producer = new ProducerBuilder<Null, string>(config)
+    .SetOAuthBearerTokenRefreshHandler((client, _) =>
+    {
+        try
+        {
+            var token = ZerobusSdk.GetToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId);
+            // The client needs an expiry; refresh again soon if the server reported none.
+            var expiresAt = token.ExpiresAt ?? DateTimeOffset.UtcNow.AddMinutes(5);
+            client.OAuthBearerSetToken(token.AccessToken, expiresAt.ToUnixTimeMilliseconds(), clientId);
+        }
+        catch (ZerobusException ex)
+        {
+            client.OAuthBearerSetTokenFailure(ex.Message);
+        }
+    })
+    .Build();
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above for the
+rest of the producer setup.
 
 ## Best Practices
 

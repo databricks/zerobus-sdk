@@ -33,6 +33,7 @@ target_compile_definitions(version_test
 zerobus_add_test(proto_schema_test)
 zerobus_add_test(headers_callback_test)
 zerobus_add_test(sdk_test)
+zerobus_add_test(token_test)
 zerobus_add_test(integration_test)
 
 # Concurrency test spawns std::threads, so it needs the platform thread library.

@@ -5,13 +5,16 @@
  * Integration tests that require a Databricks workspace are in integration.test.ts
  */
 
-import { describe, it, before } from 'node:test';
+import { describe, it, before, after, beforeEach } from 'node:test';
 import * as assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import * as util from 'node:util';
 import {
     ArrowDataType,
     IpcCompressionType,
@@ -21,6 +24,7 @@ import {
     TableProperties,
     StreamConfigurationOptions,
 } from '../index';
+import { OAuthToken, getToken } from '../wrapper';
 import { HeadersProvider } from '../src/headers_provider';
 import { loadDescriptorProto } from '../utils/descriptor.js';
 // AvroEncoder lives in the internal avro.js module; require it directly for tests.
@@ -517,13 +521,88 @@ describe('Package entry (ESM interop)', () => {
             [
                 '--input-type=module',
                 '-e',
-                `import { ZerobusSdk, ZerobusStream, RecordType } from ${JSON.stringify(entry)};
+                `import { ZerobusSdk, ZerobusStream, RecordType, getToken } from ${JSON.stringify(entry)};
                  if (typeof ZerobusSdk !== 'function') process.exit(1);
                  if (typeof ZerobusStream !== 'function') process.exit(1);
+                 if (typeof getToken !== 'function') process.exit(1);
                  if (RecordType.Avro !== 2) process.exit(1);`,
             ],
             { stdio: 'pipe' }
         );
+    });
+});
+
+describe('getToken', () => {
+    const TABLE = 'main.default.events';
+    const SECRET_TOKEN = 'secret-token-value';
+    let server: http.Server;
+    let url: string;
+    let status: number;
+    let body: object;
+    let requests: URLSearchParams[];
+
+    before(async () => {
+        server = http.createServer((req, res) => {
+            let data = '';
+            req.on('data', (chunk) => (data += chunk));
+            req.on('end', () => {
+                requests.push(new URLSearchParams(data));
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(body));
+            });
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    });
+
+    after(() => server.close());
+
+    beforeEach(() => {
+        status = 200;
+        body = { access_token: SECRET_TOKEN, expires_in: 3600 };
+        requests = [];
+    });
+
+    const fetchToken = (table = TABLE) => getToken(url, table, 'client-id', 'client-secret', '1234567890');
+
+    it('returns the token and its expiry', async () => {
+        const start = Date.now();
+        const token = await fetchToken();
+        const end = Date.now();
+
+        assert.ok(token instanceof OAuthToken);
+        assert.strictEqual(token.accessToken, SECRET_TOKEN);
+        assert.ok(token.expiresAt instanceof Date);
+        assert.ok(token.expiresAt.getTime() >= start + 3600_000);
+        assert.ok(token.expiresAt.getTime() <= end + 3600_000);
+        assert.strictEqual(requests[0].get('grant_type'), 'client_credentials');
+        assert.ok(requests[0].get('resource')?.includes('1234567890'));
+    });
+
+    it('leaves expiresAt undefined without expires_in', async () => {
+        body = { access_token: SECRET_TOKEN };
+        assert.strictEqual((await fetchToken()).expiresAt, undefined);
+    });
+
+    it('mints a new token on every call', async () => {
+        await fetchToken();
+        await fetchToken();
+        assert.strictEqual(requests.length, 2);
+    });
+
+    it('redacts the token when inspected', async () => {
+        assert.ok(!util.inspect(await fetchToken()).includes(SECRET_TOKEN));
+    });
+
+    it('rejects when the token endpoint rejects the request', async () => {
+        status = 401;
+        body = { error: 'invalid_client' };
+        await assert.rejects(fetchToken(), /401/);
+    });
+
+    it('rejects an invalid table name without a request', async () => {
+        await assert.rejects(fetchToken('not-a-table'));
+        assert.strictEqual(requests.length, 0);
     });
 });
 

@@ -790,6 +790,56 @@ Providers may override `invalidate()` to clear cached credentials after an authe
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
 
+### OAuth tokens for other clients
+
+`ZerobusSdk.getToken()` mints the same table-scoped OAuth token the SDK uses for its streams
+and returns an `OAuthToken` with `getAccessToken()` and `getExpiresAt()` (empty if the server
+reported no lifetime). Use it to authenticate clients of Zerobus' other
+[API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols), such as
+REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints a new token, so call it
+from the client's refresh hook.
+
+For example, a `kafka-clients` producer writing to Zerobus'
+[Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka) can
+authenticate with SASL/OAUTHBEARER through a login callback handler:
+
+```java
+public class ZerobusLoginCallbackHandler implements AuthenticateCallbackHandler {
+    @Override
+    public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
+        for (Callback callback : callbacks) {
+            if (!(callback instanceof OAuthBearerTokenCallback)) {
+                throw new UnsupportedCallbackException(callback);
+            }
+            OAuthToken token;
+            try {
+                token = ZerobusSdk.getToken(workspaceUrl, tableName, clientId, clientSecret, workspaceId);
+            } catch (ZerobusException e) {
+                throw new IOException(e);
+            }
+            long lifetimeMs = token.getExpiresAt()
+                    .orElseThrow(() -> new IOException("Zerobus token has no expiry"))
+                    .toEpochMilli();
+            ((OAuthBearerTokenCallback) callback).token(new OAuthBearerToken() {
+                public String value() { return token.getAccessToken(); }
+                public long lifetimeMs() { return lifetimeMs; }
+                public String principalName() { return clientId; }
+                public Set<String> scope() { return Collections.emptySet(); }
+                public Long startTimeMs() { return null; }
+            });
+        }
+    }
+
+    // configure() reads the workspace URL, table name, credentials, and workspace ID; close() is a no-op.
+}
+// Producer config: security.protocol=SASL_SSL, sasl.mechanism=OAUTHBEARER,
+// sasl.login.callback.handler.class=ZerobusLoginCallbackHandler
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above for the
+rest of the producer setup.
+
 ---
 
 ## API Styles
@@ -1213,6 +1263,17 @@ Same as above with custom configuration. _Deprecated — use [`streamBuilder()`]
 CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream closedStream)
 ```
 Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batches and flushing.
+
+```java
+static OAuthToken getToken(
+    String workspaceUrl,
+    String tableName,
+    String clientId,
+    String clientSecret,
+    String workspaceId
+) throws ZerobusException
+```
+Mints a table-scoped OAuth token and its expiry. See [OAuth tokens for other clients](#oauth-tokens-for-other-clients).
 
 ---
 

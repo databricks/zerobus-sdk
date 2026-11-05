@@ -259,6 +259,22 @@ class IdpSupplier:
         cache_identity: str,
     ) -> None: ...
 
+def get_token(
+    workspace_url: str,
+    table_name: str,
+    client_id: str,
+    client_secret: str,
+    workspace_id: str,
+) -> Tuple[str, Optional[int]]:
+    """
+    Fetch a Zerobus-scoped OAuth token. Use ``zerobus.get_token`` instead.
+
+    Returns:
+        ``(access_token, expires_at_unix_ms)``; the expiry is ``None`` if the
+        server reported no lifetime.
+    """
+    ...
+
 # =============================================================================
 # SYNC SDK
 # =============================================================================
@@ -779,6 +795,23 @@ class aio:
                 A new ZerobusStream
             """
             ...
+
+    @staticmethod
+    async def get_token(
+        workspace_url: str,
+        table_name: str,
+        client_id: str,
+        client_secret: str,
+        workspace_id: str,
+    ) -> Tuple[str, Optional[int]]:
+        """
+        Fetch a Zerobus-scoped OAuth token. Use ``zerobus.sdk.aio.get_token`` instead.
+
+        Returns:
+            ``(access_token, expires_at_unix_ms)``; the expiry is ``None`` if the
+            server reported no lifetime.
+        """
+        ...
 
 # Arrow Flight
 

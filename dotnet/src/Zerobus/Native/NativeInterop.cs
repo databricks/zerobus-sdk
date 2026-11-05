@@ -15,6 +15,8 @@ internal static class NativeInterop
 {
     private const int StackAllocThresholdBytes = 4096;
 
+    private static readonly ulong MaxUnixTimeMs = (ulong)DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
+
     private static unsafe void ApplyResult(TaskCompletionSource tcs, CResult* result)
     {
         if (result->Success)
@@ -1056,5 +1058,47 @@ internal static class NativeInterop
         }
 
         return ptr;
+    }
+
+    /// <summary>
+    /// Fetches a Zerobus-scoped OAuth token. Blocks until the token endpoint responds.
+    /// </summary>
+    public static OAuthToken GetToken(
+        string workspaceUrl,
+        string tableName,
+        string clientId,
+        string clientSecret,
+        string workspaceId)
+    {
+        var token = new CZerobusToken();
+        var result = new CResult();
+        var success = NativeMethods.GetToken(
+            workspaceUrl,
+            tableName,
+            clientId,
+            clientSecret,
+            workspaceId,
+            ref token,
+            ref result);
+
+        try
+        {
+            if (!success)
+            {
+                var ex = ToException(ref result);
+                throw ex ?? new ZerobusException("Failed to get token", isRetryable: false);
+            }
+
+            var accessToken = Marshal.PtrToStringUTF8(token.AccessToken) ?? string.Empty;
+            DateTimeOffset? expiresAt = token.ExpiresAtUnixMs == 0
+                ? null
+                : DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Min(token.ExpiresAtUnixMs, MaxUnixTimeMs));
+
+            return new OAuthToken(accessToken, expiresAt);
+        }
+        finally
+        {
+            NativeMethods.FreeToken(ref token);
+        }
     }
 }

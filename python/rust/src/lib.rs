@@ -9,6 +9,7 @@ mod auth;
 mod common;
 mod persistent;
 mod sync_wrapper;
+mod token;
 
 #[pymodule]
 fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -47,6 +48,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add authentication classes
     m.add_class::<auth::HeadersProvider>()?;
     m.add_class::<auth::IdpSupplier>()?;
+    m.add_function(wrap_pyfunction!(token::get_token, m)?)?;
 
     let sys_modules = py.import("sys")?.getattr("modules")?;
 
@@ -74,6 +76,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     aio_module.add_class::<async_wrapper::ZerobusStream>()?;
     aio_module.add_class::<async_wrapper::PersistentStream>()?;
     aio_module.add_class::<async_wrapper::PyAckFuture>()?;
+    aio_module.add_function(wrap_pyfunction!(token::get_token_async, &aio_module)?)?;
     m.add_submodule(&aio_module)?;
     sys_modules.set_item("zerobus._zerobus_core.aio", &aio_module)?;
 

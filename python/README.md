@@ -382,6 +382,55 @@ See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) f
 For advanced cases you can supply your own `HeadersProvider` via
 `headers_provider=`; see the [`HeadersProvider`](#headersprovider) reference.
 
+### OAuth tokens for other clients
+
+`get_token()` mints the same table-scoped OAuth token the SDK uses for its
+streams and returns it as an `OAuthToken` with `access_token` and `expires_at`
+(a UTC `datetime`, or `None` if the server reported no lifetime). Use it to
+authenticate clients of Zerobus' other
+[API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols),
+such as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints
+a new token, so call it from the client's refresh hook. The async SDK has the
+same function as `zerobus.sdk.aio.get_token()`.
+
+For example, a [kafka-python](https://github.com/dpkp/kafka-python) producer
+writing to Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka)
+can authenticate with SASL/OAUTHBEARER:
+
+```python
+import os
+
+from kafka import KafkaProducer
+from kafka.sasl.oauth import AbstractTokenProvider
+from zerobus import get_token
+
+
+class ZerobusTokenProvider(AbstractTokenProvider):
+    def token(self):
+        return get_token(
+            os.environ["DATABRICKS_WORKSPACE_URL"],
+            os.environ["ZEROBUS_TABLE_NAME"],
+            os.environ["DATABRICKS_CLIENT_ID"],
+            os.environ["DATABRICKS_CLIENT_SECRET"],
+            workspace_id,
+        ).access_token
+
+
+producer = KafkaProducer(
+    bootstrap_servers=bootstrap_servers,
+    security_protocol="SASL_SSL",
+    sasl_mechanism="OAUTHBEARER",
+    sasl_oauth_token_provider=ZerobusTokenProvider(),
+    acks="all",
+)
+```
+
+Clients that need the token's lifetime, such as confluent-kafka's `oauth_cb`,
+can return `(token.access_token, token.expires_at.timestamp())`. See the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the workspace URL and workspace ID, and the Zerobus Kafka documentation
+linked above for the rest of the producer setup.
+
 ## Persistent Streams
 
 A persistent (Eos) stream records its identity and committed offset on the server. After a

@@ -6,7 +6,16 @@
 
 ### New Features and Improvements
 
+- `DefaultTokenFactory::get_token_with_expiry` returns the table-scoped OAuth token
+  the SDK uses for its streams, with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
+
 ### Bug Fixes
+
+- `DefaultTokenFactory::get_token` now fails with a retryable `TokenFetchError` if the
+  token endpoint doesn't respond within 30 seconds; it could previously wait forever.
+  Stream creation is unaffected, since its recovery timeout already bounds the mint.
 
 ### Documentation
 
@@ -27,3 +36,6 @@
 ### Deprecations
 
 ### API Changes
+
+- Add `DefaultTokenFactory::get_token_with_expiry` and the `OAuthToken` struct
+  (`access_token`, `expires_at`), whose `Debug` output redacts the access token.

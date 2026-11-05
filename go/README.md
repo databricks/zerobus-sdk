@@ -22,6 +22,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
   - [Data Flow](#data-flow)
   - [Authentication Flow](#authentication-flow)
   - [Custom Authentication](#custom-authentication)
+  - [OAuth Tokens for Other Clients](#oauth-tokens-for-other-clients)
 - [Usage Guide](#usage-guide)
   - [1. Initialize the SDK](#1-initialize-the-sdk)
   - [2. Configure Authentication](#2-configure-authentication)
@@ -417,6 +418,41 @@ func example(sdk *zerobus.ZerobusSdk, tableProps zerobus.TableProperties) error 
 - **Token caching**: Implement custom token refresh logic
 - **Alternative auth mechanisms**: Use different authentication providers
 - **Dynamic credentials**: Fetch credentials on-demand from secret managers
+
+### OAuth Tokens for Other Clients
+
+`GetToken` mints the same table-scoped OAuth token the SDK uses for its streams and returns an `OAuthToken` with `AccessToken` and `ExpiresAt` (the zero `time.Time` if the server reported no lifetime). Use it to authenticate clients of Zerobus' other [API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols), such as REST, OpenTelemetry, MQTT, or Kafka. It doesn't cache: every call mints a new token, so call it from the client's refresh hook.
+
+For example, a [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go) producer writing to Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka) (configured with `security.protocol=SASL_SSL` and `sasl.mechanisms=OAUTHBEARER`) can answer token refresh events like this:
+
+```go
+for event := range producer.Events() {
+    switch event.(type) {
+    case kafka.OAuthBearerTokenRefresh:
+        tok, err := zerobus.GetToken(
+            os.Getenv("DATABRICKS_WORKSPACE_URL"),
+            os.Getenv("ZEROBUS_TABLE_NAME"),
+            os.Getenv("DATABRICKS_CLIENT_ID"),
+            os.Getenv("DATABRICKS_CLIENT_SECRET"),
+            workspaceID,
+        )
+        if err != nil {
+            producer.SetOAuthBearerTokenFailure(err.Error())
+            continue
+        }
+        err = producer.SetOAuthBearerToken(kafka.OAuthBearerToken{
+            TokenValue: tok.AccessToken,
+            Expiration: tok.ExpiresAt,
+            Principal:  os.Getenv("DATABRICKS_CLIENT_ID"),
+        })
+        if err != nil {
+            producer.SetOAuthBearerTokenFailure(err.Error())
+        }
+    }
+}
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above for the rest of the producer setup.
 
 ## Usage Guide
 

@@ -17,6 +17,7 @@ from zerobus._zerobus_core import (
 # Import Python wrappers with documentation
 from zerobus.sdk.shared.auth import FederatedToken, IdpTokenSupplier
 from zerobus.sdk.shared.config import AckCallback, StreamConfigurationOptions
+from zerobus.sdk.shared.oauth import OAuthToken
 
 __all__ = [
     "AckCallback",
@@ -24,6 +25,7 @@ __all__ = [
     "HeadersProvider",
     "IdpTokenSupplier",
     "NonRetriableException",
+    "OAuthToken",
     "RecordType",
     "StreamConfigurationOptions",
     "TableProperties",

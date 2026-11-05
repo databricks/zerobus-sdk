@@ -150,6 +150,20 @@ extern bool zerobus_stream_close(CZerobusStream* stream, CResult* result);
 extern void zerobus_free_error_message(char* error_message);
 extern CStreamConfigurationOptions zerobus_get_default_config();
 
+typedef struct CZerobusToken {
+    char *access_token;
+    uint64_t expires_at_unix_ms;
+} CZerobusToken;
+
+extern bool zerobus_get_token(const char* workspace_url,
+                              const char* table_name,
+                              const char* client_id,
+                              const char* client_secret,
+                              const char* workspace_id,
+                              CZerobusToken* out_token,
+                              CResult* result);
+extern void zerobus_free_token(CZerobusToken* token);
+
 // Forward declaration of Go functions
 extern void goGetHeaders(void* userData, CHeader** headers, uintptr_t* count, char** error);
 extern void goFreeHeadersProvider(void* userData);
@@ -916,4 +930,28 @@ func streamClose(streamPtr unsafe.Pointer) error {
 	}
 
 	return nil
+}
+
+// getToken fetches a Zerobus OAuth token. expiresAtMs is 0 if the server
+// reported no lifetime.
+func getToken(workspaceURL, tableName, clientID, clientSecret, workspaceID string) (accessToken string, expiresAtMs uint64, err error) {
+	cWorkspaceURL := C.CString(workspaceURL)
+	defer C.free(unsafe.Pointer(cWorkspaceURL))
+	cTableName := C.CString(tableName)
+	defer C.free(unsafe.Pointer(cTableName))
+	cClientID := C.CString(clientID)
+	defer C.free(unsafe.Pointer(cClientID))
+	cClientSecret := C.CString(clientSecret)
+	defer C.free(unsafe.Pointer(cClientSecret))
+	cWorkspaceID := C.CString(workspaceID)
+	defer C.free(unsafe.Pointer(cWorkspaceID))
+
+	var token C.CZerobusToken
+	var cres C.CResult
+	if !C.zerobus_get_token(cWorkspaceURL, cTableName, cClientID, cClientSecret, cWorkspaceID, &token, &cres) {
+		return "", 0, ffiResult(cres)
+	}
+	defer C.zerobus_free_token(&token)
+
+	return C.GoString(token.access_token), uint64(token.expires_at_unix_ms), nil
 }

@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- `zerobus_get_token` returns the table-scoped OAuth token the SDK uses for its
+  streams, with its expiry, to authenticate Zerobus' other [API
+  protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols)
+  (REST, OpenTelemetry, MQTT, Kafka). Every call mints a new token.
+
 ### Bug Fixes
 
 - The library is now built with `rustls-webpki` 0.103.16 and `webpki-roots`
@@ -41,3 +46,6 @@
 ### Deprecations
 
 ### API Changes
+
+- Add `zerobus_get_token`, `zerobus_free_token`, and the `CZerobusToken` struct
+  (`access_token`, `expires_at_unix_ms`). The `zerobus.h` change is additive.

@@ -94,6 +94,44 @@ mode, the creation context directly bounds token resolution, handshake, retry
 backoff, and every attempt before success. Cancellation is detached after the
 first successful open, so it does not terminate the live stream.
 
+## OAuth tokens for other clients
+
+`GetToken` mints the same Zerobus-scoped OAuth token that `CreateStream` uses and
+returns it with its `ExpiresAt` (the zero `time.Time` when the server reports no
+lifetime). Use it to authenticate clients of Zerobus' other
+[API protocols](https://docs.databricks.com/aws/en/ingestion/zerobus-api-protocols),
+such as REST, OpenTelemetry, MQTT, or Kafka.
+
+`GetToken` does not cache: every call mints a fresh token. Let the client decide when
+to call it, for example on connect or before `ExpiresAt`.
+
+For example, a [franz-go](https://github.com/twmb/franz-go) Kafka producer writing to
+Zerobus' [Kafka-compatible endpoint](https://docs.databricks.com/aws/en/ingestion/zerobus-kafka)
+can authenticate with SASL/OAUTHBEARER:
+
+```go
+import "github.com/twmb/franz-go/pkg/sasl/oauth"
+
+mechanism := oauth.Oauth(func(ctx context.Context) (oauth.Auth, error) {
+    tok, err := zerobus.GetToken(ctx,
+        os.Getenv("DATABRICKS_WORKSPACE_URL"),
+        os.Getenv("ZEROBUS_TABLE_NAME"),
+        os.Getenv("DATABRICKS_CLIENT_ID"),
+        os.Getenv("DATABRICKS_CLIENT_SECRET"),
+        workspaceID,
+    )
+    if err != nil {
+        return oauth.Auth{}, err
+    }
+    return oauth.Auth{Token: tok.AccessToken}, nil
+})
+// Pass kgo.SASL(mechanism) to kgo.NewClient.
+```
+
+See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the workspace URL and workspace ID, and the Zerobus Kafka documentation linked above
+for the full producer setup.
+
 ## Record types
 
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.

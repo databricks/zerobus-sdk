@@ -70,7 +70,8 @@ add_library(zerobus_cpp
     src/arrow_stream.cpp
     src/proto_schema.cpp
     src/headers_callback.cpp
-    src/ack_callback.cpp)
+    src/ack_callback.cpp
+    src/token.cpp)
 add_library(zerobus::zerobus ALIAS zerobus_cpp)
 
 target_compile_features(zerobus_cpp PUBLIC cxx_std_17)
