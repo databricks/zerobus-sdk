@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package zerobus.conformance.fixtures;
+
+// Common-core record used by the starter conformance scenarios.
+// Field types are limited to the common core (int64, string) so the same
+// logical record is expressible in proto, json, and avro.
+message SimpleRecord {
+  int64 id = 1;
+  string message = 2;
+}
