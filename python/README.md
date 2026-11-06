@@ -405,7 +405,8 @@ stream.close()
 ```
 
 `PersonalAccessToken` raises `ValueError` for an empty token, is immutable, and leaves
-the token out of its `repr()`. The async SDK takes the same `auth=` argument.
+the token out of its `repr()`. The async SDK takes the same `auth=` argument. Persistent
+streams use the builder method `personal_access_token(token)` instead.
 
 See [`examples/sync_example_pat.py`](examples/sync_example_pat.py) for a complete example.
 
@@ -420,8 +421,9 @@ A persistent (Eos) stream records its identity and committed offset on the serve
 restart, you resume the same stream by its `stream_id`, and delivery into Delta stays
 exactly-once.
 
-Persistent streams support JSON and protobuf records. They authenticate with OAuth or a
-custom headers provider. They do not support Avro or external-IdP federation.
+Persistent streams support JSON and protobuf records. They authenticate with OAuth, a
+personal access token (beta, private preview), or a custom headers provider. They do not
+support Avro or external-IdP federation.
 
 > **Experimental.** The persistent stream API in the Rust core is in development. It can
 > change in a minor release.
@@ -476,11 +478,12 @@ match which offsets, for example by storing its own source position with each ba
 Use one process per `stream_id`. The SDK does not check whether another client has
 resumed the same stream.
 
-The builder has these setters: `table`, `oauth`, `headers_provider`, `json`,
-`compiled_proto`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
-`recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
-`max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`, and
-`callback_max_wait_time_ms`. Unset values use the SDK defaults.
+The builder has these setters: `table`, `oauth`, `headers_provider`,
+`personal_access_token`, `json`, `compiled_proto`, `recovery`, `recovery_timeout_ms`,
+`recovery_backoff_ms`, `recovery_retries`, `server_lack_of_ack_timeout_ms`,
+`flush_timeout_ms`, `max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
+and `callback_max_wait_time_ms`. Unset values use the SDK defaults. Of `oauth`,
+`headers_provider`, and `personal_access_token`, the last call wins.
 
 `PersistentStream` has `ingest_record_offset()`, `ingest_records_offset()`,
 `wait_for_offset()`, `flush()`, and `close()`. It also has the properties `stream_id`,
