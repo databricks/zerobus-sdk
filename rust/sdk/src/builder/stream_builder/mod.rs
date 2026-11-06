@@ -40,9 +40,10 @@ use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
+#[cfg(feature = "pat-auth")]
+use crate::headers_provider::PatHeadersProvider;
 use crate::headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
-    PatHeadersProvider,
 };
 use crate::stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "avro")]
@@ -82,6 +83,7 @@ enum AuthConfig {
         client_id: Option<String>,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
+    #[cfg(feature = "pat-auth")]
     PersonalAccessToken {
         token: String,
     },
@@ -217,6 +219,7 @@ impl fmt::Debug for StreamBuilder<'_> {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
             Some(AuthConfig::FederatedAuth { .. }) => "FederatedAuth",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
+            #[cfg(feature = "pat-auth")]
             Some(AuthConfig::PersonalAccessToken { .. }) => "PersonalAccessToken",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
@@ -245,14 +248,20 @@ impl fmt::Debug for StreamBuilder<'_> {
     }
 }
 
-const fn missing_auth_error() -> &'static str {
+// Lists `.personal_access_token()` in the missing-auth error only when that setter exists.
+#[cfg(feature = "pat-auth")]
+const PAT_AUTH_HINT: &str = ".personal_access_token(), ";
+#[cfg(not(feature = "pat-auth"))]
+const PAT_AUTH_HINT: &str = "";
+
+fn missing_auth_error() -> String {
     #[cfg(feature = "testing")]
     {
-        "authentication is required: call .oauth(), .federated_auth(), .personal_access_token(), .headers_provider(), or .no_auth()"
+        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}.headers_provider(), or .no_auth()")
     }
     #[cfg(not(feature = "testing"))]
     {
-        "authentication is required: call .oauth(), .federated_auth(), .personal_access_token(), or .headers_provider()"
+        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}or .headers_provider()")
     }
 }
 
@@ -313,15 +322,19 @@ impl<'a> StreamBuilder<'a> {
 
     /// Authenticate with a Databricks personal access token (PAT).
     ///
+    /// **Beta (private preview):** PAT authentication for Zerobus requires
+    /// server-side enablement, and this API can change. Available behind the
+    /// `pat-auth` feature.
+    ///
     /// The PAT must be created with the `zerobus` API scope in the workspace that
     /// the Zerobus endpoint belongs to. The SDK sends it as a bearer token and
     /// cannot refresh it: once it expires or is revoked, creating or recovering a
     /// stream fails with an authentication error. An empty token is rejected by
-    /// [`validate`](Self::validate) and the build methods. Prefer
-    /// [`oauth`](Self::oauth) with a service principal for production workloads.
+    /// [`validate`](Self::validate) and the build methods.
     ///
     /// Of this, [`oauth`](Self::oauth), [`federated_auth`](Self::federated_auth),
     /// and [`headers_provider`](Self::headers_provider), the last call wins.
+    #[cfg(feature = "pat-auth")]
     pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
         self.auth = Some(AuthConfig::PersonalAccessToken {
             token: token.into(),
@@ -609,14 +622,15 @@ impl<'a> StreamBuilder<'a> {
                 "table name is required: call .table()".into(),
             ));
         }
-        match &self.auth {
-            None => return Err(ZerobusError::InvalidArgument(missing_auth_error().into())),
-            Some(AuthConfig::PersonalAccessToken { token }) if token.is_empty() => {
-                return Err(ZerobusError::InvalidArgument(
-                    "personal access token must not be empty".into(),
-                ));
-            }
-            Some(_) => {}
+        if self.auth.is_none() {
+            return Err(ZerobusError::InvalidArgument(missing_auth_error()));
+        }
+        #[cfg(feature = "pat-auth")]
+        if matches!(&self.auth, Some(AuthConfig::PersonalAccessToken { token }) if token.is_empty())
+        {
+            return Err(ZerobusError::InvalidArgument(
+                "personal access token must not be empty".into(),
+            ));
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
@@ -678,12 +692,13 @@ impl<'a> StreamBuilder<'a> {
                 )))
             }
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
+            #[cfg(feature = "pat-auth")]
             Some(AuthConfig::PersonalAccessToken { token }) => Ok(Arc::new(
                 PatHeadersProvider::new(token.clone(), self.table_name.clone()),
             )),
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
-            None => Err(ZerobusError::InvalidArgument(missing_auth_error().into())),
+            None => Err(ZerobusError::InvalidArgument(missing_auth_error())),
         }
     }
 

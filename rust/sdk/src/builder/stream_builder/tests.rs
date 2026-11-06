@@ -279,6 +279,32 @@ async fn build_without_auth_returns_error() {
     }
 }
 
+// Wrappers surface this text verbatim, so builds without `pat-auth` must keep the pre-PAT wording.
+#[test]
+fn missing_auth_error_matches_exact_text_for_each_feature_combination() {
+    let expected = match (cfg!(feature = "testing"), cfg!(feature = "pat-auth")) {
+        (false, false) => {
+            "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
+        }
+        (true, false) => {
+            "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
+        }
+        (false, true) => {
+            "authentication is required: call .oauth(), .federated_auth(), .personal_access_token(), or .headers_provider()"
+        }
+        (true, true) => {
+            "authentication is required: call .oauth(), .federated_auth(), .personal_access_token(), .headers_provider(), or .no_auth()"
+        }
+    };
+    assert_eq!(missing_auth_error(), expected);
+
+    let sdk = test_sdk();
+    match sdk.stream_builder().table("t").json().validate() {
+        Err(ZerobusError::InvalidArgument(msg)) => assert_eq!(msg, expected),
+        other => panic!("expected InvalidArgument error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn build_without_table_returns_error() {
     let sdk = test_sdk();
@@ -388,9 +414,11 @@ async fn resolve_headers_provider_with_oauth() {
     let _provider = builder.resolve_headers_provider().unwrap();
 }
 
+#[cfg(feature = "pat-auth")]
 const TEST_PAT: &str = "dapi-test-secret";
 
 /// Resolves the builder's auth and returns the headers it would send.
+#[cfg(feature = "pat-auth")]
 async fn resolved_headers(builder: &StreamBuilder<'_>) -> HashMap<&'static str, String> {
     builder
         .resolve_headers_provider()
@@ -400,6 +428,7 @@ async fn resolved_headers(builder: &StreamBuilder<'_>) -> HashMap<&'static str, 
         .unwrap()
 }
 
+#[cfg(feature = "pat-auth")]
 #[tokio::test]
 async fn personal_access_token_resolves_to_pat_provider() {
     let sdk = test_sdk();
@@ -423,6 +452,7 @@ async fn personal_access_token_resolves_to_pat_provider() {
     );
 }
 
+#[cfg(feature = "pat-auth")]
 #[tokio::test]
 async fn empty_personal_access_token_is_rejected() {
     let sdk = test_sdk();
@@ -447,6 +477,7 @@ async fn empty_personal_access_token_is_rejected() {
     ));
 }
 
+#[cfg(feature = "pat-auth")]
 #[tokio::test]
 async fn personal_access_token_last_auth_call_wins() {
     struct StubProvider;
@@ -499,6 +530,7 @@ async fn personal_access_token_last_auth_call_wins() {
         .expect("the later oauth() call should replace the empty token");
 }
 
+#[cfg(feature = "pat-auth")]
 #[test]
 fn debug_does_not_expose_personal_access_token() {
     let sdk = test_sdk();

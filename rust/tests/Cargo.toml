@@ -48,7 +48,7 @@ tonic-prost.workspace = true
 tonic-types.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "test-hooks", "arrow-flight", "internal-arrow-c-data", "zeroparser", "eos"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "test-hooks", "arrow-flight", "internal-arrow-c-data", "zeroparser", "eos", "pat-auth"] }
 zerobus-ffi = { path = "../ffi" }
 zerobus-test-support = { path = "../test-support" }
 

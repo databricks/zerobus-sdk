@@ -41,6 +41,8 @@ lint:
 	cargo clippy --workspace --exclude databricks-zerobus-ingest-sdk --exclude zerobus-jni --all-targets -- -D warnings
 	cargo clippy -p databricks-zerobus-ingest-sdk --all-features --all-targets -- -D warnings
 	cargo clippy -p databricks-zerobus-ingest-sdk --no-default-features --all-targets -- -D warnings
+	cargo clippy -p databricks-zerobus-ingest-sdk --no-default-features --features eos --all-targets -- -D warnings
+	cargo clippy -p databricks-zerobus-ingest-sdk --no-default-features --features pat-auth --all-targets -- -D warnings
 	cargo clippy -p zerobus-jni --all-features --all-targets -- -D warnings
 
 check: fmt lint

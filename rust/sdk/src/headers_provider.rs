@@ -3,6 +3,7 @@ use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
 use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
+#[cfg(feature = "pat-auth")]
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -539,16 +540,19 @@ impl HeadersProvider for FederatedTokenProvider {
 
 /// A headers provider that authenticates with a Databricks personal access token (PAT).
 ///
+/// **Beta (private preview):** PAT authentication for Zerobus requires server-side
+/// enablement, and this API can change. Available behind the `pat-auth` feature.
+///
 /// Sends the token as a bearer credential, together with the table name, on every
 /// stream creation. It holds no cache and makes no network calls. The PAT must be
 /// created with the `zerobus` API scope in the workspace that the Zerobus endpoint
 /// belongs to. The SDK cannot refresh a PAT: once it expires or is revoked, creating
 /// or recovering a stream fails with an authentication error.
 ///
-/// OAuth service principals ([`StreamBuilder::oauth`](crate::StreamBuilder::oauth))
-/// remain the recommended option for production workloads. Usually created for you by
-/// [`StreamBuilder::personal_access_token`](crate::StreamBuilder::personal_access_token).
-/// The `Debug` output redacts the token.
+/// Usually created for you by [`StreamBuilder::personal_access_token`]. The `Debug`
+/// output redacts the token.
+///
+/// [`StreamBuilder::personal_access_token`]: crate::StreamBuilder::personal_access_token
 ///
 /// # Examples
 ///
@@ -562,11 +566,13 @@ impl HeadersProvider for FederatedTokenProvider {
 ///     "catalog.schema.table".to_string(),
 /// ));
 /// ```
+#[cfg(feature = "pat-auth")]
 pub struct PatHeadersProvider {
     token: String,
     table_name: String,
 }
 
+#[cfg(feature = "pat-auth")]
 impl PatHeadersProvider {
     /// Creates a provider that sends `token` for streams on `table_name`.
     pub fn new(token: String, table_name: String) -> Self {
@@ -574,6 +580,7 @@ impl PatHeadersProvider {
     }
 }
 
+#[cfg(feature = "pat-auth")]
 impl fmt::Debug for PatHeadersProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PatHeadersProvider")
@@ -584,6 +591,7 @@ impl fmt::Debug for PatHeadersProvider {
 }
 
 // `invalidate` keeps the default no-op: a PAT has no cached state to drop or re-mint.
+#[cfg(feature = "pat-auth")]
 #[async_trait]
 impl HeadersProvider for PatHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
@@ -979,6 +987,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pat-auth")]
     #[tokio::test]
     async fn pat_provider_sends_bearer_token_and_table_name() {
         let provider =
@@ -997,6 +1006,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pat-auth")]
     #[tokio::test]
     async fn pat_provider_serves_same_token_after_invalidate() {
         let provider =
@@ -1009,6 +1019,7 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    #[cfg(feature = "pat-auth")]
     #[test]
     fn pat_provider_debug_redacts_token() {
         let provider =

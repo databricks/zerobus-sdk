@@ -78,10 +78,15 @@ impl<'a> PersistentStreamBuilder<'a> {
 
     /// Authenticate with a Databricks personal access token (PAT).
     ///
+    /// **Beta (private preview):** PAT authentication for Zerobus requires
+    /// server-side enablement, and this API can change. Available behind the
+    /// `eos` and `pat-auth` features.
+    ///
     /// Same as [`StreamBuilder::personal_access_token`]: the PAT needs the
     /// `zerobus` API scope, an empty token is rejected, and of this,
     /// [`oauth`](Self::oauth), and [`headers_provider`](Self::headers_provider),
     /// the last call wins.
+    #[cfg(feature = "pat-auth")]
     pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
         self.inner = self.inner.personal_access_token(token);
         self
@@ -223,7 +228,7 @@ impl<'a> PersistentStreamBuilder<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pat-auth"))]
 mod tests {
     use std::sync::Arc;
 

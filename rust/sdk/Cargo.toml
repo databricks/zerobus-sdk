@@ -12,8 +12,8 @@ keywords = ["databricks", "delta", "streaming", "ingestion", "zerobus"]
 categories = ["database", "api-bindings"]
 documentation = "https://docs.rs/databricks-zerobus-ingest-sdk"
 
-# Build docs on docs.rs with all optional features enabled so feature-gated
-# modules (arrow-flight, zeroparser) are visible on the rendered page.
+# Build docs on docs.rs with all optional features enabled so every feature-gated
+# API (arrow-flight, zeroparser, avro, eos, pat-auth, ...) is visible on the rendered page.
 [package.metadata.docs.rs]
 all-features = true
 
@@ -92,6 +92,9 @@ internal-arrow-c-data = [
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 # Persistent streams with exactly-once semantics (EoS); API is in development.
 eos = []
+# Personal access token (PAT) authentication (Beta, private preview), opt-in. Needs
+# server-side enablement; adds no dependencies and no toolchain floor.
+pat-auth = []
 testing = []
 # Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
 # unless enabled; never enabled by FFI/production builds.
