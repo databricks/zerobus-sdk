@@ -46,6 +46,7 @@ from typing import Any, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared.auth import FederatedToken, PersonalAccessToken
 from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
 
 # Import base Rust stream class
@@ -447,7 +448,8 @@ class ZerobusSdk:
         auth=None,
     ):
         """
-        Create a stream with OAuth, external-IdP federation, or a custom headers provider.
+        Create a stream with OAuth, external-IdP federation, a personal access token,
+        or a custom headers provider.
 
         Args:
             client_id: OAuth client ID
@@ -455,9 +457,10 @@ class ZerobusSdk:
             table_properties: Table configuration
             options: Optional stream configuration
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
-            auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation;
-                when set, client_id/client_secret are not required. Its
-                idp_token_supplier may be a sync or async callable.
+            auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation
+                (its idp_token_supplier may be a sync or async callable), or
+                PersonalAccessToken for a Databricks personal access token (beta,
+                private preview); when set, client_id/client_secret are not required.
         """
         if auth is not None and (client_id is not None or client_secret is not None):
             raise ValueError(
@@ -472,11 +475,11 @@ class ZerobusSdk:
 
         avro_encoder = make_encoder(table_properties.avro_schema)
 
-        if auth is not None:
-            from zerobus.sdk.shared.auth import FederatedToken
-
+        if isinstance(auth, PersonalAccessToken):
+            rust_stream = await self._inner.create_stream_pat(table_properties, auth.token, options)
+        elif auth is not None:
             if not isinstance(auth, FederatedToken):
-                raise ValueError("auth= must be a FederatedToken instance")
+                raise ValueError("auth= must be a FederatedToken or PersonalAccessToken instance")
             # External-IdP federation (RFC 8693). Build a FRESH native supplier per
             # stream, here inside the running loop so allow_async=True can capture
             # the current loop's task-locals to drive an async callback. Not
