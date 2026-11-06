@@ -183,6 +183,15 @@ impl TlsSettings {
         self
     }
 
+    /// Sets the domain name unless one is already set. Needed when the dialed URI
+    /// differs from the endpoint, since tonic would otherwise verify the dialed host.
+    #[cfg(feature = "arrow-flight")]
+    pub(crate) fn with_default_domain_name(mut self, domain_name: &str) -> Self {
+        self.domain_name
+            .get_or_insert_with(|| domain_name.to_string());
+        self
+    }
+
     /// Applies the settings to a gRPC endpoint.
     pub(crate) fn apply(&self, endpoint: Endpoint) -> ZerobusResult<Endpoint> {
         match self.mode {

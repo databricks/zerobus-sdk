@@ -103,7 +103,7 @@ pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 #[cfg(feature = "eos")]
 pub use persistent_stream::PersistentStream;
-pub use proxy::{ConnectorFactory, ProxyConnector};
+pub use proxy::{ConnectorFactory, EndpointOverride, ProxyConnector};
 #[doc(hidden)]
 pub use record_types::PreparedInput;
 #[cfg(feature = "avro")]

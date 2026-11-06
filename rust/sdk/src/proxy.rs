@@ -81,6 +81,25 @@ fn build_connector(proxy_uri: &str) -> Result<ProxiedConnector, ZerobusError> {
 /// replacement channels created during recovery.
 pub type ConnectorFactory = Arc<dyn Fn(&str) -> Option<ProxyConnector> + Send + Sync>;
 
+/// Signature for caller-supplied endpoint redirection. Given the ingestion
+/// endpoint host, return an alternate URI to dial (for example
+/// `"https://10.0.1.2:443"`) or `None` to dial the endpoint as-is.
+///
+/// Set via [`crate::ZerobusSdkBuilder::endpoint_override`]. Only the TCP
+/// destination changes: the HTTP/2 `:authority` and scheme stay those of the
+/// original endpoint, and the TLS server name is
+/// [`TlsSettings::with_domain_name`](crate::TlsSettings::with_domain_name) if set,
+/// else the original endpoint host. The dial scheme is the caller's to get right;
+/// it should match the endpoint's.
+///
+/// Called once per channel at construction, and again only when the SDK rebuilds
+/// the channel on recovery or reconnect (including multiplexed lanes). Ignored
+/// when a proxy applies, because the proxy needs the original endpoint. If the
+/// returned URI is unparsable or TLS cannot be applied to the redirected
+/// endpoint, a warning is logged and the endpoint is dialed as-is. Applies to
+/// Arrow Flight streams only.
+pub type EndpointOverride = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Resolves the connector policy for a target host.
 ///
 /// A caller-supplied factory fully replaces environment-based proxy discovery.

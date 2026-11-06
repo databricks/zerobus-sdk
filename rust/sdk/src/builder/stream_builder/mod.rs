@@ -717,6 +717,7 @@ impl<'a> StreamBuilder<'a> {
             &self.sdk.zerobus_endpoint,
             Arc::clone(&self.sdk.tls_config),
             self.sdk.connector_factory.clone(),
+            self.sdk.endpoint_override.clone(),
             table_properties,
             headers_provider,
             self.arrow_config,

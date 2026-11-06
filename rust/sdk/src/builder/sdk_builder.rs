@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::proxy::ConnectorFactory;
+use crate::proxy::{ConnectorFactory, EndpointOverride};
 use crate::token_cache::DEFAULT_REFRESH_BUFFER;
 #[cfg(feature = "testing")]
 use crate::NoTlsConfig;
@@ -31,6 +31,7 @@ pub struct ZerobusSdkBuilder {
     unity_catalog_url: Option<String>,
     tls_config: Option<Arc<dyn TlsConfig>>,
     connector_factory: Option<ConnectorFactory>,
+    endpoint_override: Option<EndpointOverride>,
     application_name: Option<String>,
     sdk_identifier_override: Option<String>,
     token_cache_enabled: bool,
@@ -48,6 +49,7 @@ impl ZerobusSdkBuilder {
             unity_catalog_url: None,
             tls_config: None,
             connector_factory: None,
+            endpoint_override: None,
             application_name: None,
             sdk_identifier_override: None,
             token_cache_enabled: true,
@@ -112,6 +114,14 @@ impl ZerobusSdkBuilder {
     /// streams; see [`ConnectorFactory`] for semantics.
     pub fn connector_factory(mut self, factory: ConnectorFactory) -> Self {
         self.connector_factory = Some(factory);
+        self
+    }
+
+    /// Redirects the TCP connection of Arrow Flight streams to another address while
+    /// keeping the endpoint as `:authority` and TLS server name; see
+    /// [`EndpointOverride`] for semantics. Has no effect on non-Arrow streams.
+    pub fn endpoint_override(mut self, f: EndpointOverride) -> Self {
+        self.endpoint_override = Some(f);
         self
     }
 
@@ -293,6 +303,7 @@ impl ZerobusSdkBuilder {
             workspace_id,
             tls_config,
             self.connector_factory,
+            self.endpoint_override,
             sdk_identifier,
             self.token_cache_enabled,
             self.token_refresh_buffer,

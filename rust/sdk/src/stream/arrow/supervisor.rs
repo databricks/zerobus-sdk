@@ -24,7 +24,7 @@ use super::{
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
-use crate::proxy::ConnectorFactory;
+use crate::proxy::{ConnectorFactory, EndpointOverride};
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
@@ -33,6 +33,7 @@ pub(super) struct Supervisor {
     endpoint: String,
     tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
+    endpoint_override: Option<EndpointOverride>,
     table_properties: ArrowTableProperties,
     options: ArrowStreamConfigurationOptions,
     headers_provider: Arc<dyn HeadersProvider>,
@@ -83,6 +84,7 @@ impl Supervisor {
             endpoint: stream.endpoint.clone(),
             tls_config: Arc::clone(&stream.tls_config),
             connector_factory: stream.connector_factory.clone(),
+            endpoint_override: stream.endpoint_override.clone(),
             table_properties: stream.table_properties.clone(),
             options: stream.options.clone(),
             headers_provider: Arc::clone(&stream.headers_provider),
@@ -440,6 +442,7 @@ impl Supervisor {
             endpoint: &self.endpoint,
             tls_config: &self.tls_config,
             connector_factory: self.connector_factory.as_ref(),
+            endpoint_override: self.endpoint_override.as_ref(),
             table_properties: &self.table_properties,
             options: &self.options,
             headers_provider: &self.headers_provider,

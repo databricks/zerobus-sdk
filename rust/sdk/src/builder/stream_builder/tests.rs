@@ -16,6 +16,7 @@ fn test_sdk() -> ZerobusSdk {
         "test-workspace".to_string(),
         Arc::new(crate::tls_config::SecureTlsConfig::new()),
         None,
+        None,
         Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
         true,
         crate::token_cache::DEFAULT_REFRESH_BUFFER,
