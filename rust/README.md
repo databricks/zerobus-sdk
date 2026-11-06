@@ -443,7 +443,7 @@ The SDK uses OAuth 2.0 client credentials flow:
 
 OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (currently one hour) that the SDK cannot configure, while a single stream lives at most ~15 minutes. By default the SDK caches the token for each table on the `ZerobusSdk` instance and reuses it across stream creations and recoveries, refreshing it only once it nears the expiry the server reported (so it adapts to whatever lifetime UC returns). This avoids minting a fresh token on every stream and reduces load on the Unity Catalog token endpoint.
 
-Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
+Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. A personal access token (`.personal_access_token(...)`) is sent as given and never cached. Custom `HeadersProvider` implementations manage their own caching.
 
 SDK builder options tune connection and token behavior. Here and in the snippets below,
 `server_endpoint` and `workspace_url` hold your Zerobus server endpoint and workspace URL
@@ -685,6 +685,39 @@ let stream = sdk
 ```
 
 The existing `.oauth(...)` and `.headers_provider(...)` paths are unchanged.
+
+#### Personal access token
+
+To authenticate with a Databricks personal access token (PAT), use the
+`personal_access_token` builder method. Create the PAT with the `zerobus` API scope in
+the workspace that the Zerobus endpoint belongs to. The SDK sends it as a bearer token
+when it creates or recovers a stream. It does not exchange, cache, or refresh the token,
+so this mode does not need `unity_catalog_url`. Once the token expires or is revoked,
+creating or recovering a stream fails with a non-retryable authentication error.
+
+OAuth service principals (`.oauth(...)`) remain the recommended option for production
+workloads.
+
+```rust,ignore
+let token = std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set");
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .personal_access_token(token)
+    .json()
+    .build()
+    .await?;
+
+for record in records {
+    stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+An empty token is rejected with `ZerobusError::InvalidArgument`. Of `.oauth(...)`,
+`.federated_auth(...)`, `.personal_access_token(...)`, and `.headers_provider(...)`, the
+last call wins. The token never appears in `Debug` output. `PersistentStreamBuilder` has
+the same method, and `PatHeadersProvider` is available for use with `.headers_provider(...)`.
 
 ### 4. Create a Stream
 
@@ -1717,7 +1750,7 @@ pub trait HeadersProvider: Send + Sync {
 }
 ```
 
-Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management. Use this for:
+Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` sends a personal access token. Use this for:
 - Custom token caching strategies
 - Alternative authentication mechanisms
 - Integration with centralized credential services

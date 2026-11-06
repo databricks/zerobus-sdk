@@ -3,6 +3,7 @@ use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
 use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -183,10 +184,16 @@ where
         .await?;
     // Remember the highest served generation so invalidate() rejects it.
     last_served_generation.fetch_max(generation, Ordering::SeqCst);
+    Ok(bearer_headers(&token, table_name))
+}
+
+/// The two headers the Zerobus server authenticates a stream with, shared by every
+/// built-in credential provider so the shape is defined once.
+fn bearer_headers(token: &str, table_name: &str) -> HashMap<&'static str, String> {
     let mut headers = HashMap::new();
     headers.insert("authorization", format!("Bearer {}", token));
     headers.insert("x-databricks-zerobus-table-name", table_name.to_string());
-    Ok(headers)
+    headers
 }
 
 /// The default headers provider that uses OAuth 2.0 with Unity Catalog.
@@ -527,6 +534,60 @@ impl HeadersProvider for FederatedTokenProvider {
         }
         .invalidate(&self.token_cache, &self.table_name, rejected_generation)
         .await;
+    }
+}
+
+/// A headers provider that authenticates with a Databricks personal access token (PAT).
+///
+/// Sends the token as a bearer credential, together with the table name, on every
+/// stream creation. It holds no cache and makes no network calls. The PAT must be
+/// created with the `zerobus` API scope in the workspace that the Zerobus endpoint
+/// belongs to. The SDK cannot refresh a PAT: once it expires or is revoked, creating
+/// or recovering a stream fails with an authentication error.
+///
+/// OAuth service principals ([`StreamBuilder::oauth`](crate::StreamBuilder::oauth))
+/// remain the recommended option for production workloads. Usually created for you by
+/// [`StreamBuilder::personal_access_token`](crate::StreamBuilder::personal_access_token).
+/// The `Debug` output redacts the token.
+///
+/// # Examples
+///
+/// ```no_run
+/// use databricks_zerobus_ingest_sdk::PatHeadersProvider;
+/// use std::sync::Arc;
+///
+/// let token = std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set");
+/// let _provider = Arc::new(PatHeadersProvider::new(
+///     token,
+///     "catalog.schema.table".to_string(),
+/// ));
+/// ```
+pub struct PatHeadersProvider {
+    token: String,
+    table_name: String,
+}
+
+impl PatHeadersProvider {
+    /// Creates a provider that sends `token` for streams on `table_name`.
+    pub fn new(token: String, table_name: String) -> Self {
+        Self { token, table_name }
+    }
+}
+
+impl fmt::Debug for PatHeadersProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PatHeadersProvider")
+            .field("token", &"<redacted>")
+            .field("table_name", &self.table_name)
+            .finish()
+    }
+}
+
+// `invalidate` keeps the default no-op: a PAT has no cached state to drop or re-mint.
+#[async_trait]
+impl HeadersProvider for PatHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        Ok(bearer_headers(&self.token, &self.table_name))
     }
 }
 
@@ -916,5 +977,46 @@ mod tests {
             2,
             "a failed mint must not be cached; the supplier is retried each call"
         );
+    }
+
+    #[tokio::test]
+    async fn pat_provider_sends_bearer_token_and_table_name() {
+        let provider =
+            PatHeadersProvider::new("dapi-secret-token".to_string(), "cat.sch.tbl".to_string());
+
+        let headers = provider.get_headers().await.unwrap();
+
+        assert_eq!(headers.len(), 2, "headers: {:?}", headers.keys());
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            "Bearer dapi-secret-token"
+        );
+        assert_eq!(
+            headers.get("x-databricks-zerobus-table-name").unwrap(),
+            "cat.sch.tbl"
+        );
+    }
+
+    #[tokio::test]
+    async fn pat_provider_serves_same_token_after_invalidate() {
+        let provider =
+            PatHeadersProvider::new("dapi-secret-token".to_string(), "cat.sch.tbl".to_string());
+
+        let before = provider.get_headers().await.unwrap();
+        provider.invalidate().await;
+        let after = provider.get_headers().await.unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn pat_provider_debug_redacts_token() {
+        let provider =
+            PatHeadersProvider::new("dapi-secret-token".to_string(), "cat.sch.tbl".to_string());
+
+        let debug = format!("{provider:?}");
+
+        assert!(!debug.contains("dapi-secret-token"), "debug: {debug}");
+        assert!(debug.contains("cat.sch.tbl"), "debug: {debug}");
     }
 }

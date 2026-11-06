@@ -95,7 +95,7 @@ pub use grpc_status::{GrpcCode, GrpcStatus};
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenCallback, IdpTokenSupplier,
-    OAuthHeadersProvider,
+    OAuthHeadersProvider, PatHeadersProvider,
 };
 #[cfg(feature = "arrow-flight")]
 pub use multiplexed_stream::MultiplexedArrowStream;

@@ -83,6 +83,39 @@ async fn create_ingest_flush_and_resume_continues_offsets() {
 }
 
 #[tokio::test]
+async fn personal_access_token_creates_and_resumes() {
+    let (server, endpoint) = start_mock_server().await.expect("start mock");
+    let sdk = sdk(endpoint);
+    let builder = || {
+        sdk.persistent_stream_builder()
+            .table(TABLE_NAME)
+            .personal_access_token("dapi-test-token")
+            .json()
+            .recovery(false)
+    };
+
+    let mut stream = builder().build().await.expect("create persistent stream");
+    let stream_id = stream.stream_id().expect("stream id").to_owned();
+    stream
+        .ingest_record_offset(r#"{"id":1}"#.to_string())
+        .await
+        .unwrap();
+    stream.flush().await.expect("flush");
+    stream.close().await.expect("close");
+
+    let mut resumed = builder()
+        .resume(stream_id.clone())
+        .await
+        .expect("resume persistent stream");
+    assert_eq!(resumed.resume_watermark(), Some(0));
+    resumed.close().await.expect("close resumed stream");
+    assert_eq!(
+        server.persistent_committed_offset(&stream_id).await,
+        Some(0)
+    );
+}
+
+#[tokio::test]
 async fn resume_unknown_stream_fails() {
     let (_server, endpoint) = start_mock_server().await.expect("start mock");
     let result = sdk(endpoint)

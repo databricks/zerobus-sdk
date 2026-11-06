@@ -388,6 +388,132 @@ async fn resolve_headers_provider_with_oauth() {
     let _provider = builder.resolve_headers_provider().unwrap();
 }
 
+const TEST_PAT: &str = "dapi-test-secret";
+
+/// Resolves the builder's auth and returns the headers it would send.
+async fn resolved_headers(builder: &StreamBuilder<'_>) -> HashMap<&'static str, String> {
+    builder
+        .resolve_headers_provider()
+        .unwrap()
+        .get_headers()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn personal_access_token_resolves_to_pat_provider() {
+    let sdk = test_sdk();
+    let builder = sdk
+        .stream_builder()
+        .table("catalog.schema.table")
+        .personal_access_token(TEST_PAT)
+        .json();
+    builder.validate().expect("validation should succeed");
+
+    let headers = resolved_headers(&builder).await;
+
+    assert_eq!(headers.len(), 2);
+    assert_eq!(
+        headers.get("authorization").unwrap(),
+        &format!("Bearer {TEST_PAT}")
+    );
+    assert_eq!(
+        headers.get("x-databricks-zerobus-table-name").unwrap(),
+        "catalog.schema.table"
+    );
+}
+
+#[tokio::test]
+async fn empty_personal_access_token_is_rejected() {
+    let sdk = test_sdk();
+    let builder = || {
+        sdk.stream_builder()
+            .table("t")
+            .personal_access_token("")
+            .json()
+    };
+
+    assert!(matches!(
+        builder().validate(),
+        Err(ZerobusError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        builder().build().await,
+        Err(ZerobusError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        builder().multiplexed(2).validate(),
+        Err(ZerobusError::InvalidArgument(_))
+    ));
+}
+
+#[tokio::test]
+async fn personal_access_token_last_auth_call_wins() {
+    struct StubProvider;
+    #[async_trait::async_trait]
+    impl HeadersProvider for StubProvider {
+        async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
+            Ok(HashMap::from([("x-stub", "stub".to_string())]))
+        }
+    }
+
+    let sdk = test_sdk();
+    let builder = || sdk.stream_builder().table("t").json();
+
+    let pat_last = builder()
+        .oauth("cid", "csec")
+        .personal_access_token(TEST_PAT);
+    assert!(matches!(
+        pat_last.auth,
+        Some(AuthConfig::PersonalAccessToken { .. })
+    ));
+    assert_eq!(
+        resolved_headers(&pat_last)
+            .await
+            .get("authorization")
+            .unwrap(),
+        &format!("Bearer {TEST_PAT}")
+    );
+
+    let oauth_last = builder()
+        .personal_access_token(TEST_PAT)
+        .oauth("cid", "csec");
+    assert!(matches!(oauth_last.auth, Some(AuthConfig::OAuth { .. })));
+
+    let provider_last = builder()
+        .personal_access_token(TEST_PAT)
+        .headers_provider(Arc::new(StubProvider));
+    assert_eq!(
+        resolved_headers(&provider_last)
+            .await
+            .get("x-stub")
+            .unwrap(),
+        "stub"
+    );
+
+    // A later valid auth replaces an empty token, so validation passes.
+    builder()
+        .personal_access_token("")
+        .oauth("cid", "csec")
+        .validate()
+        .expect("the later oauth() call should replace the empty token");
+}
+
+#[test]
+fn debug_does_not_expose_personal_access_token() {
+    let sdk = test_sdk();
+    let builder = sdk
+        .stream_builder()
+        .table("t")
+        .personal_access_token(TEST_PAT)
+        .json();
+
+    let debug_str = format!("{builder:?}");
+
+    assert!(debug_str.contains("PersonalAccessToken"), "{debug_str}");
+    assert!(!debug_str.contains(TEST_PAT), "{debug_str}");
+}
+
 #[cfg(feature = "arrow-flight")]
 #[test]
 fn arrow_builder() {

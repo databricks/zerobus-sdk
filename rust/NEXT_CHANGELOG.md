@@ -6,6 +6,12 @@
 
 ### New Features and Improvements
 
+- Added personal access token (PAT) authentication. Call
+  `.personal_access_token(token)` on `StreamBuilder` or `PersistentStreamBuilder` to
+  authenticate with a Databricks PAT created with the `zerobus` API scope. The SDK
+  sends the token as given and never refreshes it, and never includes it in `Debug`
+  output. OAuth service principals remain the recommended option for production.
+
 ### Bug Fixes
 
 ### Documentation
@@ -27,3 +33,9 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `StreamBuilder::personal_access_token` and
+  `PersistentStreamBuilder::personal_access_token` (behind `eos`). An empty token is
+  rejected with `ZerobusError::InvalidArgument`; as with the other authentication
+  setters, the last call wins.
+- Added `PatHeadersProvider`, a `HeadersProvider` that sends a personal access token.
