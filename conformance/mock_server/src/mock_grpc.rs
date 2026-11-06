@@ -24,6 +24,31 @@ use crate::MockState;
 type ResponseTx = mpsc::Sender<Result<EphemeralStreamResponse, Status>>;
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
+/// Outcome of a guarded send on the response channel.
+enum SendOutcome {
+    Sent,
+    ClientGone,
+    ShuttingDown,
+}
+
+/// Sends, but gives up if shutdown starts, so a stalled client can't wedge the drain.
+async fn guarded_send(
+    tx: &ResponseTx,
+    state: &MockState,
+    msg: Result<EphemeralStreamResponse, Status>,
+) -> SendOutcome {
+    tokio::select! {
+        _ = state.shutdown_requested() => SendOutcome::ShuttingDown,
+        res = tx.send(msg) => {
+            if res.is_ok() {
+                SendOutcome::Sent
+            } else {
+                SendOutcome::ClientGone
+            }
+        }
+    }
+}
+
 /// Zerobus gRPC service backed by shared [`MockState`].
 pub struct MockGrpc {
     state: Arc<MockState>,
@@ -123,9 +148,12 @@ async fn run_ephemeral_stream(
         match request.payload {
             Some(Payload::CreateStream(_create)) => {
                 if stream_id.is_some() {
-                    let _ = tx
-                        .send(Err(Status::invalid_argument("create_stream already sent")))
-                        .await;
+                    let _ = guarded_send(
+                        &tx,
+                        &state,
+                        Err(Status::invalid_argument("create_stream already sent")),
+                    )
+                    .await;
                     return;
                 }
                 // TODO: record table_name / descriptor / record_type per stream
@@ -140,37 +168,48 @@ async fn run_ephemeral_stream(
                         },
                     )),
                 };
-                if tx.send(Ok(response)).await.is_err() {
-                    state.inc_cancel();
-                    return;
+                match guarded_send(&tx, &state, Ok(response)).await {
+                    SendOutcome::Sent => {}
+                    SendOutcome::ClientGone => {
+                        state.inc_cancel();
+                        return;
+                    }
+                    SendOutcome::ShuttingDown => return,
                 }
                 stream_id = Some(id);
             }
             Some(Payload::IngestRecord(record)) => {
                 if stream_id.is_none() {
                     // InvalidArgument is unretriable, so the client fails fast.
-                    let _ = tx
-                        .send(Err(Status::invalid_argument(
+                    let _ = guarded_send(
+                        &tx,
+                        &state,
+                        Err(Status::invalid_argument(
                             "ingest_record before create_stream",
-                        )))
-                        .await;
+                        )),
+                    )
+                    .await;
                     return;
                 }
                 let Some(offset) = record.offset_id else {
-                    let _ = tx
-                        .send(Err(Status::invalid_argument(
-                            "ingest_record missing offset_id",
-                        )))
-                        .await;
+                    let _ = guarded_send(
+                        &tx,
+                        &state,
+                        Err(Status::invalid_argument("ingest_record missing offset_id")),
+                    )
+                    .await;
                     return;
                 };
                 // Offsets must be dense and in order on a connection.
                 if offset != next_expected {
-                    let _ = tx
-                        .send(Err(Status::invalid_argument(format!(
+                    let _ = guarded_send(
+                        &tx,
+                        &state,
+                        Err(Status::invalid_argument(format!(
                             "expected offset_id {next_expected}, got {offset}"
-                        ))))
-                        .await;
+                        ))),
+                    )
+                    .await;
                     return;
                 }
                 next_expected += 1;
@@ -180,11 +219,14 @@ async fn run_ephemeral_stream(
                     // Raw UTF-8 of the JSON text; the mock never parses it.
                     Some(Record::JsonRecord(json)) => json.into_bytes(),
                     None => {
-                        let _ = tx
-                            .send(Err(Status::invalid_argument(
+                        let _ = guarded_send(
+                            &tx,
+                            &state,
+                            Err(Status::invalid_argument(
                                 "ingest_record has no record payload",
-                            )))
-                            .await;
+                            )),
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -199,7 +241,7 @@ async fn run_ephemeral_stream(
                         Status::invalid_argument("injected non-retryable stream error")
                     };
                     warn!("injecting stream abort at offset {offset} (retryable={retryable})");
-                    let _ = tx.send(Err(status)).await;
+                    let _ = guarded_send(&tx, &state, Err(status)).await;
                     return;
                 }
 
@@ -212,25 +254,35 @@ async fn run_ephemeral_stream(
                         },
                     )),
                 };
-                if tx.send(Ok(ack)).await.is_err() {
-                    state.inc_cancel();
-                    return;
+                match guarded_send(&tx, &state, Ok(ack)).await {
+                    SendOutcome::Sent => {}
+                    SendOutcome::ClientGone => {
+                        state.inc_cancel();
+                        return;
+                    }
+                    SendOutcome::ShuttingDown => return,
                 }
             }
             Some(Payload::IngestRecordBatch(_batch)) => {
                 // Not supported yet — reject loudly rather than pass without capture or
                 // fault injection. Full support comes with the shared-engine refactor.
-                let _ = tx
-                    .send(Err(Status::unimplemented(
+                let _ = guarded_send(
+                    &tx,
+                    &state,
+                    Err(Status::unimplemented(
                         "ingest_record_batch is not supported by the mock yet",
-                    )))
-                    .await;
+                    )),
+                )
+                .await;
                 return;
             }
             None => {
-                let _ = tx
-                    .send(Err(Status::invalid_argument("request has no payload")))
-                    .await;
+                let _ = guarded_send(
+                    &tx,
+                    &state,
+                    Err(Status::invalid_argument("request has no payload")),
+                )
+                .await;
                 return;
             }
         }
