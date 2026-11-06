@@ -1,24 +1,27 @@
-//! Conformance mock server: hosts the Zerobus gRPC data plane
-//! (`databricks.zerobus.Zerobus`) and the out-of-band `MockAdmin` control plane on one port.
+//! Conformance mock server: hosts the Zerobus gRPC and Arrow Flight data planes and the
+//! out-of-band `MockAdmin` control plane on one port.
 //!
 //! Counters and captured bytes live in [`MockState`], shared by both services behind an
 //! `Arc`. Counters are global per mock instance.
 //!
-//! TEMPORARY: this crate implements its own *reactive* Zerobus mock, separate from
-//! test-support's *scripted* `MockZerobusServer`. The duplication is intentional for now; the
-//! plan is to extract one shared gRPC engine with a `ResponsePolicy` seam (scripted for
-//! rust/tests, reactive for conformance) into test-support and drop this second data plane.
+//! TEMPORARY: this crate implements its own *reactive* Zerobus mocks for both planes — gRPC
+//! `EphemeralStream` and Arrow Flight `DoPut` — separate from test-support's *scripted*
+//! `MockZerobusServer` and `MockFlightServer`. The duplication is intentional for now; the plan
+//! is to extract one shared engine per plane with a `ResponsePolicy` seam (scripted for
+//! rust/tests, reactive for conformance) into test-support and drop these second data planes.
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 pub mod mock_admin;
+pub mod mock_flight;
 pub mod mock_grpc;
 
 pub use mock_admin::MockAdmin;
@@ -249,6 +252,11 @@ impl MockState {
             .push((offset, bytes));
         self.captured_record_count.fetch_add(1, Ordering::SeqCst);
     }
+    /// Adds `n` captured records at once (the rows in an Arrow Flight batch, which are not
+    /// individually keyed by offset).
+    pub(crate) fn add_captured_records(&self, n: i64) {
+        self.captured_record_count.fetch_add(n, Ordering::SeqCst);
+    }
     /// Records an ack; the watermark only moves forward.
     pub(crate) fn note_ack(&self, offset: i64) {
         self.ack_offset.fetch_max(offset, Ordering::SeqCst);
@@ -256,7 +264,8 @@ impl MockState {
 }
 
 /// Serves Zerobus + MockAdmin on `listener` until `extra_shutdown` resolves or
-/// `MockAdmin.Shutdown` is called. Returns once in-flight RPCs drain.
+/// `MockAdmin.Shutdown` is called. After shutdown starts, the graceful drain is capped at a
+/// few seconds, so a client that stops reading its acks cannot hold the server open.
 pub async fn serve_with_shutdown<F>(
     listener: TcpListener,
     state: Arc<MockState>,
@@ -265,12 +274,16 @@ pub async fn serve_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    use arrow_flight::flight_service_server::FlightServiceServer;
     use proto::mock::mock_admin_server::MockAdminServer;
     use proto::zerobus::zerobus_server::ZerobusServer;
     use tokio_stream::wrappers::TcpListenerStream;
 
     // Match the SDK's ~10 MiB record ceiling; tonic's default 4 MiB would reject valid records.
     const MAX_DECODE_BYTES: usize = 10 * 1024 * 1024;
+    // Upper bound on the graceful drain once shutdown starts. tonic waits for queued
+    // responses to flush, which never completes against a client that stopped reading.
+    const DRAIN_GRACE: Duration = Duration::from_secs(3);
 
     let shutdown = {
         let state = Arc::clone(&state);
@@ -283,15 +296,34 @@ where
         }
     };
 
-    // Zerobus (native gRPC) data plane and the MockAdmin control plane, both on one port.
-    tonic::transport::Server::builder()
+    // Zerobus (native gRPC) + Arrow Flight data planes and the MockAdmin control plane,
+    // all on one port.
+    let server = tonic::transport::Server::builder()
         .add_service(
             ZerobusServer::new(MockGrpc::new(Arc::clone(&state)))
                 .max_decoding_message_size(MAX_DECODE_BYTES),
         )
+        .add_service(
+            FlightServiceServer::new(mock_flight::MockFlight::new(Arc::clone(&state)))
+                .max_decoding_message_size(MAX_DECODE_BYTES),
+        )
         .add_service(MockAdminServer::new(MockAdmin::new(Arc::clone(&state))))
-        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
-        .await
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown);
+
+    // Give the drain a bounded grace: once shutdown is requested, return even if a stalled
+    // client is still holding queued responses open. Dropping `server` aborts the connection.
+    let drain_deadline = {
+        let state = Arc::clone(&state);
+        async move {
+            state.shutdown_requested().await;
+            tokio::time::sleep(DRAIN_GRACE).await;
+        }
+    };
+
+    tokio::select! {
+        result = server => result,
+        _ = drain_deadline => Ok(()),
+    }
 }
 
 /// A mock server running on a background task, for embedding in tests.

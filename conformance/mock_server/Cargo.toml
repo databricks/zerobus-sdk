@@ -29,6 +29,15 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ne
 tokio-stream = { workspace = true, features = ["net"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Arrow Flight data plane. arrow-flight resolves to the vendored copy in rust/third_party
+# via the workspace pin.
+arrow-flight = { workspace = true }
+# Row counts come from the IPC record-batch header (never decoding the body), so no zstd codec
+# is needed.
+arrow-ipc = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
@@ -36,8 +45,11 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 # Self-tests drive the real Rust SDK against the mock, so `make test` exercises the mock's
-# gRPC behavior in CI. The `testing` feature enables the SDK's test seams.
-databricks-zerobus-ingest-sdk = { path = "../../rust/sdk", features = ["testing"] }
+# gRPC and Arrow Flight behavior in CI. `testing` enables the SDK's test seams; `arrow-flight`
+# enables the Flight stream API used by the Flight self-test.
+databricks-zerobus-ingest-sdk = { path = "../../rust/sdk", features = ["testing", "arrow-flight"] }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 
 [lints.clippy]
 # async-trait stamps #[must_use] on tonic's generated server methods that already return a
