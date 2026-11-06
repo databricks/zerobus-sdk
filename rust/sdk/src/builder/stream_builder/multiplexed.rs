@@ -123,7 +123,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         }
 
         #[cfg(feature = "arrow-flight")]
-        if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
+        if matches!(self.inner.core.format, Some(FormatConfig::Arrow(_))) {
             self.inner.validate_arrow()?;
             if self.inner.stats_exporter.is_some() {
                 return Err(ZerobusError::InvalidArgument(
@@ -199,24 +199,25 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         // immutable writer schema allocation across lanes, supervisors, and retries.
         let format = self
             .inner
+            .core
             .format
             .take()
             .expect("format was validated")
             .into_grpc()?;
-        self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
-            table_name: self.inner.table_name.clone(),
+            table_name: self.inner.core.table_name.clone(),
             descriptor_proto: format.descriptor_proto,
             message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
             avro_schema: format.avro_schema,
         };
-        let sdk = self.inner.sdk;
+        let sdk = self.inner.core.sdk;
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
-        let mut options = self.inner.grpc_config;
+        let mut options = self.inner.grpc_options();
+        options.record_type = format.record_type;
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
@@ -275,13 +276,13 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .expect("capacity was validated");
         let inner = self.inner;
         inner.warn_arrow_ignored_options();
+        let mut options = inner.arrow_options();
+        options.max_inflight_batches = capacity;
         let table_properties = super::ArrowTableProperties {
-            table_name: inner.table_name,
+            table_name: inner.core.table_name,
             schema,
         };
-        let mut options = inner.arrow_config;
-        options.max_inflight_batches = capacity;
-        let sdk = inner.sdk;
+        let sdk = inner.core.sdk;
         let opens = delays
             .into_iter()
             .zip(headers_providers)

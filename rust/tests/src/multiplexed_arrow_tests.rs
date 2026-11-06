@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow_array::{Int64Array, RecordBatch};
 use databricks_zerobus_ingest_sdk::{MessageId, NoTlsConfig, ZerobusError, ZerobusSdk};
 
-use crate::mock_arrow_flight::start_mock_flight_server;
+use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
 use crate::utils::{
     create_test_arrow_schema, create_test_record_batch, record_batch_to_ipc_bytes,
     TestHeadersProvider,
@@ -202,4 +202,27 @@ async fn grpc_compression_applies_to_every_lane_without_ipc_compression() {
     assert_eq!(encodings.len(), 2);
     assert!(encodings.iter().all(|e| e.as_deref() == Some("zstd")));
     assert_eq!(server.get_zstd_compressed_record_batch_count().await, 0);
+}
+
+#[tokio::test]
+async fn builder_applies_shared_settings_to_every_lane() {
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    server
+        .inject_responses(
+            TABLE,
+            vec![MockFlightResponse::FailSetup {
+                status: tonic::Status::unavailable("restarting"),
+            }],
+        )
+        .await;
+    let sdk = sdk(endpoint);
+
+    let result = builder(&sdk)
+        .recovery(false)
+        .multiplexed(1)
+        .build_arrow()
+        .await;
+
+    assert!(result.is_err(), "a failed setup must not be retried");
+    assert_eq!(server.connection_count(), 1);
 }
