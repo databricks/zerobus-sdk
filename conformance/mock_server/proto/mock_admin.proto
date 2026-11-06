@@ -7,18 +7,24 @@ package zerobus.conformance.mock;
 service MockAdmin {
   // Counters. StreamQuery.stream_id is RESERVED for later multi-stream use; the mock
   // keeps counters globally, so an empty stream_id means "the whole mock".
-  rpc GetCallCount(StreamQuery) returns (CountResponse);             // CreateStream RPCs seen
-  rpc GetCapturedMessageCount(StreamQuery) returns (CountResponse);  // all wire messages captured
+  //
+  // Counters span both planes. On the Arrow Flight plane: GetCallCount counts each DoPut
+  // connection, GetCapturedMessageCount includes the leading schema frame, and
+  // GetCapturedRecordCount counts rows (summed from record-batch headers, not frames).
+  rpc GetCallCount(StreamQuery) returns (CountResponse);             // gRPC: CreateStream RPCs; Flight: DoPut connections
+  rpc GetCapturedMessageCount(StreamQuery) returns (CountResponse);  // all wire messages captured (Flight: incl. schema frame)
   rpc GetOnCompletedCount(StreamQuery) returns (CountResponse);      // graceful stream completions
   rpc GetCancelCount(StreamQuery) returns (CountResponse);           // client cancels (vs half-close)
   rpc GetAbortCount(StreamQuery) returns (CountResponse);            // connection drops (not graceful, not cancel)
-  rpc GetCapturedRecordCount(StreamQuery) returns (CountResponse);   // ingest records captured
+  rpc GetCapturedRecordCount(StreamQuery) returns (CountResponse);   // gRPC: ingest records; Flight: rows across batches
 
   // Observations. GetAckOffset is a monotonic max across connections; GetCapturedRecordBytes
   // returns the first capture at a wire offset. Ephemeral wire offsets restart at 0 on a
   // reconnect, so after recovery these can reflect an earlier connection — assert on counts.
+  // GetCapturedRecordBytes is gRPC-only: the Flight plane counts rows from headers without
+  // keeping per-offset bytes, so it returns nothing for Flight streams.
   rpc GetAckOffset(StreamQuery) returns (OffsetResponse);            // highest cumulative ack offset
-  rpc GetCapturedRecordBytes(RecordQuery) returns (BytesResponse);   // raw encoded bytes at offset
+  rpc GetCapturedRecordBytes(RecordQuery) returns (BytesResponse);   // raw encoded bytes at offset (gRPC only)
 
   // Fault injection (one-shot). After the mock acks through `after_offset`, the next ingested
   // record aborts the stream with a transient (retryable=true -> UNAVAILABLE, so a recovering
