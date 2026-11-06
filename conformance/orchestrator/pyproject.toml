@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerobus_test_runner"
+version = "0.1.0"
+description = "Layer-1 conformance test orchestrator for the Zerobus SDKs"
+requires-python = ">=3.10"
+# The runtime drives harnesses and the mock over gRPC and builds schema artifacts.
+dependencies = [
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=4.25",
+    "pyarrow>=14",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 120
+extend-exclude = "/_generated/"
+
+[tool.isort]
+profile = "black"
+line_length = 120
+extend_skip = ["_generated"]
