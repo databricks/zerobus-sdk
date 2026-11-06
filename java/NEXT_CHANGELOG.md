@@ -18,6 +18,11 @@
 
 ### Internal Changes
 
+- Added the testing-only `ZerobusSdk.forTestingNoTls` entry point for the Layer-1
+  conformance test harness. The native no-TLS path is gated behind the JNI `testing`
+  feature; without a testing-enabled native library the method throws, and it must
+  never be used against a real endpoint.
+
 ### Breaking Changes
 
 ### Deprecations

@@ -34,6 +34,9 @@ default = []
 # Requires Rust 1.88 (via `apache-avro` 0.22), above this crate's declared `rust-version`.
 avro = ["databricks-zerobus-ingest-sdk/avro"]
 test-helpers = []
+# TESTING ONLY (conformance harness): enables plaintext `nativeCreateNoTls`. Off by default,
+# so release/CI JNI builds do not expose the no-TLS SDK constructor.
+testing = ["databricks-zerobus-ingest-sdk/testing"]
 
 [dev-dependencies]
 arrow-flight.workspace = true
