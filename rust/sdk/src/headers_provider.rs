@@ -1,6 +1,6 @@
 use crate::default_token_factory::{DefaultTokenFactory, FetchedToken, MintReason};
 use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
-use crate::ZerobusResult;
+use crate::{ZerobusError, ZerobusResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,6 +45,9 @@ pub trait HeadersProvider: Send + Sync {
     /// # Returns
     ///
     /// A `ZerobusResult` containing a `HashMap` of header names and values.
+    /// Names ending in `-bin` carry standard base64-encoded binary metadata, with
+    /// or without padding. Other values are ASCII metadata. Binary values are
+    /// marked sensitive and forwarded through tonic's binary metadata API.
     ///
     /// # Errors
     ///
@@ -60,6 +63,34 @@ pub trait HeadersProvider: Send + Sync {
     /// a concurrent refresh already replaced it with a newer token, which is kept and
     /// served without re-minting.
     async fn invalidate(&self) {}
+}
+
+/// Both transports must decode provider binary values before tonic encodes them on the wire.
+pub(crate) fn insert_header_metadata(
+    metadata: &mut tonic::metadata::MetadataMap,
+    key: &str,
+    value: &str,
+) -> ZerobusResult<()> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    use base64::Engine as _;
+    use tonic::metadata::{Ascii, Binary, MetadataKey, MetadataValue};
+
+    let invalid = || ZerobusError::InvalidArgument(format!("Invalid metadata for header '{key}'"));
+    if key.ends_with("-bin") {
+        let name = MetadataKey::<Binary>::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+        let bytes = STANDARD
+            .decode(value)
+            .or_else(|_| STANDARD_NO_PAD.decode(value))
+            .map_err(|_| invalid())?;
+        let mut value = MetadataValue::<Binary>::from_bytes(&bytes);
+        value.set_sensitive(true);
+        metadata.insert_bin(name, value);
+    } else {
+        let name = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+        let value = MetadataValue::try_from(value).map_err(|_| invalid())?;
+        metadata.insert(name, value);
+    }
+    Ok(())
 }
 
 /// Selects how a token provider keys the shared [`TokenCache`]: OAuth keys by
@@ -560,6 +591,57 @@ impl HeadersProvider for NoAuthHeadersProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn binary_provider_metadata_preserves_bytes_and_wire_encoding() {
+        use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+        use base64::Engine as _;
+        use tonic::metadata::MetadataMap;
+
+        let bytes = b"\0\xff\r\n\x80";
+        for encoded in [STANDARD.encode(bytes), STANDARD_NO_PAD.encode(bytes)] {
+            let mut metadata = MetadataMap::new();
+            insert_header_metadata(&mut metadata, "x-context-bin", &encoded).unwrap();
+            let binary = metadata.get_bin("x-context-bin").unwrap();
+            assert_eq!(binary.to_bytes().unwrap().as_ref(), bytes);
+            assert!(binary.is_sensitive());
+            assert_eq!(
+                metadata.into_headers()["x-context-bin"],
+                STANDARD_NO_PAD.encode(bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_metadata_validates_keys_and_values_without_exposing_values() {
+        use tonic::metadata::MetadataMap;
+
+        let mut metadata = MetadataMap::new();
+        insert_header_metadata(&mut metadata, "x-tenant", "tenant-a").unwrap();
+        assert_eq!(
+            metadata.get("x-tenant").unwrap().to_str().unwrap(),
+            "tenant-a"
+        );
+        insert_header_metadata(&mut metadata, "x-empty-bin", "").unwrap();
+        assert!(metadata
+            .get_bin("x-empty-bin")
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .is_empty());
+        for (key, value) in [
+            ("invalid name-bin", "YQ=="),
+            ("invalid name", "value-should-not-appear"),
+            ("x-context-bin", "secret!invalid-base64"),
+            ("x-ascii", "secret\ninvalid-ascii"),
+        ] {
+            let error = insert_header_metadata(&mut metadata, key, value)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key));
+            assert!(!error.contains(value));
+        }
+    }
 
     /// A minimal blocking HTTP mock of the UC `/oidc/v1/token` endpoint. It runs
     /// on its own OS thread (blocking std IO) so the async test can drive the
