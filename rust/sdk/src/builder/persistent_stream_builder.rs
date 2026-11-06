@@ -76,6 +76,17 @@ impl<'a> PersistentStreamBuilder<'a> {
         self
     }
 
+    /// Authenticate with a Databricks personal access token (PAT).
+    ///
+    /// Same as [`StreamBuilder::personal_access_token`]: the PAT needs the
+    /// `zerobus` API scope, an empty token is rejected, and of this,
+    /// [`oauth`](Self::oauth), and [`headers_provider`](Self::headers_provider),
+    /// the last call wins.
+    pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
+        self.inner = self.inner.personal_access_token(token);
+        self
+    }
+
     /// Authenticate with a custom headers provider.
     pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
         self.inner = self.inner.headers_provider(provider);
@@ -209,5 +220,67 @@ impl<'a> PersistentStreamBuilder<'a> {
         .await?;
         record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(PersistentStream::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{ZerobusError, ZerobusSdk};
+
+    fn test_sdk() -> ZerobusSdk {
+        ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            "http://localhost:5678".to_string(),
+            "test-workspace".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            true,
+        )
+    }
+
+    #[test]
+    fn personal_access_token_validates_and_last_auth_call_wins() {
+        let sdk = test_sdk();
+        let builder = || sdk.persistent_stream_builder().table("t").json();
+
+        builder()
+            .personal_access_token("dapi-test")
+            .validate()
+            .expect("a non-empty token should validate");
+        assert!(matches!(
+            builder().personal_access_token("").validate(),
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+        // Each auth setter replaces the previous one, in both directions.
+        assert!(matches!(
+            builder()
+                .oauth("cid", "csec")
+                .personal_access_token("")
+                .validate(),
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+        builder()
+            .personal_access_token("")
+            .oauth("cid", "csec")
+            .validate()
+            .expect("the later oauth() call should replace the empty token");
+    }
+
+    #[tokio::test]
+    async fn empty_personal_access_token_rejected_before_connecting() {
+        let sdk = test_sdk();
+        let result = sdk
+            .persistent_stream_builder()
+            .table("t")
+            .personal_access_token("")
+            .json()
+            .build()
+            .await;
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
     }
 }

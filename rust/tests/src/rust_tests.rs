@@ -98,6 +98,48 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn test_personal_access_token_stream_ingests_and_flushes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_pat".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .personal_access_token("dapi-test-token")
+            .json()
+            .recovery(false)
+            .build()
+            .await?;
+        stream
+            .ingest_record_offset(r#"{"id":1}"#.to_string())
+            .await?;
+        stream.flush().await?;
+        stream.close().await?;
+
+        assert_eq!(mock_server.get_create_requests().await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_streams_can_share_one_connection() -> Result<(), Box<dyn std::error::Error>> {
         let (mock_server, server_url) = start_mock_server().await?;
         let sdk = ZerobusSdk::builder()
