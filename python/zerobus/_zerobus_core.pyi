@@ -178,6 +178,7 @@ class PersistentStreamSettings:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         headers_provider: Optional[Any] = None,
+        personal_access_token: Optional[str] = None,
         recovery: Optional[bool] = None,
         recovery_timeout_ms: Optional[int] = None,
         recovery_backoff_ms: Optional[int] = None,

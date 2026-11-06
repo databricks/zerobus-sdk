@@ -185,3 +185,69 @@ class TestNativeCreateStreamPat:
         sdk = core.sync.ZerobusSdk(LOCAL_REFUSED, LOCAL_REFUSED)
         with pytest.raises(NonRetriableException):
             sdk.create_stream_pat(_props(), "", NO_RECOVERY)
+
+
+@pytest.fixture(params=["sync", "aio"])
+def mode(request):
+    return request.param
+
+
+@pytest.fixture
+def persistent_builder(mode):
+    sdk = (sync if mode == "sync" else aio).ZerobusSdk(LOCAL_REFUSED, LOCAL_REFUSED)
+    return sdk.persistent_stream_builder().table("c.s.t").json()
+
+
+class TestPersistentBuilder:
+    def test_personal_access_token_passes_validation(self, persistent_builder):
+        assert persistent_builder.personal_access_token(TOKEN) is persistent_builder
+        persistent_builder._native_args()
+
+    @pytest.mark.parametrize("bad", ["", None])
+    def test_rejects_empty_token(self, persistent_builder, bad):
+        with pytest.raises(ValueError):
+            persistent_builder.personal_access_token(bad)
+
+    def test_rejected_token_keeps_earlier_auth(self, persistent_builder):
+        persistent_builder.oauth("id", "secret")
+        with pytest.raises(ValueError):
+            persistent_builder.personal_access_token("")
+        assert persistent_builder._client_id == "id"
+        persistent_builder._native_args()
+
+    def test_last_auth_setter_wins(self, persistent_builder):
+        persistent_builder.oauth("id", "secret").personal_access_token(TOKEN)
+        assert persistent_builder._client_id is None and persistent_builder._client_secret is None
+        assert persistent_builder._personal_access_token == TOKEN
+        persistent_builder._native_args()
+
+        persistent_builder.headers_provider(_Headers())
+        assert persistent_builder._personal_access_token is None
+        persistent_builder._native_args()
+
+        persistent_builder.personal_access_token(TOKEN)
+        assert persistent_builder._headers_provider is None
+        persistent_builder._native_args()
+
+        persistent_builder.oauth("id", "secret")
+        assert persistent_builder._personal_access_token is None
+        persistent_builder._native_args()
+
+    def test_reaches_network(self, persistent_builder, mode):
+        builder = persistent_builder.personal_access_token(TOKEN).recovery(False)
+        with pytest.raises(ZerobusException) as info:
+            if mode == "sync":
+                builder.build()
+            else:
+                asyncio.run(builder.build())
+        assert TOKEN not in str(info.value)
+
+    def test_native_settings_require_exactly_one_auth_method(self):
+        sdk = core.sync.ZerobusSdk(LOCAL_REFUSED, LOCAL_REFUSED)
+        props = core.TableProperties("c.s.t")
+        for settings in (
+            core.PersistentStreamSettings(personal_access_token=TOKEN, client_id="id", client_secret="s"),
+            core.PersistentStreamSettings(personal_access_token=TOKEN, headers_provider=_Headers()),
+        ):
+            with pytest.raises(ValueError, match="exactly one authentication method"):
+                sdk.open_persistent_stream(props, settings)
