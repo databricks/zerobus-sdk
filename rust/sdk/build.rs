@@ -5,6 +5,12 @@ use std::env;
 mod zeroparser_proto_build;
 
 fn main() {
+    // prost-build emits no rerun-if-changed for the protos it compiles. Cargo
+    // reruns a build script on any package change only while the script emits
+    // no rerun-if-changed at all, and the zeroparser build emits some, so list
+    // the service proto here or a proto change goes unnoticed.
+    println!("cargo:rerun-if-changed=zerobus_service.proto");
+    println!("cargo:rerun-if-changed=build.rs");
     env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
     tonic_prost_build::configure()
         .build_server(false)
