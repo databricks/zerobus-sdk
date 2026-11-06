@@ -6,6 +6,13 @@
 
 ### New Features and Improvements
 
+- Added personal access token (PAT) authentication. Pass
+  `auth=PersonalAccessToken(token)` to `create_stream()` (sync and async) to
+  authenticate with a Databricks PAT created with the `zerobus` API scope. The token stays in the Rust
+  core, so no Python callback runs per request, and it is never shown in `repr()`.
+  OAuth service principals remain the recommended option for production. See
+  `examples/sync_example_pat.py`.
+
 ### Bug Fixes
 
 ### Documentation
@@ -25,3 +32,9 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `PersonalAccessToken`, exported from `zerobus` and `zerobus.sdk.shared`. It
+  raises `ValueError` for an empty token.
+- `create_stream(auth=...)` now accepts a `PersonalAccessToken` as well as a
+  `FederatedToken`. As before, `auth=` cannot be combined with
+  `client_id`/`client_secret`.
