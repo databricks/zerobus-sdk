@@ -294,6 +294,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
                         &sdk.zerobus_endpoint,
                         Arc::clone(&sdk.tls_config),
                         sdk.connector_factory.clone(),
+                        sdk.endpoint_override.clone(),
                         table_properties,
                         headers_provider,
                         options,

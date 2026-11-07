@@ -67,6 +67,13 @@ plotters = { version = "0.3", default-features = false, features = ["svg_backend
 prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
+# Local TLS/h2 server for endpoint-override tests (arrow-flight).
+rcgen = "0.13"
+# rcgen allows newer time releases that require Rust 1.88; keep tests compatible
+# with the workspace's Rust 1.85 Arrow dependency floor.
+time = "=0.3.36"
+tokio-rustls.workspace = true
+hyper = { version = "1", features = ["server", "http2"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true

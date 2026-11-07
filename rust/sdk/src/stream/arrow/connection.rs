@@ -19,7 +19,7 @@ use tokio::time::{timeout, timeout_at, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info, warn};
 
 use std::sync::Mutex as StdMutex;
@@ -36,7 +36,7 @@ use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::OffsetId;
-use crate::proxy::{self, ConnectorFactory};
+use crate::proxy::{self, ConnectorFactory, EndpointOverride};
 use crate::stats::{BatchStats, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
@@ -393,6 +393,7 @@ impl ZerobusArrowStream {
                 parameters.endpoint,
                 parameters.tls_config,
                 parameters.connector_factory,
+                parameters.endpoint_override,
                 parameters.table_properties,
                 parameters.options,
                 parameters.headers_provider,
@@ -447,6 +448,7 @@ impl ZerobusArrowStream {
         endpoint: &str,
         tls_config: &Arc<dyn TlsConfig>,
         connector_factory: Option<&ConnectorFactory>,
+        endpoint_override: Option<&EndpointOverride>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
@@ -455,21 +457,14 @@ impl ZerobusArrowStream {
     ) -> ZerobusResult<FlightClient<CompressedSizeChannel>> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
-        let base_endpoint = Channel::from_shared(endpoint.to_string())
-            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
-            .user_agent(sdk_identifier)
-            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
-            .connect_timeout(connection_timeout)
-            .timeout(connection_timeout);
-
-        let configured_endpoint = tls_config.tls_settings()?.apply(base_endpoint)?;
-        let host = configured_endpoint.uri().host().unwrap_or_default();
-        let channel = match proxy::resolve_connector(host, connector_factory)? {
-            Some(proxy_connector) => {
-                configured_endpoint.connect_with_connector_lazy(proxy_connector)
-            }
-            None => configured_endpoint.connect_lazy(),
-        };
+        let channel = build_channel(
+            endpoint,
+            tls_config,
+            connector_factory,
+            endpoint_override,
+            sdk_identifier,
+            connection_timeout,
+        )?;
 
         let inner = FlightServiceClient::new(CompressedSizeChannel::new(channel, compressed_sizes));
         let inner = if options.compression == ArrowCompression::GrpcZstd {
@@ -745,6 +740,7 @@ impl ZerobusArrowStream {
             parameters.endpoint,
             parameters.tls_config,
             parameters.connector_factory,
+            parameters.endpoint_override,
             parameters.table_properties,
             parameters.options,
             parameters.headers_provider,
@@ -832,11 +828,56 @@ impl ZerobusArrowStream {
     }
 }
 
+/// Builds the lazy channel for `endpoint`, honoring proxy and endpoint-override policy.
+fn build_channel(
+    endpoint: &str,
+    tls_config: &Arc<dyn TlsConfig>,
+    connector_factory: Option<&ConnectorFactory>,
+    endpoint_override: Option<&EndpointOverride>,
+    sdk_identifier: &str,
+    connection_timeout: Duration,
+) -> ZerobusResult<Channel> {
+    let new_endpoint = |uri: &str| -> ZerobusResult<Endpoint> {
+        Ok(Channel::from_shared(uri.to_string())
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .user_agent(sdk_identifier)
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .connect_timeout(connection_timeout)
+            .timeout(connection_timeout))
+    };
+    let base_endpoint = new_endpoint(endpoint)?;
+    let tls_settings = tls_config.tls_settings()?;
+
+    let configured_endpoint = tls_settings.clone().apply(base_endpoint)?;
+    let host = configured_endpoint.uri().host().unwrap_or_default();
+    if let Some(proxy_connector) = proxy::resolve_connector(host, connector_factory)? {
+        return Ok(configured_endpoint.connect_with_connector_lazy(proxy_connector));
+    }
+
+    if let Some(dial) = endpoint_override.and_then(|f| f(host)) {
+        // The proxy and the TLS name both need the original endpoint, so the
+        // override is only applied once those are settled.
+        let redirected = new_endpoint(&dial).and_then(|dial_endpoint| {
+            tls_settings
+                .with_default_domain_name(host)
+                .apply(dial_endpoint.origin(configured_endpoint.uri().clone()))
+        });
+        match redirected {
+            Ok(redirected) => return Ok(redirected.connect_lazy()),
+            Err(error) => warn!(target: super::LOG_TARGET,
+                %error, "Ignoring invalid endpoint override; dialing the endpoint as-is"),
+        }
+    }
+    Ok(configured_endpoint.connect_lazy())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tonic::transport::Channel;
 
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -1588,6 +1629,7 @@ mod tests {
             "http://127.0.0.1:1",
             &tls_config,
             None,
+            None,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
             &headers_provider,
@@ -1612,6 +1654,358 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "catalog.schema.table"
+        );
+    }
+
+    /// What a TLS/h2 test server saw on the wire.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Observed {
+        sni: Option<String>,
+        authority: Option<String>,
+        client_cert: bool,
+    }
+
+    struct TlsObserver {
+        addr: std::net::SocketAddr,
+        cert_pem: Vec<u8>,
+        seen: Arc<StdMutex<Vec<Observed>>>,
+    }
+
+    /// Starts a TLS h2 server whose certificate is valid for `san`. It answers
+    /// every request with an empty gRPC `UNIMPLEMENTED` and records SNI and `:authority`.
+    async fn start_tls_observer(san: &str) -> TlsObserver {
+        start_tls_observer_with_client_ca(san, None).await
+    }
+
+    /// Like [`start_tls_observer`]; with `client_ca` set, the handshake requires a
+    /// client certificate chaining to it.
+    async fn start_tls_observer_with_client_ca(
+        san: &str,
+        client_ca: Option<tokio_rustls::rustls::pki_types::CertificateDer<'static>>,
+    ) -> TlsObserver {
+        use tokio_rustls::rustls::server::WebPkiClientVerifier;
+        use tokio_rustls::rustls::{pki_types::PrivatePkcs8KeyDer, RootCertStore, ServerConfig};
+        use tokio_rustls::LazyConfigAcceptor;
+
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec![san.to_string()]).unwrap();
+        let builder = ServerConfig::builder();
+        let builder = match client_ca {
+            Some(ca) => {
+                let mut roots = RootCertStore::empty();
+                roots.add(ca).unwrap();
+                builder.with_client_cert_verifier(
+                    WebPkiClientVerifier::builder(Arc::new(roots))
+                        .build()
+                        .unwrap(),
+                )
+            }
+            None => builder.with_no_client_auth(),
+        };
+        let mut config = builder
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
+            )
+            .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let config = Arc::new(config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<StdMutex<Vec<Observed>>> = Arc::default();
+        let seen_server = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let config = Arc::clone(&config);
+                let seen = Arc::clone(&seen_server);
+                tokio::spawn(async move {
+                    let start = LazyConfigAcceptor::new(Default::default(), tcp)
+                        .await
+                        .unwrap();
+                    let sni = start.client_hello().server_name().map(str::to_string);
+                    let Ok(tls) = start.into_stream(config).await else {
+                        return;
+                    };
+                    let client_cert = tls.get_ref().1.peer_certificates().is_some();
+                    let service =
+                        hyper::service::service_fn(move |request: hyper::http::Request<_>| {
+                            let _: &hyper::body::Incoming = request.body();
+                            seen.lock().unwrap().push(Observed {
+                                sni: sni.clone(),
+                                authority: request.uri().authority().map(|a| a.to_string()),
+                                client_cert,
+                            });
+                            async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::http::Response::builder()
+                                        .header("content-type", "application/grpc")
+                                        .header("grpc-status", "12")
+                                        .body(tonic::body::Body::empty())
+                                        .unwrap(),
+                                )
+                            }
+                        });
+                    let _ = hyper::server::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                    .await;
+                });
+            }
+        });
+        TlsObserver {
+            addr,
+            cert_pem: cert.pem().into_bytes(),
+            seen,
+        }
+    }
+
+    struct TrustingTlsConfig {
+        ca_pem: Vec<u8>,
+        domain_name: Option<&'static str>,
+        client_identity: Option<(Vec<u8>, Vec<u8>)>,
+    }
+
+    impl TlsConfig for TrustingTlsConfig {
+        fn tls_settings(&self) -> ZerobusResult<crate::TlsSettings> {
+            let settings = crate::TlsSettings::new()
+                .without_native_roots()
+                .with_ca_certificate_pem(self.ca_pem.clone());
+            let settings = match &self.client_identity {
+                Some((cert, key)) => settings.with_client_identity_pem(cert.clone(), key.clone()),
+                None => settings,
+            };
+            Ok(match self.domain_name {
+                Some(name) => settings.with_domain_name(name),
+                None => settings,
+            })
+        }
+    }
+
+    fn override_to(
+        dial: String,
+        hosts: Arc<StdMutex<Vec<String>>>,
+    ) -> crate::proxy::EndpointOverride {
+        Arc::new(move |host| {
+            hosts.lock().unwrap().push(host.to_string());
+            Some(dial.clone())
+        })
+    }
+
+    /// Issues one unary gRPC call; the server's `UNIMPLEMENTED` is the expected outcome.
+    async fn probe(channel: Channel) -> tonic::Code {
+        let mut grpc: tonic::client::Grpc<Channel> = tonic::client::Grpc::new(channel);
+        grpc.ready().await.expect("channel connects");
+        let path = "/test.Probe/Call".parse().unwrap();
+        grpc.unary::<(), (), _>(
+            tonic::Request::new(()),
+            path,
+            tonic_prost::ProstCodec::default(),
+        )
+        .await
+        .expect_err("server answers UNIMPLEMENTED")
+        .code()
+    }
+
+    fn channel(
+        endpoint: &str,
+        tls: &Arc<dyn TlsConfig>,
+        connector_factory: Option<&crate::proxy::ConnectorFactory>,
+        endpoint_override: Option<&crate::proxy::EndpointOverride>,
+    ) -> Channel {
+        super::build_channel(
+            endpoint,
+            tls,
+            connector_factory,
+            endpoint_override,
+            "test-agent",
+            Duration::from_secs(5),
+        )
+        .expect("channel builds")
+    }
+
+    #[tokio::test]
+    async fn endpoint_override_keeps_authority_and_uses_configured_domain() {
+        let server = start_tls_observer("regional-dp-apiproxy.service").await;
+        let port = server.addr.port();
+        let tls: Arc<dyn TlsConfig> = Arc::new(TrustingTlsConfig {
+            ca_pem: server.cert_pem.clone(),
+            domain_name: Some("regional-dp-apiproxy.service"),
+            client_identity: None,
+        });
+        let hosts = Arc::new(StdMutex::new(Vec::new()));
+        let endpoint_override = override_to(format!("https://127.0.0.1:{port}"), hosts.clone());
+
+        let channel = channel(
+            &format!("https://shinkansen.example:{port}"),
+            &tls,
+            None,
+            Some(&endpoint_override),
+        );
+
+        assert_eq!(probe(channel).await, tonic::Code::Unimplemented);
+        assert_eq!(*hosts.lock().unwrap(), ["shinkansen.example"]);
+        assert_eq!(
+            *server.seen.lock().unwrap(),
+            [Observed {
+                sni: Some("regional-dp-apiproxy.service".into()),
+                authority: Some(format!("shinkansen.example:{port}")),
+                client_cert: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_override_without_domain_verifies_endpoint_host() {
+        // The certificate is only valid for the endpoint host, so a handshake
+        // against the dialed IP would fail verification.
+        let server = start_tls_observer("shinkansen.example").await;
+        let port = server.addr.port();
+        let tls: Arc<dyn TlsConfig> = Arc::new(TrustingTlsConfig {
+            ca_pem: server.cert_pem.clone(),
+            domain_name: None,
+            client_identity: None,
+        });
+        let endpoint_override = override_to(
+            format!("https://127.0.0.1:{port}"),
+            Arc::new(StdMutex::new(Vec::new())),
+        );
+
+        let channel = channel(
+            &format!("https://shinkansen.example:{port}"),
+            &tls,
+            None,
+            Some(&endpoint_override),
+        );
+
+        assert_eq!(probe(channel).await, tonic::Code::Unimplemented);
+        assert_eq!(
+            *server.seen.lock().unwrap(),
+            [Observed {
+                sni: Some("shinkansen.example".into()),
+                authority: Some(format!("shinkansen.example:{port}")),
+                client_cert: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_override_is_skipped_when_proxy_applies() {
+        let called = Arc::new(AtomicU32::new(0));
+        let called_clone = Arc::clone(&called);
+        let endpoint_override: crate::proxy::EndpointOverride = Arc::new(move |_| {
+            called_clone.fetch_add(1, Ordering::SeqCst);
+            Some("https://127.0.0.1:1".to_string())
+        });
+        let connector_factory: crate::proxy::ConnectorFactory = Arc::new(|_| {
+            Some(crate::ProxyConnector::new("http://127.0.0.1:1").expect("valid proxy URI"))
+        });
+        let tls: Arc<dyn TlsConfig> = Arc::new(PassthroughTlsConfig);
+
+        channel(
+            "https://shinkansen.example:443",
+            &tls,
+            Some(&connector_factory),
+            Some(&endpoint_override),
+        );
+
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn no_override_dials_endpoint_as_is() {
+        let server = start_tls_observer("localhost").await;
+        let port = server.addr.port();
+        let tls: Arc<dyn TlsConfig> = Arc::new(TrustingTlsConfig {
+            ca_pem: server.cert_pem.clone(),
+            domain_name: None,
+            client_identity: None,
+        });
+        let none: crate::proxy::EndpointOverride = Arc::new(|_| None);
+
+        for endpoint_override in [None, Some(&none)] {
+            let channel = channel(
+                &format!("https://localhost:{port}"),
+                &tls,
+                None,
+                endpoint_override,
+            );
+            assert_eq!(probe(channel).await, tonic::Code::Unimplemented);
+        }
+
+        let expected = Observed {
+            sni: Some("localhost".into()),
+            authority: Some(format!("localhost:{port}")),
+            client_cert: false,
+        };
+        assert_eq!(*server.seen.lock().unwrap(), [expected.clone(), expected]);
+    }
+
+    #[tokio::test]
+    async fn invalid_override_uri_falls_back_to_endpoint() {
+        let server = start_tls_observer("localhost").await;
+        let port = server.addr.port();
+        let tls: Arc<dyn TlsConfig> = Arc::new(TrustingTlsConfig {
+            ca_pem: server.cert_pem.clone(),
+            domain_name: None,
+            client_identity: None,
+        });
+        let endpoint_override: crate::proxy::EndpointOverride =
+            Arc::new(|_| Some("not a uri".to_string()));
+
+        let channel = channel(
+            &format!("https://localhost:{port}"),
+            &tls,
+            None,
+            Some(&endpoint_override),
+        );
+
+        assert_eq!(probe(channel).await, tonic::Code::Unimplemented);
+        assert_eq!(
+            server.seen.lock().unwrap()[0].authority,
+            Some(format!("localhost:{port}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_override_presents_client_identity() {
+        let client = rcgen::generate_simple_self_signed(vec!["client".to_string()]).unwrap();
+        let server = start_tls_observer_with_client_ca(
+            "shinkansen.example",
+            Some(client.cert.der().clone()),
+        )
+        .await;
+        let port = server.addr.port();
+        let tls: Arc<dyn TlsConfig> = Arc::new(TrustingTlsConfig {
+            ca_pem: server.cert_pem.clone(),
+            domain_name: None,
+            client_identity: Some((
+                client.cert.pem().into_bytes(),
+                client.key_pair.serialize_pem().into_bytes(),
+            )),
+        });
+        let endpoint_override = override_to(
+            format!("https://127.0.0.1:{port}"),
+            Arc::new(StdMutex::new(Vec::new())),
+        );
+
+        let channel = channel(
+            &format!("https://shinkansen.example:{port}"),
+            &tls,
+            None,
+            Some(&endpoint_override),
+        );
+
+        assert_eq!(probe(channel).await, tonic::Code::Unimplemented);
+        assert_eq!(
+            *server.seen.lock().unwrap(),
+            [Observed {
+                sni: Some("shinkansen.example".into()),
+                authority: Some(format!("shinkansen.example:{port}")),
+                client_cert: true,
+            }]
         );
     }
 }

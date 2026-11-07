@@ -11,7 +11,7 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info, instrument};
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::proxy::{self, ConnectorFactory};
+use crate::proxy::{self, ConnectorFactory, EndpointOverride};
 use crate::stream::ZerobusStream;
 use crate::{StreamBuilder, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdkBuilder};
 
@@ -56,6 +56,8 @@ pub struct ZerobusSdk {
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     pub(crate) connector_factory: Option<ConnectorFactory>,
+    #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
+    pub(crate) endpoint_override: Option<EndpointOverride>,
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     pub(crate) sdk_identifier: Arc<str>,
@@ -162,6 +164,7 @@ impl ZerobusSdk {
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
+        endpoint_override: Option<EndpointOverride>,
         sdk_identifier: Arc<str>,
         token_cache_enabled: bool,
         token_refresh_buffer: Duration,
@@ -175,6 +178,7 @@ impl ZerobusSdk {
             connection_per_stream,
             tls_config,
             connector_factory,
+            endpoint_override,
             sdk_identifier,
             token_cache: Arc::new(crate::token_cache::TokenCache::new(
                 token_cache_enabled,
@@ -312,6 +316,7 @@ impl ZerobusSdk {
             &self.zerobus_endpoint,
             Arc::clone(&self.tls_config),
             self.connector_factory.clone(),
+            self.endpoint_override.clone(),
             stream.table_properties.clone(),
             stream.headers_provider(),
             stream.options().clone(),

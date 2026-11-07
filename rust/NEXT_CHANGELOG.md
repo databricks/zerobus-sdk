@@ -6,6 +6,8 @@
 
 ### New Features and Improvements
 
+- Added `ZerobusSdkBuilder::endpoint_override` (Arrow Flight): dial an alternate address while keeping the endpoint as `:authority` and TLS server name.
+
 ### Bug Fixes
 
 ### Documentation

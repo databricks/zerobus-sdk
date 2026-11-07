@@ -34,7 +34,7 @@ use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
-use crate::proxy::ConnectorFactory;
+use crate::proxy::{ConnectorFactory, EndpointOverride};
 use crate::stats::StatsExporter;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
@@ -68,6 +68,7 @@ struct FlightConnectionParameters<'a> {
     endpoint: &'a str,
     tls_config: &'a Arc<dyn TlsConfig>,
     connector_factory: Option<&'a ConnectorFactory>,
+    endpoint_override: Option<&'a EndpointOverride>,
     table_properties: &'a ArrowTableProperties,
     options: &'a ArrowStreamConfigurationOptions,
     headers_provider: &'a Arc<dyn HeadersProvider>,
@@ -229,6 +230,8 @@ pub struct ZerobusArrowStream {
     tls_config: Arc<dyn TlsConfig>,
     /// Proxy connector policy, reused for every replacement channel.
     connector_factory: Option<ConnectorFactory>,
+    /// Endpoint redirection, reused for every replacement channel.
+    endpoint_override: Option<EndpointOverride>,
     headers_provider: Arc<dyn HeadersProvider>,
     /// Serializes ingestion with pause, replay, and finalization transitions.
     ingest_mutex: Arc<Mutex<()>>,
@@ -273,6 +276,7 @@ impl ZerobusArrowStream {
         endpoint: &str,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
+        endpoint_override: Option<EndpointOverride>,
         table_properties: ArrowTableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
@@ -346,6 +350,7 @@ impl ZerobusArrowStream {
             endpoint: endpoint.to_string(),
             tls_config,
             connector_factory,
+            endpoint_override,
             headers_provider,
             ingest_mutex: Arc::new(Mutex::new(())),
             inflight,
@@ -365,6 +370,7 @@ impl ZerobusArrowStream {
         let endpoint = stream.endpoint.clone();
         let tls_config = Arc::clone(&stream.tls_config);
         let connector_factory = stream.connector_factory.clone();
+        let endpoint_override = stream.endpoint_override.clone();
         let table_properties = stream.table_properties.clone();
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
@@ -376,6 +382,7 @@ impl ZerobusArrowStream {
             let endpoint = endpoint.clone();
             let tls_config = Arc::clone(&tls_config);
             let connector_factory = connector_factory.clone();
+            let endpoint_override = endpoint_override.clone();
             let table_properties = table_properties.clone();
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
@@ -390,6 +397,7 @@ impl ZerobusArrowStream {
                     endpoint: &endpoint,
                     tls_config: &tls_config,
                     connector_factory: connector_factory.as_ref(),
+                    endpoint_override: endpoint_override.as_ref(),
                     table_properties: &table_properties,
                     options: &options,
                     headers_provider: &headers_provider,
