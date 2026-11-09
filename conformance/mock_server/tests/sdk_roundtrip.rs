@@ -120,3 +120,43 @@ async fn retryable_injected_error_recovers() {
     );
     server.shutdown().await.unwrap();
 }
+
+/// An Arrow Flight batch flushes with the SDK's DEFAULT options (zstd IPC compression): the
+/// mock counts rows from the IPC record-batch header without decoding the body, so a zstd
+/// batch is counted and does not hang `flush()` (the row count never stays 0).
+#[tokio::test]
+async fn arrow_flight_batch_flushes() {
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+
+    let server = start_server("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let sdk = sdk_for(server.url()).await;
+
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let stream = sdk
+        .stream_builder()
+        .table(TABLE)
+        .headers_provider(Arc::new(NoAuthHeadersProvider))
+        .arrow(Arc::clone(&schema))
+        .recovery(false)
+        .flush_timeout_ms(5000)
+        .build_arrow()
+        .await
+        .expect("create arrow stream");
+
+    let batch =
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap();
+    stream.ingest_batch(batch).await.expect("ingest batch");
+    stream
+        .flush()
+        .await
+        .expect("flush should succeed (zstd batch counted from the IPC header)");
+
+    assert_eq!(
+        server.state().captured_record_count(),
+        3,
+        "all 3 rows must be counted (not frames), got {}",
+        server.state().captured_record_count()
+    );
+    server.shutdown().await.unwrap();
+}

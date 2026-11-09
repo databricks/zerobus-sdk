@@ -126,7 +126,6 @@ extern bool    zerobus_arrow_stream_close(CArrowStream *stream, CResult *result)
 extern CArrowBatchArray zerobus_arrow_stream_get_unacked_batches(CArrowStream *stream, CResult *result);
 extern void    zerobus_arrow_free_batch_array(CArrowBatchArray array);
 extern bool    zerobus_arrow_stream_is_closed(CArrowStream *stream);
-extern CArrowStreamConfigurationOptions zerobus_arrow_get_default_config(void);
 
 // Shared cleanup helper (from ffi.go's translation unit).
 extern void zerobus_free_error_message(char *message);
@@ -159,8 +158,9 @@ func arrowFfiResult(cres C.CResult) error {
 // convertArrowConfigToC converts Go arrow config to the C representation.
 // Zero-valued fields fall back to defaults.
 func convertArrowConfigToC(opts *ArrowStreamConfigurationOptions) C.CArrowStreamConfigurationOptions {
+	// Go owns its defaults so they don't change when the bundled FFI library is rebuilt.
 	if opts == nil {
-		return C.zerobus_arrow_get_default_config()
+		opts = DefaultArrowStreamConfigurationOptions()
 	}
 	d := DefaultArrowStreamConfigurationOptions()
 
@@ -199,12 +199,12 @@ func convertArrowConfigToC(opts *ArrowStreamConfigurationOptions) C.CArrowStream
 	// Map Go IPCCompressionType to the C wire values: -1=None, 0=LZ4, 1=Zstd.
 	var ipcCompression int32
 	switch opts.IPCCompression {
+	case IPCCompressionNone:
+		ipcCompression = -1
 	case IPCCompressionLZ4Frame:
 		ipcCompression = 0
-	case IPCCompressionZstd:
+	default: // IPCCompressionDefault, IPCCompressionZstd
 		ipcCompression = 1
-	default: // IPCCompressionDefault, IPCCompressionNone
-		ipcCompression = -1
 	}
 
 	// Map Go stream_paused_max_wait_time_ms: nil → -1 (wait full server duration).

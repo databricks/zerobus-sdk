@@ -34,7 +34,7 @@ use super::{
 };
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
-use crate::headers_provider::HeadersProvider;
+use crate::headers_provider::{insert_header_metadata, HeadersProvider};
 use crate::offset_generator::OffsetId;
 use crate::proxy::{self, ConnectorFactory};
 use crate::stats::{BatchStats, StatsExporter, StreamStat};
@@ -505,9 +505,7 @@ impl ZerobusArrowStream {
                     .insert(AUTHORIZATION_HEADER, auth_value);
                 continue;
             }
-            client.add_header(key, &value).map_err(|e| {
-                ZerobusError::InvalidArgument(format!("Failed to add header '{}': {}", key, e))
-            })?;
+            insert_header_metadata(client.metadata_mut(), key, &value)?;
         }
 
         // Add the required table name header (authoritative, added last to ensure it's set).
@@ -866,6 +864,7 @@ mod tests {
             Ok(HashMap::from([
                 ("authorization", "Bearer secret-token".to_string()),
                 ("x-custom-header", "custom-value".to_string()),
+                ("x-custom-bin", "AP8NCg==".to_string()),
             ]))
         }
     }
@@ -1600,6 +1599,10 @@ mod tests {
         let authorization = client.metadata().get("authorization").unwrap();
         assert!(authorization.is_sensitive());
         assert_eq!(authorization.to_str().unwrap(), "Bearer secret-token");
+
+        let binary = client.metadata().get_bin("x-custom-bin").unwrap();
+        assert_eq!(binary.to_bytes().unwrap().as_ref(), b"\0\xff\r\n");
+        assert!(binary.is_sensitive());
 
         let custom_header = client.metadata().get("x-custom-header").unwrap();
         assert!(!custom_header.is_sensitive());
