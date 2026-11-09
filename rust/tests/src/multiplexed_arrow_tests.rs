@@ -227,7 +227,7 @@ async fn binary_header_reaches_server_decoded() {
 }
 
 #[tokio::test]
-async fn builder_applies_shared_settings_to_every_lane() {
+async fn mux_build_applies_shared_settings() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();
     server
         .inject_responses(

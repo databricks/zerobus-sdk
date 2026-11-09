@@ -6,7 +6,8 @@ use std::task::Poll;
 use std::time::Duration;
 
 use databricks_zerobus_ingest_sdk::{
-    GrpcCode, MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
+    GrpcCode, JsonString, MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk,
+    ZerobusStream,
 };
 use futures::poll;
 use tracing::info;
@@ -66,8 +67,7 @@ mod construction_tests {
     use super::*;
 
     #[tokio::test]
-    async fn builder_applies_shared_settings_to_every_lane(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn mux_build_applies_shared_settings() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         let limit = 1024;
         let (_mock_server, server_url) = start_mock_server().await?;
@@ -76,16 +76,20 @@ mod construction_tests {
             .stream_builder()
             .table("builder.schema.shared_settings")
             .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap())
+            .json()
             .max_ingest_payload_bytes(limit)
             .multiplexed(2)
             .build()
             .await?;
 
-        let result = mux.ingest_record(vec![0u8; limit + 1]).await;
+        let result = mux.ingest_record(JsonString("a".repeat(limit + 1))).await;
 
+        let expected = format!(
+            "Ingest payload too large: {} bytes exceeds the configured limit of {limit} bytes",
+            limit + 1
+        );
         assert!(
-            matches!(result, Err(ZerobusError::InvalidArgument(_))),
+            matches!(&result, Err(ZerobusError::InvalidArgument(msg)) if *msg == expected),
             "{result:?}"
         );
         Ok(())
