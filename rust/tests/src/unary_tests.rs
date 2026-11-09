@@ -23,7 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tonic::Status;
-use utils::setup_tracing;
+use utils::{setup_tracing, BinaryHeadersProvider};
 use zerobus_test_support::mock_grpc::{
     start_mock_server, MockInsertResponse, MockResponse, MockZerobusServer, ReceivedInsert,
 };
@@ -367,6 +367,30 @@ async fn sends_the_provider_headers_and_the_user_agent() {
         user_agent.starts_with("zerobus-sdk-rs/") && user_agent.contains("unary-test-app"),
         "{user_agent}"
     );
+}
+
+#[tokio::test]
+async fn binary_header_reaches_server_decoded() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let sdk = sdk_builder(&url).build().unwrap();
+    let client = sdk
+        .unary_client_builder()
+        .table(TABLE_NAME)
+        .headers_provider(Arc::new(BinaryHeadersProvider("AP8NCg==")))
+        .json()
+        .build()
+        .await
+        .unwrap();
+
+    client.ingest_records(records(0..1)).await.unwrap();
+
+    let requests = requests(&server).await;
+    let value = requests[0]
+        .metadata
+        .get_bin("x-test-bin")
+        .map(|value| value.to_bytes().unwrap().to_vec());
+    assert_eq!(value, Some(b"\0\xff\r\n".to_vec()));
 }
 
 #[tokio::test]
