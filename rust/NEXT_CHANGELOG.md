@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- `HeadersProvider` can now send binary gRPC metadata on both gRPC and Arrow Flight
+  streams. Header names ending in `-bin` take a standard base64 value, with or
+  without padding. The SDK decodes it and sends the bytes as sensitive binary
+  metadata. Previously, these headers failed to send.
+
 ### Bug Fixes
 
 ### Documentation
