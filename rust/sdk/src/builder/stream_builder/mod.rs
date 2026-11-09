@@ -39,7 +39,7 @@ use crate::callbacks::AckCallback;
 use crate::client_warnings::{record_stream_creation, warn_payload_limit_ignored_for_arrow};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
-use crate::stream_configuration::StreamConfigurationOptions;
+use crate::stream_configuration::{RecordType, StreamConfigurationOptions};
 use crate::{
     MessageDescriptor, MessageId, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk,
 };
@@ -99,16 +99,60 @@ use crate::stream::{
 #[must_use = "a StreamBuilder does nothing until `.build()` is called"]
 pub struct StreamBuilder<'a> {
     core: ClientBuilderCore<'a>,
-    /// Stream-only gRPC settings. Its copies of the core's settings are stale
-    /// until [`grpc_options`](Self::grpc_options) fills them in at build time.
-    grpc_config: StreamConfigurationOptions,
+    settings: StreamSettings,
     multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
-    /// Stream-only Arrow settings. Its copies of the core's settings are stale
-    /// until [`arrow_options`](Self::arrow_options) fills them in at build time.
-    #[cfg(feature = "arrow-flight")]
-    arrow_config: ArrowStreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
     stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
+}
+
+/// Settings only streams have. The settings the core owns are not repeated
+/// here; [`grpc_options`](StreamBuilder::grpc_options) and
+/// [`arrow_options`](StreamBuilder::arrow_options) combine the two at build time.
+struct StreamSettings {
+    // gRPC and Arrow Flight streams.
+    recovery_timeout_ms: u64,
+    flush_timeout_ms: u64,
+    stream_paused_max_wait_time_ms: Option<u64>,
+    // gRPC streams only.
+    max_inflight_requests: usize,
+    ack_callback: Option<Arc<dyn AckCallback>>,
+    callback_max_wait_time_ms: Option<u64>,
+    // Arrow Flight streams only.
+    #[cfg(feature = "arrow-flight")]
+    max_inflight_batches: usize,
+    #[cfg(feature = "arrow-flight")]
+    connection_timeout_ms: u64,
+    #[cfg(feature = "arrow-flight")]
+    ipc_compression: Option<arrow_ipc::CompressionType>,
+    #[cfg(feature = "arrow-flight")]
+    compression: crate::ArrowCompression,
+}
+
+impl Default for StreamSettings {
+    /// Takes the defaults from the public options types, so they stay defined in
+    /// one place.
+    #[allow(deprecated)]
+    fn default() -> Self {
+        let grpc = StreamConfigurationOptions::default();
+        #[cfg(feature = "arrow-flight")]
+        let arrow = ArrowStreamConfigurationOptions::default();
+        Self {
+            recovery_timeout_ms: grpc.recovery_timeout_ms,
+            flush_timeout_ms: grpc.flush_timeout_ms,
+            stream_paused_max_wait_time_ms: grpc.stream_paused_max_wait_time_ms,
+            max_inflight_requests: grpc.max_inflight_requests,
+            ack_callback: grpc.ack_callback,
+            callback_max_wait_time_ms: grpc.callback_max_wait_time_ms,
+            #[cfg(feature = "arrow-flight")]
+            max_inflight_batches: arrow.max_inflight_batches,
+            #[cfg(feature = "arrow-flight")]
+            connection_timeout_ms: arrow.connection_timeout_ms,
+            #[cfg(feature = "arrow-flight")]
+            ipc_compression: arrow.ipc_compression,
+            #[cfg(feature = "arrow-flight")]
+            compression: arrow.compression,
+        }
+    }
 }
 
 /// Resolved inputs shared by the gRPC stream terminals: `StreamBuilder::build`
@@ -128,7 +172,7 @@ impl fmt::Debug for StreamBuilder<'_> {
             .field("table_name", &self.core.table_name)
             .field("auth", &self.core.auth_kind())
             .field("format", &self.core.format_kind())
-            .field("ack_callback", &self.grpc_config.ack_callback.is_some())
+            .field("ack_callback", &self.settings.ack_callback.is_some())
             .field(
                 "multiplexed_ack_callback",
                 &self.multiplexed_callback.is_some(),
@@ -142,10 +186,8 @@ impl<'a> StreamBuilder<'a> {
     pub(crate) fn new(sdk: &'a ZerobusSdk) -> Self {
         Self {
             core: ClientBuilderCore::new(sdk),
-            grpc_config: StreamConfigurationOptions::default(),
+            settings: StreamSettings::default(),
             multiplexed_callback: None,
-            #[cfg(feature = "arrow-flight")]
-            arrow_config: ArrowStreamConfigurationOptions::default(),
             #[cfg(feature = "arrow-flight")]
             stats_exporter: None,
         }
@@ -259,11 +301,7 @@ impl<'a> StreamBuilder<'a> {
     /// life left than that cap, so a stalled endpoint falls back before the
     /// attempt deadline. Very near expiry the refresh runs unbounded.
     pub fn recovery_timeout_ms(mut self, ms: u64) -> Self {
-        self.grpc_config.recovery_timeout_ms = ms;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.recovery_timeout_ms = ms;
-        }
+        self.settings.recovery_timeout_ms = ms;
         self
     }
 
@@ -287,11 +325,7 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the timeout in milliseconds for flush operations.
     pub fn flush_timeout_ms(mut self, ms: u64) -> Self {
-        self.grpc_config.flush_timeout_ms = ms;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.flush_timeout_ms = ms;
-        }
+        self.settings.flush_timeout_ms = ms;
         self
     }
 
@@ -301,7 +335,7 @@ impl<'a> StreamBuilder<'a> {
     /// receives `n / stream_count` capacity; any remainder is unused. The
     /// budget must be at least the number of sub-streams.
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
-        self.grpc_config.max_inflight_requests = n;
+        self.settings.max_inflight_requests = n;
         self
     }
 
@@ -324,11 +358,7 @@ impl<'a> StreamBuilder<'a> {
 
     /// Set the maximum wait time during graceful stream pause (JSON/proto and Arrow streams).
     pub fn stream_paused_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
-        self.grpc_config.stream_paused_max_wait_time_ms = ms;
-        #[cfg(feature = "arrow-flight")]
-        {
-            self.arrow_config.stream_paused_max_wait_time_ms = ms;
-        }
+        self.settings.stream_paused_max_wait_time_ms = ms;
         self
     }
 
@@ -337,14 +367,14 @@ impl<'a> StreamBuilder<'a> {
     /// Calling this setter again replaces the previous ordinary callback.
     /// [`MultiplexedStreamBuilder::validate`] and `build_arrow()` reject it.
     pub fn ack_callback(mut self, callback: Arc<dyn AckCallback>) -> Self {
-        self.grpc_config.ack_callback = Some(callback);
+        self.settings.ack_callback = Some(callback);
         self
     }
 
     /// Set the maximum wait time for callbacks after stream close
     /// (JSON and Protocol Buffer gRPC streams only).
     pub fn callback_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
-        self.grpc_config.callback_max_wait_time_ms = ms;
+        self.settings.callback_max_wait_time_ms = ms;
         self
     }
 
@@ -377,14 +407,14 @@ impl<'a> StreamBuilder<'a> {
     /// unused. The budget must be at least the lane count.
     #[cfg(feature = "arrow-flight")]
     pub fn max_inflight_batches(mut self, n: usize) -> Self {
-        self.arrow_config.max_inflight_batches = n;
+        self.settings.max_inflight_batches = n;
         self
     }
 
     /// Set the connection timeout in milliseconds for Arrow Flight (Arrow streams only).
     #[cfg(feature = "arrow-flight")]
     pub fn connection_timeout_ms(mut self, ms: u64) -> Self {
-        self.arrow_config.connection_timeout_ms = ms;
+        self.settings.connection_timeout_ms = ms;
         self
     }
 
@@ -396,8 +426,8 @@ impl<'a> StreamBuilder<'a> {
     #[deprecated(since = "3.0.0", note = "Use `compression` instead")]
     #[allow(deprecated)]
     pub fn ipc_compression(mut self, compression: Option<arrow_ipc::CompressionType>) -> Self {
-        self.arrow_config.ipc_compression = compression;
-        self.arrow_config.compression = crate::ArrowCompression::FallbackToLegacy;
+        self.settings.ipc_compression = compression;
+        self.settings.compression = crate::ArrowCompression::FallbackToLegacy;
         self
     }
 
@@ -409,34 +439,49 @@ impl<'a> StreamBuilder<'a> {
     /// [`ArrowCompression`](crate::ArrowCompression) for the options.
     #[cfg(feature = "arrow-flight")]
     pub fn compression(mut self, compression: crate::ArrowCompression) -> Self {
-        self.arrow_config.compression = compression;
+        self.settings.compression = compression;
         self
     }
 
-    /// The gRPC stream options, with the settings the core owns copied in.
-    fn grpc_options(&self) -> StreamConfigurationOptions {
-        let core = &self.core;
+    /// The gRPC stream options, built from the core and the stream settings. The
+    /// literal names every field, so a new options field does not compile until
+    /// it is given a source.
+    fn grpc_options(&self, record_type: RecordType) -> StreamConfigurationOptions {
+        let (core, s) = (&self.core, &self.settings);
         StreamConfigurationOptions {
+            record_type,
             recovery: core.recovery,
             recovery_retries: core.recovery_retries,
             recovery_backoff_ms: core.recovery_backoff_ms,
             server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
             max_ingest_payload_bytes: core.max_ingest_payload_bytes,
-            ..self.grpc_config.clone()
+            recovery_timeout_ms: s.recovery_timeout_ms,
+            flush_timeout_ms: s.flush_timeout_ms,
+            stream_paused_max_wait_time_ms: s.stream_paused_max_wait_time_ms,
+            max_inflight_requests: s.max_inflight_requests,
+            ack_callback: s.ack_callback.clone(),
+            callback_max_wait_time_ms: s.callback_max_wait_time_ms,
         }
     }
 
-    /// The Arrow stream options, with the settings the core owns copied in.
-    /// Arrow has no payload limit, so `max_ingest_payload_bytes` is not copied.
+    /// The Arrow stream options, built from the core and the stream settings.
+    /// Arrow has no payload limit, so `max_ingest_payload_bytes` is not used.
     #[cfg(feature = "arrow-flight")]
+    #[allow(deprecated)]
     fn arrow_options(&self) -> ArrowStreamConfigurationOptions {
-        let core = &self.core;
+        let (core, s) = (&self.core, &self.settings);
         ArrowStreamConfigurationOptions {
             recovery: core.recovery,
             recovery_retries: core.recovery_retries,
             recovery_backoff_ms: core.recovery_backoff_ms,
             server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
-            ..self.arrow_config.clone()
+            recovery_timeout_ms: s.recovery_timeout_ms,
+            flush_timeout_ms: s.flush_timeout_ms,
+            stream_paused_max_wait_time_ms: s.stream_paused_max_wait_time_ms,
+            max_inflight_batches: s.max_inflight_batches,
+            connection_timeout_ms: s.connection_timeout_ms,
+            ipc_compression: s.ipc_compression,
+            compression: s.compression,
         }
     }
 
@@ -494,11 +539,8 @@ impl<'a> StreamBuilder<'a> {
     fn resolve_headers_provider(&self) -> ZerobusResult<Arc<dyn HeadersProvider>> {
         // Give a proactive refresh half the recovery timeout so a stalled
         // refresh falls back to the cached token before the setup deadline
-        // cancels the request. The recovery-timeout setter writes the gRPC
-        // and Arrow configs in lockstep, so grpc_config is a valid single
-        // source even for an Arrow stream; revisit if a per-transport
-        // recovery timeout is ever added.
-        let refresh_timeout = Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
+        // cancels the request.
+        let refresh_timeout = Duration::from_millis(self.settings.recovery_timeout_ms) / 2;
         self.core.resolve_headers_provider(refresh_timeout)
     }
 
@@ -522,8 +564,7 @@ impl<'a> StreamBuilder<'a> {
             .into_grpc()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let mut config = self.grpc_options();
-        config.record_type = format.record_type;
+        let config = self.grpc_options(format.record_type);
         let table_properties = TableProperties {
             table_name: self.core.table_name,
             descriptor_proto: format.descriptor_proto,
@@ -596,7 +637,7 @@ impl<'a> StreamBuilder<'a> {
     fn validate_arrow(&self) -> ZerobusResult<Arc<ArrowSchema>> {
         let schema = Arc::clone(self.arrow_schema()?);
 
-        if self.grpc_config.ack_callback.is_some() || self.multiplexed_callback.is_some() {
+        if self.settings.ack_callback.is_some() || self.multiplexed_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
                 "ack_callback and multiplexed_ack_callback are not supported for Arrow Flight streams"
                     .into(),
@@ -605,7 +646,7 @@ impl<'a> StreamBuilder<'a> {
 
         // Arrow-only: a zero bound deadlocks ingest / panics the channel. Not in the
         // shared validate() since it's irrelevant to JSON/proto build().
-        if self.arrow_config.max_inflight_batches == 0 {
+        if self.settings.max_inflight_batches == 0 {
             return Err(ZerobusError::InvalidArgument(
                 "max_inflight_batches must be greater than 0".into(),
             ));

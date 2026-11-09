@@ -247,7 +247,7 @@ fn default_config_without_setters() {
         .table("t")
         .oauth("a", "b")
         .json()
-        .grpc_options();
+        .grpc_options(RecordType::Json);
     assert_eq!(options.max_inflight_requests, 1_000_000);
     assert!(options.recovery);
     assert_eq!(
@@ -267,7 +267,9 @@ fn max_ingest_payload_bytes_override() {
         .json()
         .max_ingest_payload_bytes(5 * 1024 * 1024);
     assert_eq!(
-        builder.grpc_options().max_ingest_payload_bytes,
+        builder
+            .grpc_options(RecordType::Json)
+            .max_ingest_payload_bytes,
         5 * 1024 * 1024
     );
 }
@@ -286,7 +288,7 @@ fn shared_setters_reach_grpc_options() {
         .server_lack_of_ack_timeout_ms(10_000)
         .max_ingest_payload_bytes(1_000)
         .max_inflight_requests(7)
-        .grpc_options();
+        .grpc_options(RecordType::Json);
     assert!(!options.recovery);
     assert_eq!(options.recovery_backoff_ms, 500);
     assert_eq!(options.recovery_retries, 2);
@@ -572,7 +574,7 @@ fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
 #[allow(deprecated)]
 fn compression_defaults_to_deprecated_ipc_zstd() {
     let sdk = test_sdk();
-    let config = arrow_test_builder(&sdk).arrow_config;
+    let config = arrow_test_builder(&sdk).arrow_options();
     assert_eq!(
         config.compression,
         crate::ArrowCompression::FallbackToLegacy
@@ -591,13 +593,13 @@ fn last_compression_setter_wins() {
     let new_last = arrow_test_builder(&sdk)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .compression(crate::ArrowCompression::GrpcZstd)
-        .arrow_config;
+        .arrow_options();
     assert_eq!(new_last.compression, crate::ArrowCompression::GrpcZstd);
 
     let deprecated_last = arrow_test_builder(&sdk)
         .compression(crate::ArrowCompression::GrpcZstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .arrow_config;
+        .arrow_options();
     assert_eq!(
         deprecated_last.compression,
         crate::ArrowCompression::FallbackToLegacy

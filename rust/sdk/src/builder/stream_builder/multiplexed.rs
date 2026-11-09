@@ -133,7 +133,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             if self.max_inflight_batches_per_stream().is_none() {
                 return Err(ZerobusError::InvalidArgument(format!(
                     "max_inflight_batches ({}) must be at least stream_count ({}) for multiplexed streams",
-                    self.inner.arrow_config.max_inflight_batches, self.stream_count
+                    self.inner.settings.max_inflight_batches, self.stream_count
                 )));
             }
             return Ok(());
@@ -142,11 +142,11 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         if self.max_inflight_requests_per_stream().is_none() {
             return Err(ZerobusError::InvalidArgument(format!(
                 "max_inflight_requests ({}) must be at least stream_count ({}) for multiplexed streams",
-                self.inner.grpc_config.max_inflight_requests, self.stream_count
+                self.inner.settings.max_inflight_requests, self.stream_count
             )));
         }
 
-        if self.inner.grpc_config.ack_callback.is_some() {
+        if self.inner.settings.ack_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
                 "ack_callback is only valid for ordinary streams; use multiplexed_ack_callback before .multiplexed(...)"
                     .into(),
@@ -157,7 +157,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
     pub(super) fn max_inflight_requests_per_stream(&self) -> Option<usize> {
         self.inner
-            .grpc_config
+            .settings
             .max_inflight_requests
             .checked_div(self.stream_count)
             .filter(|&capacity| capacity > 0)
@@ -216,8 +216,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
-        let mut options = self.inner.grpc_options();
-        options.record_type = format.record_type;
+        let mut options = self.inner.grpc_options(format.record_type);
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
@@ -252,7 +251,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub(super) fn max_inflight_batches_per_stream(&self) -> Option<usize> {
         self.inner
-            .arrow_config
+            .settings
             .max_inflight_batches
             .checked_div(self.stream_count)
             .filter(|&capacity| capacity > 0)
