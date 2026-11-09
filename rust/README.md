@@ -73,6 +73,8 @@ cargo add tokio --features macros,rt-multi-thread
 
 > **What's in the crates.io package?** The published crate contains only the core Zerobus ingestion SDK. Tools for schema generation (`tools/generate_files`) and working examples (`examples/`) are only available in the [GitHub repository](https://github.com/databricks/zerobus-sdk). You'll need to clone the repo to generate protobuf schemas from your Unity Catalog tables.
 
+The default `webpki-version-floor` feature requires `rustls-webpki` 0.103.16 or later and `webpki-roots` 1.0.11 or later, which stop trusting the compromised eMudhra (emSign) CAs. The SDK does not use these crates itself; the feature only raises their minimum versions in your dependency graph. If you set `default-features = false`, add `webpki-version-floor` back to `features` unless you get the eMudhra distrust some other way.
+
 ### For Local Development
 
 Clone the repository and use a path dependency:
@@ -432,7 +434,7 @@ For state ownership, replay, rotation, and concurrency invariants, see the
 The SDK uses OAuth 2.0 client credentials flow:
 
 1. SDK constructs authorization request with Unity Catalog privileges
-2. Sends request to `{uc_endpoint}/oidc/v1/token` with client credentials
+2. Sends request to `{workspace_url}/oidc/v1/token` with client credentials
 3. Token includes scoped permissions for the specific table
 4. Token is attached to gRPC metadata as Bearer token
 5. Tokens are cached per table and reused across connections until they near expiry (see Token Caching below)
@@ -443,15 +445,17 @@ OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (c
 
 Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
 
-SDK builder options tune connection and token behavior:
+SDK builder options tune connection and token behavior. Here and in the snippets below,
+`server_endpoint` and `workspace_url` hold your Zerobus server endpoint and workspace URL
+(see the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)):
 
 ```rust
 use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use std::time::Duration;
 
 let sdk = ZerobusSdk::builder()
-    .endpoint("https://<your-workspace>.zerobus.<region>.cloud.databricks.com")
-    .unity_catalog_url("https://<your-workspace>.cloud.databricks.com")
+    .endpoint(server_endpoint)
+    .unity_catalog_url(workspace_url)
     // Refresh a cached token once it is within 10 minutes of expiry (default: 5 minutes).
     .token_refresh_buffer(Duration::from_secs(600))
     // Or disable caching entirely to mint a fresh token per stream.
@@ -520,22 +524,16 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 > cd zerobus-sdk/rust
 > ```
 
-Use the included tool to generate schema files from your Unity Catalog table:
+Use the included tool to generate schema files from your Unity Catalog table. Pass your
+workspace URL as `--uc-endpoint`; see the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for its format:
 
 ```bash
 cd tools/generate_files
 
-# For AWS
 cargo run -- \
-  --uc-endpoint "https://<your-workspace>.cloud.databricks.com" \
-  --client-id "your-client-id" \
-  --client-secret "your-client-secret" \
-  --table "catalog.schema.table" \
-  --output-dir "../../output"
-
-# For Azure
-cargo run -- \
-  --uc-endpoint "https://<your-workspace>.azuredatabricks.net" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table" \
@@ -553,19 +551,14 @@ See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/r
 
 ### 2. Initialize the SDK
 
-Create an SDK instance using the builder pattern:
+Create an SDK instance using the builder pattern. See the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the format of the
+Zerobus server endpoint and workspace URL on each cloud.
 
 ```rust
-// For AWS
 let sdk = ZerobusSdk::builder()
-    .endpoint("https://<your-shard-id>.zerobus.<region>.cloud.databricks.com")
-    .unity_catalog_url("https://<your-workspace>.cloud.databricks.com")
-    .build()?;
-
-// For Azure
-let sdk = ZerobusSdk::builder()
-    .endpoint("https://<your-shard-id>.zerobus.<region>.azuredatabricks.net")
-    .unity_catalog_url("https://<your-workspace>.azuredatabricks.net")
+    .endpoint(server_endpoint)
+    .unity_catalog_url(workspace_url)
     .build()?;
 ```
 
@@ -602,8 +595,8 @@ let tls = TlsSettings::new()
     .with_client_identity_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
 
 let sdk = ZerobusSdk::builder()
-    .endpoint("https://<your-shard-id>.zerobus.<region>.azuredatabricks.net")
-    .unity_catalog_url("https://<your-workspace>.azuredatabricks.net")
+    .endpoint(server_endpoint)
+    .unity_catalog_url(workspace_url)
     .tls_config(Arc::new(tls))
     .build()?;
 ```
@@ -640,7 +633,7 @@ A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC en
 The SDK handles authentication automatically. You just need to provide:
 - **Client ID** - Your OAuth client ID
 - **Client Secret** - Your OAuth client secret
-- **Unity Catalog Endpoint** - Passed to SDK constructor
+- **Workspace URL** - Passed to the SDK builder
 - **Table Name** - Included in table properties
 
 ```rust
@@ -1199,7 +1192,7 @@ Also accepts `0` or `no`.
 | Method | Default | Description |
 |--------|---------|-------------|
 | `endpoint(...)` | Required | Set the Zerobus API endpoint. |
-| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required for built-in OAuth or federated authentication (both exchange tokens at this URL). |
+| `unity_catalog_url(...)` | Unset | Set the Databricks workspace URL. Required for built-in OAuth or federated authentication (both exchange tokens at this URL). |
 | `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
 | `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
 | `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
@@ -1472,8 +1465,8 @@ Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main
 
 ```rust
 let sdk = ZerobusSdk::builder()
-    .endpoint(endpoint)
-    .unity_catalog_url(uc_endpoint)
+    .endpoint(server_endpoint)
+    .unity_catalog_url(workspace_url)
     .build()?;
 
 let mut stream = sdk
@@ -1533,8 +1526,8 @@ Main entry point for the SDK.
 **Builder:**
 ```rust
 let sdk = ZerobusSdk::builder()
-    .endpoint("https://workspace.zerobus.databricks.com")  // Required
-    .unity_catalog_url("https://workspace.cloud.databricks.com")  // Optional with custom headers
+    .endpoint(server_endpoint)  // Required
+    .unity_catalog_url(workspace_url)  // Optional with custom headers
     .tls_config(Arc::new(SecureTlsConfig::new()))  // Optional, defaults to SecureTlsConfig
     .build()?;
 ```

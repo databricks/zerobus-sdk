@@ -20,10 +20,10 @@ This script fetches table schema from Unity Catalog and generates a correspondin
     epilog = """
 Examples:
     # Generate proto file for a Unity Catalog table
-    # Note: For AWS, use https://your-workspace.cloud.databricks.com
-    #       For Azure, use https://your-workspace.azuredatabricks.net
+    # Workspace URL formats:
+    # https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id
     python generate_proto.py \\
-        --uc-endpoint "https://your-workspace.cloud.databricks.com" \\
+        --uc-endpoint "<your-databricks-workspace-url>" \\
         --client-id "your-client-id" \\
         --client-secret "your-client-secret" \\
         --table "catalog.schema.table_name" \\
@@ -60,8 +60,7 @@ Type mappings:
         "--uc-endpoint",
         type=str,
         required=True,
-        help="Unity Catalog endpoint URL (e.g., https://your-workspace.cloud.databricks.com for AWS"
-        " or https://your-workspace.azuredatabricks.net for Azure)",
+        help="Databricks workspace URL used for Unity Catalog (formats are linked below)",
     )
 
     parser.add_argument(

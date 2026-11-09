@@ -42,18 +42,33 @@ We try to provide prebuilt native binaries for the following platforms:
 
 Before using any SDK, you need the following:
 
-### 1. Workspace URL and Workspace ID
+### 1. Connection URLs and Workspace ID
 
-After logging into your Databricks workspace, look at the browser URL:
+Every SDK takes two URLs: the Databricks workspace URL, used for Unity Catalog and OAuth,
+and the Zerobus server endpoint, used for ingestion. Their format depends on the cloud
+that hosts your workspace:
 
-```
-https://<databricks-instance>.cloud.databricks.com/o=<workspace-id>
-```
+| Cloud | Databricks workspace URL | Zerobus server endpoint |
+| ----- | ------------------------ | ----------------------- |
+| AWS | `https://<databricks-instance>.cloud.databricks.com` | `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` |
+| Azure | `https://<databricks-instance>.azuredatabricks.net` | `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` |
+| GCP | `https://<databricks-instance>.gcp.databricks.com` | `https://<workspace-id>.zerobus.<region>.gcp.databricks.com` |
 
-- **Workspace URL**: The part before `/o=` (e.g., `https://dbc-a1b2c3d4-e5f6.cloud.databricks.com`)
-- **Workspace ID**: The part after `/o=` (e.g., `1234567890123456`)
+After logging into your workspace, look at the browser URL, for example
+`https://<databricks-instance>.cloud.databricks.com/?o=<workspace-id>`:
 
-> **Note:** The examples above show AWS endpoints (`.cloud.databricks.com`). For Azure deployments, the workspace URL will be `https://<databricks-instance>.azuredatabricks.net`.
+- Workspace URL: everything before `/?o=`. Use it exactly as shown.
+- Workspace ID: the number after `o=`. If the browser URL has no `o=` parameter, copy
+  the ID from the account console or the workspace details page.
+- Region: the cloud region the workspace is deployed in, such as `us-west-2` on AWS,
+  `eastus2` on Azure, or `us-east1` on GCP.
+
+The Zerobus endpoint is built from the workspace ID and region, not from the workspace
+host. On GCP, for example, the workspace URL `https://1234567890123456.0.gcp.databricks.com`
+pairs with the endpoint `https://1234567890123456.zerobus.us-east1.gcp.databricks.com`.
+
+Pass both values as complete URLs, including `https://`, for consistent behavior across
+SDKs.
 
 ### 2. Create a Delta Table
 
@@ -101,7 +116,7 @@ Pick the record format that matches your data.
 
 - JSON: schema-free ingestion. Pass a JSON string or a native object (dict, map, and so on) and the SDK serializes it. No compilation step. Good for getting started or dynamic schemas.
 - Protocol Buffers: strongly-typed, schema-validated ingestion. More compact on the wire than JSON. A typical choice for production workloads that are not already producing Arrow.
-- Avro (beta): row-oriented binary encoding against a declared writer schema. Pass a record object or pre-encoded Avro bytes. Currently available in the Rust, Python, and Java SDKs; support in the other SDKs is in development.
+- Avro (beta): row-oriented binary encoding against a declared writer schema. Pass a record object or pre-encoded Avro bytes. Currently available in the Rust, Python, Java, and TypeScript SDKs; support in the other SDKs is in development.
 - Arrow Flight: Apache Arrow `RecordBatch` data over the Arrow Flight protocol. Best when the workload is columnar or batched, or the application already produces Arrow (pyarrow, [arrow-rs](https://github.com/apache/arrow-rs), DataFusion, Polars).
 
 JSON, Protocol Buffers, and Avro use one row-based stream API; Arrow Flight is a separate columnar API. Availability per SDK is below — Avro is beta and still rolling out.
@@ -112,7 +127,7 @@ JSON, Protocol Buffers, and Avro use one row-based stream API; Arrow Flight is a
 | Python | Available | Beta | Available since 1.8.0 |
 | Go (cgo) | Available | In development | Available since 1.6.0 |
 | Pure Go | Available | In development | Not available |
-| TypeScript | Available | In development | Available since 1.3.0 |
+| TypeScript | Available | Beta | Available since 1.3.0 |
 | Java | Available | Beta | Available since 1.6.0 |
 | C++ | Available | In development | Available since 0.3.0 |
 | .NET (C#) | Available | In development | Not available |
@@ -125,7 +140,7 @@ For Protocol Buffers, use `proto2` syntax with `optional` fields so nullable Del
 
 ### Avro ingestion (beta)
 
-Send records encoded against a declared Avro writer schema on the same row-based stream API — pass a record object the SDK encodes against the schema, or pre-encoded Avro bytes. Currently available in the Rust, Python, and Java SDKs; support in the other SDKs is in development. The Java SDK's Avro support requires Java 11+ and the `org.apache.avro:avro` dependency. See each SDK's README for language-specific usage.
+Send records encoded against a declared Avro writer schema on the same row-based stream API — pass a record object the SDK encodes against the schema, or pre-encoded Avro bytes. Currently available in the Rust, Python, Java, and TypeScript SDKs; support in the other SDKs is in development. The Java SDK's Avro support requires Java 11+ and the `org.apache.avro:avro` dependency. See each SDK's README for language-specific usage.
 
 ### Arrow Flight ingestion
 

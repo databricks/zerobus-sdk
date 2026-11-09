@@ -15,21 +15,25 @@ namespace Databricks.Zerobus;
 /// consumes it. Any further method calls after either will throw
 /// <see cref="ObjectDisposedException"/>.
 /// </para>
+/// <para>
+/// See the <see href="https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id">connection URL table</see>
+/// for cloud-specific endpoint formats.
+/// </para>
 /// </remarks>
 /// <example>
 /// OAuth credentials:
 /// <code>
 /// using var sdk = ZerobusSdk.CreateBuilder()
-///     .Endpoint("https://zerobus.databricks.com")
-///     .UnityCatalogUrl("https://workspace.databricks.com")
+///     .Endpoint(serverEndpoint)
+///     .UnityCatalogUrl(workspaceUrl)
 ///     .ApplicationName("my-service")
 ///     .Build();
 /// </code>
 ///
-/// Custom headers provider (Unity Catalog URL not required):
+/// Custom headers provider (workspace URL not required):
 /// <code>
 /// using var sdk = ZerobusSdk.CreateBuilder()
-///     .Endpoint("https://zerobus.databricks.com")
+///     .Endpoint(serverEndpoint)
 ///     .ApplicationName("my-service")
 ///     .Build();
 /// </code>
@@ -49,7 +53,7 @@ public sealed class ZerobusSdkBuilder : IDisposable
     /// <summary>
     /// Sets the Zerobus gRPC endpoint URL (required).
     /// </summary>
-    /// <param name="endpoint">The gRPC endpoint (e.g. <c>https://zerobus.databricks.com</c>).</param>
+    /// <param name="endpoint">The Zerobus gRPC endpoint.</param>
     /// <returns>This builder, for chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown if <paramref name="endpoint"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the builder has been consumed or disposed.</exception>
@@ -62,10 +66,10 @@ public sealed class ZerobusSdkBuilder : IDisposable
     }
 
     /// <summary>
-    /// Sets the Unity Catalog URL used for OAuth token acquisition.
+    /// Sets the Databricks workspace URL, used for Unity Catalog and OAuth token acquisition.
     /// Required when using OAuth credentials; optional with a custom headers provider.
     /// </summary>
-    /// <param name="unityCatalogUrl">The Unity Catalog URL (e.g. <c>https://workspace.databricks.com</c>).</param>
+    /// <param name="unityCatalogUrl">The Databricks workspace URL, used for Unity Catalog and OAuth.</param>
     /// <returns>This builder, for chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown if <paramref name="unityCatalogUrl"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the builder has been consumed or disposed.</exception>

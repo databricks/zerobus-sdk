@@ -89,14 +89,15 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 
 // New connects to the Zerobus service and returns an SDK.
 //
-// zerobusEndpoint is the Zerobus gRPC endpoint (e.g.
-// "https://ws.zerobus.region.cloud.databricks.com"). ucEndpoint is the Unity
-// Catalog workspace URL used to mint OAuth tokens (e.g.
-// "https://ws.cloud.databricks.com").
+// zerobusEndpoint is the Zerobus gRPC endpoint. ucEndpoint is the Databricks
+// workspace URL used to mint OAuth tokens. See the [connection URL table] for
+// cloud-specific formats.
 //
 // TLS uses host root CAs unless overridden by WithTLSConfig.
 // Network dialing is lazy and happens on first stream open. By default each
 // stream has a dedicated connection; WithConnectionPerStream(false) shares one.
+//
+// [connection URL table]: https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id
 func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	cfg := defaultSDKConfig()
 	for _, opt := range opts {

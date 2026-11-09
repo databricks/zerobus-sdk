@@ -225,6 +225,22 @@ public class StreamBuilderTest {
   }
 
   @Test
+  void arrowOptionsDefaultToZstdCompression() {
+    assertEquals(
+        IPCCompressionType.ZSTD, builder().arrow(emptySchema()).buildOptions().ipcCompression());
+    assertEquals(
+        IPCCompressionType.ZSTD,
+        ArrowStreamConfigurationOptions.builder().setIpcCompression(null).build().ipcCompression());
+    assertEquals(
+        IPCCompressionType.NONE,
+        builder()
+            .arrow(emptySchema())
+            .ipcCompression(IPCCompressionType.NONE)
+            .buildOptions()
+            .ipcCompression());
+  }
+
+  @Test
   void arrowOptionsApplySharedAndArrowSpecificSetters() {
     ArrowStreamConfigurationOptions options =
         builder()
@@ -234,7 +250,7 @@ public class StreamBuilderTest {
             .arrow(emptySchema())
             .maxInflightBatches(7)
             .connectionTimeoutMs(12345L)
-            .ipcCompression(IPCCompressionType.ZSTD)
+            .ipcCompression(IPCCompressionType.LZ4_FRAME)
             .streamPausedMaxWaitTimeMs(678L)
             .buildOptions();
 
@@ -246,7 +262,7 @@ public class StreamBuilderTest {
     // Arrow-specific values.
     assertEquals(7, options.maxInflightBatches());
     assertEquals(12345L, options.connectionTimeoutMs());
-    assertEquals(IPCCompressionType.ZSTD, options.ipcCompression());
+    assertEquals(IPCCompressionType.LZ4_FRAME, options.ipcCompression());
     assertEquals(678L, options.streamPausedMaxWaitTimeMs());
   }
 

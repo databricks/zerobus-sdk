@@ -22,11 +22,11 @@ const (
 )
 
 // IPCCompressionType controls Arrow IPC compression. The zero value (IPCCompressionDefault)
-// is no compression.
+// is Zstandard compression.
 type IPCCompressionType int8
 
 const (
-	// IPCCompressionDefault is no compression.
+	// IPCCompressionDefault is Zstandard compression.
 	IPCCompressionDefault IPCCompressionType = 0
 	// IPCCompressionNone explicitly disables Arrow IPC compression.
 	IPCCompressionNone IPCCompressionType = 1
@@ -70,8 +70,8 @@ type ArrowStreamConfigurationOptions struct {
 	// Default: 30,000
 	ConnectionTimeoutMs uint64
 
-	// Arrow IPC compression codec.
-	// Default: IPCCompressionNone
+	// Arrow IPC compression codec. Set IPCCompressionNone to send uncompressed payloads.
+	// Default: IPCCompressionZstd
 	IPCCompression IPCCompressionType
 
 	// Maximum time in milliseconds to wait during graceful stream close.
@@ -92,7 +92,7 @@ func DefaultArrowStreamConfigurationOptions() *ArrowStreamConfigurationOptions {
 		ServerLackOfAckTimeoutMs: 60_000,
 		FlushTimeoutMs:           300_000,
 		ConnectionTimeoutMs:      30_000,
-		IPCCompression:           IPCCompressionNone,
+		IPCCompression:           IPCCompressionZstd,
 	}
 }
 

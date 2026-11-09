@@ -93,17 +93,16 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 Every example reads its connection settings from the environment, so no value is
 ever baked into source. Export these five variables before running any example
-(the same names the Go, TypeScript, Java, and Python SDK examples use):
+(every released SDK's examples read the same variables). Find the connection values
+in the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id):
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.orders"
 export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
 export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 ```
-
-For Azure, use `.azuredatabricks.net` hosts in the endpoint and workspace URL.
 
 The proto examples additionally read the Unity Catalog table metadata JSON from
 the environment (the JSON examples don't). See the [Protocol Buffers
@@ -123,9 +122,8 @@ export ZEROBUS_UC_TABLE_JSON="$(curl -sS --fail \
 ```
 
 **How to get these values:**
-- **ZEROBUS_SERVER_ENDPOINT** — Zerobus ingestion endpoint (usually
-  `https://<shard-id>.zerobus.<region>.cloud.databricks.com`).
-- **DATABRICKS_WORKSPACE_URL** — your Databricks workspace URL (Unity Catalog endpoint).
+- **ZEROBUS_SERVER_ENDPOINT** — your Zerobus ingestion endpoint from the connection URL table.
+- **DATABRICKS_WORKSPACE_URL** — your Databricks workspace URL, used for Unity Catalog and OAuth.
 - **ZEROBUS_TABLE_NAME** — full table name in the form `catalog.schema.table`.
 - **DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET** — OAuth 2.0 credentials from your
   service principal.

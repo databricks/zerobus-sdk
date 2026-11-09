@@ -17,10 +17,12 @@ use crate::{
 ///
 /// ```no_run
 /// use databricks_zerobus_ingest_sdk::ZerobusSdkBuilder;
+/// let server_endpoint = std::env::var("ZEROBUS_SERVER_ENDPOINT").expect("endpoint must be set");
+/// let workspace_url = std::env::var("DATABRICKS_WORKSPACE_URL").expect("workspace URL must be set");
 ///
 /// let sdk = ZerobusSdkBuilder::new()
-///     .endpoint("https://workspace.zerobus.databricks.com")
-///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+///     .endpoint(server_endpoint)
+///     .unity_catalog_url(workspace_url)
 ///     .build()?;
 /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
 /// ```
@@ -60,13 +62,14 @@ impl ZerobusSdkBuilder {
     ///
     /// # Arguments
     ///
-    /// * `endpoint` - The Zerobus endpoint URL (e.g., "https://workspace-id.zerobus.region.cloud.databricks.com")
+    /// * `endpoint` - The Zerobus endpoint URL. See the repository's
+    ///   [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id).
     pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.zerobus_endpoint = Some(endpoint.into());
         self
     }
 
-    /// Sets the Unity Catalog endpoint URL.
+    /// Sets the Databricks workspace URL, used for Unity Catalog and OAuth.
     ///
     /// This is required when using OAuth authentication via `StreamBuilder::oauth()`
     /// or federated authentication via `StreamBuilder::federated_auth()` (the
@@ -76,7 +79,7 @@ impl ZerobusSdkBuilder {
     ///
     /// # Arguments
     ///
-    /// * `url` - The Unity Catalog URL (e.g., "https://workspace.cloud.databricks.com")
+    /// * `url` - The Databricks workspace URL used for Unity Catalog.
     pub fn unity_catalog_url(mut self, url: impl Into<String>) -> Self {
         self.unity_catalog_url = Some(url.into());
         self

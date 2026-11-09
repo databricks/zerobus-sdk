@@ -15,12 +15,16 @@ namespace Databricks.Zerobus;
 /// <para>
 /// The SDK is thread-safe — you may create multiple streams from one instance.
 /// </para>
+/// <para>
+/// See the <see href="https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id">connection URL table</see>
+/// for cloud-specific endpoint formats.
+/// </para>
 /// </remarks>
 /// <example>
 /// <code>
 /// using var sdk = ZerobusSdk.CreateBuilder()
-///     .Endpoint("https://your-shard.zerobus.databricks.com")
-///     .UnityCatalogUrl("https://your-workspace.databricks.com")
+///     .Endpoint(serverEndpoint)
+///     .UnityCatalogUrl(workspaceUrl)
 ///     .Build();
 ///
 /// using var stream = sdk.CreateJsonStream(
@@ -52,8 +56,8 @@ public sealed class ZerobusSdk : IDisposable
     /// <example>
     /// <code>
     /// using var sdk = ZerobusSdk.CreateBuilder()
-    ///     .Endpoint("https://zerobus.databricks.com")
-    ///     .UnityCatalogUrl("https://workspace.databricks.com")
+    ///     .Endpoint(serverEndpoint)
+    ///     .UnityCatalogUrl(workspaceUrl)
     ///     .ApplicationName("my-service")
     ///     .Build();
     /// </code>

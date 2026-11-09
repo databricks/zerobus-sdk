@@ -11,12 +11,9 @@ use std::error::Error;
 use apache_avro::{writer::datum::GenericDatumWriter, Schema};
 use databricks_zerobus_ingest_sdk::{AvroBytes, AvroRecord, AvroValue, ZerobusSdk};
 
-// Change constants to match your data.
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
+#[path = "../config.rs"]
+mod config;
+use config::ExampleConfig;
 
 // The Avro writer schema (JSON), declared once at stream creation.
 const AVRO_SCHEMA: &str = r#"{
@@ -30,15 +27,16 @@ const AVRO_SCHEMA: &str = r#"{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     let sdk = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     let mut stream = sdk
         .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .avro(AVRO_SCHEMA)
         .build()
         .await?;

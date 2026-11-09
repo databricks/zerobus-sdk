@@ -137,8 +137,9 @@ struct ArrowStreamOptions {
   std::uint64_t flush_timeout_ms = 300'000;
   /// Connection establishment timeout.
   std::uint64_t connection_timeout_ms = 30'000;
-  /// Arrow IPC compression codec.
-  IpcCompression ipc_compression = IpcCompression::NoCompression;
+  /// Arrow IPC compression codec. Use `NoCompression` to send uncompressed
+  /// payloads.
+  IpcCompression ipc_compression = IpcCompression::Zstd;
   /// Max wait during a server-initiated pause before recovering. `nullopt` =
   /// full server duration; `0` = recover immediately; `x` = min(x, server).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;

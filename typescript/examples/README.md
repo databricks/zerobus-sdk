@@ -8,6 +8,7 @@ This directory contains examples demonstrating how to use the Zerobus TypeScript
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
 - [Arrow Flight Examples](arrow/README.md)
+- [Avro Examples](avro/README.md)
 - [Prerequisites](#prerequisites)
 - [Common Code Patterns](#common-code-patterns)
 - [API Styles](#api-styles)
@@ -16,12 +17,13 @@ This directory contains examples demonstrating how to use the Zerobus TypeScript
 
 ## Overview
 
-The SDK supports three serialization formats and two ingestion methods:
+The SDK supports four serialization formats and two ingestion methods:
 
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
 - **[Arrow Flight](arrow/README.md)** - High-performance columnar format for analytics.
+- **[Avro](avro/README.md)** *(Beta)* - Row-oriented encoding against a writer schema; object encoding uses the optional `avsc` dependency.
 
 **Ingestion Methods:**
 - **Single-record** (`ingestRecordOffset`) - Ingest records one at a time
@@ -63,11 +65,12 @@ CREATE TABLE catalog.schema.air_quality (
 
 ### 3. Configure Environment Variables
 
-Set the following environment variables:
+Set the following environment variables. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the endpoint and workspace URL formats on each cloud:
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.air_quality"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
@@ -80,7 +83,7 @@ All examples follow the same general flow:
 ### 1. Initialize SDK
 
 ```typescript
-const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
 ```
 
 ### 2. Configure Table Properties

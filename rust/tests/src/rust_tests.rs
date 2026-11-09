@@ -8,7 +8,7 @@ use databricks_zerobus_ingest_sdk::{
 use tracing::info;
 use utils::{
     advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
-    run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
+    run_with_paused_time_watchdog, setup_tracing, BinaryHeadersProvider, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
 use zerobus_test_support::databricks::zerobus::RecordType as WireRecordType;
@@ -64,6 +64,38 @@ mod stream_initialization_and_basic_lifecycle_tests {
             Some(WireRecordType::Proto as i32)
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_binary_header_reaches_server_decoded() -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_1".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let _stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(BinaryHeadersProvider("AP8NCg==")))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(false)
+            .build()
+            .await?;
+        assert_eq!(
+            mock_server.get_test_bin_headers().await,
+            vec![Some(b"\0\xff\r\n".to_vec())]
+        );
         Ok(())
     }
 

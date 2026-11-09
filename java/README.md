@@ -344,7 +344,7 @@ wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/1.4.0/zero
 
 ```bash
 java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
-  --uc-endpoint "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "your-service-principal-application-id" \
   --client-secret "your-service-principal-secret" \
   --table "main.default.air_quality" \
@@ -353,7 +353,7 @@ java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
 ```
 
 **Parameters:**
-- `--uc-endpoint`: Your workspace URL (e.g., `https://dbc-a1b2c3d4-e5f6.cloud.databricks.com`)
+- `--uc-endpoint`: Your workspace URL from the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
 - `--client-id`: Service principal application ID
 - `--client-secret`: Service principal secret
 - `--table`: Fully qualified table name (catalog.schema.table)
@@ -425,7 +425,9 @@ For detailed documentation and examples, see [tools/README.md](https://github.co
 > [Acknowledgments and throughput](#acknowledgments-and-throughput) below the example for
 > how acknowledgment works and when to use `waitForOffset()` or an `AckCallback`.
 
-Create `src/main/java/com/example/ZerobusClient.java`:
+Create `src/main/java/com/example/ZerobusClient.java`. It reads the connection settings from
+environment variables; see the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the `ZEROBUS_SERVER_ENDPOINT` and `DATABRICKS_WORKSPACE_URL` formats on each cloud:
 
 ```java
 package com.example;
@@ -436,11 +438,11 @@ import com.example.proto.Record.AirQuality;
 public class ZerobusClient {
     public static void main(String[] args) throws Exception {
         // Configuration
-        String serverEndpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com";
-        String workspaceUrl = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com";
-        String tableName = "main.default.air_quality";
-        String clientId = "your-service-principal-application-id";
-        String clientSecret = "your-service-principal-secret";
+        String serverEndpoint = System.getenv("ZEROBUS_SERVER_ENDPOINT");
+        String workspaceUrl = System.getenv("DATABRICKS_WORKSPACE_URL");
+        String tableName = System.getenv("ZEROBUS_TABLE_NAME");
+        String clientId = System.getenv("DATABRICKS_CLIENT_ID");
+        String clientSecret = System.getenv("DATABRICKS_CLIENT_SECRET");
 
         try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
              ZerobusProtoStream stream = sdk.streamBuilder()
@@ -477,6 +479,13 @@ public class ZerobusClient {
 ```bash
 # First, compile the proto file to generate Java classes
 protoc --java_out=src/main/java src/main/proto/record.proto
+
+# Set the connection settings
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
+export ZEROBUS_TABLE_NAME="main.default.air_quality"
+export DATABRICKS_CLIENT_ID="<your-oauth-client-id>"
+export DATABRICKS_CLIENT_SECRET="<your-oauth-client-secret>"
 
 # Compile and run
 mvn compile
@@ -582,7 +591,6 @@ try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
         .table("catalog.schema.table")
         .oauth(clientId, clientSecret)
         .arrow(schema)
-        .ipcCompression(IPCCompressionType.ZSTD)
         .build()
         .join()) {
     // ingest...
@@ -890,7 +898,7 @@ stream.flush();
 |--------|----------|------|------|
 | **Protocol Buffers** | Production systems | Type-safe, compact, fast | Requires schema compilation |
 | **JSON** | Prototyping, flexible schemas | Human-readable, no compilation, clean API | Larger payload, slower |
-| **Arrow Flight** | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, optional IPC compression (LZ4 / ZSTD) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags |
+| **Arrow Flight** | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, IPC compression (ZSTD by default; LZ4 or none optional) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags |
 
 ### JSON Streams (Recommended for JSON)
 
@@ -963,7 +971,7 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `connectionTimeoutMs` | 30000 | Timeout for establishing a gRPC connection (ms) |
-| `ipcCompression` | `IPCCompressionType.NONE` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`) |
+| `ipcCompression` | `IPCCompressionType.ZSTD` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`). Pass `NONE` to send uncompressed payloads |
 | `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = immediate recovery, `>0` = `min(this, server_duration)` ms |
 
 `ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
@@ -1111,8 +1119,8 @@ ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, boolean connectio
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName)
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream)
 ```
-- `serverEndpoint` - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.region.cloud.databricks.com`)
-- `unityCatalogEndpoint` - The Unity Catalog endpoint (your workspace URL)
+- `serverEndpoint` - The Zerobus gRPC endpoint from the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+- `unityCatalogEndpoint` - Your Databricks workspace URL, used for Unity Catalog and OAuth
 - `applicationName` (optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). Pass `null` to omit.
 - `connectionPerStream` (optional) - Gives each JSON/protobuf stream a dedicated
   gRPC connection. Constructors without this argument default to `true`; pass
@@ -1435,7 +1443,7 @@ Example:
 ```java
 ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builder()
     .setMaxInflightBatches(2000)
-    .setIpcCompression(IPCCompressionType.ZSTD)
+    .setIpcCompression(IPCCompressionType.LZ4_FRAME)
     .setRecovery(true)
     .setRecoveryRetries(5)
     .build();
@@ -1449,11 +1457,11 @@ Selects the Arrow IPC compression codec applied to each batch on the wire. Set v
 
 **Values:**
 
-- `NONE` — No compression (default).
+- `NONE` — No compression.
 - `LZ4_FRAME` — LZ4 frame compression. Fast, modest ratio.
-- `ZSTD` — Zstandard. Higher ratio at higher CPU cost.
+- `ZSTD` — Zstandard (default). Higher ratio at higher CPU cost.
 
-Compression trades client CPU for fewer bytes on the wire. Enable only when network bandwidth limits throughput.
+Compression trades client CPU for fewer bytes on the wire. Pass `NONE` if client CPU, not network bandwidth, limits throughput.
 
 ---
 

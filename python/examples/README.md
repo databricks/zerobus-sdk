@@ -25,17 +25,14 @@ The examples use a pre-generated protobuf file (`record_pb2.py`) based on the in
 
 ### 3. Configure Credentials
 
-Set the following environment variables:
+Set the following environment variables. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the endpoint and workspace URL formats on each cloud:
 
 ```bash
 export DATABRICKS_CLIENT_ID="your-service-principal-application-id"
 export DATABRICKS_CLIENT_SECRET="your-service-principal-secret"
-# For AWS:
-export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
-# For Azure:
-# export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.azuredatabricks.net"
-# export DATABRICKS_WORKSPACE_URL="https://your-workspace.azuredatabricks.net"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.table"
 ```
 

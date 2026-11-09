@@ -25,6 +25,7 @@ import logging
 import os
 
 import requests
+from example_config import required_env
 
 from zerobus import FederatedToken
 from zerobus.sdk.shared import StreamConfigurationOptions, TableProperties
@@ -34,18 +35,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-# Configuration - update these with your values.
-SERVER_ENDPOINT = os.getenv(
-    "ZEROBUS_SERVER_ENDPOINT",
-    "https://your-shard-id.zerobus.region.cloud.databricks.com",
-)
-UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
-TABLE_NAME = os.getenv("ZEROBUS_TABLE_NAME", "catalog.schema.table")
+SERVER_ENDPOINT = required_env("ZEROBUS_SERVER_ENDPOINT")
+WORKSPACE_URL = required_env("DATABRICKS_WORKSPACE_URL")
+TABLE_NAME = required_env("ZEROBUS_TABLE_NAME")
 
 # External IdP (Entra ID) app registration used to mint the IdP token.
-ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID", "your-entra-tenant-id")
-ENTRA_CLIENT_ID = os.getenv("ENTRA_CLIENT_ID", "your-entra-client-id")
-ENTRA_CLIENT_SECRET = os.getenv("ENTRA_CLIENT_SECRET", "your-entra-client-secret")
+ENTRA_TENANT_ID = required_env("ENTRA_TENANT_ID")
+ENTRA_CLIENT_ID = required_env("ENTRA_CLIENT_ID")
+ENTRA_CLIENT_SECRET = required_env("ENTRA_CLIENT_SECRET")
 # Audience/scope your Databricks federation policy expects.
 ENTRA_SCOPE = os.getenv("ENTRA_SCOPE", "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default")
 
@@ -96,7 +93,7 @@ def create_sample_json_record(index):
 
 
 def main():
-    sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT)
+    sdk = ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL)
 
     # Opt into federated auth. Omit databricks_client_id for account-level
     # federation; set it for workload identity federation.

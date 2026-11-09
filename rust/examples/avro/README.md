@@ -51,7 +51,7 @@ This example crate is excluded from the Cargo workspace (so the `avro` feature d
 
 ### Running the Example
 
-1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -78,8 +78,8 @@ use databricks_zerobus_ingest_sdk::{AvroBytes, AvroRecord, AvroValue};
 // The writer schema, declared once at stream creation.
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .avro(AVRO_SCHEMA)
     .build()
     .await?;
@@ -102,7 +102,7 @@ stream.flush().await?;
 
 ### Running the Example
 
-1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -156,8 +156,8 @@ terminal `.multiplexed(n)` call:
 ```rust
 let mut stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .avro(AVRO_SCHEMA)
     .multiplexed(4)
     .build()
@@ -200,4 +200,5 @@ let record = AvroValue::Record(vec![
 ]);
 ```
 
-**3. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.
+**3. Configure the environment variables** listed in the
+[examples prerequisites](../README.md#3-configure-credentials).

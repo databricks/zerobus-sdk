@@ -105,6 +105,16 @@ static void test_starts_with(void)
     CHECK(!zb_starts_with("ftp://x", 7, "https://"));
 }
 
+static void test_equals_ignore_case(void)
+{
+    CHECK(zb_equals_ignore_case("Content-Length", 14, "content-length"));
+    CHECK(!zb_equals_ignore_case("content-len", 11, "content-length"));
+    CHECK(!zb_equals_ignore_case("content-lengths", 15, "content-length"));
+    CHECK(!zb_equals_ignore_case("chunkey", 7, "chunked"));
+    /* Only len bytes are compared. */
+    CHECK(zb_equals_ignore_case("chunked, gzip", 7, "chunked"));
+}
+
 static void test_parse_u32(void)
 {
     uint32_t out = 0;
@@ -125,6 +135,20 @@ static void test_parse_u32(void)
     CHECK(!parse(" 1", &out));
     CHECK(!parse("1x", &out));
     CHECK_EQ_INT(out, 7);
+}
+
+/* The digit rules are those of zb_parse_u32, which uses it. */
+static void test_parse_u64(void)
+{
+    uint64_t out = 0;
+    CHECK(zb_parse_u64((const uint8_t *)"4294967296", 10, &out) &&
+          out == 4294967296u);
+    CHECK(zb_parse_u64((const uint8_t *)"18446744073709551615", 20, &out) &&
+          out == UINT64_MAX);
+    out = 7;
+    /* UINT64_MAX + 1 */
+    CHECK(!zb_parse_u64((const uint8_t *)"18446744073709551616", 20, &out));
+    CHECK(out == 7);
 }
 
 static void test_hex_value(void)
@@ -337,6 +361,26 @@ static void test_strdup(void)
     CHECK(zb_strdup(NULL) == NULL);
 }
 
+/* The result is exactly as long as the formatted text, however long. */
+static void test_strdup_printf(void)
+{
+    char *text = zb_strdup_printf("%s %u%s", "status", 7u, "");
+    CHECK(text != NULL && strcmp(text, "status 7") == 0);
+    free(text);
+
+    char *empty = zb_strdup_printf("%s", "");
+    CHECK(empty != NULL && empty[0] == '\0');
+    free(empty);
+
+    char long_arg[1000];
+    memset(long_arg, 'x', sizeof(long_arg) - 1);
+    long_arg[sizeof(long_arg) - 1] = '\0';
+    char *long_text = zb_strdup_printf("<%s>", long_arg);
+    CHECK(long_text != NULL && strlen(long_text) == sizeof(long_arg) + 1 &&
+          long_text[0] == '<' && long_text[sizeof(long_arg)] == '>');
+    free(long_text);
+}
+
 static void test_secure(void)
 {
     char *p = NULL;
@@ -364,7 +408,9 @@ int main(void)
     test_trim_whitespace();
     test_utf8();
     test_starts_with();
+    test_equals_ignore_case();
     test_parse_u32();
+    test_parse_u64();
     test_hex_value();
     test_view_equals();
     test_copy_bounded();
@@ -372,6 +418,7 @@ int main(void)
     test_url_validate();
     test_host_labels();
     test_strdup();
+    test_strdup_printf();
     test_secure();
     TEST_MAIN_RETURN();
 }

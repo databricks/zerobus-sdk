@@ -8,7 +8,15 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+from example_config import required_env
+
 from zerobus.sdk.aio import TableProperties, ZerobusSdk
+
+SERVER_ENDPOINT = required_env("ZEROBUS_SERVER_ENDPOINT")
+WORKSPACE_URL = required_env("DATABRICKS_WORKSPACE_URL")
+TABLE_NAME = required_env("ZEROBUS_TABLE_NAME")
+CLIENT_ID = required_env("DATABRICKS_CLIENT_ID")
+CLIENT_SECRET = required_env("DATABRICKS_CLIENT_SECRET")
 
 schema = {
     "type": "record",
@@ -22,15 +30,12 @@ schema = {
 
 
 async def main():
-    sdk = ZerobusSdk(
-        host="https://your-shard.zerobus.region.cloud.databricks.com",
-        unity_catalog_url="https://your-workspace.cloud.databricks.com",
-    )
+    sdk = ZerobusSdk(host=SERVER_ENDPOINT, unity_catalog_url=WORKSPACE_URL)
 
-    table_properties = TableProperties("my_catalog.my_schema.my_table", avro_schema=json.dumps(schema))
+    table_properties = TableProperties(TABLE_NAME, avro_schema=json.dumps(schema))
     stream = await sdk.create_stream(
-        client_id="your-client-id",
-        client_secret="your-client-secret",
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
         table_properties=table_properties,
     )
 
