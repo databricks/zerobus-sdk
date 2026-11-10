@@ -22,6 +22,7 @@ const (
 	Zerobus_EphemeralStream_FullMethodName  = "/databricks.zerobus.Zerobus/EphemeralStream"
 	Zerobus_PersistentStream_FullMethodName = "/databricks.zerobus.Zerobus/PersistentStream"
 	Zerobus_RetireStream_FullMethodName     = "/databricks.zerobus.Zerobus/RetireStream"
+	Zerobus_InsertRecords_FullMethodName    = "/databricks.zerobus.Zerobus/InsertRecords"
 )
 
 // ZerobusClient is the client API for Zerobus service.
@@ -50,6 +51,11 @@ type ZerobusClient interface {
 	// Permanently retires a persistent stream. Unary and idempotent; callable
 	// without an open connection. A retired stream can never be resumed.
 	RetireStream(ctx context.Context, in *RetireStreamRequest, opts ...grpc.CallOption) (*RetireStreamResponse, error)
+	// InsertRecords inserts a list of JSON records into a specified
+	// 3-parts UC table. Unary: it returns once the records are durable, without
+	// opening a stream. Also served over REST as
+	// POST /zerobus/v1/tables/{table_name}/insert.
+	InsertRecords(ctx context.Context, in *InsertRecordsRequest, opts ...grpc.CallOption) (*InsertRecordsResponse, error)
 }
 
 type zerobusClient struct {
@@ -96,6 +102,16 @@ func (c *zerobusClient) RetireStream(ctx context.Context, in *RetireStreamReques
 	return out, nil
 }
 
+func (c *zerobusClient) InsertRecords(ctx context.Context, in *InsertRecordsRequest, opts ...grpc.CallOption) (*InsertRecordsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InsertRecordsResponse)
+	err := c.cc.Invoke(ctx, Zerobus_InsertRecords_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ZerobusServer is the server API for Zerobus service.
 // All implementations must embed UnimplementedZerobusServer
 // for forward compatibility.
@@ -122,6 +138,11 @@ type ZerobusServer interface {
 	// Permanently retires a persistent stream. Unary and idempotent; callable
 	// without an open connection. A retired stream can never be resumed.
 	RetireStream(context.Context, *RetireStreamRequest) (*RetireStreamResponse, error)
+	// InsertRecords inserts a list of JSON records into a specified
+	// 3-parts UC table. Unary: it returns once the records are durable, without
+	// opening a stream. Also served over REST as
+	// POST /zerobus/v1/tables/{table_name}/insert.
+	InsertRecords(context.Context, *InsertRecordsRequest) (*InsertRecordsResponse, error)
 	mustEmbedUnimplementedZerobusServer()
 }
 
@@ -140,6 +161,9 @@ func (UnimplementedZerobusServer) PersistentStream(grpc.BidiStreamingServer[Pers
 }
 func (UnimplementedZerobusServer) RetireStream(context.Context, *RetireStreamRequest) (*RetireStreamResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RetireStream not implemented")
+}
+func (UnimplementedZerobusServer) InsertRecords(context.Context, *InsertRecordsRequest) (*InsertRecordsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InsertRecords not implemented")
 }
 func (UnimplementedZerobusServer) mustEmbedUnimplementedZerobusServer() {}
 func (UnimplementedZerobusServer) testEmbeddedByValue()                 {}
@@ -194,6 +218,24 @@ func _Zerobus_RetireStream_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Zerobus_InsertRecords_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InsertRecordsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ZerobusServer).InsertRecords(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Zerobus_InsertRecords_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ZerobusServer).InsertRecords(ctx, req.(*InsertRecordsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Zerobus_ServiceDesc is the grpc.ServiceDesc for Zerobus service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -204,6 +246,10 @@ var Zerobus_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RetireStream",
 			Handler:    _Zerobus_RetireStream_Handler,
+		},
+		{
+			MethodName: "InsertRecords",
+			Handler:    _Zerobus_InsertRecords_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

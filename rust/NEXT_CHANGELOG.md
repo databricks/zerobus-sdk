@@ -30,6 +30,9 @@
 - Moved the table, authentication, record format, and shared retry settings of
   `StreamBuilder` into a private builder core that other client builders can
   reuse. Stream behavior is unchanged.
+- Added the `InsertRecords` RPC to the SDK's copy of the service proto and
+  regenerated the purego and purec bindings. The mock servers answer it with
+  `Unimplemented`.
 
 ### Breaking Changes
 
