@@ -1148,6 +1148,56 @@ describe('Multiplexed ack callback', () => {
         }
     });
 
+    it('adopts a resolving custom thenable without logging', async () => {
+        const consoleError = stubConsoleError();
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            const thenables = [
+                { then(resolve: () => void) { resolve(); } },
+                { async then(resolve: () => void) { resolve(); } },
+            ];
+            for (const thenable of thenables) {
+                const { dispatch } = await captureDispatch({ onAck: () => thenable });
+                assert.doesNotThrow(() => dispatch('ack', 1n));
+            }
+            await drainEventLoop();
+            assert.deepStrictEqual(unhandled, []);
+            assert.strictEqual(consoleError.calls.length, 0);
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+            consoleError.restore();
+        }
+    });
+
+    it('logs a custom thenable that throws or rejects once, without an unhandled rejection', async () => {
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            const failure = new Error('thenable failed');
+            const thenables = [
+                { then() { throw failure; } },
+                { then(_resolve: () => void, reject: (error: unknown) => void) { reject(failure); } },
+            ];
+            for (const thenable of thenables) {
+                const consoleError = stubConsoleError();
+                try {
+                    const { dispatch } = await captureDispatch({ onAck: () => thenable });
+                    assert.doesNotThrow(() => dispatch('ack', 1n));
+                    await drainEventLoop();
+                    assert.deepStrictEqual(consoleError.calls, [['Zerobus multiplexed stream ack callback failed:', failure]]);
+                } finally {
+                    consoleError.restore();
+                }
+            }
+            assert.deepStrictEqual(unhandled, []);
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+        }
+    });
+
     it('logs nothing for a plain or resolving return value', async () => {
         const consoleError = stubConsoleError();
         try {
