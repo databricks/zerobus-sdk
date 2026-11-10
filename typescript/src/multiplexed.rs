@@ -347,8 +347,9 @@ impl ZerobusMultiplexedStream {
 
     /// Flushes and closes every sub-stream.
     ///
-    /// Waits for in-flight ingest, wait and flush calls first. On error the stream keeps its
-    /// records: use `getUnackedRecords()` / `getUnackedBatches()` to recover them.
+    /// Waits for in-flight ingest, wait and flush calls first. A rejected close is final:
+    /// retrying rejects with the same error. The stream keeps its records; call
+    /// `getUnackedRecords()` / `getUnackedBatches()` to recover them.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn close(&self, env: Env) -> Result<JsObject> {
         let stream = self.inner.clone();
@@ -379,8 +380,9 @@ impl ZerobusMultiplexedStream {
         promise
     }
 
-    /// Whether the stream is closed: by `close()`, by a sub-stream failure, or while a
-    /// close or unacked getter is in progress.
+    /// Whether the stream is closed: after `close()`, once an ingest, flush or wait call has
+    /// hit a failed sub-stream, or while a close or unacked getter is in progress. A failure
+    /// no call has hit yet doesn't show here.
     #[napi(getter)]
     pub fn is_closed(&self) -> bool {
         match self.inner.try_read() {
@@ -393,6 +395,7 @@ impl ZerobusMultiplexedStream {
     }
 
     /// Returns the records that were ingested but not acknowledged. Closes the stream first.
+    /// On a JSON stream each `Buffer` holds UTF-8 JSON: re-ingest it as `buf.toString('utf8')`.
     #[napi(ts_return_type = "Promise<Buffer[]>")]
     pub fn get_unacked_records(&self, env: Env) -> Result<JsObject> {
         let stream = self.inner.clone();
@@ -420,7 +423,8 @@ impl ZerobusMultiplexedStream {
     }
 
     /// Returns the unacknowledged records grouped by their original batches (a single-record
-    /// ingest is a 1-element batch). Closes the stream first.
+    /// ingest is a 1-element batch). Closes the stream first. On a JSON stream each `Buffer`
+    /// holds UTF-8 JSON: re-ingest it as `buf.toString('utf8')`.
     #[napi(ts_return_type = "Promise<Buffer[][]>")]
     pub fn get_unacked_batches(&self, env: Env) -> Result<JsObject> {
         let stream = self.inner.clone();
