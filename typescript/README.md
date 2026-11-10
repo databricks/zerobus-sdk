@@ -737,13 +737,15 @@ await stream.close();
   (`null` for an empty batch).
 - Opening is atomic: each sub-stream opens after a random delay of up to one second, and if
   any fails, the others are closed and `build()` rejects.
-- After a sub-stream fails, the stream rejects new records. To get back the records that were
+- Once an ingest, flush or wait call hits a failed sub-stream, the stream rejects new records
+  (until then, ingests that land on healthy sub-streams are still accepted). A rejected
+  `close()` is final: retrying rejects with the same error. To get back the records that were
   never acknowledged, call `getUnackedRecords()` or `getUnackedBatches()` *instead of*
   `close()`: they close the stream first and return the records of every sub-stream, so you
   can ingest them into a new stream. Records come back as `Buffer`s: on a JSON stream each
   holds the record as UTF-8 JSON, so re-ingest it as `buf.toString('utf8')` (a `Buffer` is
-  taken as Protocol Buffers bytes). After a successful `close()` they reject. There is no
-  `recreateStream()` for multiplexed streams.
+  taken as Protocol Buffers bytes). After a successful `close()` they reject; after a rejected
+  one they still return the records. There is no `recreateStream()` for multiplexed streams.
 - `close()` and the unacked getters first wait for ingest, flush and wait calls already in
   progress (up to `flushTimeoutMs`, or 30 seconds if that is larger: an ingest waits up to
   30 seconds for sub-stream capacity), then flush (up to `flushTimeoutMs` again). Size
@@ -1212,8 +1214,9 @@ readonly isClosed: boolean
 ```
 
 Payloads are converted as on `ZerobusStream`. Ingest calls resolve once the record or batch is
-queued. `isClosed` is `true` after `close()`, after a sub-stream failure, and while a close is
-in progress.
+queued. `isClosed` is `true` after `close()`, once an ingest, flush or wait call has hit a
+failed sub-stream, and while a close or unacked getter is in progress; a failure no call has
+hit yet doesn't show in it.
 
 ---
 
