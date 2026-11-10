@@ -20,6 +20,8 @@ table:
 """
 
 import asyncio
+import gc
+import inspect
 import io
 import json
 import os
@@ -48,6 +50,8 @@ pytestmark = pytest.mark.skipif(
 STREAM_INDEX_SHIFT = 58
 # Seconds to wait for ACK callbacks, which run asynchronously after flush().
 CALLBACK_WAIT_SECONDS = 30
+# Seconds to wait for a thread before the test reports it as stuck.
+THREAD_JOIN_SECONDS = 120
 
 AVRO_SCHEMA = json.dumps(
     {
@@ -74,6 +78,7 @@ class _RecordingCallback(core.AckCallback):
         self._lock = threading.Lock()
         self.acked = set()
         self.errors = []
+        self.failed = []
 
     def on_ack(self, offset):
         with self._lock:
@@ -84,6 +89,7 @@ class _RecordingCallback(core.AckCallback):
     def on_error(self, offset, error_message):
         with self._lock:
             self.errors.append(f"{offset}: {error_message}")
+            self.failed.append((offset, error_message))
 
     def wait_for(self, expected):
         """Wait until exactly ``expected`` has been acknowledged."""
@@ -96,6 +102,18 @@ class _RecordingCallback(core.AckCallback):
         with self._lock:
             assert self.acked == set(expected), "ACKed IDs must match the IDs the ingest calls returned"
             assert not self.errors, self.errors
+
+    def wait_for_failure(self):
+        """Wait until ``on_error`` has been called, and return its (ID, message) calls."""
+        deadline = time.monotonic() + CALLBACK_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self.failed:
+                    break
+            time.sleep(0.05)
+        with self._lock:
+            assert self.failed, "on_error was not called"
+            return list(self.failed)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -142,6 +160,40 @@ def _row(device_name, i):
 def _stream_index(message_id):
     """The sub-stream index packed into the top bits of a message ID (an unsigned view of the int)."""
     return (message_id & 0xFFFF_FFFF_FFFF_FFFF) >> STREAM_INDEX_SHIFT
+
+
+@pytest.fixture(params=["sync", "aio"])
+def module(request):
+    return sync if request.param == "sync" else aio
+
+
+async def _maybe(result):
+    """Await ``result`` when it comes from the async API; return it as is from the sync API."""
+    return await result if inspect.isawaitable(result) else result
+
+
+def _run_concurrently(threads, body):
+    """Run ``body(index)`` on ``threads`` threads at once and return what the threads raised."""
+    failures = []
+    lock = threading.Lock()
+    start = threading.Event()
+
+    def worker(index):
+        start.wait()
+        try:
+            body(index)
+        except BaseException as e:  # reported to the test thread
+            with lock:
+                failures.append(e)
+
+    workers = [threading.Thread(target=worker, args=(index,), daemon=True) for index in range(threads)]
+    for w in workers:
+        w.start()
+    start.set()
+    for w in workers:
+        w.join(THREAD_JOIN_SECONDS)
+    assert not any(w.is_alive() for w in workers), "a thread did not finish"
+    return failures
 
 
 def test_ordinary_stream():
@@ -201,13 +253,16 @@ def test_multiplexed_proto_spreads_records_and_acks_every_message_id():
 def test_negative_message_ids_from_sub_streams_32_and_above_can_be_awaited():
     stream_count = 40
     prefix = RUN_PREFIX + "wide-"
+    callback = _RecordingCallback()
+    ids = set()
     last_id_per_stream = {}
 
     builder = _authenticated(_sdk(sync).stream_builder()).compiled_proto(_air_quality_descriptor())
-    stream = builder.multiplexed(stream_count).build()
+    stream = builder.multiplexed(stream_count).ack_callback(callback).build()
     try:
         for i in range(2 * stream_count):
             message_id = stream.ingest_record(_air_quality(f"{prefix}{i}", i))
+            ids.add(message_id)
             last_id_per_stream[_stream_index(message_id)] = message_id
         assert len(last_id_per_stream) == stream_count
         assert any(i < 0 for i in last_id_per_stream.values()), last_id_per_stream
@@ -217,6 +272,8 @@ def test_negative_message_ids_from_sub_streams_32_and_above_can_be_awaited():
         for message_id in last_id_per_stream.values():
             stream.wait_for_message_id(message_id)
         stream.flush()
+        # The callback receives exactly the IDs the ingest calls returned, negative ones included.
+        callback.wait_for(ids)
     finally:
         stream.close()
     assert list(stream.get_unacked_records()) == []
@@ -278,3 +335,619 @@ def test_async_multiplexed_proto():
     ids = asyncio.run(run())
     callback.wait_for(ids)
     EXPECTED_ROWS[prefix] = 200
+
+
+def test_async_negative_message_ids_cross_the_bridge_both_ways():
+    stream_count = 40
+    prefix = RUN_PREFIX + "aiowide-"
+    callback = _RecordingCallback()
+
+    async def run():
+        builder = _authenticated(_sdk(aio).stream_builder()).compiled_proto(_air_quality_descriptor())
+        stream = await builder.multiplexed(stream_count).ack_callback(callback).build()
+        ids = set()
+        last_id_per_stream = {}
+        try:
+            for i in range(2 * stream_count):
+                message_id = await stream.ingest_record(_air_quality(f"{prefix}{i}", i))
+                ids.add(message_id)
+                last_id_per_stream[_stream_index(message_id)] = message_id
+            assert len(last_id_per_stream) == stream_count
+            assert any(i < 0 for i in last_id_per_stream.values()), last_id_per_stream
+
+            # Deliberately wait on one ID per sub-stream, including the negative ones, to exercise
+            # wait_for_message_id. For bulk ingestion, flush() once instead.
+            for message_id in last_id_per_stream.values():
+                await stream.wait_for_message_id(message_id)
+            await stream.flush()
+        finally:
+            await stream.close()
+        assert list(await stream.get_unacked_records()) == []
+        return ids
+
+    ids = asyncio.run(run())
+    callback.wait_for(ids)
+    EXPECTED_ROWS[prefix] = 2 * stream_count
+
+
+@pytest.mark.parametrize("operation", ["ingest_record", "ingest_records", "flush"])
+def test_unissued_message_id_and_calls_after_close_are_rejected(module, operation):
+    prefix = RUN_PREFIX + "closed-"
+
+    async def run():
+        builder = _authenticated(_sdk(module).stream_builder()).compiled_proto(_air_quality_descriptor())
+        stream = await _maybe(builder.multiplexed(4).build())
+        try:
+            for i in range(8):
+                await _maybe(stream.ingest_record(_air_quality(f"{prefix}{i}", i)))
+            await _maybe(stream.flush())
+            # -1 belongs to sub-stream 63, which a stream of 4 sub-streams does not have: the
+            # core rejects it at once instead of waiting.
+            started = time.monotonic()
+            with pytest.raises(core.NonRetriableException):
+                await _maybe(stream.wait_for_message_id(-1))
+            assert time.monotonic() - started < 5
+        finally:
+            await _maybe(stream.close())
+        assert stream.is_closed
+        assert list(await _maybe(stream.get_unacked_records())) == []
+        assert list(await _maybe(stream.get_unacked_batches())) == []
+
+        calls = {
+            "ingest_record": lambda: stream.ingest_record(_air_quality(prefix, 0)),
+            "ingest_records": lambda: stream.ingest_records([_air_quality(prefix, 0)]),
+            "flush": stream.flush,
+        }
+        with pytest.raises(core.NonRetriableException):
+            await _maybe(calls[operation]())
+
+    asyncio.run(run())
+    EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + 8
+
+
+def test_empty_batch_returns_none_while_open_and_raises_once_closed():
+    stream = _authenticated(_sdk(sync).stream_builder()).json().multiplexed(2).build()
+    try:
+        assert stream.ingest_records([]) is None
+    finally:
+        stream.close()
+    with pytest.raises(core.NonRetriableException):
+        stream.ingest_records([])
+
+
+def test_async_empty_batch_returns_none_while_open_and_raises_once_closed():
+    # The async wrapper returns early on its own code path, so it is tested separately.
+    async def run():
+        stream = await _authenticated(_sdk(aio).stream_builder()).json().multiplexed(2).build()
+        try:
+            assert await stream.ingest_records([]) is None
+        finally:
+            await stream.close()
+        with pytest.raises(core.NonRetriableException):
+            await stream.ingest_records([])
+
+    asyncio.run(run())
+
+
+# A JSON record the table rejects: temp is an INT column.
+def _rejected_json(prefix):
+    return json.dumps({"device_name": f"{prefix}rejected", "temp": "not a number", "humidity": 1})
+
+
+# Bytes that decode as neither a protobuf message nor an Avro datum.
+UNDECODABLE = b"\xff"
+
+
+def test_rejected_record_reaches_on_error_and_comes_back(module):
+    prefix = RUN_PREFIX + "rejected-"
+    callback = _RecordingCallback()
+    record = _rejected_json(prefix)
+
+    async def run():
+        builder = _authenticated(_sdk(module).stream_builder()).recovery(False).json()
+        stream = await _maybe(builder.multiplexed(1).ack_callback(callback).build())
+        message_id = await _maybe(stream.ingest_record(record))
+        with pytest.raises(core.ZerobusException):
+            await _maybe(stream.flush())
+
+        failures = callback.wait_for_failure()
+        assert [failed_id for failed_id, _ in failures] == [message_id]
+        assert all(isinstance(message, str) and message for _, message in failures)
+        assert callback.acked == set()
+        assert stream.is_closed
+        with pytest.raises(core.ZerobusException):
+            await _maybe(stream.ingest_record(record))
+        with pytest.raises(core.ZerobusException):
+            await _maybe(stream.close())
+        assert list(await _maybe(stream.get_unacked_records())) == [record.encode()]
+        # A failed stream rejects an empty batch too, as the core does.
+        with pytest.raises(core.ZerobusException):
+            await _maybe(stream.ingest_records([]))
+
+    asyncio.run(run())
+
+
+def _ingest_after_rejection(stream, calls):
+    """Make each (method, payload, expected) call and return the expected records of the calls that returned.
+
+    The first call ingests a record the server rejects, which fails the stream. Calls that raise
+    because the stream has already failed queued nothing, so their records are not expected back.
+    """
+    accepted = []
+    for method, payload, expected in calls:
+        try:
+            getattr(stream, method)(payload)
+        except core.ZerobusException:
+            continue
+        accepted.extend(expected)
+    return accepted
+
+
+def _assert_records_come_back(stream, accepted, decode):
+    """Fail the stream, close it, and check that every accepted record comes back unacknowledged."""
+    with pytest.raises(core.ZerobusException):
+        stream.flush()
+    try:
+        stream.close()
+    except core.ZerobusException:
+        pass  # a multiplexed stream reports the failure again; an ordinary stream does not
+    batches = list(stream.get_unacked_batches())
+    assert batches
+    assert all(isinstance(batch, list) and all(isinstance(r, bytes) for r in batch) for batch in batches)
+    assert sorted(decode(r) for r in stream.get_unacked_records()) == sorted(accepted)
+
+
+def _canonical_json(record):
+    return json.dumps(json.loads(record), sort_keys=True)
+
+
+def test_multiplexed_json_records_come_back_unacknowledged():
+    prefix = RUN_PREFIX + "unacked-"
+    rows = [_row(f"{prefix}json-{i}", i) for i in range(6)]
+    rejected = _rejected_json(prefix)
+    stream = _authenticated(_sdk(sync).stream_builder()).recovery(False).json().multiplexed(1).build()
+    accepted = _ingest_after_rejection(
+        stream,
+        [
+            ("ingest_record", rejected, [_canonical_json(rejected)]),
+            ("ingest_record", json.dumps(rows[0]), [_canonical_json(json.dumps(rows[0]))]),
+            ("ingest_record", rows[1], [_canonical_json(json.dumps(rows[1]))]),
+            ("ingest_records", [json.dumps(r) for r in rows[2:4]], [_canonical_json(json.dumps(r)) for r in rows[2:4]]),
+            ("ingest_records", rows[4:6], [_canonical_json(json.dumps(r)) for r in rows[4:6]]),
+        ],
+    )
+    _assert_records_come_back(stream, accepted, _canonical_json)
+    assert stream.is_closed
+    with pytest.raises(core.NonRetriableException):
+        stream.ingest_record(rows[0])
+
+
+def test_multiplexed_proto_records_come_back_unacknowledged():
+    prefix = RUN_PREFIX + "unacked-"
+    messages = [_air_quality(f"{prefix}proto-{i}", i) for i in range(6)]
+    encoded = [m.SerializeToString() for m in messages]
+    builder = _authenticated(_sdk(sync).stream_builder()).recovery(False).compiled_proto(_air_quality_descriptor())
+    stream = builder.multiplexed(1).build()
+    accepted = _ingest_after_rejection(
+        stream,
+        [
+            ("ingest_record", UNDECODABLE, [UNDECODABLE]),
+            ("ingest_record", messages[0], encoded[0:1]),
+            ("ingest_record", encoded[1], encoded[1:2]),
+            ("ingest_records", messages[2:4], encoded[2:4]),
+            ("ingest_records", encoded[4:6], encoded[4:6]),
+        ],
+    )
+    _assert_records_come_back(stream, accepted, lambda record: record)
+    assert stream.is_closed
+    with pytest.raises(core.NonRetriableException):
+        stream.ingest_record(messages[0])
+
+
+def _avro_bytes(row):
+    import fastavro
+
+    encoded = io.BytesIO()
+    fastavro.schemaless_writer(encoded, fastavro.parse_schema(json.loads(AVRO_SCHEMA)), row)
+    return encoded.getvalue()
+
+
+def _decoded_avro(record):
+    """An Avro record as canonical JSON, or ``"undecodable"`` for the rejected one."""
+    import fastavro
+
+    if record == UNDECODABLE:
+        return "undecodable"
+    row = fastavro.schemaless_reader(io.BytesIO(record), fastavro.parse_schema(json.loads(AVRO_SCHEMA)))
+    return json.dumps(row, sort_keys=True)
+
+
+def test_multiplexed_avro_records_come_back_unacknowledged():
+    prefix = RUN_PREFIX + "unacked-"
+    rows = [_row(f"{prefix}avro-{i}", i) for i in range(6)]
+    expected = [json.dumps(r, sort_keys=True) for r in rows]
+    stream = _authenticated(_sdk(sync).stream_builder()).recovery(False).avro(AVRO_SCHEMA).multiplexed(1).build()
+    accepted = _ingest_after_rejection(
+        stream,
+        [
+            ("ingest_record", UNDECODABLE, ["undecodable"]),
+            ("ingest_record", rows[0], expected[0:1]),
+            ("ingest_record", _avro_bytes(rows[1]), expected[1:2]),
+            ("ingest_records", rows[2:4], expected[2:4]),
+            ("ingest_records", [_avro_bytes(r) for r in rows[4:6]], expected[4:6]),
+        ],
+    )
+    _assert_records_come_back(stream, accepted, _decoded_avro)
+    assert stream.is_closed
+    with pytest.raises(core.NonRetriableException):
+        stream.ingest_record(rows[0])
+
+
+def test_ordinary_avro_records_come_back_unacknowledged():
+    prefix = RUN_PREFIX + "unacked-"
+    rows = [_row(f"{prefix}ordinary-{i}", i) for i in range(4)]
+    expected = [json.dumps(r, sort_keys=True) for r in rows]
+    stream = _authenticated(_sdk(sync).stream_builder()).recovery(False).avro(AVRO_SCHEMA).build()
+    accepted = _ingest_after_rejection(
+        stream,
+        [
+            ("ingest_record_offset", UNDECODABLE, ["undecodable"]),
+            ("ingest_record_offset", rows[0], expected[0:1]),
+            ("ingest_record_offset", _avro_bytes(rows[1]), expected[1:2]),
+            ("ingest_records_offset", rows[2:4], expected[2:4]),
+        ],
+    )
+    _assert_records_come_back(stream, accepted, _decoded_avro)
+
+
+@pytest.mark.parametrize("record_format", ["json", "avro"])
+def test_ordinary_stream_formats(module, record_format):
+    # Each format's encoder is wired separately for ordinary streams, and the async build
+    # passes the Avro encoder on its own code path.
+    prefix = RUN_PREFIX + "ordinary" + record_format + "-"
+    rows = [_row(f"{prefix}{i}", i) for i in range(10)]
+    payloads = [json.dumps(r) for r in rows[:5]] + rows[5:] if record_format == "json" else rows
+
+    async def run():
+        builder = _authenticated(_sdk(module).stream_builder())
+        builder = builder.json() if record_format == "json" else builder.avro(AVRO_SCHEMA)
+        stream = await _maybe(builder.build())
+        try:
+            for payload in payloads:
+                await _maybe(stream.ingest_record_offset(payload))
+            await _maybe(stream.flush())
+        finally:
+            await _maybe(stream.close())
+        assert list(await _maybe(stream.get_unacked_records())) == []
+
+    asyncio.run(run())
+    EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + len(rows)
+
+
+def test_ordinary_stream_ack_callback_receives_every_offset(module):
+    prefix = RUN_PREFIX + "ordinaryack-"
+    callback = _RecordingCallback()
+
+    async def run():
+        builder = _authenticated(_sdk(module).stream_builder()).compiled_proto(_air_quality_descriptor())
+        stream = await _maybe(builder.ack_callback(callback).build())
+        offsets = []
+        try:
+            for i in range(20):
+                offsets.append(await _maybe(stream.ingest_record_offset(_air_quality(f"{prefix}{i}", i))))
+            await _maybe(stream.flush())
+        finally:
+            await _maybe(stream.close())
+        return offsets
+
+    offsets = asyncio.run(run())
+    assert len(set(offsets)) == 20
+    callback.wait_for(offsets)
+    EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + 20
+
+
+def test_threads_share_one_sync_stream():
+    threads = 8
+    records_per_thread = 50
+    prefix = RUN_PREFIX + "threads-"
+    callback = _RecordingCallback()
+    ids = []
+    ids_lock = threading.Lock()
+
+    stream = _authenticated(_sdk(sync).stream_builder()).json().multiplexed(4).ack_callback(callback).build()
+    try:
+
+        def ingest(thread):
+            message_id = None
+            for i in range(records_per_thread):
+                message_id = stream.ingest_record(_row(f"{prefix}{thread}-{i}", i))
+                with ids_lock:
+                    ids.append(message_id)
+            # Deliberately wait on this thread's last ID while other threads still ingest, so
+            # ingest, wait, and flush overlap. For bulk ingestion, flush() once instead.
+            stream.wait_for_message_id(message_id)
+            stream.flush()
+
+        assert _run_concurrently(threads, ingest) == []
+        assert len(ids) == len(set(ids)) == threads * records_per_thread
+        callback.wait_for(ids)
+        assert not stream.is_closed
+    finally:
+        stream.close()
+    assert stream.is_closed
+    EXPECTED_ROWS[prefix] = threads * records_per_thread
+
+
+def test_sync_flush_lets_other_python_threads_run():
+    # flush() releases the GIL while it waits, so a Python thread keeps running meanwhile.
+    prefix = RUN_PREFIX + "gil-"
+    beats = []
+    stop = threading.Event()
+
+    def heartbeat():
+        while not stop.is_set():
+            beats.append(time.monotonic())
+            time.sleep(0.001)
+
+    stream = _authenticated(_sdk(sync).stream_builder()).json().multiplexed(2).build()
+    beating = threading.Thread(target=heartbeat, daemon=True)
+    try:
+        for i in range(2000):
+            stream.ingest_record(_row(f"{prefix}{i}", i))
+        beating.start()
+        started = time.monotonic()
+        stream.flush()
+        finished = time.monotonic()
+    finally:
+        stop.set()
+        beating.join(THREAD_JOIN_SECONDS)
+        stream.close()
+    assert finished - started >= 0.05, "flush() returned too fast to observe other threads"
+    assert len([beat for beat in beats if started < beat < finished]) >= 5
+    EXPECTED_ROWS[prefix] = 2000
+
+
+def test_close_while_other_threads_ingest():
+    ingest_threads = 4
+    prefix = RUN_PREFIX + "closing-"
+    ingested = [threading.Event() for _ in range(ingest_threads)]
+    stream = _authenticated(_sdk(sync).stream_builder()).json().multiplexed(4).build()
+
+    def body(thread):
+        if thread >= ingest_threads:
+            # Two threads close the stream, concurrently with each other and with the ingest
+            # calls, once every ingest thread is under way.
+            for event in ingested:
+                assert event.wait(THREAD_JOIN_SECONDS), "an ingest thread never ingested"
+            try:
+                stream.close()
+            except core.ZerobusException:
+                pass  # the close that comes second may find the stream already closing
+            return
+        # Bounded so a slow close cannot let the threads queue records without limit.
+        for i in range(5000):
+            try:
+                message_id = stream.ingest_record(_row(f"{prefix}{thread}-{i}", i))
+            except core.ZerobusException:
+                return
+            assert isinstance(message_id, int)
+            ingested[thread].set()
+
+    try:
+        assert _run_concurrently(ingest_threads + 2, body) == []
+    finally:
+        if not stream.is_closed:
+            stream.close()
+    assert stream.is_closed
+
+
+def test_cancelled_flush_leaves_the_async_stream_usable():
+    prefix = RUN_PREFIX + "cancel-"
+    callback = _RecordingCallback()
+
+    async def run():
+        builder = _authenticated(_sdk(aio).stream_builder()).compiled_proto(_air_quality_descriptor())
+        stream = await builder.multiplexed(2).ack_callback(callback).build()
+        ids = set()
+        try:
+            for i in range(1000):
+                ids.add(await stream.ingest_record(_air_quality(f"{prefix}{i}", i)))
+            flush = asyncio.create_task(stream.flush())
+            await asyncio.sleep(0)  # let the flush start its native call
+            flush.cancel()
+            # If the flush finished before the cancel, the test has proved nothing and fails here.
+            with pytest.raises(asyncio.CancelledError):
+                await flush
+            assert flush.cancelled()
+        finally:
+            await asyncio.wait_for(stream.close(), CALLBACK_WAIT_SECONDS)
+        return ids
+
+    ids = asyncio.run(run())
+    callback.wait_for(ids)
+    EXPECTED_ROWS[prefix] = 1000
+
+
+def test_concurrent_ingest_tasks_on_one_async_stream():
+    prefix = RUN_PREFIX + "gather-"
+    callback = _RecordingCallback()
+
+    async def run():
+        builder = _authenticated(_sdk(aio).stream_builder()).compiled_proto(_air_quality_descriptor())
+        stream = await builder.multiplexed(4).ack_callback(callback).build()
+        try:
+            ids = await asyncio.gather(*(stream.ingest_record(_air_quality(f"{prefix}{i}", i)) for i in range(200)))
+            await stream.flush()
+        finally:
+            await stream.close()
+        return ids
+
+    ids = asyncio.run(run())
+    assert len(set(ids)) == 200
+    callback.wait_for(ids)
+    EXPECTED_ROWS[prefix] = 200
+
+
+def test_dropping_a_stream_without_close():
+    # Rows ingested into the dropped streams may or may not land, so they are not counted.
+    prefix = RUN_PREFIX + "dropped-"
+    sdk = _sdk(sync)
+    stream = _authenticated(sdk.stream_builder()).json().multiplexed(2).build()
+    stream.ingest_record(_row(prefix, 0))
+    del stream
+    gc.collect()
+
+    # The SDK still opens and uses new streams.
+    stream = _authenticated(sdk.stream_builder()).json().multiplexed(2).build()
+    try:
+        stream.ingest_record(_row(prefix, 1))
+        stream.flush()
+    finally:
+        stream.close()
+
+
+def test_async_dropping_a_stream_without_close():
+    prefix = RUN_PREFIX + "dropped-"
+    sdk = _sdk(aio)
+
+    async def open_and_drop():
+        stream = await _authenticated(sdk.stream_builder()).json().multiplexed(2).build()
+        await stream.ingest_record(_row(prefix, 0))
+        del stream
+        gc.collect()
+
+        stream = await _authenticated(sdk.stream_builder()).json().multiplexed(2).build()
+        try:
+            await stream.ingest_record(_row(prefix, 1))
+            await stream.flush()
+        finally:
+            await stream.close()
+
+    async def open_and_keep():
+        stream = await _authenticated(sdk.stream_builder()).json().multiplexed(2).build()
+        await stream.ingest_record(_row(prefix, 2))
+        return stream
+
+    asyncio.run(open_and_drop())
+    # Dropped after its event loop has finished.
+    stream = asyncio.run(open_and_keep())
+    del stream
+    gc.collect()
+
+
+def test_flush_timeout_reaches_the_core():
+    prefix = RUN_PREFIX + "timeout-"
+    stream = _authenticated(_sdk(sync).stream_builder()).json().flush_timeout_ms(1).multiplexed(2).build()
+    try:
+        for i in range(1000):
+            stream.ingest_record(_row(f"{prefix}{i}", i))
+        # The default timeout is minutes; 1 ms is too short for the server to acknowledge 1000 records.
+        with pytest.raises(core.ZerobusException):
+            stream.flush()
+    finally:
+        try:
+            stream.close()
+        except core.ZerobusException:
+            pass  # close() flushes with the same timeout
+
+
+class _SlowCallback(core.AckCallback):
+    """Takes 0.4 s per acknowledgment, so callbacks are still queued when close() starts."""
+
+    def __init__(self):
+        super().__init__()
+        self.done = 0
+
+    def on_ack(self, offset):
+        time.sleep(0.4)
+        self.done += 1  # callbacks of one sub-stream run one at a time
+
+    def wait_for_all(self, expected):
+        deadline = time.monotonic() + CALLBACK_WAIT_SECONDS
+        while self.done < expected and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert self.done == expected, self.done
+
+
+@pytest.mark.parametrize("wait", ["unset", None, 0])
+def test_callback_max_wait_time_reaches_the_core(wait):
+    # One sub-stream, so callbacks run one at a time: 20 of them take 8 s.
+    prefix = RUN_PREFIX + "callbackwait-"
+    callback = _SlowCallback()
+    builder = _authenticated(_sdk(sync).stream_builder()).json()
+    if wait != "unset":
+        builder = builder.callback_max_wait_time_ms(wait)
+    stream = builder.multiplexed(1).ack_callback(callback).build()
+    for i in range(20):
+        stream.ingest_record(_row(f"{prefix}{i}", i))
+    stream.flush()
+    assert callback.done <= 3, "the callbacks must still be queued when close() starts"
+    started = time.monotonic()
+    stream.close()
+    took = time.monotonic() - started
+    done = callback.done
+    EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + 20
+    # Callbacks still queued when close() stops waiting keep running. Let them finish before
+    # the SDK is released: releasing it while a callback waits for the GIL hangs.
+    callback.wait_for_all(20)
+
+    if wait == "unset":
+        # The core's default wait is 5 s.
+        assert 4 <= took and done < 20, (took, done)
+    elif wait is None:
+        # No limit: close() waits for every callback.
+        assert done == 20, (took, done)
+    else:
+        assert took < 1 and done <= 5, (took, done)
+
+
+@pytest.mark.parametrize("record_format", ["json", "avro"])
+def test_async_multiplexed_batches_and_waits(record_format):
+    # The async wrapper encodes JSON and Avro payloads on its own code path.
+    prefix = RUN_PREFIX + "aio" + record_format + "-"
+    rows = [_row(f"{prefix}{i}", i) for i in range(12)]
+    if record_format == "json":
+        singles = [json.dumps(rows[0]), rows[1]]
+    else:
+        singles = [rows[0], _avro_bytes(rows[1])]
+
+    async def run():
+        builder = _authenticated(_sdk(aio).stream_builder())
+        builder = builder.json() if record_format == "json" else builder.avro(AVRO_SCHEMA)
+        stream = await builder.multiplexed(2).build()
+        try:
+            for payload in singles:
+                assert isinstance(await stream.ingest_record(payload), int)
+            batch_id = await stream.ingest_records(rows[2:])
+            assert isinstance(batch_id, int)
+            assert await stream.ingest_records([]) is None
+            # Deliberately wait on the batch's ID to exercise wait_for_message_id.
+            await stream.wait_for_message_id(batch_id)
+            await stream.flush()
+        finally:
+            await stream.close()
+        assert list(await stream.get_unacked_batches()) == []
+
+    asyncio.run(run())
+    EXPECTED_ROWS[prefix] = len(rows)
+
+
+def test_max_ingest_payload_bytes_reaches_the_core():
+    prefix = RUN_PREFIX + "payloadlimit-"
+    limit = 64
+    builder = _authenticated(_sdk(sync).stream_builder()).compiled_proto(_air_quality_descriptor())
+    stream = builder.max_ingest_payload_bytes(limit).multiplexed(1).build()
+    try:
+        too_large = _air_quality(prefix + "x" * 100, 0)
+        assert len(too_large.SerializeToString()) > limit
+        # Checked on the client before anything is sent.
+        with pytest.raises(core.NonRetriableException):
+            stream.ingest_record(too_large)
+
+        small = _air_quality(f"{prefix}0", 0)
+        assert len(small.SerializeToString()) < limit
+        stream.ingest_record(small)
+        stream.flush()
+    finally:
+        stream.close()
+    EXPECTED_ROWS[prefix] = 1
