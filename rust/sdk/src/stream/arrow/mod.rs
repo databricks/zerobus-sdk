@@ -28,7 +28,9 @@ pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use self::batch::{materialize_ipc, PendingBatch};
 use self::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
 use self::connection::RequestBodyRegistry;
-pub use self::options::{ArrowCompression, ArrowStreamConfigurationOptions};
+pub use self::options::{
+    ArrowCompression, ArrowDictionaryHandling, ArrowStreamConfigurationOptions,
+};
 use self::supervisor::{Supervisor, SupervisorTaskHandle};
 use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::grpc_status::GrpcStatus;
