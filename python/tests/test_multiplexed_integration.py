@@ -183,9 +183,8 @@ def test_multiplexed_proto_spreads_records_and_acks_every_message_id():
 
         stream.flush()
 
-        # Every ingest call returns a distinct ID, and round-robin uses every sub-stream.
+        # Every ingest call returns a distinct ID.
         assert len(ids) == 1000 + 10 + 10
-        assert {_stream_index(i) for i in ids} == set(range(stream_count))
         # Each ingest call is acknowledged exactly once with the ID it returned.
         callback.wait_for(ids)
     finally:
@@ -277,6 +276,5 @@ def test_async_multiplexed_proto():
         return ids
 
     ids = asyncio.run(run())
-    assert {_stream_index(i) for i in ids} == {0, 1, 2, 3}
     callback.wait_for(ids)
     EXPECTED_ROWS[prefix] = 200

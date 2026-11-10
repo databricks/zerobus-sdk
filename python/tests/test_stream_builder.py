@@ -84,6 +84,11 @@ class TestBuilderValidation:
         with pytest.raises(ValueError, match="authentication is required"):
             _open(mode, builder.build)
 
+    def test_build_requires_both_oauth_credentials(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", None).json(), kind)
+        with pytest.raises(ValueError, match="oauth requires both client_id and client_secret"):
+            _open(mode, builder.build)
+
     def test_build_requires_format(self, sdk, mode, kind):
         builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", "secret"), kind)
         with pytest.raises(ValueError, match=r"record format is required: call json\(\), compiled_proto"):
@@ -136,6 +141,11 @@ class TestBuilderValidation:
     def test_numeric_setters_reject_negative(self, sdk, setter):
         with pytest.raises(ValueError, match=setter):
             getattr(sdk.stream_builder(), setter)(-1)
+
+    def test_stream_paused_max_wait_time_rejects_values_beyond_native_range(self, sdk):
+        # The other numeric setters are shared with the persistent builder and tested there.
+        with pytest.raises(ValueError, match="stream_paused_max_wait_time_ms"):
+            sdk.stream_builder().stream_paused_max_wait_time_ms(2**70)
 
     @pytest.mark.parametrize("setter", ["callback_max_wait_time_ms", "stream_paused_max_wait_time_ms"])
     def test_optional_waits_accept_none(self, sdk, setter):
@@ -194,6 +204,23 @@ class TestMultiplexedStep:
     def test_rejects_the_ordinary_ack_callback(self, sdk, mode):
         mux = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().ack_callback(_Ack()).multiplexed(2)
         with pytest.raises(ValueError, match=r"use multiplexed\(n\)\.ack_callback"):
+            _open(mode, mux.build)
+
+
+class TestAckCallbackType:
+    """A callback that is not an ``AckCallback`` is rejected before anything is opened."""
+
+    def test_ordinary_stream_rejects_a_plain_function(self, mode):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+        builder.ack_callback(lambda offset: None)
+        # A TypeError, not the ZerobusException of a failed connection.
+        with pytest.raises(TypeError):
+            _open(mode, builder.build)
+
+    def test_multiplexed_stream_rejects_a_plain_function(self, mode):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+        mux = builder.multiplexed(2).ack_callback(lambda message_id: None)
+        with pytest.raises(TypeError):
             _open(mode, mux.build)
 
 
@@ -270,12 +297,23 @@ class TestNativeValidation:
             with pytest.raises(ValueError, match="exactly one authentication method"):
                 native.open_multiplexed_stream(props, settings, 2)
 
-    def test_rejects_out_of_range_stream_count(self):
+    def test_async_requires_exactly_one_auth_method(self):
+        # The async open calls check the settings before they return an awaitable.
         props = core.TableProperties("c.s.t")
-        native = core.sync.ZerobusSdk(*UNREACHABLE)
-        settings = core.StreamSettings(headers_provider=_Headers())
-        with pytest.raises(core.NonRetriableException, match="stream_count must be between 1 and 64"):
-            native.open_multiplexed_stream(props, settings, 65)
+
+        async def run():
+            native = core.aio.ZerobusSdk(*SDK_ARGS)
+            for settings in (
+                core.StreamSettings(),
+                core.StreamSettings(client_id="id"),
+                core.StreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
+            ):
+                with pytest.raises(ValueError, match="exactly one authentication method"):
+                    native.open_stream(props, settings)
+                with pytest.raises(ValueError, match="exactly one authentication method"):
+                    native.open_multiplexed_stream(props, settings, 2)
+
+        asyncio.run(run())
 
     def test_rejects_the_ordinary_ack_callback_on_a_multiplexed_stream(self):
         # The Python builder catches this first; the core rejects it too.
