@@ -582,8 +582,8 @@ impl HeadersProvider for FederatedTokenProvider {
 
 /// A headers provider that authenticates with a Databricks personal access token (PAT).
 ///
-/// **Beta (private preview):** PAT authentication for Zerobus requires server-side
-/// enablement, and this API can change. Available behind the `pat-auth` feature.
+/// **Private Preview:** PAT authentication for Zerobus requires server-side enablement.
+/// Available behind the `pat-auth` feature.
 ///
 /// Sends the token as a bearer credential, together with the table name, on every
 /// stream creation. It holds no cache and makes no network calls. The PAT must be

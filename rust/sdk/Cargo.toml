@@ -92,7 +92,7 @@ internal-arrow-c-data = [
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 # Persistent streams with exactly-once semantics (EoS); API is in development.
 eos = []
-# Personal access token (PAT) authentication (Beta, private preview), opt-in. Needs
+# Personal access token (PAT) authentication (Private Preview), opt-in. Needs
 # server-side enablement; adds no dependencies and no toolchain floor.
 pat-auth = []
 testing = []

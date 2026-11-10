@@ -41,7 +41,7 @@ Off by default unless noted; these constraints aren't visible in `Cargo.toml`:
 - `arrow-flight` — Arrow Flight ingestion.
 - `avro` — Avro (Beta). Ephemeral streams only; raises MSRV (apache-avro).
 - `eos` — persistent streams (in dev). JSON + compiled protobuf only; no Arrow, Avro, dynamic protobuf, or multiplexing.
-- `pat-auth` — personal access token auth (Beta, private preview; needs server-side enablement). No new deps or MSRV change. Gates `StreamBuilder::personal_access_token`, `PatHeadersProvider`, and, with `eos`, `PersistentStreamBuilder::personal_access_token`.
+- `pat-auth` — personal access token auth (Private Preview; needs server-side enablement, not available for Arrow Flight streams yet). No new deps or MSRV change. Gates `StreamBuilder::personal_access_token`, `PatHeadersProvider`, and, with `eos`, `PersistentStreamBuilder::personal_access_token`.
 - `zeroparser` — zero-copy protobuf parser; opt-in (`sdk/src/zeroparser/`).
 - `internal-arrow-c-data` — wrapper-only C Data importer; unstable, don't depend on it.
 - `webpki-version-floor` — **on by default.** A `rustls-webpki`/`webpki-roots` floor distrusting compromised CAs (crates not imported). Bindings must keep it on; a `default-features = false` build must restore the distrust itself.

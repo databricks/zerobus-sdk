@@ -233,9 +233,8 @@ impl<'a> StreamBuilder<'a> {
 
     /// Authenticate with a Databricks personal access token (PAT).
     ///
-    /// **Beta (private preview):** PAT authentication for Zerobus requires
-    /// server-side enablement, and this API can change. Available behind the
-    /// `pat-auth` feature.
+    /// **Private Preview:** PAT authentication for Zerobus requires server-side
+    /// enablement. Available behind the `pat-auth` feature.
     ///
     /// The PAT must be created with the `zerobus` API scope in the workspace that
     /// the Zerobus endpoint belongs to. The SDK sends it as a bearer token and
@@ -243,10 +242,11 @@ impl<'a> StreamBuilder<'a> {
     /// stream fails with an authentication error. An empty token is rejected by
     /// [`validate`](Self::validate) and the build methods.
     ///
-    /// Applies to every stream this builder produces, including Arrow Flight streams
-    /// from `build_arrow()` (feature `arrow-flight`). Because the token cannot be
-    /// refreshed, an authentication rejection while creating the stream is not
-    /// retried, unlike the one-shot refresh retry OAuth credentials get.
+    /// Not available for Arrow Flight streams (`build_arrow()`) yet: the server does
+    /// not accept a PAT there, so use [`oauth`](Self::oauth) or
+    /// [`headers_provider`](Self::headers_provider) for those. Because the token
+    /// cannot be refreshed, an authentication rejection while creating the stream is
+    /// not retried, unlike the one-shot refresh retry OAuth credentials get.
     ///
     /// Of this, [`oauth`](Self::oauth), [`federated_auth`](Self::federated_auth),
     /// and [`headers_provider`](Self::headers_provider), the last call wins.
