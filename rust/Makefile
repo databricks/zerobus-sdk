@@ -51,4 +51,8 @@ test:
 	cargo test --workspace --exclude databricks-zerobus-ingest-sdk --exclude zerobus-jni
 	cargo test -p databricks-zerobus-ingest-sdk --all-features
 	cargo test -p databricks-zerobus-ingest-sdk --no-default-features
+# The missing-auth wording is pinned per feature set; all-features and no-features above skip
+# `testing` alone (how the C FFI builds the SDK) and `pat-auth` alone (a Rust user's build).
+	cargo test -p databricks-zerobus-ingest-sdk --features testing --lib missing_auth
+	cargo test -p databricks-zerobus-ingest-sdk --features pat-auth --lib missing_auth
 	cargo test -p zerobus-jni --all-features

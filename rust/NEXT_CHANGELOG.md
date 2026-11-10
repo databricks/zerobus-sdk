@@ -16,7 +16,8 @@
   `.personal_access_token(token)` on `StreamBuilder` or `PersistentStreamBuilder` to
   authenticate with a Databricks PAT created with the `zerobus` API scope. The SDK
   sends the token as given and never refreshes it, and never includes it in `Debug`
-  output.
+  output. An authentication rejection while creating the stream fails immediately
+  instead of spending the one-shot credential-refresh retry.
 
 ### Bug Fixes
 
@@ -47,3 +48,6 @@
   call wins (Beta).
 - Added `PatHeadersProvider` (behind `pat-auth`), a `HeadersProvider` that sends a
   personal access token (Beta).
+- Added `HeadersProvider::can_refresh`, a defaulted method returning `true`. A provider
+  with a fixed credential returns `false` to skip the one-shot auth retry during stream
+  creation; `PatHeadersProvider` does. Existing implementations are unaffected.

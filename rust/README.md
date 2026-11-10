@@ -700,7 +700,10 @@ To authenticate with a Databricks personal access token (PAT), use the
 the workspace that the Zerobus endpoint belongs to. The SDK sends it as a bearer token
 when it creates or recovers a stream. It does not exchange, cache, or refresh the token,
 so this mode does not need `unity_catalog_url`. Once the token expires or is revoked,
-creating or recovering a stream fails with a non-retryable authentication error.
+creating or recovering a stream fails with a non-retryable authentication error. That
+failure is immediate: the one-shot credential-refresh retry that OAuth streams get at
+creation is skipped, because a PAT cannot be refreshed. The same credential is used
+for Arrow Flight streams built with `build_arrow()`.
 
 ```rust,ignore
 let token = std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set");
@@ -1752,10 +1755,15 @@ Trait for custom authentication header providers.
 #[async_trait]
 pub trait HeadersProvider: Send + Sync {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>>;
+    // Defaulted: drop cached state the server just rejected.
+    async fn invalidate(&self) {}
+    // Defaulted: `false` skips the one-shot auth retry at stream creation.
+    fn can_refresh(&self) -> bool { true }
 }
 ```
 
-Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` (feature `pat-auth`, Beta) sends a personal access token. Use this for:
+Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` (feature `pat-auth`, Beta) sends a personal access token and returns
+`false` from `can_refresh()`, so a rejected token fails stream creation without a retry. Use this for:
 - Custom token caching strategies
 - Alternative authentication mechanisms
 - Integration with centralized credential services

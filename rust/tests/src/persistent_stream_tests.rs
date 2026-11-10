@@ -113,6 +113,15 @@ async fn personal_access_token_creates_and_resumes() {
         server.persistent_committed_offset(&stream_id).await,
         Some(0)
     );
+    let auth = server.get_auth_headers().await;
+    assert_eq!(auth.len(), 2, "one capture for build, one for resume");
+    for captured in &auth {
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer dapi-test-token")
+        );
+        assert_eq!(captured.table_name.as_deref(), Some(TABLE_NAME));
+    }
 }
 
 #[tokio::test]

@@ -332,6 +332,11 @@ impl<'a> StreamBuilder<'a> {
     /// stream fails with an authentication error. An empty token is rejected by
     /// [`validate`](Self::validate) and the build methods.
     ///
+    /// Applies to every stream this builder produces, including Arrow Flight streams
+    /// from `build_arrow()` (feature `arrow-flight`). Because the token cannot be
+    /// refreshed, an authentication rejection while creating the stream is not
+    /// retried, unlike the one-shot refresh retry OAuth credentials get.
+    ///
     /// Of this, [`oauth`](Self::oauth), [`federated_auth`](Self::federated_auth),
     /// and [`headers_provider`](Self::headers_provider), the last call wins.
     #[cfg(feature = "pat-auth")]
@@ -824,4 +829,4 @@ impl<'a> StreamBuilder<'a> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -9,7 +9,7 @@ impl<Id> AckCallback<Id> for NoopAckCallback {
     fn on_error(&self, _offset_id: Id, _error_message: &str) {}
 }
 
-fn test_sdk() -> ZerobusSdk {
+pub(crate) fn test_sdk() -> ZerobusSdk {
     ZerobusSdk::new_with_config(
         "http://localhost:1234".to_string(),
         "http://localhost:5678".to_string(),

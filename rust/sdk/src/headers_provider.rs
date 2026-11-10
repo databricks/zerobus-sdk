@@ -65,6 +65,17 @@ pub trait HeadersProvider: Send + Sync {
     /// a concurrent refresh already replaced it with a newer token, which is kept and
     /// served without re-minting.
     async fn invalidate(&self) {}
+
+    /// Whether a rejected credential can be replaced by a fresh one.
+    ///
+    /// When the server rejects the credentials while a stream is being created and
+    /// recovery is on, the SDK calls [`invalidate`](Self::invalidate) and retries once
+    /// so a refreshed credential can be sent. A provider whose credential is fixed,
+    /// such as a personal access token, returns `false` to skip that retry and surface
+    /// the rejection immediately. The default is `true`.
+    fn can_refresh(&self) -> bool {
+        true
+    }
 }
 
 /// Both transports must decode provider binary values before tonic encodes them on the wire.
@@ -628,6 +639,11 @@ impl HeadersProvider for PatHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
         Ok(bearer_headers(&self.token, &self.table_name))
     }
+
+    // A rejected PAT stays rejected, so the one-shot auth retry would only repeat the failure.
+    fn can_refresh(&self) -> bool {
+        false
+    }
 }
 
 /// A headers provider that returns no headers.
@@ -1089,16 +1105,12 @@ mod tests {
     }
 
     #[cfg(feature = "pat-auth")]
-    #[tokio::test]
-    async fn pat_provider_serves_same_token_after_invalidate() {
+    #[test]
+    fn pat_provider_cannot_refresh() {
         let provider =
             PatHeadersProvider::new("dapi-secret-token".to_string(), "cat.sch.tbl".to_string());
 
-        let before = provider.get_headers().await.unwrap();
-        provider.invalidate().await;
-        let after = provider.get_headers().await.unwrap();
-
-        assert_eq!(before, after);
+        assert!(!provider.can_refresh());
     }
 
     #[cfg(feature = "pat-auth")]
