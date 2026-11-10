@@ -128,7 +128,9 @@ export interface MultiplexedStreamBuilder {
  * Ingest calls resolve to a message ID as soon as the record is queued. Message IDs are opaque,
  * unordered bigints (some are negative): ingest in a loop, then `flush()` to confirm.
  * `waitForMessageId(id)` confirms only that record or batch. On an Avro stream, record objects
- * are encoded against the writer schema before ingestion.
+ * are encoded against the writer schema before ingestion. `getUnackedRecords()` and
+ * `getUnackedBatches()` return `Buffer`s; on a JSON stream, re-ingest them as
+ * `buf.toString('utf8')`, since a `Buffer` is taken as Protocol Buffers bytes.
  *
  * ```typescript
  * const stream = await sdk.streamBuilder()

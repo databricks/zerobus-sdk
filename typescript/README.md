@@ -740,7 +740,9 @@ await stream.close();
 - After a sub-stream fails, the stream rejects new records. To get back the records that were
   never acknowledged, call `getUnackedRecords()` or `getUnackedBatches()` *instead of*
   `close()`: they close the stream first and return the records of every sub-stream, so you
-  can ingest them into a new stream. After a successful `close()` they reject. There is no
+  can ingest them into a new stream. Records come back as `Buffer`s: on a JSON stream each
+  holds the record as UTF-8 JSON, so re-ingest it as `buf.toString('utf8')` (a `Buffer` is
+  taken as Protocol Buffers bytes). After a successful `close()` they reject. There is no
   `recreateStream()` for multiplexed streams.
 - `close()` and the unacked getters first wait for ingest, flush and wait calls already in
   progress (up to `flushTimeoutMs`, or 30 seconds if that is larger: an ingest waits up to
