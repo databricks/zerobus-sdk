@@ -12,19 +12,28 @@ bounded batch, or periodically for a long-running stream).
 
 Each ingest returns the record's offset, and `waitForOffset(offset)` confirms a specific
 record when one must be acknowledged before continuing (acks are ordered, so the last
-offset confirms the whole run); prefer `flush()` for bulk. Note that ack callbacks are NOT
-part of the TypeScript API — the async confirmation tools are `flush()` and `waitForOffset()`.
+offset confirms the whole run); prefer `flush()` for bulk. Ordinary streams have no ack
+callbacks — their async confirmation tools are `flush()` and `waitForOffset()`.
+
 The one thing to avoid is calling `waitForOffset()` after every record in a tight loop,
 since that limits throughput to one record per round-trip.
+
+Multiplexed streams (Beta, `streamBuilder()...multiplexed(n)`) differ: ingest returns an
+unordered message ID, so `waitForMessageId(id)` confirms only that record and the last ID
+does not confirm the run — use `flush()`. They are the only streams with an ack callback
+(`multiplexed(n).ackCallback({ onAck, onError })`); keep it trivial in examples.
 
 ## Structure
 
 ```
 typescript/
 ├── src/lib.rs        # NAPI-RS bindings (Rust ↔ Node.js bridge)
+├── src/multiplexed.rs # NAPI-RS bindings for multiplexed streams (Beta)
 ├── index.js/.d.ts    # NAPI-generated native binding (gitignored build output)
 ├── wrapper.js/.d.ts  # Public entry point: thin JS wrapper over the native binding; encodes
 │                     #   Avro record objects (via the optional `avsc` dependency)
+├── stream_builder.js # Internal: streamBuilder() builders and the mux ack-callback dispatcher
+├── avro.js           # Internal: Avro record-object encoding
 ├── Cargo.toml        # Rust crate config for NAPI-RS
 ├── package.json      # npm package config (main → wrapper.js)
 ├── test/             # Node.js test runner tests
@@ -35,7 +44,9 @@ typescript/
 
 The native addon compiles to a platform-specific `.node` binary. NAPI-RS generates TypeScript
 type definitions automatically. The package entry point is `wrapper.js` (not the generated
-`index.js`): it encodes Avro record objects to bytes and forwards everything else unchanged.
+`index.js`): it encodes Avro record objects to bytes, adds `streamBuilder()`, and makes a
+multiplexed stream's `close()` wait until its ack callbacks have run; everything else is
+forwarded unchanged. `wrapper.d.ts` is hand-written: update it with every wrapper change.
 The `avro` and `arrow-flight` Cargo features are off by default for a from-source `npm run build`,
 but CI and release builds enable both (`npm run build:all`), so published binaries include them.
 
@@ -57,6 +68,7 @@ Run from `typescript/`:
 NAPI-RS bridges Rust types to JavaScript with automatic type conversions. Key considerations:
 
 - **Memory**: NAPI external objects are ref-counted by Node.js GC. Cleanup triggers Rust `Drop`. No explicit free needed, but `close()` should be called to flush.
+- **JS callbacks** (headers provider, mux ack callback) cross as threadsafe functions. A JS throw inside one is a fatal Node exception, so the JS side must catch everything (`stream_builder.js` does for ack callbacks). The mux ack TSFN is unref'd while the stream is open so it never keeps Node alive, and re-ref'd during close (`src/multiplexed.rs`).
 - **Async**: Rust futures become JavaScript Promises. The tokio runtime runs on a separate thread pool — Node.js event loop is never blocked.
 - **Payload conversion**: The binding coerces payloads by the stream's record type:
   - Proto / JSON streams: `Buffer` → proto bytes, `string` → JSON, objects with `.encode()` →

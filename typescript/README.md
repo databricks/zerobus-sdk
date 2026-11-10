@@ -13,6 +13,8 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
   - [Option 2: Using Protocol Buffers (Default, Recommended)](#option-2-using-protocol-buffers-default-recommended)
 - [Usage Examples](#usage-examples)
 - [Authentication](#authentication)
+- [Stream Builder](#stream-builder)
+- [Multiplexed Streams (Beta)](#multiplexed-streams-beta)
 - [Configuration](#configuration)
 - [Descriptor Utilities](#descriptor-utilities)
 - [Error Handling](#error-handling)
@@ -31,6 +33,7 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 - **Multiple serialization formats**: Support for JSON, Protocol Buffers, Avro *(Beta)*, and Arrow Flight ingestion with ZSTD compression by default (LZ4 or none optional)
 - **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) - automatically handles serialization
 - **Batch ingestion**: Ingest multiple records with a single acknowledgment for higher throughput
+- **Multiplexed streams** *(Beta)*: Spread records over several sub-streams to one table when one stream is the bottleneck
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **TypeScript support**: Full type definitions for excellent IDE support
 - **Cross-platform**: Supports Linux, macOS, and Windows
@@ -661,6 +664,132 @@ const stream = await sdk.createStream(
 
 **Note:** The SDK automatically adds the `user-agent` header if not provided.
 
+**Note:** `getHeadersCallback` is called once, when the stream opens. Its headers are reused for
+every reconnect and, on a multiplexed stream, for every sub-stream, so a token that expires
+during the stream's lifetime needs OAuth instead.
+
+## Stream Builder
+
+`sdk.streamBuilder()` configures a stream step by step, like the Rust, Python and Java SDKs:
+set the table, one authentication method, one record format and any stream options, then
+call `build()`. It opens the same `ZerobusStream` as `createStream()`, which stays available
+unchanged.
+
+```typescript
+import { ZerobusSdk } from '@databricks/zerobus-ingest-sdk';
+
+const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
+const stream = await sdk.streamBuilder()
+  .table('catalog.schema.air_quality')
+  .oauth(CLIENT_ID, CLIENT_SECRET)            // or .headersProvider({ getHeadersCallback })
+  .compiledProto(descriptorBase64)            // or .json() / .avro(schemaJson)
+  .maxInflightRequests(10000)                 // optional; see Stream Configuration Options
+  .build();
+
+for (const record of records) {
+  await stream.ingestRecordOffset(record);    // queue only — do NOT wait here
+}
+await stream.flush();                         // wait once for all pending acks
+await stream.close();
+```
+
+- For the format and the authentication, the last setter called wins.
+- Setters check their arguments and throw right away on an invalid value (for example a
+  negative or fractional number, or a `maxInflightRequests` below 1); `build()` rejects when
+  the table, the authentication or the record format is missing.
+- The option setters (`maxInflightRequests`, `recovery`, `recoveryTimeoutMs`,
+  `recoveryBackoffMs`, `recoveryRetries`, `flushTimeoutMs`, `serverLackOfAckTimeoutMs`,
+  `streamPausedMaxWaitTimeMs`) match the
+  [Stream Configuration Options](#stream-configuration-options); unset ones keep the defaults.
+
+## Multiplexed Streams (Beta)
+
+A single stream is ordered, which caps its throughput. When one stream is the bottleneck and
+you don't need a global order, a multiplexed stream opens several sub-streams to one table
+and distributes records round-robin across them. Records keep their order within a
+sub-stream, but there is no order across sub-streams.
+
+Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
+Multiplexed streams support JSON, Protocol Buffers and Avro records, with OAuth or a custom
+headers provider (called once, at open; see [Custom Authentication](#custom-authentication)).
+For JSON, first migrate to Protocol Buffers and measure again before multiplexing.
+
+```typescript
+const stream = await sdk.streamBuilder()
+  .table('catalog.schema.air_quality')
+  .oauth(CLIENT_ID, CLIENT_SECRET)
+  .compiledProto(descriptorBase64)
+  .multiplexed(4)
+  .build();
+
+for (const record of records) {
+  await stream.ingestRecord(record);   // queues only; resolves to a message ID
+}
+await stream.flush();                  // confirms every sub-stream once
+await stream.close();
+```
+
+- `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned builder
+  keeps the configuration as it is at that point and only has `ackCallback()` and `build()`.
+  `maxInflightRequests` is a budget for the whole stream, divided evenly across sub-streams,
+  so it must be at least `n`; `build()` rejects a smaller value.
+- `ingestRecord()` and `ingestRecords()` resolve to a **message ID**: an opaque `bigint` that
+  identifies the sub-stream and the record's position in it. Message IDs are not ordered and
+  may be negative. `waitForMessageId(id)` confirms only that record or batch, not the ones
+  ingested before it; use `flush()` to confirm everything.
+- A batch from `ingestRecords()` lands on one sub-stream, and one message ID covers it
+  (`null` for an empty batch).
+- Opening is atomic: each sub-stream opens after a random delay of up to one second, and if
+  any fails, the others are closed and `build()` rejects.
+- Once an ingest, flush or wait call hits a failed sub-stream, the stream rejects new records
+  (until then, ingests that land on healthy sub-streams are still accepted). A rejected
+  `close()` is final: retrying rejects with the same error. To get back the records that were
+  never acknowledged, call `getUnackedRecords()` or `getUnackedBatches()` *instead of*
+  `close()`: they close the stream first and return the records of every sub-stream, so you
+  can ingest them into a new stream. Records come back as `Buffer`s: on a JSON stream each
+  holds the record as UTF-8 JSON, so re-ingest it as `buf.toString('utf8')` (a `Buffer` is
+  taken as Protocol Buffers bytes). After a successful `close()` they reject; after a rejected
+  one they still return the records. There is no `recreateStream()` for multiplexed streams.
+- `close()` and the unacked getters first wait for ingest, flush and wait calls already in
+  progress (up to `flushTimeoutMs`, or 30 seconds if that is larger: an ingest waits up to
+  30 seconds for sub-stream capacity), then flush (up to `flushTimeoutMs` again). Size
+  shutdown deadlines for the sum.
+
+### Acknowledgment callbacks
+
+A multiplexed stream can report each acknowledgment through a callback, registered with
+`multiplexed(n).ackCallback(...)`. One object is shared by every sub-stream, and calls arrive
+in no global order.
+
+```typescript
+let acked = 0;
+const stream = await sdk.streamBuilder()
+  .table('catalog.schema.air_quality')
+  .oauth(CLIENT_ID, CLIENT_SECRET)
+  .compiledProto(descriptorBase64)
+  .multiplexed(4)
+  .ackCallback({
+    onAck(messageId: bigint) { acked++; },
+    onError(messageId: bigint, message: string) { console.error(messageId, message); },
+  })
+  .build();
+```
+
+- Keep the methods trivial: they run on the Node.js event loop, once per record or batch.
+  For throughput, rely on `flush()` rather than on callbacks.
+- A method that throws, or returns a promise that rejects, is logged with `console.error`;
+  delivery continues.
+- When `close()` (or an unacked getter) settles, every callback call has run. Async work a
+  callback starts may still be pending. `flush()` confirms that records are durable, but
+  their `onAck` calls may not have run yet: only `close()` and the unacked getters wait for
+  callbacks.
+- An open stream doesn't keep Node.js alive. If the process exits without `close()`, the
+  last callbacks may never run.
+- A callback that references its stream keeps an unclosed stream from being
+  garbage-collected, so always call `close()`.
+
+See [`examples/proto/multiplexed.ts`](examples/proto/multiplexed.ts).
+
 ## Configuration
 
 ### Stream Configuration Options
@@ -872,6 +1001,15 @@ debugging, inspect `getUnackedBatches()` after a terminal failure and before clo
 
 ---
 
+```typescript
+streamBuilder(): StreamBuilder
+```
+
+Returns a builder for an ordinary or a multiplexed stream on this SDK. See
+[Stream Builder](#stream-builder) and [Multiplexed Streams (Beta)](#multiplexed-streams-beta).
+
+---
+
 ### ZerobusStream
 
 Represents an active ingestion stream.
@@ -1058,6 +1196,32 @@ try {
   console.log(`Batches available for recovery: ${unackedBatches.length}`);
 }
 ```
+
+---
+
+### ZerobusMultiplexedStream (Beta)
+
+A multiplexed stream, opened with `streamBuilder()...multiplexed(n).build()`. See
+[Multiplexed Streams (Beta)](#multiplexed-streams-beta).
+
+**Methods:**
+
+```typescript
+ingestRecord(payload: Buffer | string | object): Promise<bigint>
+ingestRecords(payloads: Array<Buffer | string | object>): Promise<bigint | null>
+waitForMessageId(messageId: bigint): Promise<void>
+flush(): Promise<void>
+close(): Promise<void>
+getUnackedRecords(): Promise<Buffer[]>
+getUnackedBatches(): Promise<Buffer[][]>
+readonly isClosed: boolean
+```
+
+Payloads are converted as on `ZerobusStream`. Ingest calls resolve once the record or batch is
+queued; unlike the deprecated `ZerobusStream.ingestRecord()`, they don't wait for the
+acknowledgment. `isClosed` is `true` after `close()`, once an ingest, flush or wait call has hit a
+failed sub-stream, and while a close or unacked getter is in progress; a failure no call has
+hit yet doesn't show in it.
 
 ---
 
