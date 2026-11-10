@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,6 +95,39 @@ pub enum MockResponse {
     },
 }
 
+/// A scripted reply to one `InsertRecords` call.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum MockInsertResponse {
+    /// Reply with success after `delay_ms`.
+    Ok { delay_ms: u64 },
+    /// Reply with `status` after `delay_ms`.
+    Error { status: Status, delay_ms: u64 },
+    /// Never reply, so the caller's own timeout fires.
+    Hang,
+}
+
+/// One `InsertRecords` call as the mock received it.
+#[derive(Debug, Clone)]
+pub struct ReceivedInsert {
+    pub table_name: Option<String>,
+    pub records_json: Vec<u8>,
+    pub metadata: tonic::metadata::MetadataMap,
+    pub remote_addr: Option<SocketAddr>,
+    /// When the mock received the call.
+    pub received_at: std::time::Instant,
+}
+
+/// Scripted `InsertRecords` replies, consumed in order, and the calls received.
+/// A table's own script is used before the shared one. Once both are drained,
+/// every call succeeds.
+#[derive(Debug, Default)]
+struct InsertState {
+    responses: VecDeque<MockInsertResponse>,
+    table_responses: HashMap<String, VecDeque<MockInsertResponse>>,
+    received: Vec<ReceivedInsert>,
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum PersistentOpenFault {
@@ -140,6 +173,8 @@ pub struct MockZerobusServer {
     persistent_open_fault: Arc<Mutex<Option<PersistentOpenFault>>>,
     /// One-shot disconnect after committing a persistent write but before ACKing it.
     fail_persistent_ack_once: Arc<AtomicBool>,
+    /// `InsertRecords` script and received calls.
+    inserts: Arc<Mutex<InsertState>>,
 }
 
 impl Default for MockZerobusServer {
@@ -166,6 +201,7 @@ impl MockZerobusServer {
             persistent_configs: Arc::new(Mutex::new(HashMap::new())),
             persistent_open_fault: Arc::new(Mutex::new(None)),
             fail_persistent_ack_once: Arc::new(AtomicBool::new(false)),
+            inserts: Arc::new(Mutex::new(InsertState::default())),
         }
     }
 
@@ -217,6 +253,12 @@ impl MockZerobusServer {
         self.test_bin_headers.lock().await.clone()
     }
 
+    /// Get the TCP peers that opened streams.
+    #[allow(dead_code)]
+    pub async fn get_connection_addresses(&self) -> HashSet<SocketAddr> {
+        self.connection_addresses.lock().await.clone()
+    }
+
     /// Get the create requests received by the server.
     #[allow(dead_code)]
     pub async fn get_create_requests(&self) -> Vec<CreateIngestStreamRequest> {
@@ -254,6 +296,46 @@ impl MockZerobusServer {
         self.fail_persistent_ack_once.store(true, Ordering::SeqCst);
     }
 
+    /// Appends replies for the next `InsertRecords` calls, across all tables.
+    #[allow(dead_code)]
+    pub async fn inject_insert_responses(&self, responses: Vec<MockInsertResponse>) {
+        self.inserts.lock().await.responses.extend(responses);
+    }
+
+    /// Appends replies for the next `InsertRecords` calls to `table_name` only.
+    #[allow(dead_code)]
+    pub async fn inject_insert_responses_for_table(
+        &self,
+        table_name: &str,
+        responses: Vec<MockInsertResponse>,
+    ) {
+        self.inserts
+            .lock()
+            .await
+            .table_responses
+            .entry(table_name.to_string())
+            .or_default()
+            .extend(responses);
+    }
+
+    /// The `InsertRecords` calls received so far, in arrival order.
+    #[allow(dead_code)]
+    pub async fn get_insert_requests(&self) -> Vec<ReceivedInsert> {
+        self.inserts.lock().await.received.clone()
+    }
+
+    /// The number of distinct TCP connections that carried `InsertRecords` calls.
+    #[allow(dead_code)]
+    pub async fn get_insert_connection_count(&self) -> usize {
+        let inserts = self.inserts.lock().await;
+        let peers: HashSet<_> = inserts
+            .received
+            .iter()
+            .filter_map(|r| r.remote_addr)
+            .collect();
+        peers.len()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -272,6 +354,7 @@ impl MockZerobusServer {
         self.persistent_configs.lock().await.clear();
         *self.persistent_open_fault.lock().await = None;
         self.fail_persistent_ack_once.store(false, Ordering::SeqCst);
+        *self.inserts.lock().await = InsertState::default();
     }
 }
 
@@ -760,14 +843,41 @@ impl Zerobus for MockZerobusServer {
         ))
     }
 
-    /// Not exercised by the existing tests; returns `Unimplemented`.
+    /// Records the call, then replies with the next scripted response.
     async fn insert_records(
         &self,
-        _request: Request<InsertRecordsRequest>,
+        request: Request<InsertRecordsRequest>,
     ) -> Result<Response<InsertRecordsResponse>, Status> {
-        Err(Status::unimplemented(
-            "InsertRecords is not implemented in the mock server",
-        ))
+        let remote_addr = request.remote_addr();
+        let metadata = request.metadata().clone();
+        let body = request.into_inner();
+        let response = {
+            let mut inserts = self.inserts.lock().await;
+            let table_name = body.table_name.unwrap_or_default();
+            let response = match inserts.table_responses.get_mut(&table_name) {
+                Some(script) if !script.is_empty() => script.pop_front(),
+                _ => inserts.responses.pop_front(),
+            };
+            inserts.received.push(ReceivedInsert {
+                table_name: Some(table_name),
+                records_json: body.records_json.unwrap_or_default(),
+                metadata,
+                remote_addr,
+                received_at: std::time::Instant::now(),
+            });
+            response
+        };
+        match response.unwrap_or(MockInsertResponse::Ok { delay_ms: 0 }) {
+            MockInsertResponse::Ok { delay_ms } => {
+                sleep(Duration::from_millis(delay_ms)).await;
+                Ok(Response::new(InsertRecordsResponse {}))
+            }
+            MockInsertResponse::Error { status, delay_ms } => {
+                sleep(Duration::from_millis(delay_ms)).await;
+                Err(status)
+            }
+            MockInsertResponse::Hang => std::future::pending().await,
+        }
     }
 }
 
@@ -831,6 +941,7 @@ async fn start_mock_server_inner(
         persistent_configs: Arc::clone(&mock_server.persistent_configs),
         persistent_open_fault: Arc::clone(&mock_server.persistent_open_fault),
         fail_persistent_ack_once: Arc::clone(&mock_server.fail_persistent_ack_once),
+        inserts: Arc::clone(&mock_server.inserts),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

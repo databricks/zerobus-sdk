@@ -29,6 +29,14 @@ name = "persistent_stream_tests"
 path = "src/persistent_stream_tests.rs"
 
 [[test]]
+name = "unary_tests"
+path = "src/unary_tests.rs"
+
+[[test]]
+name = "unary_live_tests"
+path = "src/unary_live_tests.rs"
+
+[[test]]
 name = "arrow_tests"
 path = "src/arrow_tests.rs"
 
