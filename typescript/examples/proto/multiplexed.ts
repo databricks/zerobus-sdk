@@ -73,10 +73,13 @@ async function main() {
         // One flush confirms every record ingested so far, on every sub-stream.
         await stream.flush();
         console.log(`Ingested and flushed ${NUM_RECORDS} records`);
-    } finally {
-        // close() resolves once every ack callback has run.
-        await stream.close();
+    } catch (error) {
+        // Close anyway, but report the ingest error rather than a close error it may cause.
+        await stream.close().catch((closeError) => console.error('close() failed:', closeError));
+        throw error;
     }
+    // close() resolves once every ack callback has run.
+    await stream.close();
     console.log(`Stream closed: ${acked} acknowledged, ${failed} failed`);
 }
 

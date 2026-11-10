@@ -243,8 +243,9 @@ pub struct ZerobusMultiplexedStream {
 impl ZerobusMultiplexedStream {
     /// Ingests a single record into the next sub-stream.
     ///
-    /// Resolves to the record's message ID as soon as the record is queued; it does not wait
-    /// for acknowledgment. Ingest in a loop and call `flush()` once to confirm.
+    /// Resolves to the record's message ID as soon as the record is queued; unlike the
+    /// deprecated `ZerobusStream.ingestRecord()`, it does not wait for acknowledgment. Ingest
+    /// in a loop and call `flush()` once to confirm.
     #[napi(ts_return_type = "Promise<bigint>")]
     pub fn ingest_record(&self, env: Env, payload: Unknown) -> Result<JsObject> {
         let record_payload = convert_js_to_record_payload(&env, payload, self.record_type)?;
