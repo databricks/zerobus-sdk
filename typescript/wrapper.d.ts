@@ -73,14 +73,18 @@ export interface StreamBuilder {
   flushTimeoutMs(ms: number): this
   /** See {@link StreamConfigurationOptions.serverLackOfAckTimeoutMs}. */
   serverLackOfAckTimeoutMs(ms: number): this
-  /** See {@link StreamConfigurationOptions.streamPausedMaxWaitTimeMs}; `null` restores the default. */
-  streamPausedMaxWaitTimeMs(ms: number | null): this
+  /**
+   * See {@link StreamConfigurationOptions.streamPausedMaxWaitTimeMs}; `null` or `undefined`
+   * restores the default.
+   */
+  streamPausedMaxWaitTimeMs(ms?: number | null): this
   /**
    * Selects a multiplexed stream (Beta) of `streamCount` sub-streams, an integer from 1 to 64.
    *
    * Terminal: call it after the other setters. The returned builder keeps the settings as they
    * are now and only offers `ackCallback()` and `build()`. `maxInflightRequests` is divided
-   * evenly across the sub-streams, so it must be at least `streamCount`.
+   * evenly across the sub-streams, so it must be at least `streamCount`; `build()` rejects a
+   * smaller value.
    */
   multiplexed(streamCount: number): MultiplexedStreamBuilder
   /** Opens an ordinary stream with these settings. */

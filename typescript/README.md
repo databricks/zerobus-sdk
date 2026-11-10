@@ -728,7 +728,7 @@ await stream.close();
 - `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned builder
   keeps the configuration as it is at that point and only has `ackCallback()` and `build()`.
   `maxInflightRequests` is a budget for the whole stream, divided evenly across sub-streams,
-  so it must be at least `n`.
+  so it must be at least `n`; `build()` rejects a smaller value.
 - `ingestRecord()` and `ingestRecords()` resolve to a **message ID**: an opaque `bigint` that
   identifies the sub-stream and the record's position in it. Message IDs are not ordered and
   may be negative. `waitForMessageId(id)` confirms only that record or batch, not the ones
