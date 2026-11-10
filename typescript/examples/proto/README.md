@@ -156,6 +156,45 @@ const bufferBatchOffset = await stream.ingestRecordsOffset(bufferBatch);
 await stream.flush();
 ```
 
+## Multiplexed Stream Example (Beta)
+
+`multiplexed.ts` opens a multiplexed stream of 4 sub-streams with `sdk.streamBuilder()`,
+ingests 1,000 records, flushes once and counts acknowledgments with an ack callback. See
+[Multiplexed Streams (Beta)](../../README.md#multiplexed-streams-beta) in the SDK README.
+
+### Running the Example
+
+1. Generate proto files:
+   ```bash
+   npm run build:proto
+   ```
+
+2. Set environment variables (see [Prerequisites](../README.md#prerequisites))
+
+3. Run the example:
+   ```bash
+   npm run example:proto:multiplexed
+   ```
+
+### Code Highlights
+
+```typescript
+let acked = 0;
+const stream = await sdk.streamBuilder()
+    .table(TABLE_NAME)
+    .oauth(CLIENT_ID, CLIENT_SECRET)
+    .compiledProto(descriptorBase64)
+    .multiplexed(4)
+    .ackCallback({ onAck() { acked++; } })
+    .build();
+
+for (const record of records) {
+    await stream.ingestRecord(record); // resolves to a message ID once queued
+}
+await stream.flush();  // confirms every sub-stream once
+await stream.close();  // resolves once every ack callback has run
+```
+
 ## Adapting for Your Custom Table
 
 ### 1. Create a Proto Schema

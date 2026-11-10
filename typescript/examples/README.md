@@ -37,6 +37,7 @@ The SDK supports four serialization formats and two ingestion methods:
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `npm run example:json:batch` |
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `npm run example:proto:single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `npm run example:proto:batch` |
+| [Proto Multiplexed](proto/README.md#multiplexed-stream-example-beta) *(Beta)* | Protocol Buffers | Single-record over 4 sub-streams | `npm run example:proto:multiplexed` |
 | [Arrow](arrow/README.md) | Arrow Flight | Multi-row batches in a loop | `npm run example:arrow` |
 
 ## Prerequisites
