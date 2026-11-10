@@ -1053,6 +1053,19 @@ describe('Multiplexed ack callback', () => {
         return { dispatch: captured.mux![6], stream };
     };
 
+    // Replaces console.error and records its arguments; call restore() in a finally block.
+    // Not t.mock: Node 16's node:test has none, and passes a test function that takes a
+    // parameter a done callback.
+    const stubConsoleError = (replacement: () => void = () => {}) => {
+        const original = console.error;
+        const calls: unknown[][] = [];
+        console.error = (...args: unknown[]) => {
+            calls.push(args);
+            replacement();
+        };
+        return { calls, restore: () => { console.error = original; } };
+    };
+
     it('delivers an ack with the message ID as a bigint', async () => {
         const acked: unknown[] = [];
         const { dispatch } = await captureDispatch({ onAck: (messageId: bigint) => { acked.push(messageId); } });
@@ -1068,41 +1081,49 @@ describe('Multiplexed ack callback', () => {
         assert.deepStrictEqual(errors, [[7n, 'boom']]);
     });
 
-    it('logs a throwing callback and keeps delivering', async (t) => {
-        const consoleError = t.mock.method(console, 'error', () => {});
-        let acks = 0;
-        let errors = 0;
-        const { dispatch } = await captureDispatch({
-            onAck() { acks++; throw new Error('ack handler failed'); },
-            onError() { errors++; throw new Error('error handler failed'); },
-        });
-        assert.doesNotThrow(() => dispatch('ack', 1n));
-        assert.strictEqual(consoleError.mock.callCount(), 1);
-        dispatch('ack', 2n);
-        assert.strictEqual(acks, 2);
-        assert.doesNotThrow(() => dispatch('error', 3n, 'boom'));
-        dispatch('error', 4n, 'boom');
-        assert.strictEqual(errors, 2);
-        assert.strictEqual(consoleError.mock.callCount(), 4);
-        for (const call of consoleError.mock.calls) {
-            assert.strictEqual(call.arguments[0], 'Zerobus multiplexed stream ack callback failed:');
-            assert.ok(call.arguments[1] instanceof Error);
+    it('logs a throwing callback and keeps delivering', async () => {
+        const consoleError = stubConsoleError();
+        try {
+            let acks = 0;
+            let errors = 0;
+            const { dispatch } = await captureDispatch({
+                onAck() { acks++; throw new Error('ack handler failed'); },
+                onError() { errors++; throw new Error('error handler failed'); },
+            });
+            assert.doesNotThrow(() => dispatch('ack', 1n));
+            assert.strictEqual(consoleError.calls.length, 1);
+            dispatch('ack', 2n);
+            assert.strictEqual(acks, 2);
+            assert.doesNotThrow(() => dispatch('error', 3n, 'boom'));
+            dispatch('error', 4n, 'boom');
+            assert.strictEqual(errors, 2);
+            assert.strictEqual(consoleError.calls.length, 4);
+            for (const args of consoleError.calls) {
+                assert.strictEqual(args[0], 'Zerobus multiplexed stream ack callback failed:');
+                assert.ok(args[1] instanceof Error);
+            }
+            assert.strictEqual((consoleError.calls[0][1] as Error).message, 'ack handler failed');
+            assert.strictEqual((consoleError.calls[2][1] as Error).message, 'error handler failed');
+        } finally {
+            consoleError.restore();
         }
-        assert.strictEqual(consoleError.mock.calls[0].arguments[1].message, 'ack handler failed');
-        assert.strictEqual(consoleError.mock.calls[2].arguments[1].message, 'error handler failed');
     });
 
-    it('ignores an event whose method is missing, without logging', async (t) => {
-        const consoleError = t.mock.method(console, 'error', () => {});
-        const onlyError = await captureDispatch({ onError() {} });
-        assert.doesNotThrow(() => onlyError.dispatch('ack', 1n));
-        const onlyAck = await captureDispatch({ onAck() {} });
-        assert.doesNotThrow(() => onlyAck.dispatch('error', 1n, 'boom'));
-        assert.strictEqual(consoleError.mock.callCount(), 0);
+    it('ignores an event whose method is missing, without logging', async () => {
+        const consoleError = stubConsoleError();
+        try {
+            const onlyError = await captureDispatch({ onError() {} });
+            assert.doesNotThrow(() => onlyError.dispatch('ack', 1n));
+            const onlyAck = await captureDispatch({ onAck() {} });
+            assert.doesNotThrow(() => onlyAck.dispatch('error', 1n, 'boom'));
+            assert.strictEqual(consoleError.calls.length, 0);
+        } finally {
+            consoleError.restore();
+        }
     });
 
-    it('logs a rejected async callback without an unhandled rejection', async (t) => {
-        const consoleError = t.mock.method(console, 'error', () => {});
+    it('logs a rejected async callback without an unhandled rejection', async () => {
+        const consoleError = stubConsoleError();
         const unhandled: unknown[] = [];
         const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
         process.on('unhandledRejection', onUnhandled);
@@ -1117,28 +1138,32 @@ describe('Multiplexed ack callback', () => {
             dispatch('error', 2n, 'boom');
             await drainEventLoop();
             assert.deepStrictEqual(unhandled, []);
-            const logged = consoleError.mock.calls.map(call => call.arguments);
-            assert.deepStrictEqual(logged, [
+            assert.deepStrictEqual(consoleError.calls, [
                 ['Zerobus multiplexed stream ack callback failed:', ackFailure],
                 ['Zerobus multiplexed stream ack callback failed:', errorFailure],
             ]);
         } finally {
             process.off('unhandledRejection', onUnhandled);
+            consoleError.restore();
         }
     });
 
-    it('logs nothing for a plain or resolving return value', async (t) => {
-        const consoleError = t.mock.method(console, 'error', () => {});
-        const plain = await captureDispatch({ onAck: () => 5 });
-        plain.dispatch('ack', 1n);
-        const resolving = await captureDispatch({ onAck: async () => 5 });
-        resolving.dispatch('ack', 1n);
-        await drainEventLoop();
-        assert.strictEqual(consoleError.mock.callCount(), 0);
+    it('logs nothing for a plain or resolving return value', async () => {
+        const consoleError = stubConsoleError();
+        try {
+            const plain = await captureDispatch({ onAck: () => 5 });
+            plain.dispatch('ack', 1n);
+            const resolving = await captureDispatch({ onAck: async () => 5 });
+            resolving.dispatch('ack', 1n);
+            await drainEventLoop();
+            assert.strictEqual(consoleError.calls.length, 0);
+        } finally {
+            consoleError.restore();
+        }
     });
 
-    it('never lets a failing console.error escape the dispatcher', async (t) => {
-        t.mock.method(console, 'error', () => { throw new Error('log failed'); });
+    it('never lets a failing console.error escape the dispatcher', async () => {
+        const consoleError = stubConsoleError(() => { throw new Error('log failed'); });
         const unhandled: unknown[] = [];
         const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
         process.on('unhandledRejection', onUnhandled);
@@ -1154,16 +1179,21 @@ describe('Multiplexed ack callback', () => {
             assert.strictEqual(acks, 2);
         } finally {
             process.off('unhandledRejection', onUnhandled);
+            consoleError.restore();
         }
     });
 
-    it('ignores an unknown event kind', async (t) => {
-        const consoleError = t.mock.method(console, 'error', () => {});
-        let calls = 0;
-        const { dispatch } = await captureDispatch({ onAck() { calls++; }, onError() { calls++; } });
-        assert.doesNotThrow(() => dispatch('bogus', 1n));
-        assert.strictEqual(calls, 0);
-        assert.strictEqual(consoleError.mock.callCount(), 0);
+    it('ignores an unknown event kind', async () => {
+        const consoleError = stubConsoleError();
+        try {
+            let calls = 0;
+            const { dispatch } = await captureDispatch({ onAck() { calls++; }, onError() { calls++; } });
+            assert.doesNotThrow(() => dispatch('bogus', 1n));
+            assert.strictEqual(calls, 0);
+            assert.strictEqual(consoleError.calls.length, 0);
+        } finally {
+            consoleError.restore();
+        }
     });
 
     it('calls the callbacks as methods of the callback object', async () => {

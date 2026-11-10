@@ -727,8 +727,11 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
             }
         });
 
-        it('survives ack callbacks that throw or reject', async (t) => {
-            const consoleError = t.mock.method(console, 'error', () => {});
+        it('survives ack callbacks that throw or reject', async () => {
+            // Not t.mock: Node 16's node:test has none (see the unit tests' stubConsoleError).
+            const originalConsoleError = console.error;
+            let consoleErrorCalls = 0;
+            console.error = () => { consoleErrorCalls++; };
             const unhandled: unknown[] = [];
             const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
             process.on('unhandledRejection', onUnhandled);
@@ -756,10 +759,11 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
                 assert.strictEqual(acks, 20);
                 assert.strictEqual(asyncAcks, 20);
                 // Every throw and every rejection was logged, none escaped.
-                assert.strictEqual(consoleError.mock.callCount(), 40);
+                assert.strictEqual(consoleErrorCalls, 40);
                 assert.deepStrictEqual(unhandled, []);
             } finally {
                 process.off('unhandledRejection', onUnhandled);
+                console.error = originalConsoleError;
             }
         });
 
