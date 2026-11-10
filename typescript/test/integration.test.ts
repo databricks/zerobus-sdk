@@ -544,9 +544,9 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
         }
 
         // Core error texts (rust/sdk/src/errors.rs, default_token_factory.rs, grpc_status.rs):
-        // a 4xx from the OAuth token endpoint is InvalidUCTokenError, and a stream the server
+        // a 400/401 from the OAuth token endpoint is InvalidUCTokenError, and a stream the server
         // refuses is CreateStreamError with the Unauthenticated or PermissionDenied description.
-        const TOKEN_REJECTED = /^Failed to create multiplexed stream: Specified UC token is in invalid format: Client error \(4\d\d\)/;
+        const TOKEN_REJECTED = /^Failed to create multiplexed stream: Specified UC token is in invalid format: Client error \(40[01]\)/;
         const STREAM_AUTH_REJECTED = new RegExp(
             "^Failed to create multiplexed stream: Failed to create stream: code: " +
                 "'(The request does not have valid authentication credentials|" +
@@ -646,13 +646,14 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
                 assert.deepStrictEqual(new Set(ids.map(laneOf)), new Set(Array.from({ length: 40 }, (_, lane) => lane)));
                 assert.ok(ids.some(id => id < 0n), 'lanes 32-63 have negative message IDs');
 
-                // Message IDs are bigint and never truncated across the binding.
+                // Message IDs are bigint, and an ID outside the i64 range is rejected instead of
+                // being truncated across the binding.
                 assert.throws(() => stream.waitForMessageId(5 as any), { code: 'BigintExpected' });
                 assert.throws(() => stream.waitForMessageId(2n ** 63n), /messageId exceeds i64 range/);
                 assert.throws(() => stream.waitForMessageId(-(2n ** 63n) - 1n), /messageId exceeds i64 range/);
 
                 // Deliberate per-ID waits, one per lane (a low-volume check, not the ingest pattern):
-                // the wait must find each lane's ID, including the negative ones.
+                // a negative ID from lanes 32 and up is accepted and resolves.
                 const firstIdPerLane = new Map<number, bigint>();
                 for (const id of ids) {
                     if (!firstIdPerLane.has(laneOf(id))) firstIdPerLane.set(laneOf(id), id);
@@ -697,18 +698,25 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
         it('closes the stream and runs every callback in getUnackedRecords()', async () => {
             const { recorded, callback } = recordingCallback();
             const stream = await builder().json().multiplexed(2).ackCallback(callback).build();
-            for (let i = 0; i < 20; i++) {
-                await stream.ingestRecord(JSON.stringify(row('i7', i)));
+            try {
+                for (let i = 0; i < 20; i++) {
+                    await stream.ingestRecord(JSON.stringify(row('i7', i)));
+                }
+                await stream.flush();
+                // getUnackedRecords() closes the stream first.
+                assert.deepStrictEqual(await stream.getUnackedRecords(), []);
+            } catch (error) {
+                await stream.close().catch(() => {});
+                throw error;
             }
-            await stream.flush();
-            assert.deepStrictEqual(await stream.getUnackedRecords(), []);
             wrote('i7', 20);
             assert.strictEqual(stream.isClosed, true);
             assert.strictEqual(recorded.acked.length, 20);
         });
 
-        it('keeps ingesting while a waitForMessageId() call is pending', { timeout: 60_000 }, async () => {
-            const stream = await builder().json().flushTimeoutMs(10_000).multiplexed(1).build();
+        it('keeps ingesting while a waitForMessageId() call is pending', { timeout: 90_000 }, async () => {
+            // A wide margin: ingest and flush must finish long before the wait times out.
+            const stream = await builder().json().flushTimeoutMs(30_000).multiplexed(1).build();
             try {
                 // A fabricated lane-0 ID that is never acked: the wait lasts until the flush timeout.
                 const waiting = stream.waitForMessageId(1_000_000n);
@@ -738,13 +746,12 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
             try {
                 let acks = 0;
                 let asyncAcks = 0;
-                const throwing = await builder().json().multiplexed(2)
-                    .ackCallback({ onAck() { acks++; throw new Error('ack handler failed'); } })
-                    .build();
-                const rejecting = await builder().json().multiplexed(2)
-                    .ackCallback({ async onAck() { asyncAcks++; throw new Error('async ack handler failed'); } })
-                    .build();
-                for (const stream of [throwing, rejecting]) {
+                const callbacks = [
+                    { onAck() { acks++; throw new Error('ack handler failed'); } },
+                    { async onAck() { asyncAcks++; throw new Error('async ack handler failed'); } },
+                ];
+                for (const callback of callbacks) {
+                    const stream = await builder().json().multiplexed(2).ackCallback(callback).build();
                     try {
                         for (let i = 0; i < 20; i++) {
                             await stream.ingestRecord(JSON.stringify(row('i9', i)));
