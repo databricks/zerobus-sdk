@@ -229,7 +229,9 @@ function makeAckDispatcher(callback) {
       }
       if (result !== null && (typeof result === 'object' || typeof result === 'function') &&
           typeof result.then === 'function') {
-        result.then(undefined, logCallbackError);
+        // Promise.resolve calls a thenable's `then` with real resolve/reject functions and
+        // turns a throw from it into a rejection, which the handler then logs.
+        Promise.resolve(result).then(undefined, logCallbackError);
       }
     } catch (error) {
       logCallbackError(error);
