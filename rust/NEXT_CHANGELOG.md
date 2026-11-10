@@ -27,6 +27,10 @@
 
 ### Internal Changes
 
+- Moved the table, authentication, record format, and shared retry settings of
+  `StreamBuilder` into a private builder core that other client builders can
+  reuse. Stream behavior is unchanged.
+
 ### Breaking Changes
 
 ### Deprecations
