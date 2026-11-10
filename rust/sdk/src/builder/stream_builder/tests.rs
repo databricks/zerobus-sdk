@@ -242,14 +242,19 @@ fn config_setters_chain() {
 #[test]
 fn default_config_without_setters() {
     let sdk = test_sdk();
-    let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
-    assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
-    assert!(builder.grpc_config.recovery);
+    let options = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .json()
+        .grpc_options(RecordType::Json);
+    assert_eq!(options.max_inflight_requests, 1_000_000);
+    assert!(options.recovery);
     assert_eq!(
-        builder.grpc_config.max_ingest_payload_bytes,
+        options.max_ingest_payload_bytes,
         crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
     );
-    assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
+    assert!(options.max_ingest_payload_bytes < 10 * 1024 * 1024);
 }
 
 #[test]
@@ -262,9 +267,34 @@ fn max_ingest_payload_bytes_override() {
         .json()
         .max_ingest_payload_bytes(5 * 1024 * 1024);
     assert_eq!(
-        builder.grpc_config.max_ingest_payload_bytes,
+        builder
+            .grpc_options(RecordType::Json)
+            .max_ingest_payload_bytes,
         5 * 1024 * 1024
     );
+}
+
+#[test]
+fn shared_setters_reach_grpc_options() {
+    let sdk = test_sdk();
+    let options = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .json()
+        .recovery(false)
+        .recovery_backoff_ms(500)
+        .recovery_retries(2)
+        .server_lack_of_ack_timeout_ms(10_000)
+        .max_ingest_payload_bytes(1_000)
+        .max_inflight_requests(7)
+        .grpc_options(RecordType::Json);
+    assert!(!options.recovery);
+    assert_eq!(options.recovery_backoff_ms, 500);
+    assert_eq!(options.recovery_retries, 2);
+    assert_eq!(options.server_lack_of_ack_timeout_ms, 10_000);
+    assert_eq!(options.max_ingest_payload_bytes, 1_000);
+    assert_eq!(options.max_inflight_requests, 7);
 }
 
 #[tokio::test]
@@ -493,7 +523,7 @@ async fn arrow_builder_reports_format_error_before_ack_callback_error() {
 
 #[cfg(feature = "arrow-flight")]
 #[test]
-fn shared_setters_write_to_arrow_config() {
+fn shared_setters_reach_arrow_options() {
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
     let sdk = test_sdk();
@@ -514,16 +544,14 @@ fn shared_setters_write_to_arrow_config() {
         .server_lack_of_ack_timeout_ms(10_000)
         .flush_timeout_ms(20_000)
         .stream_paused_max_wait_time_ms(Some(5_000));
-    assert!(!builder.arrow_config.recovery);
-    assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
-    assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
-    assert_eq!(builder.arrow_config.recovery_retries, 2);
-    assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
-    assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
-    assert_eq!(
-        builder.arrow_config.stream_paused_max_wait_time_ms,
-        Some(5_000)
-    );
+    let options = builder.arrow_options();
+    assert!(!options.recovery);
+    assert_eq!(options.recovery_timeout_ms, 5_000);
+    assert_eq!(options.recovery_backoff_ms, 500);
+    assert_eq!(options.recovery_retries, 2);
+    assert_eq!(options.server_lack_of_ack_timeout_ms, 10_000);
+    assert_eq!(options.flush_timeout_ms, 20_000);
+    assert_eq!(options.stream_paused_max_wait_time_ms, Some(5_000));
 }
 
 #[cfg(feature = "arrow-flight")]
@@ -546,7 +574,7 @@ fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
 #[allow(deprecated)]
 fn compression_defaults_to_deprecated_ipc_zstd() {
     let sdk = test_sdk();
-    let config = arrow_test_builder(&sdk).arrow_config;
+    let config = arrow_test_builder(&sdk).arrow_options();
     assert_eq!(
         config.compression,
         crate::ArrowCompression::FallbackToLegacy
@@ -565,13 +593,13 @@ fn last_compression_setter_wins() {
     let new_last = arrow_test_builder(&sdk)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
         .compression(crate::ArrowCompression::GrpcZstd)
-        .arrow_config;
+        .arrow_options();
     assert_eq!(new_last.compression, crate::ArrowCompression::GrpcZstd);
 
     let deprecated_last = arrow_test_builder(&sdk)
         .compression(crate::ArrowCompression::GrpcZstd)
         .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
-        .arrow_config;
+        .arrow_options();
     assert_eq!(
         deprecated_last.compression,
         crate::ArrowCompression::FallbackToLegacy

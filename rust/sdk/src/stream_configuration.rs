@@ -68,11 +68,11 @@ pub struct StreamConfigurationOptions {
     ///
     /// If a recovery attempt takes longer than this, it will be retried.
     ///
-    /// For OAuth-authenticated streams this also caps a proactive token refresh at
-    /// half its value, but only when the cached token has more life left than that
-    /// cap, so a stalled endpoint falls back to the cached token before the attempt
-    /// deadline. When too little of the token's life remains, the refresh runs
-    /// unbounded, like a cold miss.
+    /// For streams authenticated with OAuth or federated auth, this also caps a
+    /// proactive token refresh at half its value, but only when the cached token
+    /// has more life left than that cap, so a stalled endpoint falls back to the
+    /// cached token before the attempt deadline. When too little of the token's
+    /// life remains, the refresh runs unbounded, like a cold miss.
     ///
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,

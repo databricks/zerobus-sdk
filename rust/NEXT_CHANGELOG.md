@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- `HeadersProvider` can now send binary gRPC metadata on both gRPC and Arrow Flight
+  streams. Header names ending in `-bin` take a standard base64 value, with or
+  without padding. The SDK decodes it and sends the bytes as sensitive binary
+  metadata. Previously, these headers failed to send.
 - Added `StreamBuilder::dictionary_handling(ArrowDictionaryHandling)` for Arrow
   Flight streams. The default, `Hydrate`, decodes dictionary-encoded columns on
   the client, as before. `Resend` sends them as Arrow IPC dictionaries. `Delta`
@@ -30,6 +34,10 @@
   source.
 
 ### Internal Changes
+
+- Moved the table, authentication, record format, and shared retry settings of
+  `StreamBuilder` into a private builder core that other client builders can
+  reuse. Stream behavior is unchanged.
 
 ### Breaking Changes
 

@@ -31,6 +31,7 @@
 //!     .await?;
 //! ```
 
+mod client_builder_core;
 #[cfg(feature = "eos")]
 mod persistent_stream_builder;
 mod sdk_builder;
