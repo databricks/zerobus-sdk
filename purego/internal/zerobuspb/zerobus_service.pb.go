@@ -1463,6 +1463,115 @@ func (*RetireStreamResponse) Descriptor() ([]byte, []int) {
 	return file_zerobus_service_proto_rawDescGZIP(), []int{17}
 }
 
+// A message in the InsertRecords unary rpc.
+//
+// This message type allows clients to ingest a batch of records.
+type InsertRecordsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Target managed table name in 3 part form (catalog.schema.table).
+	//
+	// Required.
+	TableName *string `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
+	// The raw JSON request body, one object per row to insert: either a JSON
+	// array of objects, or JSON Lines (one object per line). The server tells
+	// them apart by the first byte, and parses them with serde_json, which
+	// preserves arbitrary-precision integers (i64/u64).
+	//
+	// Required, but marked `optional` in proto; presence is enforced by the
+	// server at runtime. Maximum total size is 10MB.
+	//
+	// Example body:
+	//
+	//	[
+	//	  {"id": 1, "name": "Alice", "email": "alice@example.com"},
+	//	  {"id": 3824212507853254558, "name": "Bob"}
+	//	]
+	RecordsJson   []byte `protobuf:"bytes,3,opt,name=records_json,json=recordsJson" json:"records_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InsertRecordsRequest) Reset() {
+	*x = InsertRecordsRequest{}
+	mi := &file_zerobus_service_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InsertRecordsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InsertRecordsRequest) ProtoMessage() {}
+
+func (x *InsertRecordsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InsertRecordsRequest.ProtoReflect.Descriptor instead.
+func (*InsertRecordsRequest) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *InsertRecordsRequest) GetTableName() string {
+	if x != nil && x.TableName != nil {
+		return *x.TableName
+	}
+	return ""
+}
+
+func (x *InsertRecordsRequest) GetRecordsJson() []byte {
+	if x != nil {
+		return x.RecordsJson
+	}
+	return nil
+}
+
+// Empty: success or failure is carried by the gRPC status code.
+type InsertRecordsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InsertRecordsResponse) Reset() {
+	*x = InsertRecordsResponse{}
+	mi := &file_zerobus_service_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InsertRecordsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InsertRecordsResponse) ProtoMessage() {}
+
+func (x *InsertRecordsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InsertRecordsResponse.ProtoReflect.Descriptor instead.
+func (*InsertRecordsResponse) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{19}
+}
+
 var File_zerobus_service_proto protoreflect.FileDescriptor
 
 const file_zerobus_service_proto_rawDesc = "" +
@@ -1541,17 +1650,23 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\tstream_id\x18\x02 \x01(\tH\x00R\bstreamIdB\f\n" +
 	"\n" +
 	"identifierJ\x04\b\x03\x10\x04R\vstream_name\"\x16\n" +
-	"\x14RetireStreamResponse*N\n" +
+	"\x14RetireStreamResponse\"g\n" +
+	"\x14InsertRecordsRequest\x12\x1d\n" +
+	"\n" +
+	"table_name\x18\x01 \x01(\tR\ttableName\x12!\n" +
+	"\frecords_json\x18\x03 \x01(\fR\vrecordsJsonJ\x04\b\x02\x10\x03R\arecords\"\x17\n" +
+	"\x15InsertRecordsResponse*N\n" +
 	"\n" +
 	"RecordType\x12\x1b\n" +
 	"\x17RECORD_TYPE_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05PROTO\x10\x01\x12\b\n" +
 	"\x04JSON\x10\x02\x12\b\n" +
-	"\x04AVRO\x10\x04\"\x04\b\x03\x10\x032\xcf\x02\n" +
+	"\x04AVRO\x10\x04\"\x04\b\x03\x10\x032\xb5\x03\n" +
 	"\aZerobus\x12n\n" +
 	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01\x12q\n" +
 	"\x10PersistentStream\x12+.databricks.zerobus.PersistentStreamRequest\x1a,.databricks.zerobus.PersistentStreamResponse(\x010\x01\x12a\n" +
-	"\fRetireStream\x12'.databricks.zerobus.RetireStreamRequest\x1a(.databricks.zerobus.RetireStreamResponseB(\n" +
+	"\fRetireStream\x12'.databricks.zerobus.RetireStreamRequest\x1a(.databricks.zerobus.RetireStreamResponse\x12d\n" +
+	"\rInsertRecords\x12(.databricks.zerobus.InsertRecordsRequest\x1a).databricks.zerobus.InsertRecordsResponseB(\n" +
 	"\x16com.databricks.zerobusB\fZerobusProtoP\x01"
 
 var (
@@ -1567,7 +1682,7 @@ func file_zerobus_service_proto_rawDescGZIP() []byte {
 }
 
 var file_zerobus_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_zerobus_service_proto_goTypes = []any{
 	(RecordType)(0),                       // 0: databricks.zerobus.RecordType
 	(*JsonRecordBatch)(nil),               // 1: databricks.zerobus.JsonRecordBatch
@@ -1588,7 +1703,9 @@ var file_zerobus_service_proto_goTypes = []any{
 	(*PersistentStreamResponse)(nil),      // 16: databricks.zerobus.PersistentStreamResponse
 	(*RetireStreamRequest)(nil),           // 17: databricks.zerobus.RetireStreamRequest
 	(*RetireStreamResponse)(nil),          // 18: databricks.zerobus.RetireStreamResponse
-	(*durationpb.Duration)(nil),           // 19: google.protobuf.Duration
+	(*InsertRecordsRequest)(nil),          // 19: databricks.zerobus.InsertRecordsRequest
+	(*InsertRecordsResponse)(nil),         // 20: databricks.zerobus.InsertRecordsResponse
+	(*durationpb.Duration)(nil),           // 21: google.protobuf.Duration
 }
 var file_zerobus_service_proto_depIdxs = []int32{
 	0,  // 0: databricks.zerobus.CreateIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
@@ -1598,7 +1715,7 @@ var file_zerobus_service_proto_depIdxs = []int32{
 	4,  // 4: databricks.zerobus.EphemeralStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
 	6,  // 5: databricks.zerobus.EphemeralStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
 	7,  // 6: databricks.zerobus.EphemeralStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
-	19, // 7: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
+	21, // 7: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
 	5,  // 8: databricks.zerobus.EphemeralStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
 	9,  // 9: databricks.zerobus.EphemeralStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
 	10, // 10: databricks.zerobus.EphemeralStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
@@ -1615,11 +1732,13 @@ var file_zerobus_service_proto_depIdxs = []int32{
 	8,  // 21: databricks.zerobus.Zerobus.EphemeralStream:input_type -> databricks.zerobus.EphemeralStreamRequest
 	15, // 22: databricks.zerobus.Zerobus.PersistentStream:input_type -> databricks.zerobus.PersistentStreamRequest
 	17, // 23: databricks.zerobus.Zerobus.RetireStream:input_type -> databricks.zerobus.RetireStreamRequest
-	11, // 24: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
-	16, // 25: databricks.zerobus.Zerobus.PersistentStream:output_type -> databricks.zerobus.PersistentStreamResponse
-	18, // 26: databricks.zerobus.Zerobus.RetireStream:output_type -> databricks.zerobus.RetireStreamResponse
-	24, // [24:27] is the sub-list for method output_type
-	21, // [21:24] is the sub-list for method input_type
+	19, // 24: databricks.zerobus.Zerobus.InsertRecords:input_type -> databricks.zerobus.InsertRecordsRequest
+	11, // 25: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
+	16, // 26: databricks.zerobus.Zerobus.PersistentStream:output_type -> databricks.zerobus.PersistentStreamResponse
+	18, // 27: databricks.zerobus.Zerobus.RetireStream:output_type -> databricks.zerobus.RetireStreamResponse
+	20, // 28: databricks.zerobus.Zerobus.InsertRecords:output_type -> databricks.zerobus.InsertRecordsResponse
+	25, // [25:29] is the sub-list for method output_type
+	21, // [21:25] is the sub-list for method input_type
 	21, // [21:21] is the sub-list for extension type_name
 	21, // [21:21] is the sub-list for extension extendee
 	0,  // [0:21] is the sub-list for field type_name
@@ -1674,7 +1793,7 @@ func file_zerobus_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zerobus_service_proto_rawDesc), len(file_zerobus_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

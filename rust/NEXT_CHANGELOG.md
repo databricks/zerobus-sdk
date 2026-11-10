@@ -21,6 +21,10 @@
 
 ### Internal Changes
 
+- Added the `InsertRecords` RPC to the SDK's copy of the service proto and
+  regenerated the purego and purec bindings. The mock servers answer it with
+  `Unimplemented`.
+
 ### Breaking Changes
 
 ### Deprecations

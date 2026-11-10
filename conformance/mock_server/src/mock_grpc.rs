@@ -1,8 +1,8 @@
 //! `databricks.zerobus.Zerobus` data plane.
 //!
 //! `EphemeralStream` is implemented: create-stream handshake, per-record cumulative
-//! acks, raw-byte capture, and graceful-vs-cancel accounting. PersistentStream and
-//! RetireStream return `Unimplemented`.
+//! acks, raw-byte capture, and graceful-vs-cancel accounting. PersistentStream,
+//! RetireStream and InsertRecords return `Unimplemented`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,8 +16,9 @@ use tracing::{debug, info, warn};
 use crate::proto::zerobus::{
     ephemeral_stream_request::Payload, ephemeral_stream_response::Payload as ResponsePayload,
     ingest_record_request::Record, zerobus_server::Zerobus, CreateIngestStreamResponse,
-    EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordResponse, PersistentStreamRequest,
-    PersistentStreamResponse, RetireStreamRequest, RetireStreamResponse,
+    EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordResponse, InsertRecordsRequest,
+    InsertRecordsResponse, PersistentStreamRequest, PersistentStreamResponse, RetireStreamRequest,
+    RetireStreamResponse,
 };
 use crate::MockState;
 
@@ -95,6 +96,15 @@ impl Zerobus for MockGrpc {
     ) -> Result<Response<RetireStreamResponse>, Status> {
         Err(Status::unimplemented(
             "RetireStream is not implemented in the conformance mock",
+        ))
+    }
+
+    async fn insert_records(
+        &self,
+        _request: Request<InsertRecordsRequest>,
+    ) -> Result<Response<InsertRecordsResponse>, Status> {
+        Err(Status::unimplemented(
+            "InsertRecords is not implemented in the conformance mock",
         ))
     }
 }
