@@ -36,8 +36,10 @@ mod client_builder_core;
 mod persistent_stream_builder;
 mod sdk_builder;
 mod stream_builder;
+mod unary_client_builder;
 
 #[cfg(feature = "eos")]
 pub use persistent_stream_builder::PersistentStreamBuilder;
 pub use sdk_builder::ZerobusSdkBuilder;
 pub use stream_builder::{MultiplexedStreamBuilder, StreamBuilder};
+pub use unary_client_builder::UnaryClientBuilder;

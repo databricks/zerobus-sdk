@@ -121,7 +121,8 @@ impl ZerobusSdkBuilder {
     /// do not compete for throughput on one HTTP/2 connection. Set it to `false`
     /// to multiplex all JSON and protobuf streams from this SDK over one shared
     /// connection. Arrow Flight streams already use dedicated connections and
-    /// are unaffected by this option.
+    /// are unaffected by this option. Unary clients are unaffected too: they
+    /// always share one connection of their own, separate from streams.
     pub fn connection_per_stream(mut self, enabled: bool) -> Self {
         self.connection_per_stream = enabled;
         self

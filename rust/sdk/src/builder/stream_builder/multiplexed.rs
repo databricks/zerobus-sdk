@@ -227,7 +227,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
                 async move {
                     tokio::time::sleep(delay).await;
-                    let channel = sdk.get_or_create_channel_zerobus_client().await?;
+                    let channel = sdk.get_or_create_stream_channel().await?;
                     options.ack_callback = multiplexed_callback.map(|callback| {
                         crate::multiplexed_stream::multiplexed_ack_callback(stream_index, callback)
                     });
