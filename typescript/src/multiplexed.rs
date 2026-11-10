@@ -325,15 +325,24 @@ impl ZerobusMultiplexedStream {
     }
 
     /// Waits until every record queued so far, on every sub-stream, is acknowledged.
-    #[napi]
-    pub async fn flush(&self) -> Result<()> {
-        let guard = self.inner.read().await;
-        let mux = guard
-            .as_ref()
-            .ok_or_else(|| Error::from_reason("Stream has been closed"))?;
-        mux.flush()
-            .await
-            .map_err(|e| Error::from_reason(format!("Failed to flush stream: {}", e)))
+    // Not an `async fn`: napi releases its reference to `this` only when such a call
+    // resolves, so a rejected flush would keep the stream from being garbage-collected.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn flush(&self, env: Env) -> Result<JsObject> {
+        let stream = self.inner.clone();
+
+        env.execute_tokio_future(
+            async move {
+                let guard = stream.read().await;
+                let mux = guard
+                    .as_ref()
+                    .ok_or_else(|| Error::from_reason("Stream has been closed"))?;
+                mux.flush()
+                    .await
+                    .map_err(|e| Error::from_reason(format!("Failed to flush stream: {}", e)))
+            },
+            |_env, _| Ok(()),
+        )
     }
 
     /// Flushes and closes every sub-stream.
