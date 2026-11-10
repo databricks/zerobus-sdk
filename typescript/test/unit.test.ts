@@ -1054,8 +1054,8 @@ describe('Multiplexed ack callback', () => {
     };
 
     // Replaces console.error and records its arguments; call restore() in a finally block.
-    // Not t.mock: Node 16's node:test has none, and passes a test function that takes a
-    // parameter a done callback.
+    // Not t.mock: Node 16's node:test has none, and treats a test function that takes a
+    // parameter as callback-style.
     const stubConsoleError = (replacement: () => void = () => {}) => {
         const original = console.error;
         const calls: unknown[][] = [];
