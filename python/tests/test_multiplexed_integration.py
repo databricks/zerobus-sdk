@@ -274,6 +274,13 @@ def test_negative_message_ids_from_sub_streams_32_and_above_can_be_awaited():
         stream.flush()
         # The callback receives exactly the IDs the ingest calls returned, negative ones included.
         callback.wait_for(ids)
+
+        # -1 belongs to sub-stream 63, which this stream does not have: the core rejects it at
+        # once instead of waiting.
+        started = time.monotonic()
+        with pytest.raises(core.NonRetriableException):
+            stream.wait_for_message_id(-1)
+        assert time.monotonic() - started < 5
     finally:
         stream.close()
     assert list(stream.get_unacked_records()) == []
@@ -360,6 +367,10 @@ def test_async_negative_message_ids_cross_the_bridge_both_ways():
             for message_id in last_id_per_stream.values():
                 await stream.wait_for_message_id(message_id)
             await stream.flush()
+
+            # -1 belongs to sub-stream 63, which this stream does not have.
+            with pytest.raises(core.NonRetriableException):
+                await asyncio.wait_for(stream.wait_for_message_id(-1), 5)
         finally:
             await stream.close()
         assert list(await stream.get_unacked_records()) == []
@@ -371,7 +382,7 @@ def test_async_negative_message_ids_cross_the_bridge_both_ways():
 
 
 @pytest.mark.parametrize("operation", ["ingest_record", "ingest_records", "flush"])
-def test_unissued_message_id_and_calls_after_close_are_rejected(module, operation):
+def test_calls_after_close_are_rejected(module, operation):
     prefix = RUN_PREFIX + "closed-"
 
     async def run():
@@ -381,12 +392,6 @@ def test_unissued_message_id_and_calls_after_close_are_rejected(module, operatio
             for i in range(8):
                 await _maybe(stream.ingest_record(_air_quality(f"{prefix}{i}", i)))
             await _maybe(stream.flush())
-            # -1 belongs to sub-stream 63, which a stream of 4 sub-streams does not have: the
-            # core rejects it at once instead of waiting.
-            started = time.monotonic()
-            with pytest.raises(core.NonRetriableException):
-                await _maybe(stream.wait_for_message_id(-1))
-            assert time.monotonic() - started < 5
         finally:
             await _maybe(stream.close())
         assert stream.is_closed
@@ -468,17 +473,15 @@ def test_rejected_record_reaches_on_error_and_comes_back(module):
 
 
 def _ingest_after_rejection(stream, calls):
-    """Make each (method, payload, expected) call and return the expected records of the calls that returned.
+    """Make each (method, payload, expected) call and return the records expected back.
 
-    The first call ingests a record the server rejects, which fails the stream. Calls that raise
-    because the stream has already failed queued nothing, so their records are not expected back.
+    The first call ingests a record the server rejects, which fails the stream. Queuing takes far
+    less than the server's round trip, so every later call is still accepted; if one raises, the
+    test fails instead of silently checking fewer record shapes.
     """
     accepted = []
     for method, payload, expected in calls:
-        try:
-            getattr(stream, method)(payload)
-        except core.ZerobusException:
-            continue
+        getattr(stream, method)(payload)
         accepted.extend(expected)
     return accepted
 
@@ -788,7 +791,7 @@ def test_concurrent_ingest_tasks_on_one_async_stream():
     EXPECTED_ROWS[prefix] = 200
 
 
-def test_dropping_a_stream_without_close():
+def test_dropping_a_stream_without_close_leaves_the_sdk_usable():
     # Rows ingested into the dropped streams may or may not land, so they are not counted.
     prefix = RUN_PREFIX + "dropped-"
     sdk = _sdk(sync)
@@ -806,7 +809,7 @@ def test_dropping_a_stream_without_close():
         stream.close()
 
 
-def test_async_dropping_a_stream_without_close():
+def test_async_dropping_a_stream_without_close_leaves_the_sdk_usable():
     prefix = RUN_PREFIX + "dropped-"
     sdk = _sdk(aio)
 
@@ -841,7 +844,8 @@ def test_flush_timeout_reaches_the_core():
     try:
         for i in range(1000):
             stream.ingest_record(_row(f"{prefix}{i}", i))
-        # The default timeout is minutes; 1 ms is too short for the server to acknowledge 1000 records.
+        # 1 ms is too short for the server to acknowledge 1000 records; with the default (300 s)
+        # this flush would succeed.
         with pytest.raises(core.ZerobusException):
             stream.flush()
     finally:
@@ -878,18 +882,24 @@ def test_callback_max_wait_time_reaches_the_core(wait):
     if wait != "unset":
         builder = builder.callback_max_wait_time_ms(wait)
     stream = builder.multiplexed(1).ack_callback(callback).build()
-    for i in range(20):
-        stream.ingest_record(_row(f"{prefix}{i}", i))
-    stream.flush()
-    assert callback.done <= 3, "the callbacks must still be queued when close() starts"
-    started = time.monotonic()
-    stream.close()
-    took = time.monotonic() - started
-    done = callback.done
+    closed = False
+    try:
+        for i in range(20):
+            stream.ingest_record(_row(f"{prefix}{i}", i))
+        stream.flush()
+        assert callback.done <= 3, "the callbacks must still be queued when close() starts"
+        started = time.monotonic()
+        stream.close()
+        closed = True
+        took = time.monotonic() - started
+        done = callback.done
+    finally:
+        if not closed:
+            stream.close()
+        # Callbacks still queued when close() stops waiting keep running. Let them finish before
+        # the SDK is released: releasing it while a callback waits for the GIL hangs.
+        callback.wait_for_all(20)
     EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + 20
-    # Callbacks still queued when close() stops waiting keep running. Let them finish before
-    # the SDK is released: releasing it while a callback waits for the GIL hangs.
-    callback.wait_for_all(20)
 
     if wait == "unset":
         # The core's default wait is 5 s.
