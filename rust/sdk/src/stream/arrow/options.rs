@@ -3,6 +3,36 @@
 use crate::stream_options::defaults;
 use arrow_ipc::CompressionType;
 
+/// How an Arrow Flight stream sends dictionary-encoded columns.
+///
+/// Zerobus does not support Arrow dictionaries yet, so keep the default,
+/// [`Hydrate`](Self::Hydrate). Until it does, [`Resend`](Self::Resend) or
+/// [`Delta`](Self::Delta) with dictionary-encoded columns makes stream creation
+/// fail with [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema).
+///
+/// Configure it with
+/// [`StreamBuilder::dictionary_handling`](crate::StreamBuilder::dictionary_handling).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArrowDictionaryHandling {
+    /// Decode dictionary-encoded columns to their value type before sending, so the
+    /// server receives plain values.
+    #[default]
+    Hydrate,
+
+    /// Send dictionary-encoded columns as Arrow IPC dictionaries for the server to
+    /// decode.
+    ///
+    /// Each connection sends a column's dictionary before the first batch that uses
+    /// it and again whenever its values change.
+    Resend,
+
+    /// Like [`Resend`](Self::Resend), but when a batch's dictionary starts with the
+    /// previous batch's values for that column, send only the new values.
+    /// Otherwise, send the full dictionary.
+    Delta,
+}
+
 /// Configuration options for Arrow Flight stream creation and operation.
 ///
 /// These options control the behavior of Arrow Flight ingestion streams, including
@@ -122,6 +152,15 @@ pub struct ArrowStreamConfigurationOptions {
     /// zstd unless that field is changed.
     pub compression: ArrowCompression,
 
+    /// How dictionary-encoded columns are sent. See [`ArrowDictionaryHandling`].
+    ///
+    /// Zerobus does not support Arrow dictionaries yet, so keep the default. Until it
+    /// does, `Resend` or `Delta` with dictionary-encoded columns makes stream creation
+    /// fail with [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema).
+    ///
+    /// Default: [`ArrowDictionaryHandling::Hydrate`]
+    pub dictionary_handling: ArrowDictionaryHandling,
+
     /// Maximum time in milliseconds to wait for acknowledgments during server-initiated
     /// graceful stream rotation.
     ///
@@ -174,6 +213,7 @@ impl Default for ArrowStreamConfigurationOptions {
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
             ipc_compression: Some(CompressionType::ZSTD),
             compression: ArrowCompression::FallbackToLegacy,
+            dictionary_handling: ArrowDictionaryHandling::Hydrate,
             stream_paused_max_wait_time_ms: None,
         }
     }

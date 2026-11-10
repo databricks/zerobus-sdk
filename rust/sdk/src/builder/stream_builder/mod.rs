@@ -55,7 +55,8 @@ use multiplexed::MAX_MULTIPLEXED_JITTER_MS;
 
 #[cfg(feature = "arrow-flight")]
 use crate::stream::{
-    ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusArrowStream,
+    ArrowDictionaryHandling, ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties,
+    ZerobusArrowStream,
 };
 
 /// A fluent builder for creating Zerobus ingestion streams.
@@ -126,6 +127,8 @@ struct StreamSettings {
     ipc_compression: Option<arrow_ipc::CompressionType>,
     #[cfg(feature = "arrow-flight")]
     compression: crate::ArrowCompression,
+    #[cfg(feature = "arrow-flight")]
+    dictionary_handling: ArrowDictionaryHandling,
 }
 
 impl Default for StreamSettings {
@@ -151,6 +154,8 @@ impl Default for StreamSettings {
             ipc_compression: arrow.ipc_compression,
             #[cfg(feature = "arrow-flight")]
             compression: arrow.compression,
+            #[cfg(feature = "arrow-flight")]
+            dictionary_handling: arrow.dictionary_handling,
         }
     }
 }
@@ -443,6 +448,19 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Set how dictionary-encoded columns are sent (Arrow streams only).
+    ///
+    /// Zerobus does not support Arrow dictionaries yet, so keep the default,
+    /// `Hydrate`. Until it does, `Resend` or `Delta` with dictionary-encoded columns
+    /// makes stream creation fail with
+    /// [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema). See
+    /// [`ArrowDictionaryHandling`] for the modes.
+    #[cfg(feature = "arrow-flight")]
+    pub fn dictionary_handling(mut self, handling: ArrowDictionaryHandling) -> Self {
+        self.settings.dictionary_handling = handling;
+        self
+    }
+
     /// The gRPC stream options, built from the core and the stream settings. The
     /// literal names every field, so a new options field does not compile until
     /// it is given a source.
@@ -482,6 +500,7 @@ impl<'a> StreamBuilder<'a> {
             connection_timeout_ms: s.connection_timeout_ms,
             ipc_compression: s.ipc_compression,
             compression: s.compression,
+            dictionary_handling: s.dictionary_handling,
         }
     }
 
