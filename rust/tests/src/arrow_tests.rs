@@ -113,6 +113,42 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// An endpoint that isn't a valid URI can never connect, so stream creation
+        /// must fail at once instead of after the recovery retries.
+        #[tokio::test]
+        async fn test_invalid_endpoint_fails_stream_creation_without_retrying(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_invalid_endpoint_fails_stream_creation_without_retrying");
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint("https://bad host.example.com")
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
+
+            let build = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(create_test_arrow_schema())
+                .recovery(true)
+                .recovery_backoff_ms(60_000)
+                .build_arrow();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+                .await
+                .map_err(|_| "stream creation retried an invalid endpoint")?
+                .err()
+                .expect("an invalid endpoint must fail stream creation");
+
+            assert!(
+                matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+                "{error:?}"
+            );
+            assert!(!error.is_retryable());
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_initial_auth_rejection_refreshes_once_then_succeeds(
         ) -> Result<(), Box<dyn std::error::Error>> {
