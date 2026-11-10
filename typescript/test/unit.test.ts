@@ -1018,6 +1018,35 @@ describe('ZerobusMultiplexedStream wrapper', () => {
         assert.doesNotThrow(() => dispatch('drained'));
     });
 
+    it('passes non-empty unacked results through unchanged', { timeout: 5_000 }, async () => {
+        const records = [Buffer.from('record-a'), Buffer.from('record-b')];
+        const batches = [[Buffer.from('batch-c')], [Buffer.from('batch-d'), Buffer.from('batch-e')]];
+        const getters: Array<[string, unknown]> = [['getUnackedRecords', records], ['getUnackedBatches', batches]];
+        for (const [getter, nativeResult] of getters) {
+            const nativeCalls: string[] = [];
+            const nativeStream = {
+                getUnackedRecords: async () => { nativeCalls.push('getUnackedRecords'); return records; },
+                getUnackedBatches: async () => { nativeCalls.push('getUnackedBatches'); return batches; },
+            };
+
+            // With an ack callback, the result arrives only after the drained marker.
+            const withCallback = await openMux(nativeStream, undefined, { onAck() {} });
+            const pending = withCallback.stream[getter]();
+            const state = track(pending);
+            await drainEventLoop();
+            assert.strictEqual(state.settled, false, getter);
+            withCallback.dispatch('drained');
+            const result = await pending;
+            assert.deepStrictEqual(result, nativeResult, getter);
+            assert.strictEqual(result, nativeResult, `${getter} returns the native value itself`);
+
+            // Without one, the native result comes back as is.
+            const withoutCallback = await openMux(nativeStream);
+            assert.strictEqual(await withoutCallback.stream[getter](), nativeResult, getter);
+            assert.deepStrictEqual(nativeCalls, [getter, getter], 'only the matching native getter runs');
+        }
+    });
+
     it('settles close() with the native result when there is no ack callback', async () => {
         const { stream, dispatch } = await openMux({ close: async () => {} });
         assert.strictEqual(dispatch, undefined);
@@ -1173,7 +1202,7 @@ describe('Multiplexed ack callback', () => {
         }
     });
 
-    it('logs a custom thenable that throws or rejects once, without an unhandled rejection', async () => {
+    it('logs a custom thenable whose then throws or rejects once, without an unhandled rejection', async () => {
         const unhandled: unknown[] = [];
         const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
         process.on('unhandledRejection', onUnhandled);
@@ -1182,6 +1211,7 @@ describe('Multiplexed ack callback', () => {
             const thenables = [
                 { then() { throw failure; } },
                 { then(_resolve: () => void, reject: (error: unknown) => void) { reject(failure); } },
+                { get then(): never { throw failure; } },
             ];
             for (const thenable of thenables) {
                 const consoleError = stubConsoleError();
