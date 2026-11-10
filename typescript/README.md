@@ -664,6 +664,10 @@ const stream = await sdk.createStream(
 
 **Note:** The SDK automatically adds the `user-agent` header if not provided.
 
+**Note:** `getHeadersCallback` is called once, when the stream opens. Its headers are reused for
+every reconnect and, on a multiplexed stream, for every sub-stream, so a token that expires
+during the stream's lifetime needs OAuth instead.
+
 ## Stream Builder
 
 `sdk.streamBuilder()` configures a stream step by step, like the Rust, Python and Java SDKs:
@@ -707,8 +711,8 @@ sub-stream, but there is no order across sub-streams.
 
 Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
 Multiplexed streams support JSON, Protocol Buffers and Avro records, with OAuth or a custom
-headers provider. For JSON, first migrate to Protocol Buffers and measure again before
-multiplexing.
+headers provider (called once, at open; see [Custom Authentication](#custom-authentication)).
+For JSON, first migrate to Protocol Buffers and measure again before multiplexing.
 
 ```typescript
 const stream = await sdk.streamBuilder()
@@ -1214,7 +1218,8 @@ readonly isClosed: boolean
 ```
 
 Payloads are converted as on `ZerobusStream`. Ingest calls resolve once the record or batch is
-queued. `isClosed` is `true` after `close()`, once an ingest, flush or wait call has hit a
+queued; unlike the deprecated `ZerobusStream.ingestRecord()`, they don't wait for the
+acknowledgment. `isClosed` is `true` after `close()`, once an ingest, flush or wait call has hit a
 failed sub-stream, and while a close or unacked getter is in progress; a failure no call has
 hit yet doesn't show in it.
 

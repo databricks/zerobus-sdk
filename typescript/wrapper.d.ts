@@ -51,7 +51,11 @@ export interface StreamBuilder {
   table(tableName: string): this
   /** OAuth 2.0 client credentials of a service principal. */
   oauth(clientId: string, clientSecret: string): this
-  /** Custom authentication headers instead of OAuth. */
+  /**
+   * Custom authentication headers instead of OAuth. `getHeadersCallback` is called once, when
+   * the stream opens, and its headers are reused for every reconnect and sub-stream, so a token
+   * that expires needs `oauth()`.
+   */
   headersProvider(provider: JsHeadersProvider): this
   /** JSON records. */
   json(): this
@@ -129,7 +133,8 @@ export interface MultiplexedStreamBuilder {
  * A multiplexed stream (Beta): records are spread round-robin over several sub-streams to one
  * table. Records keep their order within a sub-stream only.
  *
- * Ingest calls resolve to a message ID as soon as the record is queued. Message IDs are opaque,
+ * Ingest calls resolve to a message ID as soon as the record is queued (unlike the deprecated
+ * `ZerobusStream.ingestRecord()`, they don't wait for the acknowledgment). Message IDs are opaque,
  * unordered bigints (some are negative): ingest in a loop, then `flush()` to confirm.
  * `waitForMessageId(id)` confirms only that record or batch. On an Avro stream, record objects
  * are encoded against the writer schema before ingestion. `getUnackedRecords()` and
