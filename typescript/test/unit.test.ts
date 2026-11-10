@@ -603,7 +603,6 @@ describe('Multiplexed stream native entry point', () => {
 // Wrapper-level tests (public entry point). Every native call is stubbed on one SDK
 // instance, so nothing here reaches the native stream code or the network.
 const wrapper = require('../wrapper');
-const { AvroEncoder: MuxAvroEncoder } = require('../avro');
 
 const UNIT_ZEROBUS_ENDPOINT = 'https://1234567890.zerobus.us-west-2.cloud.databricks.com';
 const UNIT_WORKSPACE_URL = 'https://test-workspace.cloud.databricks.com';
@@ -936,7 +935,7 @@ describe('ZerobusMultiplexedStream wrapper', () => {
         const record = { id: 1n, name: 'Alice' };
         assert.strictEqual(await stream.ingestRecord(record), 7n);
         assert.ok(Buffer.isBuffer(received));
-        assert.ok(received.equals(new MuxAvroEncoder(muxAvroSchema).encode(record)));
+        assert.ok(received.equals(new AvroEncoder(muxAvroSchema).encode(record)));
     });
 
     it('encodes an Avro batch and rejects a non-array batch', async () => {
@@ -949,7 +948,7 @@ describe('ZerobusMultiplexedStream wrapper', () => {
         const preEncoded = Buffer.from([9]);
         assert.strictEqual(await stream.ingestRecords([record, preEncoded]), 8n);
         assert.strictEqual(received.length, 2);
-        assert.ok(received[0].equals(new MuxAvroEncoder(muxAvroSchema).encode(record)));
+        assert.ok(received[0].equals(new AvroEncoder(muxAvroSchema).encode(record)));
         assert.ok(received[1].equals(preEncoded));
         assert.throws(() => stream.ingestRecords(record), /array of records/);
     });
@@ -1154,15 +1153,18 @@ describe('Multiplexed ack callback', () => {
         const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
         process.on('unhandledRejection', onUnhandled);
         try {
+            let thenCalls = 0;
             const thenables = [
-                { then(resolve: () => void) { resolve(); } },
-                { async then(resolve: () => void) { resolve(); } },
+                { then(resolve: () => void) { thenCalls++; resolve(); } },
+                { async then(resolve: () => void) { thenCalls++; resolve(); } },
             ];
             for (const thenable of thenables) {
                 const { dispatch } = await captureDispatch({ onAck: () => thenable });
                 assert.doesNotThrow(() => dispatch('ack', 1n));
             }
             await drainEventLoop();
+            // Each thenable was adopted (its then() called once), not ignored.
+            assert.strictEqual(thenCalls, 2);
             assert.deepStrictEqual(unhandled, []);
             assert.strictEqual(consoleError.calls.length, 0);
         } finally {
@@ -1316,7 +1318,7 @@ describe('Multiplexed stream package surface', () => {
                     `mux.ackCallback({ onError(messageId, message) { const x: bigint = messageId; const y: string = message; void x; void y; } });\n` +
                     `mux.ackCallback({ onAck(messageId) { void messageId; }, onError(messageId, message) { void messageId; void message; } });\n` +
                     `mux.ackCallback({ async onAck(messageId) { void messageId; }, async onError(messageId, message) { void messageId; void message; } });\n` +
-                    // A handler's return value is ignored, so an arrow that returns one is fine.
+                    // A non-thenable return value is ignored, so an arrow that returns one is fine.
                     `const ackedIds: bigint[] = [];\n` +
                     `mux.ackCallback({ onAck: (messageId) => ackedIds.push(messageId) });\n` +
                     `// @ts-expect-error an ack callback needs onAck or onError\n` +

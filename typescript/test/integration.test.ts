@@ -434,7 +434,9 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
         });
     });
 
-    describe('createStream format resolution', () => {
+    // The native createStream (../index) throws these synchronously; the wrapper's async
+    // createStream turns the same errors into rejections.
+    describe('native createStream format resolution', () => {
         const validDescriptor = Buffer.from(
             descriptor.DescriptorProto.encode(
                 descriptor.DescriptorProto.create({
@@ -730,8 +732,8 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
                 assert.strictEqual(waitSettled, false, 'ingest and flush finished while the wait was pending');
                 await assert.rejects(waiting, /Failed to wait for message ID: /);
             } finally {
-                // The fabricated wait may leave the lane failed; close's outcome isn't the point here.
-                await stream.close().catch(() => {});
+                // A timed-out wait leaves the lane open, so close() succeeds.
+                await stream.close();
             }
         });
 
@@ -739,7 +741,13 @@ describe('Integration Tests', { skip: SKIP_INTEGRATION }, () => {
             // Not t.mock: Node 16's node:test has none (see the unit tests' stubConsoleError).
             const originalConsoleError = console.error;
             let consoleErrorCalls = 0;
-            console.error = () => { consoleErrorCalls++; };
+            console.error = (...args: unknown[]) => {
+                if (args[0] === 'Zerobus multiplexed stream ack callback failed:') {
+                    consoleErrorCalls++;
+                } else {
+                    originalConsoleError(...args);
+                }
+            };
             const unhandled: unknown[] = [];
             const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
             process.on('unhandledRejection', onUnhandled);
