@@ -12,13 +12,16 @@ import org.slf4j.LoggerFactory;
  * ::} replaced by {@code .}. The crate prefix is dropped, so an event from {@code
  * databricks_zerobus_ingest_sdk::stream::arrow} is logged as {@code
  * com.databricks.zerobus.core.stream.arrow}. The level of {@value #ROOT_LOGGER} decides which
- * events the native side forwards; set it to DEBUG to see core debug output.
+ * events the native side forwards; set it to DEBUG to see core debug output. The JNI layer's own
+ * module names share this namespace.
  *
- * <p>The native side reads the level when the library loads, when an {@link ZerobusSdk} is created,
- * and at JVM shutdown (when forwarding is turned off).
+ * <p>The native side reads the level when the library loads and each time a {@link ZerobusSdk} is
+ * created.
  */
 final class NativeLogBridge {
   static final String ROOT_LOGGER = "com.databricks.zerobus.core";
+
+  private static final String FORWARDER_THREAD_NAME = "zerobus-native-log-forwarder";
 
   private static final String[] CRATE_PREFIXES = {"databricks_zerobus_ingest_sdk", "zerobus_jni"};
 
@@ -35,25 +38,20 @@ final class NativeLogBridge {
     // Utility class.
   }
 
-  /** Pushes the current level and turns forwarding off at JVM shutdown. */
-  static void install() {
-    try {
-      Runtime.getRuntime()
-          .addShutdownHook(
-              new Thread(() -> nativeSetLogLevel(LEVEL_OFF), "zerobus-native-log-shutdown"));
-      refreshLevel();
-    } catch (RuntimeException e) {
-      // Logging is best effort; the SDK works without it.
-    }
-  }
-
   /** Reads the effective level of {@value #ROOT_LOGGER} and pushes it to the native side. */
   static void refreshLevel() {
     try {
       nativeSetLogLevel(levelOf(LoggerFactory.getLogger(ROOT_LOGGER)));
-    } catch (RuntimeException e) {
-      // Keep the previous level if SLF4J cannot report one.
+    } catch (RuntimeException | LinkageError e) {
+      // Logging is best effort; keep the previous level and never fail class initialization.
     }
+  }
+
+  /** Called once from the native forwarder thread after it attaches to the JVM. */
+  static void initForwarderThread() {
+    Thread thread = Thread.currentThread();
+    thread.setName(FORWARDER_THREAD_NAME);
+    thread.setContextClassLoader(NativeLogBridge.class.getClassLoader());
   }
 
   /**

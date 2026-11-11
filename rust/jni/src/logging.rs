@@ -63,7 +63,11 @@ pub fn set_max_level(code: jint) {
     } else {
         LEVEL_OFF
     };
-    MAX_LEVEL.store(code, Ordering::Relaxed);
+    // The global max level and the callsite interest cache are derived from the gate's hint
+    // and only refresh on rebuild.
+    if MAX_LEVEL.swap(code, Ordering::Relaxed) != code {
+        tracing::callsite::rebuild_interest_cache();
+    }
 }
 
 /// Installs the global subscriber and starts the forwarder thread. Idempotent; a failure
@@ -73,13 +77,7 @@ pub fn install() {
     INSTALL.call_once(|| {
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
-        let layer = ForwardLayer {
-            tx,
-            dropped: dropped.clone(),
-        };
-        let subscriber = Registry::default().with(layer.with_filter(LevelGate {
-            max_level: &MAX_LEVEL,
-        }));
+        let subscriber = build_subscriber(tx, dropped.clone(), &MAX_LEVEL);
         if tracing::subscriber::set_global_default(subscriber).is_err() {
             return;
         }
@@ -87,6 +85,15 @@ pub fn install() {
             .name("zerobus-native-log".into())
             .spawn(move || run_forwarder(rx, dropped));
     });
+}
+
+fn build_subscriber(
+    tx: SyncSender<LogRecord>,
+    dropped: Arc<AtomicU64>,
+    max_level: &'static AtomicU8,
+) -> impl Subscriber + Send + Sync + 'static {
+    let layer = ForwardLayer { tx, dropped };
+    Registry::default().with(layer.with_filter(LevelGate { max_level }))
 }
 
 #[no_mangle]
@@ -127,8 +134,19 @@ struct LogRecord {
     message: String,
 }
 
-/// Admits events at or below the level in `max_level`. The callsite interest is
-/// `sometimes` so the level is re-read on every event instead of being cached.
+fn level_filter(code: u8) -> LevelFilter {
+    match code {
+        LEVEL_ERROR => LevelFilter::ERROR,
+        LEVEL_WARN => LevelFilter::WARN,
+        LEVEL_INFO => LevelFilter::INFO,
+        LEVEL_DEBUG => LevelFilter::DEBUG,
+        LEVEL_TRACE => LevelFilter::TRACE,
+        _ => LevelFilter::OFF,
+    }
+}
+
+/// Admits events at or below the level in `max_level`. The hint follows the threshold, so
+/// disabled levels short-circuit at the macro. `set_max_level` rebuilds the cache on change.
 struct LevelGate {
     max_level: &'static AtomicU8,
 }
@@ -148,7 +166,7 @@ impl<S: Subscriber> Filter<S> for LevelGate {
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
-        None
+        Some(level_filter(self.max_level.load(Ordering::Relaxed)))
     }
 }
 
@@ -232,20 +250,30 @@ fn run_forwarder(rx: Receiver<LogRecord>, dropped: Arc<AtomicU64>) {
         Ok(env) => env,
         Err(_) => return,
     };
-    let method = {
-        let class = as_jclass(&get_class_cache().native_log_bridge_class);
-        match env.get_static_method_id(&class, "log", LOG_SIGNATURE) {
-            Ok(method) => method,
-            Err(_) => {
-                let _ = env.exception_clear();
-                return;
-            }
+    let class = as_jclass(&get_class_cache().native_log_bridge_class);
+    if env
+        .call_static_method(&class, "initForwarderThread", "()V", &[])
+        .is_err()
+    {
+        let _ = env.exception_clear();
+    }
+    let method = match env.get_static_method_id(&class, "log", LOG_SIGNATURE) {
+        Ok(method) => method,
+        Err(_) => {
+            let _ = env.exception_clear();
+            return;
         }
     };
 
     let mut last_report = Instant::now();
     loop {
-        match rx.recv_timeout(DROP_REPORT_INTERVAL) {
+        // Wake on a timeout only while drops are waiting to be reported.
+        let next = if dropped.load(Ordering::Relaxed) > 0 {
+            rx.recv_timeout(DROP_REPORT_INTERVAL)
+        } else {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        };
+        match next {
             Ok(record) => forward(
                 &mut env,
                 method,
@@ -306,11 +334,7 @@ mod tests {
     ) -> (Vec<LogRecord>, u64) {
         let (tx, rx) = mpsc::sync_channel(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
-        let layer = ForwardLayer {
-            tx,
-            dropped: dropped.clone(),
-        };
-        let subscriber = Registry::default().with(layer.with_filter(LevelGate { max_level }));
+        let subscriber = build_subscriber(tx, dropped.clone(), max_level);
         tracing::subscriber::with_default(subscriber, emit);
         (rx.try_iter().collect(), dropped.load(Ordering::Relaxed))
     }
@@ -383,13 +407,24 @@ mod tests {
         assert_eq!(dropped, 2);
     }
 
+    // Uses the global threshold, so it is the only test that touches MAX_LEVEL.
     #[test]
-    fn set_max_level_rejects_out_of_range_codes() {
+    fn level_change_after_install_takes_effect() {
         let previous = MAX_LEVEL.load(Ordering::Relaxed);
         set_max_level(9);
         assert_eq!(MAX_LEVEL.load(Ordering::Relaxed), LEVEL_OFF);
-        set_max_level(LEVEL_TRACE as jint);
-        assert_eq!(MAX_LEVEL.load(Ordering::Relaxed), LEVEL_TRACE);
-        MAX_LEVEL.store(previous, Ordering::Relaxed);
+
+        let (tx, rx) = mpsc::sync_channel(64);
+        let subscriber = build_subscriber(tx, Arc::new(AtomicU64::new(0)), &MAX_LEVEL);
+        tracing::subscriber::with_default(subscriber, || {
+            set_max_level(i32::from(LEVEL_WARN));
+            tracing::debug!(target: "databricks_zerobus_ingest_sdk::level", "below");
+            set_max_level(i32::from(LEVEL_DEBUG));
+            tracing::debug!(target: "databricks_zerobus_ingest_sdk::level", "above");
+        });
+        set_max_level(i32::from(previous));
+
+        let messages: Vec<String> = rx.try_iter().map(|r| r.message).collect();
+        assert_eq!(messages, vec!["above".to_string()]);
     }
 }

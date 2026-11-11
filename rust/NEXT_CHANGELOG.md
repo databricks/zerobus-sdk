@@ -12,6 +12,9 @@
 
 ### Internal Changes
 
+- Per-record, per-batch and per-acknowledgment debug events and the ingest spans are now TRACE
+  instead of DEBUG, so DEBUG output stays readable when core logs are forwarded to SLF4J.
+
 ### Breaking Changes
 
 ### Deprecations

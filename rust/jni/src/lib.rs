@@ -77,7 +77,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 /// Called by the JVM when the native library is unloaded.
 #[no_mangle]
 pub extern "system" fn JNI_OnUnload(_vm: JavaVM, _reserved: *mut c_void) {
-    tracing::info!("Zerobus JNI library unloading");
     logging::set_max_level(0);
+    tracing::info!("Zerobus JNI library unloading");
     // The runtime will be dropped when the process exits
 }

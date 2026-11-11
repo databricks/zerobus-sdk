@@ -1,6 +1,7 @@
 package com.databricks.zerobus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -8,9 +9,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
+import ch.qos.logback.core.AppenderBase;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -22,17 +24,31 @@ class NativeLogForwardingTest {
 
   private static final String CORE_LOGGER = NativeLogBridge.ROOT_LOGGER;
   private static final String NATIVE_TEST_LOGGER = CORE_LOGGER + ".native_log_test";
+  private static final String FORWARDER_THREAD = "zerobus-native-log-forwarder";
 
   private Logger core;
   private Level previousLevel;
-  private ListAppender<ILoggingEvent> appender;
+  private CapturingAppender appender;
+
+  private static final class CapturingAppender extends AppenderBase<ILoggingEvent> {
+    private final List<ILoggingEvent> events = new CopyOnWriteArrayList<>();
+    private volatile ClassLoader forwarderContextLoader;
+
+    @Override
+    protected void append(ILoggingEvent event) {
+      if (FORWARDER_THREAD.equals(event.getThreadName())) {
+        forwarderContextLoader = Thread.currentThread().getContextClassLoader();
+      }
+      events.add(event);
+    }
+  }
 
   @BeforeEach
   void setUp() {
     assumeTrue(NativeLoader.isLoaded(), "Native library not available");
     core = (Logger) LoggerFactory.getLogger(CORE_LOGGER);
     previousLevel = core.getLevel();
-    appender = new ListAppender<>();
+    appender = new CapturingAppender();
     appender.start();
     core.addAppender(appender);
   }
@@ -57,6 +73,18 @@ class NativeLogForwardingTest {
     assertEquals(NATIVE_TEST_LOGGER, event.getLoggerName());
     assertEquals(Level.WARN, event.getLevel());
     assertEquals("connection failed table=main.default.t1", event.getFormattedMessage());
+  }
+
+  @Test
+  void forwarderThreadIsNamedAndUsesBridgeContextClassLoader() throws InterruptedException {
+    core.setLevel(Level.DEBUG);
+    NativeLogBridge.refreshLevel();
+
+    NativeTestHelper.nativeTestEmitLog(2, "thread probe");
+
+    ILoggingEvent event = awaitMessage("thread probe");
+    assertEquals(FORWARDER_THREAD, event.getThreadName());
+    assertSame(NativeLogBridge.class.getClassLoader(), appender.forwarderContextLoader);
   }
 
   @Test
@@ -105,8 +133,6 @@ class NativeLogForwardingTest {
   }
 
   private List<ILoggingEvent> events() {
-    synchronized (appender) {
-      return new ArrayList<>(appender.list);
-    }
+    return new ArrayList<>(appender.events);
   }
 }

@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::sync::atomic::Ordering;
-use tracing::{debug, error, warn};
+use tracing::{error, trace, warn};
 
 use super::types::IngestRequest;
 use super::ZerobusStream;
@@ -274,7 +274,7 @@ impl ZerobusStream {
         self.check_open()?;
 
         let offset_id = self.logical_offset_id_generator.next();
-        debug!(
+        trace!(
             offset_id = offset_id,
             record_count = encoded_batch.get_record_count(),
             "Ingesting record(s)"

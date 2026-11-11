@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
 use tokio::time::{timeout, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
@@ -482,7 +482,7 @@ impl ZerobusArrowStream {
     /// # Ok(())
     /// # }
     /// ```
-    #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
+    #[instrument(level = "trace", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
         if self.is_ingest_admission_closed() {
             return Err(Self::stream_closing_or_closed_error());
@@ -680,7 +680,7 @@ impl ZerobusArrowStream {
         // processor observe the batch as buffered-but-unsent and go idle again.
         self.pending_notify.notify_one();
 
-        debug!(offset_id = offset_id, "Batch queued for ingestion");
+        trace!(offset_id = offset_id, "Batch queued for ingestion");
         Ok(offset_id)
     }
 
@@ -695,7 +695,7 @@ impl ZerobusArrowStream {
     /// `tableToIPC(table, 'stream')`, etc.). Dictionary messages between the schema and
     /// the RecordBatch are supported. Trailing stream metadata (such as an end-of-stream
     /// marker after `finish()`) is allowed after that batch.
-    #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
+    #[instrument(level = "trace", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
         if self.is_ingest_admission_closed() {
             return Err(Self::stream_closing_or_closed_error());
@@ -748,7 +748,7 @@ impl ZerobusArrowStream {
                         );
                         return Ok(());
                     }
-                    debug!(
+                    trace!(
                         current_ack = ack_offset,
                         target_offset = offset_to_wait,
                         "Waiting for more acks"
