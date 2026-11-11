@@ -11,7 +11,7 @@ mod arrow_flight_tests {
         import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
     };
     use databricks_zerobus_ingest_sdk::{
-        ConnectorFactory, NoTlsConfig, ProxyConnector, ZerobusError, ZerobusSdk,
+        ConnectorFactory, NoTlsConfig, ProxyConnector, TlsSettings, ZerobusError, ZerobusSdk,
     };
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
@@ -142,6 +142,45 @@ mod arrow_flight_tests {
 
             assert!(
                 matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+                "{error:?}"
+            );
+            assert!(!error.is_retryable());
+
+            Ok(())
+        }
+
+        /// A TLS domain name that isn't a DNS name or an IP address can never work,
+        /// so stream creation must fail at once instead of after the recovery retries.
+        #[tokio::test]
+        async fn test_invalid_tls_domain_name_fails_stream_creation_without_retrying(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_invalid_tls_domain_name_fails_stream_creation_without_retrying");
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint("https://localhost:1")
+                .tls_config(Arc::new(
+                    TlsSettings::new().with_domain_name("zerobus.example.com:443"),
+                ))
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
+
+            let build = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(create_test_arrow_schema())
+                .recovery(true)
+                .recovery_backoff_ms(60_000)
+                .build_arrow();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+                .await
+                .map_err(|_| "stream creation retried an invalid TLS domain name")?
+                .err()
+                .expect("an invalid TLS domain name must fail stream creation");
+
+            assert!(
+                matches!(error, ZerobusError::InvalidArgument(_)),
                 "{error:?}"
             );
             assert!(!error.is_retryable());

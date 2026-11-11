@@ -3,7 +3,8 @@ mod utils;
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    message_descriptor, GrpcCode, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
+    message_descriptor, GrpcCode, NoTlsConfig, ProtoBytes, StreamType, TlsSettings, ZerobusError,
+    ZerobusSdk,
 };
 use tracing::info;
 use utils::{
@@ -277,6 +278,46 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         assert!(
             matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+
+        Ok(())
+    }
+
+    /// A TLS domain name that isn't a DNS name or an IP address can never work,
+    /// so stream creation must fail at once instead of after the recovery retries.
+    #[tokio::test]
+    async fn test_invalid_tls_domain_name_fails_stream_creation_without_retrying(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_invalid_tls_domain_name_fails_stream_creation_without_retrying");
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint("https://localhost:1")
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(
+                TlsSettings::new().with_domain_name("zerobus.example.com:443"),
+            ))
+            .build()?;
+
+        let build = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .recovery_backoff_ms(60_000)
+            .build();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+            .await
+            .map_err(|_| "stream creation retried an invalid TLS domain name")?
+            .err()
+            .expect("an invalid TLS domain name must fail stream creation");
+
+        assert!(
+            matches!(error, ZerobusError::InvalidArgument(_)),
             "{error:?}"
         );
         assert!(!error.is_retryable());

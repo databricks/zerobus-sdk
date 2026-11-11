@@ -9,7 +9,7 @@
 
 use crate::errors::ZerobusError;
 use crate::ZerobusResult;
-use rustls_pki_types::{pem::PemObject, CertificateDer};
+use rustls_pki_types::{pem::PemObject, CertificateDer, ServerName};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -350,7 +350,9 @@ impl TlsSettings {
 
     /// Sets the domain name the SDK checks the server certificate against.
     ///
-    /// By default the SDK uses the host name of the endpoint.
+    /// By default the SDK uses the host name of the endpoint. The value is a DNS
+    /// name or an IP address, without a scheme or port. Any other value makes
+    /// opening a stream fail with a non-retryable [`ZerobusError::InvalidArgument`].
     pub fn with_domain_name(mut self, domain_name: impl Into<String>) -> Self {
         self.domain_name = Some(domain_name.into());
         self
@@ -430,6 +432,16 @@ impl ResolvedTls<'_> {
             TlsMode::Tls => {}
             #[cfg(feature = "testing")]
             TlsMode::Plaintext => return Ok(endpoint),
+        }
+
+        // tonic rejects such a name only when the endpoint is configured, with an
+        // error that doesn't say why and that would be retried.
+        if let Some(domain_name) = self.domain_name {
+            if let Err(err) = ServerName::try_from(domain_name) {
+                return Err(ZerobusError::InvalidArgument(format!(
+                    "TLS domain name {domain_name:?} is not a DNS name or an IP address: {err}"
+                )));
+            }
         }
 
         // Material passed as PEM data fails the same way on every attempt, so it is
@@ -735,6 +747,52 @@ OXAXnIE7l91w/88HcoR0
         assert!(!err.is_retryable());
         // The message carries the reason from tonic's `source()`.
         assert!(err.to_string().contains("private key"), "{err}");
+    }
+
+    #[test]
+    fn apply_rejects_an_invalid_domain_name_as_not_retryable_with_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = dir.path().join("identity.pem");
+        std::fs::write(&identity, "not a certificate").unwrap();
+
+        for domain_name in [
+            "zerobus.example.com:443",
+            "https://zerobus.example.com",
+            "bad name with spaces",
+            "",
+        ] {
+            // Identity files don't make the error retryable: the name never changes.
+            for settings in [
+                TlsSettings::new(),
+                TlsSettings::new().with_client_identity_files(&identity, &identity),
+            ] {
+                let err = settings
+                    .with_domain_name(domain_name)
+                    .apply(endpoint())
+                    .unwrap_err();
+
+                assert!(
+                    matches!(err, ZerobusError::InvalidArgument(_)),
+                    "{domain_name:?}: {err:?}"
+                );
+                assert!(!err.is_retryable(), "{domain_name:?}");
+                assert!(
+                    err.to_string().contains(&format!("{domain_name:?}")),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_accepts_a_dns_name_or_an_ip_address_as_domain_name() {
+        for domain_name in ["zerobus.example.com", "localhost", "10.0.0.1", "::1"] {
+            let result = TlsSettings::new()
+                .with_domain_name(domain_name)
+                .apply(endpoint());
+
+            assert!(result.is_ok(), "{domain_name:?}: {:?}", result.err());
+        }
     }
 
     #[test]
