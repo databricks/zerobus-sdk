@@ -12,6 +12,7 @@ The examples are organized by stream type and demonstrate both single-record and
 - `ZerobusArrowStream` - Arrow Flight columnar ingestion
 - `ZerobusAvroStream` - Avro ingestion (Beta; requires Java 11+ and `org.apache.avro:avro`)
 - `ZerobusStream` (deprecated) - Legacy Future-based API for backward compatibility
+- `ZerobusSdk.builder()` with `TlsOptions` - Custom CA certificates and mutual TLS
 
 ## Directory Structure
 
@@ -31,6 +32,7 @@ examples/
 │   ├── README.md
 │   └── ArrowIngestionExample.java
 ├── avro/                  (Avro examples - ZerobusAvroStream, Beta)
+├── tls/                   (TLS configuration - ZerobusSdk.builder() with TlsOptions)
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
 └── legacy/                (Legacy examples - ZerobusStream)

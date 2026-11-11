@@ -15,6 +15,8 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [JSON Examples](#json-examples)
   - [Arrow Flight Examples](#arrow-flight-examples)
 - [Authentication](#authentication)
+  - [TLS Configuration](#tls-configuration)
+  - [Binary Headers](#binary-headers)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
   - [Future-Based API (Deprecated)](#future-based-api-deprecated)
@@ -790,6 +792,60 @@ Providers may override `invalidate()` to clear cached credentials after an authe
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
 
+### TLS Configuration
+
+By default the SDK trusts the operating system's CA certificates. To trust a private CA, present a
+client certificate for mutual TLS, or check the server certificate against a different name, pass
+`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`:
+
+```java
+TlsOptions tls = TlsOptions.builder()
+    .trustSystemRoots(false)
+    .addCaCertificateFile("/etc/zerobus/ca.pem")
+    .clientIdentityFiles("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key")
+    .domainName("zerobus.example.com")
+    .build();
+
+try (ZerobusSdk sdk = ZerobusSdk.builder()
+        .serverEndpoint(serverEndpoint)
+        .unityCatalogEndpoint(workspaceUrl)
+        .tlsOptions(tls)
+        .build()) {
+    // Create streams with sdk.streamBuilder()
+}
+```
+
+- `trustSystemRoots(false)` trusts only the CA certificates you add. At least one CA certificate
+  is required in that case.
+- `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
+  paths. Use them when the certificates come from a secret store rather than the file system.
+- `domainName(...)` checks the server certificate against a name other than the endpoint host.
+
+Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
+effect without restarting the process. Replace the certificate and its key together, for example by
+writing both into a new directory and switching a symbolic link to it, as Kubernetes secret volumes
+do. Use absolute paths. A missing or unreadable file fails stream creation with a
+`NonRetriableException` that names the file. Content the SDK cannot use, such as a file with no
+certificate, fails with a `ZerobusException`, because a rotation may be in progress.
+
+### Binary Headers
+
+A `HeadersProvider` header whose name ends in `-bin` is sent as binary gRPC metadata. Its value must
+be the standard base64 encoding of the bytes, padded or unpadded. The SDK decodes the value before
+sending it:
+
+```java
+HeadersProvider provider = () -> {
+    Map<String, String> headers = new HashMap<>();
+    headers.put("authorization", "Bearer " + fetchToken());
+    headers.put("x-databricks-zerobus-table-name", tableName);
+    headers.put("x-context-bin", Base64.getEncoder().encodeToString(contextBytes));
+    return headers;
+};
+```
+
+Any other header value is sent as ASCII text.
+
 ---
 
 ## API Styles
@@ -1133,6 +1189,15 @@ aggregate throughput. Dedicated connections isolate that loss. For many
 smaller, low-throughput streams, pass `false`; shared multiplexing is
 recommended there to reduce connection overhead.
 
+**Static methods:**
+
+```java
+ZerobusSdkBuilder builder()
+```
+Returns a [`ZerobusSdkBuilder`](#zerobussdkbuilder) for setting the endpoints, the application name,
+the connection mode, and [TLS options](#tls-configuration). The constructors above remain available
+and create an SDK with the same defaults.
+
 **Methods:**
 
 ```java
@@ -1213,6 +1278,38 @@ Same as above with custom configuration. _Deprecated — use [`streamBuilder()`]
 CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream closedStream)
 ```
 Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batches and flushing.
+
+---
+
+### ZerobusSdkBuilder
+
+Fluent builder for `ZerobusSdk`, returned by [`ZerobusSdk.builder()`](#zerobussdk). Only
+`serverEndpoint` is required.
+
+- `serverEndpoint(String)` - The Zerobus gRPC endpoint. Required.
+- `unityCatalogEndpoint(String)` - The Databricks workspace URL, used for Unity Catalog and OAuth.
+  Streams that use a `HeadersProvider` can omit it.
+- `applicationName(String)` - Application identifier for the `user-agent` header. Pass `null` to omit.
+- `connectionPerStream(boolean)` - Dedicated connection per JSON/protobuf stream. Defaults to `true`.
+- `tlsOptions(TlsOptions)` - TLS settings. Defaults to the operating system's CA certificates.
+- `build()` - Creates the SDK. Throws `IllegalStateException` if the server endpoint is not set.
+
+---
+
+### TlsOptions
+
+Immutable TLS settings, created with `TlsOptions.builder()` and passed to
+`ZerobusSdkBuilder.tlsOptions(...)`. See [TLS Configuration](#tls-configuration).
+
+- `trustSystemRoots(boolean)` - Also trust the operating system's CA certificates. Defaults to `true`.
+- `addCaCertificatePem(String)` - Trust a CA certificate given as PEM text. Call more than once to add several.
+- `addCaCertificateFile(String)` - Trust the CA certificates in a PEM file, read on each connection.
+- `clientIdentityPem(String certPem, String keyPem)` - Client certificate chain and key for mutual TLS, as PEM text.
+- `clientIdentityFiles(String certPath, String keyPath)` - Client certificate chain and key for mutual TLS, read from files on each connection.
+- `domainName(String)` - Server name to check the certificate against.
+- `build()` - Returns the options. Throws `IllegalStateException` if `trustSystemRoots(false)` is set without a CA certificate.
+
+`toString()` reports counts and the kind of client identity. It never includes certificate or key material.
 
 ---
 

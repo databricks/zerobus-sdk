@@ -201,6 +201,8 @@ fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
     Ok(leaked)
 }
 
+/// Lowercases and validates a header name. Names ending in `-bin` are kept as they are:
+/// the core decodes their base64 values and validates them.
 fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
     if name.len() > MAX_HEADER_NAME_LENGTH {
         return Err(provider_invalid_argument(format!(
@@ -209,7 +211,6 @@ fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
     }
     name.make_ascii_lowercase();
     if name.is_empty()
-        || name.ends_with("-bin")
         || !name.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.".contains(&byte)
         })
@@ -290,4 +291,55 @@ fn provider_invalid_argument(message: impl Into<String>) -> ZerobusError {
 
 fn provider_retryable_error(message: impl Into<String>) -> ZerobusError {
     ZerobusError::TokenFetchError(format!("Java HeadersProvider error: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_header_name;
+
+    #[test]
+    fn accepts_binary_header_names_and_lowercases_them() {
+        assert_eq!(
+            normalize_header_name("x-context-bin".to_string()).unwrap(),
+            "x-context-bin"
+        );
+        assert_eq!(
+            normalize_header_name("X-Context-BIN".to_string()).unwrap(),
+            "x-context-bin"
+        );
+        assert_eq!(
+            normalize_header_name("x_trace-id-bin".to_string()).unwrap(),
+            "x_trace-id-bin"
+        );
+    }
+
+    #[test]
+    fn accepts_ascii_header_names() {
+        assert_eq!(
+            normalize_header_name("Authorization".to_string()).unwrap(),
+            "authorization"
+        );
+        assert_eq!(
+            normalize_header_name("x-databricks.zerobus_1".to_string()).unwrap(),
+            "x-databricks.zerobus_1"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_header_names() {
+        let oversized = "x".repeat(super::MAX_HEADER_NAME_LENGTH + 1);
+        for name in [
+            "",
+            "invalid header",
+            "x-context:bin",
+            "x-context\u{7f}",
+            "héader",
+            oversized.as_str(),
+        ] {
+            assert!(
+                normalize_header_name(name.to_string()).is_err(),
+                "{name:?} must be rejected"
+            );
+        }
+    }
 }
