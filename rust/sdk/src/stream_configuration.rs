@@ -93,8 +93,9 @@ pub struct StreamConfigurationOptions {
 
     /// Timeout in milliseconds for waiting for server acknowledgements.
     ///
-    /// If no acknowledgement is received within this time (and there are pending records),
-    /// the stream will be considered failed and recovery will be triggered.
+    /// The stream is considered failed and recovery is triggered when the oldest
+    /// unacknowledged record has waited this long since it was sent and since the
+    /// last server message. Idle time before a send does not count.
     ///
     /// Default: 60,000 (60 seconds)
     pub server_lack_of_ack_timeout_ms: u64,

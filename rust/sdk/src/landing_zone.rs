@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 
 pub(crate) struct CapacityReservation(OwnedSemaphorePermit);
 
@@ -19,8 +20,9 @@ pub enum LandingZoneError {
 struct LandingZoneState<T> {
     /// Queue of items that haven't been observed yet.
     queue: VecDeque<T>,
-    /// Queue of items that have been observed but not yet removed.
-    observed_items: VecDeque<T>,
+    /// Queue of items that have been observed but not yet removed, with the time
+    /// each was observed.
+    observed_items: VecDeque<(T, Instant)>,
 }
 
 /// A thread-safe queue with observation semantics and backpressure control.
@@ -78,7 +80,7 @@ impl<T: Clone> LandingZone<T> {
         let mut state = self.state.lock().expect("Lock poisoned");
 
         let mut all_items = Vec::with_capacity(state.observed_items.len() + state.queue.len());
-        all_items.extend(state.observed_items.drain(..));
+        all_items.extend(state.observed_items.drain(..).map(|(item, _)| item));
         all_items.extend(state.queue.drain(..));
 
         let mut permits = self.permits.lock().expect("Lock poisoned");
@@ -114,11 +116,11 @@ impl<T: Clone> LandingZone<T> {
         let mut state = self.state.lock().expect("Lock poisoned");
         let mut permits = self.permits.lock().expect("Lock poisoned");
         let mut removed = Vec::new();
-        while let Some(front) = state.observed_items.front() {
+        while let Some((front, _)) = state.observed_items.front() {
             if !should_remove(front) {
                 break;
             }
-            let item = state
+            let (item, _) = state
                 .observed_items
                 .pop_front()
                 .expect("front existed before pop");
@@ -149,7 +151,7 @@ impl<T: Clone> LandingZone<T> {
     /// * `Err(LandingZoneError::RemovingNonObservedElement)` - If no items have been observed
     pub fn remove_observed(&self) -> Result<T, LandingZoneError> {
         let mut state = self.state.lock().expect("Lock poisoned");
-        if let Some(item) = state.observed_items.pop_front() {
+        if let Some((item, _)) = state.observed_items.pop_front() {
             self.permits.lock().expect("Lock poisoned").pop_front();
             Ok(item)
         } else {
@@ -174,7 +176,9 @@ impl<T: Clone> LandingZone<T> {
             {
                 let mut state = self.state.lock().expect("Lock poisoned");
                 if let Some(elem) = state.queue.pop_front() {
-                    state.observed_items.push_back(elem.clone());
+                    state
+                        .observed_items
+                        .push_back((elem.clone(), Instant::now()));
                     return elem;
                 }
             }
@@ -193,7 +197,7 @@ impl<T: Clone> LandingZone<T> {
     pub fn reset_observe(&self) -> usize {
         let mut state = self.state.lock().expect("Lock poisoned");
         let mut moved = 0;
-        while let Some(observed_item) = state.observed_items.pop_back() {
+        while let Some((observed_item, _)) = state.observed_items.pop_back() {
             state.queue.push_front(observed_item);
             moved += 1;
         }
@@ -208,6 +212,16 @@ impl<T: Clone> LandingZone<T> {
     pub fn is_observed_empty(&self) -> bool {
         let state = self.state.lock().expect("Lock poisoned");
         state.observed_items.is_empty()
+    }
+
+    /// Returns when the oldest observed item still waiting for acknowledgement
+    /// was observed, or `None` if no observed item is waiting.
+    pub fn oldest_observed_at(&self) -> Option<Instant> {
+        let state = self.state.lock().expect("Lock poisoned");
+        state
+            .observed_items
+            .front()
+            .map(|(_, observed_at)| *observed_at)
     }
 
     /// Returns the number of in-flight requests in the landing zone.
@@ -239,7 +253,7 @@ impl<T: Clone + Countable> LandingZone<T> {
         state
             .queue
             .iter()
-            .chain(state.observed_items.iter())
+            .chain(state.observed_items.iter().map(|(item, _)| item))
             .map(Countable::count)
             .sum()
     }
@@ -247,7 +261,11 @@ impl<T: Clone + Countable> LandingZone<T> {
     /// Sums [`Countable::count`] over only the observed items.
     pub fn observed_count(&self) -> usize {
         let state = self.state.lock().expect("Lock poisoned");
-        state.observed_items.iter().map(Countable::count).sum()
+        state
+            .observed_items
+            .iter()
+            .map(|(item, _)| item.count())
+            .sum()
     }
 }
 
@@ -610,5 +628,41 @@ mod tests {
         lz.add(Box::new(Batch(4))).await;
         lz.add(Box::new(Batch(1))).await;
         assert_eq!(lz.total_count(), 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_oldest_observed_at_tracks_front_of_observed_queue() {
+        let lz = LandingZone::new(10);
+        for value in 1..=4 {
+            lz.add(value).await;
+        }
+        assert_eq!(lz.oldest_observed_at(), None);
+
+        let t1 = tokio::time::Instant::now();
+        lz.observe().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let t2 = tokio::time::Instant::now();
+        lz.observe().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let t3 = tokio::time::Instant::now();
+        lz.observe().await;
+        assert_eq!(lz.oldest_observed_at(), Some(t1));
+
+        lz.remove_observed().unwrap();
+        assert_eq!(lz.oldest_observed_at(), Some(t2));
+
+        lz.remove_observed_prefix(|value| *value == 2);
+        assert_eq!(lz.oldest_observed_at(), Some(t3));
+
+        // Re-observing after a reset starts a fresh deadline.
+        assert_eq!(lz.reset_observe(), 1);
+        assert_eq!(lz.oldest_observed_at(), None);
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let t4 = tokio::time::Instant::now();
+        lz.observe().await;
+        assert_eq!(lz.oldest_observed_at(), Some(t4));
+
+        lz.remove_all();
+        assert_eq!(lz.oldest_observed_at(), None);
     }
 }
