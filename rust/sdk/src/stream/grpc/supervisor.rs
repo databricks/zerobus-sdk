@@ -25,6 +25,7 @@ use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::errors::should_retry_initial_connection;
 use crate::grpc_channel::GrpcChannelSource;
 use crate::grpc_status::{GrpcCode, GrpcStatus};
+use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -64,9 +65,10 @@ impl ZerobusStream {
         terminal_token: CancellationToken,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<StreamInitInfo>>,
-        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        server_error_tx: ServerErrorSender,
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+        stream_stats: Arc<StreamStatsState>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -230,6 +232,7 @@ impl ZerobusStream {
                 info!(stream_id = %stream_id, "Successfully created stream");
             } else {
                 info!(stream_id = %stream_id, "Successfully recovered stream");
+                stream_stats.record_reconnect();
                 let _ = server_error_tx.send(None);
             }
 
@@ -249,6 +252,7 @@ impl ZerobusStream {
                         &oneshot_map,
                         &logical_last_received_offset_id_tx,
                         &callback_tx,
+                        &stream_stats,
                         watermark,
                     )
                     .await;
@@ -292,6 +296,7 @@ impl ZerobusStream {
                 per_stream_token.clone(),
                 callback_tx.clone(),
                 initial_last_acked_offset,
+                Arc::clone(&stream_stats),
             ));
             let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 connection.sink,
@@ -407,6 +412,7 @@ impl ZerobusStream {
         oneshot_map: &Arc<tokio::sync::Mutex<OneshotMap>>,
         logical_last_received_offset_id_tx: &tokio::sync::watch::Sender<Option<OffsetId>>,
         callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+        stream_stats: &StreamStatsState,
         watermark: OffsetId,
     ) {
         let committed = landing_zone.remove_observed_prefix(|item| item.offset_id <= watermark);
@@ -428,6 +434,8 @@ impl ZerobusStream {
         }
         drop(map);
         if let Some(highest) = highest {
+            stream_stats.record_acked_records(reconciled_records as u64);
+            stream_stats.record_acked_offset(highest);
             let _ = logical_last_received_offset_id_tx.send(Some(highest));
         }
         info!(
@@ -449,7 +457,7 @@ impl ZerobusStream {
         sync_mutex: &tokio::sync::Mutex<()>,
         is_closed: &AtomicBool,
         terminal_token: &CancellationToken,
-        server_error_tx: &tokio::sync::watch::Sender<Option<ZerobusError>>,
+        server_error_tx: &ServerErrorSender,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
@@ -533,6 +541,8 @@ mod tests {
         let is_closed = AtomicBool::new(false);
         let terminal_token = CancellationToken::new();
         let (server_error_tx, _) = tokio::sync::watch::channel(None);
+        let server_error_tx =
+            ServerErrorSender::new(server_error_tx, Arc::new(StreamStatsState::default()));
         let landing_zone = Arc::new(LandingZone::new(1));
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(OneshotMap::new()));
         let failed_records = Arc::new(RwLock::new(Vec::new()));
@@ -583,6 +593,8 @@ mod tests {
         is_closed.store(false, Ordering::Relaxed);
         let terminal_token = CancellationToken::new();
         let (server_error_tx, _) = tokio::sync::watch::channel(None);
+        let server_error_tx =
+            ServerErrorSender::new(server_error_tx, Arc::new(StreamStatsState::default()));
         let batch = EncodedBatch::Proto(vec![b"recoverable".to_vec()].into());
         let reservation = landing_zone.reserve_capacity().await;
         landing_zone.enqueue_reserved(

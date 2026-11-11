@@ -71,6 +71,11 @@ impl PersistentStream {
         self.inner.last_committed_offset
     }
 
+    /// Snapshot of the stream's counters. See [`ZerobusStream::stats`].
+    pub fn stats(&self) -> crate::StreamStats {
+        self.inner.stats()
+    }
+
     /// Ingests a single record and returns its logical offset once queued.
     ///
     /// See [`ZerobusStream::ingest_record_offset`].

@@ -36,6 +36,10 @@ path = "src/arrow_tests.rs"
 name = "arrow_c_data_ffi_tests"
 path = "src/arrow_c_data_ffi_tests.rs"
 
+[[test]]
+name = "stream_stats_tests"
+path = "src/stream_stats_tests.rs"
+
 [dependencies]
 async-trait.workspace = true
 prost.workspace = true

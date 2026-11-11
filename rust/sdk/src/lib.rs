@@ -76,6 +76,7 @@ mod stats;
 mod stream;
 mod stream_configuration;
 pub mod stream_options;
+mod stream_stats;
 mod tls_config;
 mod token_cache;
 
@@ -127,6 +128,7 @@ pub use stream::{
     DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream,
 };
 pub use stream_configuration::{RecordType, StreamConfigurationOptions};
+pub use stream_stats::{LastStreamError, StreamStats};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};

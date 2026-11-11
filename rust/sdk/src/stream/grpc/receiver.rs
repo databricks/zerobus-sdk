@@ -17,6 +17,7 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::{CloseStreamSignal, IngestRecordResponse};
 use crate::grpc_status::GrpcStatus;
+use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::{OffsetId, StreamConfigurationOptions, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
@@ -41,11 +42,12 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
-        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        server_error_tx: ServerErrorSender,
         recv_drain_token: CancellationToken,
         half_close_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         initial_last_acked_offset: OffsetId,
+        stream_stats: Arc<StreamStatsState>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -121,6 +123,7 @@ impl ZerobusStream {
                             &oneshot_map,
                             &last_received_offset_id_tx,
                             &callback_tx,
+                            &stream_stats,
                             &mut last_acked_offset,
                             durability_ack_up_to_offset,
                         )
@@ -219,6 +222,7 @@ impl ZerobusStream {
                     &oneshot_map,
                     &last_received_offset_id_tx,
                     &callback_tx,
+                    &stream_stats,
                     &mut last_acked_offset,
                 )
                 .await;
@@ -267,6 +271,7 @@ impl ZerobusStream {
 
 /// Reads responses until the server ends the stream or `window` elapses, and applies the
 /// acks it delivers, so those records are not sent again.
+#[allow(clippy::too_many_arguments)]
 async fn drain_applying_acks(
     inbound: &mut InboundStream,
     window: Duration,
@@ -274,6 +279,7 @@ async fn drain_applying_acks(
     oneshot_map: &Arc<tokio::sync::Mutex<OneshotMap>>,
     last_received_offset_id_tx: &tokio::sync::watch::Sender<Option<OffsetId>>,
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+    stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
 ) {
     let deadline = tokio::time::Instant::now() + window;
@@ -287,6 +293,7 @@ async fn drain_applying_acks(
                     oneshot_map,
                     last_received_offset_id_tx,
                     callback_tx,
+                    stream_stats,
                     last_acked_offset,
                     offset,
                 )
@@ -312,6 +319,7 @@ async fn apply_ack(
     oneshot_map: &Arc<tokio::sync::Mutex<OneshotMap>>,
     last_received_offset_id_tx: &tokio::sync::watch::Sender<Option<OffsetId>>,
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+    stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
     durability_ack_up_to_offset: OffsetId,
 ) -> ZerobusResult<()> {
@@ -328,6 +336,8 @@ async fn apply_ack(
     for _offset_to_ack in (*last_acked_offset + 1)..=durability_ack_up_to_offset {
         if let Ok(record) = landing_zone.remove_observed() {
             let logical_offset = record.offset_id;
+            stream_stats.record_acked_records(record.payload.get_record_count() as u64);
+            stream_stats.record_acked_offset(logical_offset);
             last_logical_acked_offset = logical_offset;
 
             if let Some(sender) = map.remove(&logical_offset) {
