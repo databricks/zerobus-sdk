@@ -384,8 +384,8 @@ impl ZerobusStream {
 
     /// Returns a snapshot of this stream's counters.
     ///
-    /// Reads atomics and does not wait on the stream's tasks, so it is safe to call
-    /// from the ingest loop. Multiplexed streams do not expose these counters.
+    /// Reads atomics and does not wait on the stream's tasks. Multiplexed streams do not
+    /// expose these counters.
     pub fn stats(&self) -> StreamStats {
         self.stream_stats.snapshot()
     }

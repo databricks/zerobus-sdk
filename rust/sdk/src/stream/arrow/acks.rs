@@ -402,10 +402,13 @@ impl AckProcessor {
         last_acked_records: Arc<AtomicU64>,
         is_paused: bool,
     ) -> (Self, RequestBodyControl, watch::Receiver<Option<OffsetId>>) {
+        // Fixtures ack batches they never admitted through the stream. Prime the in-flight
+        // count with the submitted total, which bounds every acknowledgment `apply` accepts.
+        let stream_stats = Arc::new(StreamStatsState::default());
+        stream_stats.record_admitted(submitted_records.load(Ordering::Acquire));
         let (last_ack_tx, last_ack_rx) = watch::channel(None);
         let (server_error_tx, _server_error_rx) = watch::channel(None);
-        let server_error_tx =
-            ServerErrorSender::new(server_error_tx, Arc::new(StreamStatsState::default()));
+        let server_error_tx = ServerErrorSender::new(server_error_tx, Arc::clone(&stream_stats));
         let processor = Self {
             is_closed: Arc::new(AtomicBool::new(false)),
             last_ack_tx,
@@ -424,7 +427,7 @@ impl AckProcessor {
             },
             close: CloseCoordinator::new(),
             stats_exporter: None,
-            stream_stats: Arc::new(StreamStatsState::default()),
+            stream_stats,
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::new(TestHooks::default()),
         };

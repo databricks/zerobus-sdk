@@ -421,6 +421,11 @@ impl ZerobusStream {
         }
         let reconciled_records: usize =
             committed.iter().map(|r| r.payload.get_record_count()).sum();
+        // Count before waiters and callbacks see the acks, as `apply_ack` does.
+        if let Some(last) = committed.last() {
+            stream_stats.record_acked_records(reconciled_records as u64);
+            stream_stats.record_acked_offset(last.offset_id);
+        }
         let mut map = oneshot_map.lock().await;
         let mut highest = None;
         for item in &committed {
@@ -434,8 +439,6 @@ impl ZerobusStream {
         }
         drop(map);
         if let Some(highest) = highest {
-            stream_stats.record_acked_records(reconciled_records as u64);
-            stream_stats.record_acked_offset(highest);
             let _ = logical_last_received_offset_id_tx.send(Some(highest));
         }
         info!(
