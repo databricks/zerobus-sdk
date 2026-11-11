@@ -1083,7 +1083,13 @@ At the **WARN** level, the SDK logs:
 At the **ERROR** level, the SDK logs:
 - Native library loading failures
 
-> **Note:** Most detailed logging (token generation, gRPC, retries) is handled internally by the native Rust SDK and uses its own logging configuration.
+### Native Core Logs
+
+The native Rust core logs its own events, such as connection failures, recovery attempts, token refreshes, and server errors. The SDK forwards these to SLF4J. Core events are logged under `com.databricks.zerobus.core`, followed by the Rust module path. For example, Arrow Flight stream events use `com.databricks.zerobus.core.stream.arrow`. Configure them like any other logger. The `com.databricks.zerobus` logger in the examples above also covers core events.
+
+The SDK reads the effective level of `com.databricks.zerobus.core` when the native library loads and each time a `ZerobusSdk` is created. Core events below that level are not forwarded at all. A level change at runtime takes effect the next time an SDK is created.
+
+Forwarding never blocks ingestion. Core events go through a bounded queue to a background thread. If logging falls behind, events are dropped and a WARN is logged with the number dropped.
 
 ## Error Handling
 

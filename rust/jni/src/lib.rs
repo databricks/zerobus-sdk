@@ -9,6 +9,7 @@ mod callbacks;
 mod class_cache;
 mod errors;
 mod headers_provider;
+mod logging;
 mod options;
 mod runtime;
 mod sdk;
@@ -67,6 +68,8 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
         return jni::sys::JNI_ERR;
     }
 
+    logging::install();
+
     tracing::info!("Zerobus JNI library loaded successfully");
     JNI_VERSION
 }
@@ -75,5 +78,6 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 #[no_mangle]
 pub extern "system" fn JNI_OnUnload(_vm: JavaVM, _reserved: *mut c_void) {
     tracing::info!("Zerobus JNI library unloading");
+    logging::set_max_level(0);
     // The runtime will be dropped when the process exits
 }

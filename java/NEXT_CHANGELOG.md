@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Native core log events (connection failures, recovery attempts, token refreshes, server
+  errors) are now forwarded to SLF4J under `com.databricks.zerobus.core`, followed by the Rust
+  module path. Core events are filtered by the effective level of that logger, so set it to DEBUG
+  to see core debug output. See the Logging section of the README.
+
 ### Bug Fixes
 
 ### Documentation

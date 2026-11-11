@@ -137,6 +137,7 @@ public class ZerobusSdk implements AutoCloseable {
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
+    NativeLogBridge.refreshLevel();
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
@@ -166,6 +167,7 @@ public class ZerobusSdk implements AutoCloseable {
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
+    NativeLogBridge.refreshLevel();
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
