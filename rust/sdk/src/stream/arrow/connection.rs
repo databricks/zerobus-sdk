@@ -510,10 +510,16 @@ impl ZerobusArrowStream {
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             if key.eq_ignore_ascii_case(TABLE_NAME_HEADER) {
-                warn!(target: super::LOG_TARGET,
-                    "HeadersProvider attempted to set reserved header '{}', ignoring",
-                    TABLE_NAME_HEADER
-                );
+                // Providers are documented to send this header, so only a value that
+                // differs from the stream's table is worth a warning.
+                if value != table_properties.table_name {
+                    warn!(target: super::LOG_TARGET,
+                        provider_table = %value,
+                        stream_table = %table_properties.table_name,
+                        "HeadersProvider set reserved header '{}' to a different table, ignoring",
+                        TABLE_NAME_HEADER
+                    );
+                }
                 continue;
             }
             if key.eq_ignore_ascii_case(AUTHORIZATION_HEADER) {
@@ -1727,6 +1733,87 @@ mod tests {
             .await
             .expect("dropping the setup attempt must release its request body");
         assert_eq!(registry.registered_count().await, 0);
+    }
+
+    /// Sends the table-name header with the given value, as the README tells
+    /// custom providers to do.
+    struct TableHeaderProvider(&'static str);
+
+    #[async_trait]
+    impl HeadersProvider for TableHeaderProvider {
+        async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+            Ok(HashMap::from([
+                ("authorization", "Bearer secret-token".to_string()),
+                ("x-databricks-zerobus-table-name", self.0.to_string()),
+            ]))
+        }
+    }
+
+    /// The stream's table always wins. A provider that sends the same table is
+    /// following the docs and must not cause a warning; a different table must.
+    #[tokio::test]
+    async fn table_header_from_the_provider_warns_only_when_it_differs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tracing_subscriber::prelude::*;
+
+        struct WarningCount(Arc<AtomicUsize>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCount {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().level() == &tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::new(ArrowSchema::empty()),
+        };
+        let tls_config: Arc<dyn TlsConfig> = Arc::new(PassthroughTlsConfig);
+
+        for (provider_table, expected_warnings) in
+            [("catalog.schema.table", 0), ("catalog.schema.other", 1)]
+        {
+            let warnings = Arc::new(AtomicUsize::new(0));
+            let _guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(WarningCount(Arc::clone(&warnings))),
+            );
+            let headers_provider: Arc<dyn HeadersProvider> =
+                Arc::new(TableHeaderProvider(provider_table));
+            let client = ZerobusArrowStream::create_flight_client(
+                "http://127.0.0.1:1",
+                &tls_config,
+                None,
+                &table_properties,
+                &ArrowStreamConfigurationOptions::default(),
+                &headers_provider,
+                "test-sdk",
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                warnings.load(Ordering::Relaxed),
+                expected_warnings,
+                "provider table {provider_table}"
+            );
+            assert_eq!(
+                client
+                    .metadata()
+                    .get("x-databricks-zerobus-table-name")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "catalog.schema.table"
+            );
+        }
     }
 
     #[tokio::test]
