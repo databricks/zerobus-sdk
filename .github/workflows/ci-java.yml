@@ -117,9 +117,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install maven 2>/dev/null || true
       - name: Build with Maven
-        run: mvn clean compile -Dprotobuf.version=${{ matrix.protobufVersion }}
+        shell: bash
+        run: mvn clean compile "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Run tests
-        run: mvn test -Dprotobuf.version=${{ matrix.protobufVersion }}
+        shell: bash
+        run: mvn test "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
