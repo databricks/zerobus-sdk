@@ -35,8 +35,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private IntPtr _ptr;
     private int _disposed;
     private readonly ReaderWriterLockSlim _lifetimeLock = new();
-    private int _inflightAsyncOperations;
-    private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
+    private readonly AsyncOperationTracker _asyncOperations = new();
 
     internal ZerobusStream(IntPtr ptr)
     {
@@ -338,22 +337,32 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
             return;
 
-        IntPtr ptr = IntPtr.Zero;
-        var shouldClose = false;
-        Exception? closeError = null;
-
-        using (WithWriteLock())
+        // _disposed now rejects new operations. The write lock waits out calls that
+        // already passed that check (synchronous calls in progress, asynchronous
+        // ones still registering); asynchronous operations in flight are then
+        // awaited instead of blocking the caller.
+        Task drained;
+        _lifetimeLock.EnterWriteLock();
+        try
         {
-            ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-            if (ptr == IntPtr.Zero)
-            {
-                return;
-            }
-
-            shouldClose = !NativeMethods.StreamIsClosed(ptr);
+            drained = _asyncOperations.WhenDrained();
+        }
+        finally
+        {
+            _lifetimeLock.ExitWriteLock();
         }
 
-        if (shouldClose)
+        await drained.ConfigureAwait(false);
+
+        var ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
+        if (ptr == IntPtr.Zero)
+        {
+            return;
+        }
+
+        Exception? closeError = null;
+
+        if (!NativeMethods.StreamIsClosed(ptr))
         {
             try
             {
@@ -501,7 +510,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private IDisposable WithWriteLock()
     {
         _lifetimeLock.EnterWriteLock();
-        _asyncOperationsDrained.Wait();
+        _asyncOperations.WhenDrained().Wait();
         return new Disposable(() => _lifetimeLock.ExitWriteLock());
     }
 
@@ -516,7 +525,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
         catch
         {
-            EndAsyncOperation();
+            _asyncOperations.Exit();
             throw;
         }
     }
@@ -532,7 +541,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
         catch
         {
-            EndAsyncOperation();
+            _asyncOperations.Exit();
             throw;
         }
     }
@@ -548,8 +557,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         try
         {
             var ptr = GetNativePointerForCall();
-            if (Interlocked.Increment(ref _inflightAsyncOperations) == 1)
-                _asyncOperationsDrained.Reset();
+            _asyncOperations.Enter();
             return ptr;
         }
         finally
@@ -562,13 +570,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void EndAsyncOperation()
-    {
-        if (Interlocked.Decrement(ref _inflightAsyncOperations) == 0)
-            _asyncOperationsDrained.Set();
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private async Task<T> CompleteAsyncOperation<T>(Task<T> task)
     {
         try
@@ -577,7 +578,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
         finally
         {
-            EndAsyncOperation();
+            _asyncOperations.Exit();
         }
     }
 
@@ -590,7 +591,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
         finally
         {
-            EndAsyncOperation();
+            _asyncOperations.Exit();
         }
     }
 
