@@ -49,6 +49,19 @@ class ZerobusSdkBuilderTest {
   }
 
   @Test
+  void applicationNameRejectsControlCharactersBeforeTheNativeCall() {
+    ZerobusSdkBuilder builder = new ZerobusSdkBuilder();
+
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\nname"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u0007name"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u007fname"));
+    // A tab is allowed, and a blank value counts as unset.
+    builder.applicationName("my-app/1.0\t");
+    builder.applicationName("   ");
+    builder.applicationName(null);
+  }
+
+  @Test
   void rejectsNullTlsOptions() {
     ZerobusSdkBuilder builder = new ZerobusSdkBuilder();
 
@@ -189,5 +202,30 @@ class ZerobusSdkBuilderTest {
           error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
       assertTrue(error.getCause().getMessage().contains(missing), error.getCause().getMessage());
     }
+  }
+
+  @Test
+  void invalidClientIdentityPemFailsStreamCreationWithoutRetry() {
+    assumeNativeLibrary();
+    // The PEM values reach the core, which rejects them when it opens the channel. A PEM
+    // value that the core cannot use fails the same way on every attempt, so it is not retryable.
+    TlsOptions tls = TlsOptions.builder().clientIdentityPem("not a cert", "not a key").build();
+    try (ZerobusSdk sdk =
+        ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).tlsOptions(tls).build()) {
+      ExecutionException error = assertThrows(ExecutionException.class, () -> createStream(sdk));
+      assertTrue(
+          error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
+      assertTrue(
+          error.getCause().getMessage().contains("private key"), error.getCause().getMessage());
+    }
+  }
+
+  private static ZerobusJsonStream createStream(ZerobusSdk sdk) throws Exception {
+    return sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .headersProvider(() -> Collections.singletonMap("authorization", "Bearer t"))
+        .json()
+        .build()
+        .get(60, TimeUnit.SECONDS);
   }
 }

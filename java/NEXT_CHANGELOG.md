@@ -49,10 +49,10 @@
 
 ### Internal Changes
 
-- Bumped the native JNI ABI version to 2 for the new federated stream-creation
-  methods. Release a `jni/v*` build from this source before the Java release,
-  and rebuild any laptop-built macOS dylibs that `release-java.yml` imports
-  through `macos-binaries-release`.
+- Bumped the native JNI ABI version to 3 for the new federated stream-creation
+  methods and the TLS-options constructor. Release a `jni/v*` build from this
+  source before the Java release, and rebuild any laptop-built macOS dylibs that
+  `release-java.yml` imports through `macos-binaries-release`.
 
 ### Breaking Changes
 
@@ -63,3 +63,6 @@
 - The JAR now includes the generated `InsertRecordsRequest` and
   `InsertRecordsResponse` classes from the shared service proto. They are wire
   types, not a supported API.
+- New public API: `ZerobusSdk.builder()` returning `ZerobusSdkBuilder`; `TlsOptions` and
+  `TlsOptions.Builder` (created with `TlsOptions.builder()`). `ZerobusSdkBuilder.tlsOptions(...)` takes
+  a `TlsOptions`.

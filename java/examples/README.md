@@ -32,9 +32,11 @@ examples/
 │   ├── README.md
 │   └── ArrowIngestionExample.java
 ├── avro/                  (Avro examples - ZerobusAvroStream, Beta)
-├── tls/                   (TLS configuration - ZerobusSdk.builder() with TlsOptions)
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
+├── tls/                   (TLS configuration - ZerobusSdk.builder() with TlsOptions)
+│   ├── README.md
+│   └── TlsConfigurationExample.java
 └── legacy/                (Legacy examples - ZerobusStream)
     └── LegacyStreamExample.java
 ```
@@ -50,6 +52,7 @@ examples/
 | `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close |
 | `avro/SingleRecordExample` | `ZerobusAvroStream` | Single record ingestion (GenericRecord + byte[]) |
 | `avro/BatchIngestionExample` | `ZerobusAvroStream` | Batch ingestion |
+| `tls/TlsConfigurationExample` | `ZerobusJsonStream` | Custom CA certificates and optional mutual TLS, configured with `ZerobusSdk.builder()` and `TlsOptions` |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
 Most examples demonstrate queue-then-flush, batch ingestion, and recreateStream; the Avro examples

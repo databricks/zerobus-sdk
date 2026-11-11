@@ -50,7 +50,8 @@ public final class ZerobusSdkBuilder {
    *
    * @param serverEndpoint the Zerobus endpoint URL
    * @return this builder for method chaining
-   * @throws IllegalArgumentException if {@code serverEndpoint} is null or blank
+   * @throws NullPointerException if {@code serverEndpoint} is null
+   * @throws IllegalArgumentException if {@code serverEndpoint} is blank
    */
   public ZerobusSdkBuilder serverEndpoint(String serverEndpoint) {
     this.serverEndpoint = requireNonBlank(serverEndpoint, "serverEndpoint");
@@ -63,7 +64,8 @@ public final class ZerobusSdkBuilder {
    *
    * @param unityCatalogEndpoint the workspace URL
    * @return this builder for method chaining
-   * @throws IllegalArgumentException if {@code unityCatalogEndpoint} is null or blank
+   * @throws NullPointerException if {@code unityCatalogEndpoint} is null
+   * @throws IllegalArgumentException if {@code unityCatalogEndpoint} is blank
    */
   public ZerobusSdkBuilder unityCatalogEndpoint(String unityCatalogEndpoint) {
     this.unityCatalogEndpoint = requireNonBlank(unityCatalogEndpoint, "unityCatalogEndpoint");
@@ -72,13 +74,32 @@ public final class ZerobusSdkBuilder {
 
   /**
    * Sets an application identifier appended to the HTTP {@code user-agent} header, conventionally
-   * {@code "<product>/<version>"} (for example {@code "my-app/1.0"}). Pass {@code null} to omit it.
+   * {@code "<product>/<version>"} (for example {@code "my-app/1.0"}). Pass {@code null}, or a value
+   * that is blank after trimming, to omit it. Leading and trailing whitespace is removed.
    *
    * @param applicationName the application identifier, or {@code null}
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code applicationName} contains a control character other
+   *     than tab, or the DEL character. Such a value is not a valid HTTP header value.
    */
   public ZerobusSdkBuilder applicationName(String applicationName) {
-    this.applicationName = applicationName;
+    if (applicationName == null) {
+      this.applicationName = null;
+      return this;
+    }
+    String trimmed = applicationName.trim();
+    if (trimmed.isEmpty()) {
+      this.applicationName = null;
+      return this;
+    }
+    for (int i = 0; i < trimmed.length(); i++) {
+      char c = trimmed.charAt(i);
+      if (c != '\t' && (c < 0x20 || c == 0x7f)) {
+        throw new IllegalArgumentException(
+            "applicationName must not contain control characters other than tab");
+      }
+    }
+    this.applicationName = trimmed;
     return this;
   }
 
