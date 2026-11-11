@@ -10,7 +10,8 @@
   `StreamStats` snapshot of records in flight, the last acknowledged offset, the number of
   successful automatic reconnects, and the most recent error (`LastStreamError`). The accessor
   reads atomic counters and does not wait on the stream's tasks. Multiplexed streams do not
-  expose these counters.
+  expose these counters. `stats_reader()` returns a `StreamStatsReader`, a cloneable handle that
+  reads the same counters without borrowing the stream, for callers that cannot hold the stream.
 
 ### Bug Fixes
 

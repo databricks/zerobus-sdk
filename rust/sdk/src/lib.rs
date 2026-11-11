@@ -128,7 +128,7 @@ pub use stream::{
     DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream,
 };
 pub use stream_configuration::{RecordType, StreamConfigurationOptions};
-pub use stream_stats::{LastStreamError, StreamStats};
+pub use stream_stats::{LastStreamError, StreamStats, StreamStatsReader};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};

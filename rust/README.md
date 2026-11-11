@@ -1193,6 +1193,8 @@ if let Some(err) = &stats.last_error {
 - `reconnects` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
 - `last_error` is the most recent error the stream recorded, including errors that were recovered from. It is kept after a successful recovery.
 
+`stats_reader()` returns a cloneable `StreamStatsReader` that reads the same counters without borrowing the stream. Use it when the stream is held behind a lock or owned by another component.
+
 The snapshot is not atomic across fields. A snapshot taken during concurrent ingest or acknowledgment can mix values from slightly different moments. Multiplexed streams (`MultiplexedStream`, `MultiplexedArrowStream`) do not expose statistics.
 
 ## Client-side warnings

@@ -38,7 +38,7 @@ use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::ConnectorFactory;
 use crate::stats::StatsExporter;
-use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsState};
+use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsReader, StreamStatsState};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -1297,6 +1297,12 @@ impl ZerobusArrowStream {
     /// expose these counters.
     pub fn stats(&self) -> StreamStats {
         self.stream_stats.snapshot()
+    }
+
+    /// Returns a handle that reads this stream's counters without borrowing the stream.
+    /// See `ZerobusStream::stats_reader`.
+    pub fn stats_reader(&self) -> StreamStatsReader {
+        self.stream_stats.reader()
     }
 
     pub fn table_name(&self) -> &str {
