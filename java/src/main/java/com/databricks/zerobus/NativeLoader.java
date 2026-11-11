@@ -45,7 +45,7 @@ public final class NativeLoader {
   // Bumped with the Rust NATIVE_ABI_VERSION whenever native signatures change, to reject a stale
   // libzerobus_jni (natives bind by name only, so an old one would read arguments from wrong
   // slots).
-  static final int EXPECTED_NATIVE_ABI = 1;
+  static final int EXPECTED_NATIVE_ABI = 4;
 
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;

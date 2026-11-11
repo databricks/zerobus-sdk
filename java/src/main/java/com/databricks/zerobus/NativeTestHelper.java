@@ -46,4 +46,19 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
+
+  /**
+   * Starts an in-process mock Zerobus server, once per JVM, and returns its endpoint.
+   *
+   * @return the mock server's {@code http://} endpoint
+   */
+  public static native String nativeTestStartStatsMockServer();
+
+  /**
+   * Scripts the mock server for one stream on the given table. See the Rust helper for the exact
+   * acknowledgment sequence.
+   *
+   * @param table the table name the stream will be created for
+   */
+  public static native void nativeTestInjectStatsScript(String table);
 }

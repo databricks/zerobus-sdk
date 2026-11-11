@@ -277,3 +277,73 @@ fn test_result<'local>(env: &mut JNIEnv<'local>, result: String) -> JObject<'loc
         .map(Into::into)
         .unwrap_or_else(|_| JObject::null())
 }
+
+struct StatsMockServer {
+    server: zerobus_test_support::mock_grpc::MockZerobusServer,
+    url: String,
+}
+
+static STATS_MOCK_SERVER: std::sync::OnceLock<StatsMockServer> = std::sync::OnceLock::new();
+
+fn stats_mock_server() -> &'static StatsMockServer {
+    STATS_MOCK_SERVER.get_or_init(|| {
+        let (server, url) = crate::runtime::block_on(async {
+            zerobus_test_support::mock_grpc::start_mock_server()
+                .await
+                .expect("start mock Zerobus server")
+        });
+        StatsMockServer { server, url }
+    })
+}
+
+/// Starts (once) an in-process mock Zerobus server and returns its endpoint.
+///
+/// # JNI Signature
+/// ```java
+/// public static native String nativeTestStartStatsMockServer();
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestStartStatsMockServer<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> JObject<'local> {
+    let url = stats_mock_server().url.clone();
+    test_result(&mut env, url)
+}
+
+/// Scripts the mock server for one stream on `table`: create the stream, then withhold the
+/// acknowledgment of the first three records for 500 ms and acknowledge up to offset 2.
+///
+/// # JNI Signature
+/// ```java
+/// public static native void nativeTestInjectStatsScript(String table);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestInjectStatsScript<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    table: JString<'local>,
+) {
+    let table: String = match env.get_string(&table) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    let server = &stats_mock_server().server;
+    crate::runtime::block_on(server.inject_responses(
+        &table,
+        vec![
+            zerobus_test_support::mock_grpc::MockResponse::CreateStream {
+                stream_id: "stats_java_stream".to_string(),
+                delay_ms: 0,
+            },
+            zerobus_test_support::mock_grpc::MockResponse::RecordAck {
+                ack_up_to_offset: 2,
+                delay_ms: 500,
+            },
+        ],
+    ));
+}

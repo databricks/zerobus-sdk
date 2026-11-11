@@ -19,6 +19,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
   - [Future-Based API (Deprecated)](#future-based-api-deprecated)
 - [Configuration](#configuration)
+- [Stream Statistics](#stream-statistics)
 - [Logging](#logging)
 - [Error Handling](#error-handling)
 - [API Reference](#api-reference)
@@ -976,6 +977,28 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 
 `ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
 
+## Stream Statistics
+
+Every stream class has `getStats()`, which returns an immutable `StreamStats` snapshot of the stream's counters:
+
+```java
+StreamStats stats = stream.getStats();
+System.out.println("in flight: " + stats.getRecordsInFlight());
+stats.getLastAckedOffset().ifPresent(o -> System.out.println("last acked offset: " + o));
+System.out.println("reconnects: " + stats.getReconnects());
+stats.getLastError().ifPresent(e ->
+    System.out.println("last error (retryable=" + e.isRetryable() + "): " + e.getMessage()));
+```
+
+- `getRecordsInFlight()` counts records accepted by ingest that the server has not yet acknowledged. It counts records, not batches. A batch of N records adds N.
+- `getLastAckedOffset()` is empty until the first acknowledgment. It is the offset of the most recent batch the server fully acknowledged, and it never decreases.
+- `getReconnects()` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
+- `getLastError()` is the most recent error the stream recorded, including errors it recovered from. It is kept after a successful recovery.
+
+`getStats()` reads in-memory counters. It never waits for the stream's ingest or acknowledgment work, so it can be called from another thread while the ingest thread is blocked, for example waiting for capacity. After `close()`, it returns the snapshot taken when the stream closed.
+
+The fields are read one at a time, so a snapshot taken during concurrent ingest can mix values from slightly different moments. Multiplexed streams do not expose these counters.
+
 ## Logging
 
 The Databricks Zerobus Ingest SDK for Java uses the standard [SLF4J logging framework](https://www.slf4j.org/). The SDK only depends on `slf4j-api`, which means **you need to add an SLF4J implementation** to your classpath to see log output.
@@ -1300,7 +1323,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1349,7 +1372,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1385,7 +1408,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records as raw Avro datums, or grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1407,7 +1430,7 @@ List<byte[]> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged batches as serialized Arrow IPC byte arrays. After the stream is closed, returns cached data captured at close time. Each element can be re-ingested into a recreated stream, or deserialized with `ArrowStreamReader`.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1476,7 +1499,7 @@ CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException
 ```
 Ingests a record and returns a Future that completes on acknowledgment.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`
 
 **Accessors:**
 

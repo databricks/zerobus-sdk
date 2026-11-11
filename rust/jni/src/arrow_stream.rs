@@ -6,7 +6,7 @@
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
-use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
+use databricks_zerobus_ingest_sdk::{StreamStatsReader, ZerobusArrowStream};
 use jni::objects::{JByteArray, JClass, JObject, JValue};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
@@ -16,14 +16,18 @@ use tokio::sync::Mutex;
 /// Native Arrow stream handle stored in Java.
 pub struct NativeArrowStreamHandle {
     pub stream: Arc<Mutex<Option<ZerobusArrowStream>>>,
+    /// Reads statistics without the stream lock, which ingest holds while waiting for capacity.
+    pub stats: StreamStatsReader,
     pub client_id: String,
     pub client_secret: String,
 }
 
 impl NativeArrowStreamHandle {
     pub fn new(stream: ZerobusArrowStream, client_id: String, client_secret: String) -> Self {
+        let stats = stream.stats_reader();
         Self {
             stream: Arc::new(Mutex::new(Some(stream))),
+            stats,
             client_id,
             client_secret,
         }
@@ -419,3 +423,26 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetU
 #[cfg(test)]
 #[path = "arrow_stream/tests.rs"]
 mod tests;
+
+/// Returns a snapshot of the stream's counters. Does not take the stream lock.
+///
+/// # JNI Signature
+/// ```java
+/// private native StreamStats nativeGetStats(long handle);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetStats<'local>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    if handle == 0 {
+        throw_zerobus_exception(&mut env, "Arrow stream handle is closed");
+        return JObject::null();
+    }
+    // Safety: the Java side only passes a non-zero handle while it is not destroyed; stats
+    // reads and destruction are serialized there.
+    let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
+    let snapshot = stream_handle.stats.snapshot();
+    crate::stream_stats::stats_to_java(&mut env, &snapshot)
+}

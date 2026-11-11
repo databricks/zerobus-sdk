@@ -6,6 +6,7 @@ import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -50,8 +51,13 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Thread Safety</h3>
  *
- * <p>This class is <b>not thread-safe</b>. Each stream instance should be used from a single
- * thread.
+ * <p>Ingest, acknowledgment, flush, close and recovery methods are <b>not thread-safe</b>. Use them
+ * from a single thread, and do not call them on the same stream concurrently from multiple threads.
+ *
+ * <p>{@link #getStats()} and {@link #isClosed()} may be called from any thread. {@code getStats()}
+ * does not wait for ingest or acknowledgment work. {@code isClosed()} can wait while an ingest call
+ * is blocked waiting for capacity. Both may wait briefly while {@code close()} releases the native
+ * handle.
  *
  * <h3>Dependencies</h3>
  *
@@ -73,6 +79,9 @@ public class ZerobusArrowStream implements AutoCloseable {
 
   // Native handle to the Rust Arrow stream object.
   private volatile long nativeHandle;
+  // Read-locked by getStats() and isClosed(), write-locked while the native handle is destroyed.
+  private final ReentrantReadWriteLock handleLock = new ReentrantReadWriteLock();
+  private volatile StreamStats finalStats;
 
   // Stream properties.
   private final String tableName;
@@ -204,8 +213,7 @@ public class ZerobusArrowStream implements AutoCloseable {
       cachedUnackedBatches = unackedBatches;
 
       // Recovery data is safely owned by Java; the native stream can now be destroyed.
-      nativeHandle = 0;
-      nativeDestroy(handle);
+      releaseNativeHandle(handle);
       logger.info("Arrow stream closed");
 
       if (closeFailure != null) {
@@ -220,7 +228,13 @@ public class ZerobusArrowStream implements AutoCloseable {
    * @return true if the stream is closed
    */
   public boolean isClosed() {
-    return nativeHandle == 0 || nativeIsClosed(nativeHandle);
+    handleLock.readLock().lock();
+    try {
+      long handle = nativeHandle;
+      return handle == 0 || nativeIsClosed(handle);
+    } finally {
+      handleLock.readLock().unlock();
+    }
   }
 
   // ==================== Accessors ====================
@@ -294,8 +308,7 @@ public class ZerobusArrowStream implements AutoCloseable {
 
     List<byte[]> batches = nativeGetUnackedBatches(handle);
     cachedUnackedBatches = batches;
-    nativeHandle = 0;
-    nativeDestroy(handle);
+    releaseNativeHandle(handle);
     return batches;
   }
 
@@ -303,8 +316,61 @@ public class ZerobusArrowStream implements AutoCloseable {
   void discardFailedRecreation() {
     long handle = nativeHandle;
     if (handle != 0) {
-      nativeHandle = 0;
-      nativeDestroy(handle);
+      releaseNativeHandle(handle);
+    }
+  }
+
+  /**
+   * Returns a snapshot of the stream's counters.
+   *
+   * <p>Reads in-memory counters and never waits for the stream's ingest or acknowledgment work, so
+   * it can be called from any thread, including while another thread is blocked in {@code
+   * ingestBatch} or {@code flush}. After {@link #close()}, returns the snapshot taken when the
+   * stream closed.
+   *
+   * @return a snapshot of the stream's counters
+   */
+  public StreamStats getStats() {
+    handleLock.readLock().lock();
+    try {
+      long handle = nativeHandle;
+      if (handle == 0) {
+        StreamStats last = finalStats;
+        return last != null ? last : StreamStats.empty();
+      }
+      return nativeGetStats(handle);
+    } finally {
+      handleLock.readLock().unlock();
+    }
+  }
+
+  /**
+   * Captures the final counters and destroys the native handle. Runs under the write lock, so it
+   * waits for in-flight {@code getStats()} and {@code isClosed()} reads, and destroys the handle at
+   * most once even if two closes race.
+   */
+  private void releaseNativeHandle(long handle) {
+    handleLock.writeLock().lock();
+    try {
+      if (nativeHandle != handle) {
+        return;
+      }
+      try {
+        finalStats = snapshotOrEmpty(handle);
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+      }
+    } finally {
+      handleLock.writeLock().unlock();
+    }
+  }
+
+  private StreamStats snapshotOrEmpty(long handle) {
+    try {
+      return nativeGetStats(handle);
+    } catch (Exception e) {
+      return StreamStats.empty();
     }
   }
 
@@ -368,6 +434,8 @@ public class ZerobusArrowStream implements AutoCloseable {
   // ==================== Native methods implemented in Rust ====================
 
   private static native void nativeDestroy(long handle);
+
+  private native StreamStats nativeGetStats(long handle);
 
   private native long nativeIngestBatch(long handle, byte[] batchData);
 
