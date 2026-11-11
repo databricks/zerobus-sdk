@@ -7,8 +7,8 @@ use crate::async_bridge::{create_completable_future, spawn_and_complete_void};
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
-use databricks_zerobus_ingest_sdk::ZerobusStream;
 use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord, RecordType};
+use databricks_zerobus_ingest_sdk::{StreamStatsReader, ZerobusStream};
 use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
@@ -32,6 +32,8 @@ fn encoded_record_from(record_type: RecordType, bytes: Vec<u8>) -> Result<Encode
 /// Native stream handle stored in Java.
 pub struct NativeStreamHandle {
     pub stream: Arc<Mutex<Option<ZerobusStream>>>,
+    /// Reads statistics without the stream lock, which ingest holds while waiting for capacity.
+    pub stats: StreamStatsReader,
     /// Record format, fixed at creation; the ingest paths read it instead of taking it per call.
     pub record_type: RecordType,
     pub client_id: String,
@@ -45,8 +47,10 @@ impl NativeStreamHandle {
         client_id: String,
         client_secret: String,
     ) -> Self {
+        let stats = stream.stats_reader();
         Self {
             stream: Arc::new(Mutex::new(Some(stream))),
+            stats,
             record_type,
             client_id,
             client_secret,
@@ -663,4 +667,27 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
     }
 
     list
+}
+
+/// Returns a snapshot of the stream's counters. Does not take the stream lock.
+///
+/// # JNI Signature
+/// ```java
+/// private native StreamStats nativeGetStats(long handle);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetStats<'local>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    if handle == 0 {
+        throw_zerobus_exception(&mut env, "Stream handle is closed");
+        return JObject::null();
+    }
+    // Safety: the Java side only passes a non-zero handle while it is not destroyed; stats
+    // reads and destruction are serialized there.
+    let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
+    let snapshot = stream_handle.stats.snapshot();
+    crate::stream_stats::stats_to_java(&mut env, &snapshot)
 }

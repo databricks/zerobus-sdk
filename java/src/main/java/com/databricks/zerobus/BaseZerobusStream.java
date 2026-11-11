@@ -47,6 +47,9 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   // Native handle to the Rust stream object.
   protected volatile long nativeHandle;
+  // Guards native destruction against getStats(), which may run on another thread.
+  private final Object statsLock = new Object();
+  private volatile StreamStats finalStats;
 
   // Stream properties.
   protected final String tableName;
@@ -175,8 +178,7 @@ abstract class BaseZerobusStream implements AutoCloseable {
       cachedUnackedBatches = unackedBatches;
 
       // Recovery data is safely owned by Java; the native stream can now be destroyed.
-      nativeHandle = 0;
-      nativeDestroy(handle);
+      releaseNativeHandle(handle);
       logger.info("Stream closed");
 
       if (closeFailure != null) {
@@ -229,8 +231,7 @@ abstract class BaseZerobusStream implements AutoCloseable {
     }
     cachedUnackedBatches = batches;
     cachedUnackedRecords = records;
-    nativeHandle = 0;
-    nativeDestroy(handle);
+    releaseNativeHandle(handle);
     return batches;
   }
 
@@ -244,8 +245,45 @@ abstract class BaseZerobusStream implements AutoCloseable {
   final void discardFailedRecreation() {
     long handle = nativeHandle;
     if (handle != 0) {
+      releaseNativeHandle(handle);
+    }
+  }
+
+  /**
+   * Returns a snapshot of the stream's counters.
+   *
+   * <p>Reads in-memory counters and never waits for the stream's ingest or acknowledgment work, so
+   * it can be called from any thread, including while another thread is blocked in {@code
+   * ingestRecordOffset} or {@code flush}. After {@link #close()}, returns the snapshot taken when
+   * the stream closed.
+   *
+   * @return a snapshot of the stream's counters
+   */
+  public StreamStats getStats() {
+    synchronized (statsLock) {
+      long handle = nativeHandle;
+      if (handle == 0) {
+        StreamStats last = finalStats;
+        return last != null ? last : StreamStats.empty();
+      }
+      return nativeGetStats(handle);
+    }
+  }
+
+  /** Captures the final counters and destroys the native handle, under the stats lock. */
+  private void releaseNativeHandle(long handle) {
+    synchronized (statsLock) {
+      finalStats = snapshotOrEmpty(handle);
       nativeHandle = 0;
       nativeDestroy(handle);
+    }
+  }
+
+  private StreamStats snapshotOrEmpty(long handle) {
+    try {
+      return nativeGetStats(handle);
+    } catch (Exception e) {
+      return StreamStats.empty();
     }
   }
 
@@ -293,6 +331,8 @@ abstract class BaseZerobusStream implements AutoCloseable {
   // ==================== Native methods implemented in Rust ====================
 
   private static native void nativeDestroy(long handle);
+
+  private native StreamStats nativeGetStats(long handle);
 
   protected native CompletableFuture<Void> nativeIngestRecord(long handle, byte[] payload);
 

@@ -22,6 +22,7 @@ prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+zerobus-test-support = { path = "../test-support", optional = true }
 
 # Arrow dependencies (re-exported from SDK)
 arrow-array.workspace = true
@@ -33,7 +34,7 @@ default = []
 # Avro (Beta). Enable only with `-p zerobus-jni` so it isn't unified onto the FFI crate.
 # Requires Rust 1.88 (via `apache-avro` 0.22), above this crate's declared `rust-version`.
 avro = ["databricks-zerobus-ingest-sdk/avro"]
-test-helpers = []
+test-helpers = ["dep:zerobus-test-support"]
 
 [dev-dependencies]
 arrow-flight.workspace = true

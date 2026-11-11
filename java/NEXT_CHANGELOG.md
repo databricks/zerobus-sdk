@@ -6,6 +6,8 @@
 
 ### New Features and Improvements
 
+- Added `getStats()` to the stream classes (`ZerobusProtoStream`, `ZerobusJsonStream`, `ZerobusAvroStream`, `ZerobusArrowStream` and the deprecated `ZerobusStream`). It returns an immutable `StreamStats` snapshot with the records in flight, the last acknowledged offset, the number of successful reconnects, and the most recent error. It reads in-memory counters and does not wait for ingest or acknowledgment work. See the Stream Statistics section of the README.
+
 ### Bug Fixes
 
 ### Documentation

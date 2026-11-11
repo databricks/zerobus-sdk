@@ -19,6 +19,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
   - [Future-Based API (Deprecated)](#future-based-api-deprecated)
 - [Configuration](#configuration)
+- [Stream Statistics](#stream-statistics)
 - [Logging](#logging)
 - [Error Handling](#error-handling)
 - [API Reference](#api-reference)
@@ -975,6 +976,28 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = immediate recovery, `>0` = `min(this, server_duration)` ms |
 
 `ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
+
+## Stream Statistics
+
+Every stream class has `getStats()`, which returns an immutable `StreamStats` snapshot of the stream's counters:
+
+```java
+StreamStats stats = stream.getStats();
+System.out.println("in flight: " + stats.getRecordsInFlight());
+stats.getLastAckedOffset().ifPresent(o -> System.out.println("last acked offset: " + o));
+System.out.println("reconnects: " + stats.getReconnects());
+stats.getLastError().ifPresent(e ->
+    System.out.println("last error (retryable=" + e.isRetryable() + "): " + e.getMessage()));
+```
+
+- `getRecordsInFlight()` counts records accepted by ingest that the server has not yet acknowledged. It counts records, not batches. A batch of N records adds N.
+- `getLastAckedOffset()` is empty until the first acknowledgment. It is the offset of the most recent batch the server fully acknowledged, and it never decreases.
+- `getReconnects()` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
+- `getLastError()` is the most recent error the stream recorded, including errors it recovered from. It is kept after a successful recovery.
+
+`getStats()` reads in-memory counters. It never waits for the stream's ingest or acknowledgment work, so it can be called from another thread while the ingest thread is blocked, for example waiting for capacity. After `close()`, it returns the snapshot taken when the stream closed.
+
+The fields are read one at a time, so a snapshot taken during concurrent ingest can mix values from slightly different moments. Multiplexed streams do not expose these counters.
 
 ## Logging
 

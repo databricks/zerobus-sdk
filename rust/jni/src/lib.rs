@@ -13,6 +13,7 @@ mod options;
 mod runtime;
 mod sdk;
 mod stream;
+mod stream_stats;
 #[cfg(feature = "test-helpers")]
 mod test_helper;
 
