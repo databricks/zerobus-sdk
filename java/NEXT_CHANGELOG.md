@@ -6,6 +6,9 @@
 
 ### New Features and Improvements
 
+- The SDK now also works with the protobuf-java 3.25 runtime. Applications that declare
+  `protobuf-java` 3.25.x themselves can use the regular JAR. The default runtime is unchanged.
+
 ### Bug Fixes
 
 ### Documentation
