@@ -44,23 +44,23 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '11'
-            protobufVersion: '3.25.9'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '17'
-            protobufVersion: '3.25.9'
+            protobufVersion: '4.33.0'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '21'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '21'
             protobufVersion: '3.25.9'
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            javaVersion: '21'
-            protobufVersion: '4.36.2'
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             javaVersion: '21'
-            protobufVersion: '3.25.9'
+            protobufVersion: '4.33.0'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
