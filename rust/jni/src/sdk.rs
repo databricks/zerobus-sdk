@@ -12,6 +12,7 @@ use crate::options::{
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
+use crate::tls_options::{extract_tls_options, ExtractedTlsOptions};
 use databricks_zerobus_ingest_sdk::{RecordType, ZerobusSdk};
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE};
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 /// Native ABI version; bump in lockstep with Java's `NativeLoader.EXPECTED_NATIVE_ABI` whenever
 /// native method signatures change, so a stale library is rejected at load.
-const NATIVE_ABI_VERSION: jint = 1;
+const NATIVE_ABI_VERSION: jint = 2;
 
 /// # JNI Signature
 /// ```java
@@ -69,6 +70,7 @@ fn create_sdk<'local>(
     unity_catalog_endpoint: JString<'local>,
     application_name: JString<'local>,
     connection_per_stream: bool,
+    tls: Option<ExtractedTlsOptions>,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
@@ -110,6 +112,10 @@ fn create_sdk<'local>(
         Some(name) => builder.application_name(name),
         None => builder,
     };
+    let builder = match tls {
+        Some(tls) => builder.tls_config(Arc::new(tls.into_settings())),
+        None => builder,
+    };
     match builder.build() {
         Ok(sdk) => NativeSdkHandle::new(sdk).into_raw(),
         Err(e) => {
@@ -139,6 +145,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
         unity_catalog_endpoint,
         application_name,
         true,
+        None,
     )
 }
 
@@ -165,6 +172,47 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithCo
         unity_catalog_endpoint,
         application_name,
         connection_per_stream != JNI_FALSE,
+        None,
+    )
+}
+
+/// Create a new ZerobusSdk instance with connection ownership and TLS options.
+///
+/// # JNI Signature
+/// ```java
+/// private static native long nativeCreateWithOptions(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream, TlsOptions tlsOptions);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithOptions<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+    tls_options: JObject<'local>,
+) -> jlong {
+    let tls = if tls_options.is_null() {
+        None
+    } else {
+        match extract_tls_options(&mut env, &tls_options) {
+            Ok(tls) => Some(tls),
+            // A Java exception from a getter is already pending; JNI calls are not allowed
+            // until it is cleared, so leave it for the caller.
+            Err(jni::errors::Error::JavaException) => return 0,
+            Err(e) => {
+                throw_zerobus_exception(&mut env, &format!("Invalid TLS options: {}", e));
+                return 0;
+            }
+        }
+    };
+    create_sdk(
+        &mut env,
+        server_endpoint,
+        unity_catalog_endpoint,
+        application_name,
+        connection_per_stream != JNI_FALSE,
+        tls,
     )
 }
 

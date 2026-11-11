@@ -15,6 +15,7 @@ mod sdk;
 mod stream;
 #[cfg(feature = "test-helpers")]
 mod test_helper;
+mod tls_options;
 
 use jni::sys::jint;
 use jni::JavaVM;
