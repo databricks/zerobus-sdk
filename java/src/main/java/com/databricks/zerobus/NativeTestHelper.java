@@ -46,4 +46,14 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
+
+  /**
+   * Invokes {@link AckCallback#onAck} {@code acks} times, then {@link AckCallback#onError} once,
+   * all on one native SDK thread.
+   *
+   * @param callback the callback used by the native test
+   * @param acks the number of {@code onAck} calls
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestAckCallbackExceptions(AckCallback callback, int acks);
 }
