@@ -346,7 +346,7 @@ public class StreamConfigurationOptions {
      * @return this builder for method chaining
      * @deprecated This callback is no longer invoked by the native Rust backend. Use {@link
      *     #setAckCallback(AckCallback)} instead, which provides working acknowledgment
-     *     notifications.
+     *     notifications. This method will be removed in the next major release.
      */
     @Deprecated
     public StreamConfigurationOptionsBuilder setAckCallback(
