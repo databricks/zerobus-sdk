@@ -180,7 +180,8 @@ public final class TlsOptions {
      *
      * @param caCertificatePem the CA certificate in PEM format
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if {@code caCertificatePem} is null or blank
+     * @throws NullPointerException if {@code caCertificatePem} is null
+     * @throws IllegalArgumentException if {@code caCertificatePem} is blank
      */
     public Builder addCaCertificatePem(String caCertificatePem) {
       caPems.add(requireNonBlank(caCertificatePem, "caCertificatePem"));
@@ -193,7 +194,8 @@ public final class TlsOptions {
      *
      * @param caCertificateFile the path to a PEM file with one or more CA certificates
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if {@code caCertificateFile} is null or blank
+     * @throws NullPointerException if {@code caCertificateFile} is null
+     * @throws IllegalArgumentException if {@code caCertificateFile} is blank
      */
     public Builder addCaCertificateFile(String caCertificateFile) {
       caFiles.add(requireNonBlank(caCertificateFile, "caCertificateFile"));
@@ -207,7 +209,8 @@ public final class TlsOptions {
      * @param certificatePem the client certificate chain in PEM format
      * @param keyPem the client private key in PEM format
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if either argument is null or blank
+     * @throws NullPointerException if either argument is null
+     * @throws IllegalArgumentException if either argument is blank
      */
     public Builder clientIdentityPem(String certificatePem, String keyPem) {
       String cert = requireNonBlank(certificatePem, "certificatePem");
@@ -227,7 +230,8 @@ public final class TlsOptions {
      * @param certificateFile the path to the client certificate chain in PEM format
      * @param keyFile the path to the client private key in PEM format
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if either argument is null or blank
+     * @throws NullPointerException if either argument is null
+     * @throws IllegalArgumentException if either argument is blank
      */
     public Builder clientIdentityFiles(String certificateFile, String keyFile) {
       String cert = requireNonBlank(certificateFile, "certificateFile");
@@ -243,9 +247,13 @@ public final class TlsOptions {
      * Sets the domain name the server certificate is checked against. By default the host name of
      * the server endpoint is used.
      *
+     * <p>The value is a DNS name or an IP address, with no scheme and no port, for example {@code
+     * "zerobus.example.com"} rather than {@code "https://zerobus.example.com:443"}.
+     *
      * @param domainName the expected server certificate name
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if {@code domainName} is null or blank
+     * @throws NullPointerException if {@code domainName} is null
+     * @throws IllegalArgumentException if {@code domainName} is blank
      */
     public Builder domainName(String domainName) {
       this.domainName = requireNonBlank(domainName, "domainName");

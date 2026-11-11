@@ -34,3 +34,7 @@
 ### Deprecations
 
 ### API Changes
+
+- New public API: `ZerobusSdk.builder()` returning `ZerobusSdkBuilder`; `TlsOptions` and
+  `TlsOptions.Builder` (created with `TlsOptions.builder()`). `ZerobusSdkBuilder.tlsOptions(...)` takes
+  a `TlsOptions`.

@@ -201,8 +201,8 @@ fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
     Ok(leaked)
 }
 
-/// Lowercases and validates a header name. Names ending in `-bin` are kept as they are:
-/// the core decodes their base64 values and validates them.
+/// Lowercases and validates a header name. A name ending in `-bin` is accepted; the core
+/// decodes its base64 value and validates it.
 fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
     if name.len() > MAX_HEADER_NAME_LENGTH {
         return Err(provider_invalid_argument(format!(

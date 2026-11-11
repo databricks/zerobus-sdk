@@ -819,7 +819,9 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
   is required in that case.
 - `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
   paths. Use them when the certificates come from a secret store rather than the file system.
-- `domainName(...)` checks the server certificate against a name other than the endpoint host.
+- `domainName(...)` checks the server certificate against a name other than the endpoint host. The
+  value is a DNS name or an IP address, with no scheme and no port, for example
+  `zerobus.example.com`.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by
@@ -1306,7 +1308,7 @@ Immutable TLS settings, created with `TlsOptions.builder()` and passed to
 - `addCaCertificateFile(String)` - Trust the CA certificates in a PEM file, read on each connection.
 - `clientIdentityPem(String certPem, String keyPem)` - Client certificate chain and key for mutual TLS, as PEM text.
 - `clientIdentityFiles(String certPath, String keyPath)` - Client certificate chain and key for mutual TLS, read from files on each connection.
-- `domainName(String)` - Server name to check the certificate against.
+- `domainName(String)` - Server name to check the certificate against: a DNS name or an IP address, with no scheme and no port.
 - `build()` - Returns the options. Throws `IllegalStateException` if `trustSystemRoots(false)` is set without a CA certificate.
 
 `toString()` reports counts and the kind of client identity. It never includes certificate or key material.

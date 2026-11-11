@@ -197,6 +197,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithOp
     } else {
         match extract_tls_options(&mut env, &tls_options) {
             Ok(tls) => Some(tls),
+            // A Java exception from a getter is already pending; JNI calls are not allowed
+            // until it is cleared, so leave it for the caller.
+            Err(jni::errors::Error::JavaException) => return 0,
             Err(e) => {
                 throw_zerobus_exception(&mut env, &format!("Invalid TLS options: {}", e));
                 return 0;
