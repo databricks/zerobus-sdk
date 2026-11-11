@@ -27,6 +27,7 @@ use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::offset_generator::OffsetId;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
+use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
@@ -39,7 +40,7 @@ pub(super) struct AckProcessor {
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     pending_notify: Arc<Notify>,
     request_send_failure: Arc<RequestSendFailure>,
-    server_error_tx: watch::Sender<Option<ZerobusError>>,
+    server_error_tx: ServerErrorSender,
     submitted_records: Arc<AtomicU64>,
     last_acked_records: Arc<AtomicU64>,
     is_paused: Arc<AtomicBool>,
@@ -48,6 +49,7 @@ pub(super) struct AckProcessor {
     options: ArrowStreamConfigurationOptions,
     close: CloseCoordinator,
     stats_exporter: Option<Arc<dyn StatsExporter>>,
+    stream_stats: Arc<StreamStatsState>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<TestHooks>,
 }
@@ -231,6 +233,7 @@ struct AckProgress<'a> {
     last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
     close: &'a CloseCoordinator,
     stats_exporter: Option<&'a Arc<dyn StatsExporter>>,
+    stream_stats: &'a StreamStatsState,
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: &'a TestNotifyGate,
 }
@@ -244,7 +247,7 @@ impl AckProgress<'_> {
         // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
         // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
         // a waiter; keep the server-provided offset only for diagnostics.
-        let (effective_acked_records, max_acked_offset, acked_offsets) = {
+        let (effective_acked_records, max_acked_offset, acked_offsets, newly_acked_records) = {
             // Ingest publishes submitted_records and commits to the active sender while
             // holding this same lock. Validation therefore cannot observe a submitted
             // watermark before its handoff, or a handoff before its watermark.
@@ -260,6 +263,7 @@ impl AckProgress<'_> {
                 .last_acked_records
                 .fetch_max(acked_records, Ordering::AcqRel);
             let effective_acked_records = previous_acked_records.max(acked_records);
+            let newly_acked_records = effective_acked_records - previous_acked_records;
             let mut max_acked_offset: Option<OffsetId> = None;
             let mut acked_offsets: Vec<OffsetId> = Vec::new();
             pending.retain(|pending_batch| {
@@ -275,7 +279,12 @@ impl AckProgress<'_> {
                     true
                 }
             });
-            (effective_acked_records, max_acked_offset, acked_offsets)
+            (
+                effective_acked_records,
+                max_acked_offset,
+                acked_offsets,
+                newly_acked_records,
+            )
         };
         let applied_at = Instant::now();
 
@@ -302,7 +311,9 @@ impl AckProgress<'_> {
             }
         }
 
+        self.stream_stats.record_acked_records(newly_acked_records);
         if let Some(offset) = max_acked_offset {
+            self.stream_stats.record_acked_offset(offset);
             let _ = self.last_ack_tx.send(Some(offset));
             self.close.observe_ack(offset, applied_at);
         }
@@ -378,6 +389,7 @@ impl AckProcessor {
             options: stream.options.clone(),
             close: stream.close.clone(),
             stats_exporter: stream.stats_exporter.clone(),
+            stream_stats: Arc::clone(&stream.stream_stats),
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::clone(&stream.test_hooks),
         }
@@ -390,8 +402,13 @@ impl AckProcessor {
         last_acked_records: Arc<AtomicU64>,
         is_paused: bool,
     ) -> (Self, RequestBodyControl, watch::Receiver<Option<OffsetId>>) {
+        // Fixtures ack batches they never admitted through the stream. Prime the in-flight
+        // count with the submitted total, which bounds every acknowledgment `apply` accepts.
+        let stream_stats = Arc::new(StreamStatsState::default());
+        stream_stats.record_admitted(submitted_records.load(Ordering::Acquire));
         let (last_ack_tx, last_ack_rx) = watch::channel(None);
         let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let server_error_tx = ServerErrorSender::new(server_error_tx, Arc::clone(&stream_stats));
         let processor = Self {
             is_closed: Arc::new(AtomicBool::new(false)),
             last_ack_tx,
@@ -410,6 +427,7 @@ impl AckProcessor {
             },
             close: CloseCoordinator::new(),
             stats_exporter: None,
+            stream_stats,
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::new(TestHooks::default()),
         };
@@ -743,6 +761,7 @@ impl AckProcessor {
             last_ack_tx: &self.last_ack_tx,
             close: &self.close,
             stats_exporter: self.stats_exporter.as_ref(),
+            stream_stats: self.stream_stats.as_ref(),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: &self.test_hooks.ack_applied,
         }

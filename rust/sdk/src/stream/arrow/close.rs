@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::offset_generator::OffsetId;
+use crate::stream_stats::ServerErrorSender;
 use crate::ZerobusResult;
 
 use super::batch::PendingBatch;
@@ -168,7 +169,7 @@ pub(super) struct CloseFinalizer {
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     last_acked_records: Arc<AtomicU64>,
-    server_error_tx: watch::Sender<Option<ZerobusError>>,
+    server_error_tx: ServerErrorSender,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<super::TestHooks>,
 }

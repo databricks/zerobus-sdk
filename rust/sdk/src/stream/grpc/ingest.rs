@@ -280,6 +280,10 @@ impl ZerobusStream {
             "Ingesting record(s)"
         );
         let hook_result = on_offset(offset_id).await?;
+        let record_count = encoded_batch.get_record_count() as u64;
+        // Count before the sender can see the batch: the receiver may apply its ack before
+        // this thread resumes, and the in-flight count must never go below zero.
+        self.stream_stats.record_admitted(record_count);
         self.landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
                 payload: encoded_batch,

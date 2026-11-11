@@ -38,6 +38,7 @@ use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::ConnectorFactory;
 use crate::stats::StatsExporter;
+use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsReader, StreamStatsState};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -238,8 +239,10 @@ pub struct ZerobusArrowStream {
     /// `batch_tx` channel so the inline send never blocks while holding `ingest_mutex`.
     inflight: Arc<Semaphore>,
     /// Watch channel carrying the latest cross-task stream error.
-    server_error_tx: watch::Sender<Option<ZerobusError>>,
+    server_error_tx: ServerErrorSender,
     server_error_rx: watch::Receiver<Option<ZerobusError>>,
+    /// Counters returned by `stats()`, updated by the ingest, ack and recovery paths.
+    stream_stats: Arc<StreamStatsState>,
     /// Cumulative record count assigned to pending ranges for the current connection.
     /// This includes batches buffered while paused.
     cumulative_records_assigned: Arc<AtomicU64>,
@@ -324,6 +327,8 @@ impl ZerobusArrowStream {
         let inflight = Arc::new(Semaphore::new(options.max_inflight_batches));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
+        let stream_stats = Arc::new(StreamStatsState::default());
+        let server_error_tx = ServerErrorSender::new(server_error_tx, Arc::clone(&stream_stats));
         let close = CloseCoordinator::new();
 
         let stream = Self {
@@ -353,6 +358,7 @@ impl ZerobusArrowStream {
             inflight,
             server_error_tx,
             server_error_rx,
+            stream_stats,
             stats_exporter,
             cumulative_records_assigned,
             submitted_records,
@@ -594,6 +600,7 @@ impl ZerobusArrowStream {
                 permit,
             ));
         }
+        self.stream_stats.record_admitted(record_count);
 
         // While paused for a close signal or recovery handoff, retain the batch as
         // pending; successful recovery replays it and terminal recovery finalizes it.
@@ -636,6 +643,7 @@ impl ZerobusArrowStream {
                     let mut pending = self.pending_batches.lock().await;
                     pending.retain(|pending_batch| pending_batch.offset_id() != offset_id);
                 }
+                self.stream_stats.record_withdrawn(record_count);
                 // Withdraw the logical assignment before waking terminal finalization.
                 self.cumulative_records_assigned
                     .store(start_record, Ordering::Relaxed);
@@ -1280,6 +1288,20 @@ impl ZerobusArrowStream {
         if let Some(task) = self.supervisor_task.lock().await.as_ref() {
             task.abort();
         }
+    }
+
+    /// Returns a snapshot of this stream's counters.
+    ///
+    /// Reads atomics and does not wait on the stream's tasks. Multiplexed streams do not
+    /// expose these counters.
+    pub fn stats(&self) -> StreamStats {
+        self.stream_stats.snapshot()
+    }
+
+    /// Returns a handle that reads this stream's counters without borrowing the stream.
+    /// See `ZerobusStream::stats_reader`.
+    pub fn stats_reader(&self) -> StreamStatsReader {
+        self.stream_stats.reader()
     }
 
     /// Returns the table name for this stream.
