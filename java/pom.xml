@@ -71,11 +71,11 @@
       <version>${arrow.version}</version>
       <scope>test</scope>
     </dependency>
-    <!-- SLF4J Simple Implementation (for tests only) -->
+    <!-- Logback as the SLF4J binding for tests only; lets tests capture forwarded native logs -->
     <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-simple</artifactId>
-      <version>2.0.17</version>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>1.5.18</version>
       <scope>test</scope>
     </dependency>
     <!-- Test dependencies -->

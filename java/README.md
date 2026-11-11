@@ -993,9 +993,9 @@ Add to your Maven dependencies:
 </dependency>
 ```
 
-Control log levels with system properties:
+Control log levels with system properties. The native core logs under `com.databricks.zerobus.core`, which stays at INFO here (see [Native Core Logs](#native-core-logs)):
 ```bash
-java -Dorg.slf4j.simpleLogger.log.com.databricks.zerobus=debug -cp "lib/*:out" com.example.ZerobusClient
+java -Dorg.slf4j.simpleLogger.log.com.databricks.zerobus=debug -Dorg.slf4j.simpleLogger.log.com.databricks.zerobus.core=info -cp "lib/*:out" com.example.ZerobusClient
 ```
 
 Available log levels: `trace`, `debug`, `info`, `warn`, `error`
@@ -1021,6 +1021,7 @@ Create `logback.xml` in your resources directory:
     </appender>
 
     <logger name="com.databricks.zerobus" level="DEBUG"/>
+    <logger name="com.databricks.zerobus.core" level="INFO"/>
 
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
@@ -1049,6 +1050,7 @@ Create `log4j2.xml` in your resources directory:
     </Appenders>
     <Loggers>
         <Logger name="com.databricks.zerobus" level="debug"/>
+        <Logger name="com.databricks.zerobus.core" level="info"/>
         <Root level="info">
             <AppenderRef ref="Console"/>
         </Root>
@@ -1083,7 +1085,17 @@ At the **WARN** level, the SDK logs:
 At the **ERROR** level, the SDK logs:
 - Native library loading failures
 
-> **Note:** Most detailed logging (token generation, gRPC, retries) is handled internally by the native Rust SDK and uses its own logging configuration.
+Native core events are logged under `com.databricks.zerobus.core`, described below.
+
+### Native Core Logs
+
+The native Rust core logs its own events, such as connection failures, recovery attempts, token refreshes, and server errors. The SDK forwards these to SLF4J under `com.databricks.zerobus.core`, followed by the Rust module path. For example, Arrow Flight stream events use `com.databricks.zerobus.core.stream.arrow`. Events from the native JNI layer use the same namespace, so a JNI module and an SDK module with the same name share one logger.
+
+Keep `com.databricks.zerobus.core` at INFO unless you are debugging the native core. The examples above set it to INFO while `com.databricks.zerobus` is at DEBUG, which shows SDK debug output without core debug output. Core DEBUG output is verbose, and per-record, per-batch and per-acknowledgment events are logged at TRACE, so only TRACE shows them.
+
+The SDK reads the effective level of `com.databricks.zerobus.core` when the native library loads and each time a `ZerobusSdk` is created. Core events below that level are not forwarded at all. A level change at runtime takes effect the next time an SDK is created.
+
+Forwarding never blocks ingestion. Core events go through a bounded queue to a background thread named `zerobus-native-log-forwarder`. If logging falls behind, events are dropped and a WARN is logged with the number dropped.
 
 ## Error Handling
 

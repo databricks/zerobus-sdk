@@ -133,6 +133,7 @@ public class ZerobusSdk implements AutoCloseable {
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName) {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
+    syncNativeLogLevel();
     this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
@@ -160,6 +161,7 @@ public class ZerobusSdk implements AutoCloseable {
       boolean connectionPerStream) {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
+    syncNativeLogLevel();
     this.nativeHandle =
         nativeCreateWithConnectionPerStream(
             serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
@@ -1076,6 +1078,11 @@ public class ZerobusSdk implements AutoCloseable {
     }
     return nativeCreateArrowStreamWithHeadersProvider(
         sdkHandle, tableName, arrowSchema, clientId, clientSecret, headersProvider, options);
+  }
+
+  // Runs before native creation so events emitted during it use the current core log level.
+  private static void syncNativeLogLevel() {
+    NativeLogBridge.refreshLevel();
   }
 
   // Native methods implemented in Rust

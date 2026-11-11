@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 /// Native ABI version; bump in lockstep with Java's `NativeLoader.EXPECTED_NATIVE_ABI` whenever
 /// native method signatures change, so a stale library is rejected at load.
-const NATIVE_ABI_VERSION: jint = 1;
+const NATIVE_ABI_VERSION: jint = 3;
 
 /// # JNI Signature
 /// ```java
