@@ -1323,7 +1323,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1372,7 +1372,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1408,7 +1408,7 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged records as raw Avro datums, or grouped by batch.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1430,7 +1430,7 @@ List<byte[]> getUnackedBatches() throws ZerobusException
 ```
 Returns unacknowledged batches as serialized Arrow IPC byte arrays. After the stream is closed, returns cached data captured at close time. Each element can be re-ingested into a recreated stream, or deserialized with `ArrowStreamReader`.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`, `getTableName()`, `getOptions()`
 
 ---
 
@@ -1499,7 +1499,7 @@ CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException
 ```
 Ingests a record and returns a Future that completes on acknowledgment.
 
-**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`
+**Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getStats()`
 
 **Accessors:**
 

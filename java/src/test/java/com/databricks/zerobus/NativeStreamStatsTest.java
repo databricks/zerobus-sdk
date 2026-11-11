@@ -2,6 +2,7 @@ package com.databricks.zerobus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
@@ -60,6 +61,10 @@ class NativeStreamStatsTest {
       assertEquals(0, acked.getReconnects());
       assertFalse(acked.getLastError().isPresent());
 
+      stream.close();
+      assertEquals(acked, stream.getStats());
+      assertTrue(stream.isClosed());
+      // A second close must not destroy the native handle again.
       stream.close();
       assertEquals(acked, stream.getStats());
     }

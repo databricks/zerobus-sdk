@@ -3,6 +3,7 @@ package com.databricks.zerobus;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,8 +34,13 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Thread Safety</h3>
  *
- * <p>Streams are <b>not thread-safe</b>. Each stream instance should be used from a single thread.
- * Do not call methods on the same stream concurrently from multiple threads.
+ * <p>Ingest, acknowledgment, flush, close and recovery methods are <b>not thread-safe</b>. Use them
+ * from a single thread, and do not call them on the same stream concurrently from multiple threads.
+ *
+ * <p>{@link #getStats()} and {@link #isClosed()} may be called from any thread. {@code getStats()}
+ * does not wait for ingest or acknowledgment work. {@code isClosed()} can wait while an ingest call
+ * is blocked waiting for capacity. Both may wait briefly while {@code close()} releases the native
+ * handle.
  */
 abstract class BaseZerobusStream implements AutoCloseable {
 
@@ -47,8 +53,8 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   // Native handle to the Rust stream object.
   protected volatile long nativeHandle;
-  // Guards native destruction against getStats(), which may run on another thread.
-  private final Object statsLock = new Object();
+  // Read-locked by getStats() and isClosed(), write-locked while the native handle is destroyed.
+  private final ReentrantReadWriteLock handleLock = new ReentrantReadWriteLock();
   private volatile StreamStats finalStats;
 
   // Stream properties.
@@ -260,22 +266,38 @@ abstract class BaseZerobusStream implements AutoCloseable {
    * @return a snapshot of the stream's counters
    */
   public StreamStats getStats() {
-    synchronized (statsLock) {
+    handleLock.readLock().lock();
+    try {
       long handle = nativeHandle;
       if (handle == 0) {
         StreamStats last = finalStats;
         return last != null ? last : StreamStats.empty();
       }
       return nativeGetStats(handle);
+    } finally {
+      handleLock.readLock().unlock();
     }
   }
 
-  /** Captures the final counters and destroys the native handle, under the stats lock. */
+  /**
+   * Captures the final counters and destroys the native handle. Runs under the write lock, so it
+   * waits for in-flight {@code getStats()} and {@code isClosed()} reads, and destroys the handle at
+   * most once even if two closes race.
+   */
   private void releaseNativeHandle(long handle) {
-    synchronized (statsLock) {
-      finalStats = snapshotOrEmpty(handle);
-      nativeHandle = 0;
-      nativeDestroy(handle);
+    handleLock.writeLock().lock();
+    try {
+      if (nativeHandle != handle) {
+        return;
+      }
+      try {
+        finalStats = snapshotOrEmpty(handle);
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+      }
+    } finally {
+      handleLock.writeLock().unlock();
     }
   }
 
@@ -293,7 +315,13 @@ abstract class BaseZerobusStream implements AutoCloseable {
    * @return true if the stream is closed
    */
   public boolean isClosed() {
-    return nativeHandle == 0 || nativeIsClosed(nativeHandle);
+    handleLock.readLock().lock();
+    try {
+      long handle = nativeHandle;
+      return handle == 0 || nativeIsClosed(handle);
+    } finally {
+      handleLock.readLock().unlock();
+    }
   }
 
   /**
