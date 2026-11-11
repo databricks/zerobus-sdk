@@ -31,7 +31,7 @@ use tracing::instrument;
 
 use crate::grpc_channel::GrpcChannelSource;
 use crate::landing_zone::LandingZone;
-use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsState};
+use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsReader, StreamStatsState};
 use crate::{
     DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
     StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusResult,
@@ -388,6 +388,14 @@ impl ZerobusStream {
     /// from the ingest loop. Multiplexed streams do not expose these counters.
     pub fn stats(&self) -> StreamStats {
         self.stream_stats.snapshot()
+    }
+
+    /// Returns a handle that reads this stream's counters without borrowing the stream.
+    ///
+    /// The handle stays valid after the stream is closed or dropped and reports the
+    /// last values. Use it to read statistics from a thread that cannot hold the stream.
+    pub fn stats_reader(&self) -> StreamStatsReader {
+        self.stream_stats.reader()
     }
 
     /// The [`MessageDescriptor`] for this stream's schema, for building records

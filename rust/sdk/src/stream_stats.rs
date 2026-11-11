@@ -50,6 +50,23 @@ pub struct LastStreamError {
     pub timestamp: SystemTime,
 }
 
+/// Thread-safe handle that reads a stream's counters without a reference to the
+/// stream. Use it where the stream itself is behind a lock or owned elsewhere; the
+/// reader keeps returning the last values after the stream is closed.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct StreamStatsReader {
+    state: Arc<StreamStatsState>,
+}
+
+impl StreamStatsReader {
+    /// Returns a snapshot of the stream's counters. Same semantics as
+    /// `ZerobusStream::stats`.
+    pub fn snapshot(&self) -> StreamStats {
+        self.state.snapshot()
+    }
+}
+
 /// Shared counters for one stream. `last_acked_offset` holds `-1` until the first
 /// acknowledgment; offsets start at 0.
 #[derive(Debug)]
@@ -72,6 +89,12 @@ impl Default for StreamStatsState {
 }
 
 impl StreamStatsState {
+    pub(crate) fn reader(self: &Arc<Self>) -> StreamStatsReader {
+        StreamStatsReader {
+            state: Arc::clone(self),
+        }
+    }
+
     pub(crate) fn record_admitted(&self, records: u64) {
         self.records_in_flight.fetch_add(records, Ordering::Relaxed);
     }
@@ -174,6 +197,18 @@ mod tests {
 
     fn retryable() -> ZerobusError {
         ZerobusError::StreamClosedError(GrpcStatus::unavailable("transient"))
+    }
+
+    #[test]
+    fn reader_observes_updates_from_the_shared_state() {
+        let state = Arc::new(StreamStatsState::default());
+        let reader = state.reader();
+        state.record_admitted(2);
+        state.record_acked_records(1);
+        state.record_acked_offset(0);
+        let stats = reader.clone().snapshot();
+        assert_eq!(stats.records_in_flight, 1);
+        assert_eq!(stats.last_acked_offset, Some(0));
     }
 
     #[test]
