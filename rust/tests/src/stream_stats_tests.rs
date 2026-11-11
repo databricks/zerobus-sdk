@@ -137,6 +137,92 @@ mod grpc_stream_stats {
         Ok(())
     }
 
+    // Runs ingest on one worker while the receiver applies immediate acks on others.
+    // An ack that lands before its admission is counted must not leave records in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn immediate_acks_on_multi_thread_leave_no_phantom_in_flight(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        const RECORDS: i64 = 2000;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        let mut responses = vec![MockResponse::CreateStream {
+            stream_id: "stats_mt_stream".to_string(),
+            delay_ms: 0,
+        }];
+        responses.extend((0..RECORDS).map(|i| MockResponse::RecordAck {
+            ack_up_to_offset: i,
+            delay_ms: 0,
+        }));
+        mock_server.inject_responses(TABLE_NAME, responses).await;
+
+        let stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(1000)
+            .build()
+            .await?;
+
+        let mut last = -1;
+        for i in 0..RECORDS {
+            last = stream
+                .ingest_record_offset(format!("row-{i}").into_bytes())
+                .await?;
+        }
+        stream.flush().await?;
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 0);
+        assert_eq!(stats.last_acked_offset, Some(last));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_close_does_not_record_last_error() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stats_clean_close".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let offset = stream.ingest_record_offset(b"only".to_vec()).await?;
+        stream.wait_for_offset(offset).await?;
+        stream.close().await?;
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 0);
+        assert!(
+            stats.last_error.is_none(),
+            "clean close recorded {:?}",
+            stats.last_error
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn forced_drop_counts_reconnect_and_records_last_error(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -285,6 +371,59 @@ mod arrow_stream_stats {
         let acked = stream.stats();
         assert_eq!(acked.records_in_flight, 0);
         assert_eq!(acked.last_acked_offset, Some(offset));
+        Ok(())
+    }
+
+    // A graceful server rotation is routine: it counts as a reconnect and is not an error.
+    #[tokio::test]
+    async fn server_rotation_counts_reconnect_without_last_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockFlightResponse::GracefulClose {
+                        duration_ms: 100,
+                        delay_ms: 0,
+                        ack_up_to_offset: None,
+                        ack_up_to_records: None,
+                    },
+                    // The rotated connection acknowledges the replayed batch.
+                    MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 1,
+                    },
+                ],
+            )
+            .await;
+
+        let stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .arrow(schema.clone())
+            .recovery(true)
+            .recovery_timeout_ms(5000)
+            .recovery_backoff_ms(100)
+            .build_arrow()
+            .await?;
+
+        let batch = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+        let offset = stream.ingest_batch(batch).await?;
+        stream.wait_for_offset(offset).await?;
+
+        let stats = stream.stats();
+        assert_eq!(stats.reconnects, 1);
+        assert!(
+            stats.last_error.is_none(),
+            "rotation recorded {:?}",
+            stats.last_error
+        );
+        assert_eq!(stats.records_in_flight, 0);
         Ok(())
     }
 

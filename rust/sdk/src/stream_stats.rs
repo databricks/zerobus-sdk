@@ -24,8 +24,10 @@ use crate::ZerobusError;
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamStats {
     /// Records accepted by ingest and not yet acknowledged by the server. Counts
-    /// records, not batches. Records that were rejected before reaching the wire
-    /// are not counted.
+    /// records, not batches. Counting starts when a batch is admitted, not when it
+    /// reaches the wire. A record whose ingest call returned an error is not counted.
+    /// Records retained after a terminal failure, or left unacknowledged at close,
+    /// stay counted.
     pub records_in_flight: u64,
     /// Offset of the most recently acknowledged batch, or `None` before the first
     /// acknowledgment. Never decreases.
@@ -145,13 +147,18 @@ impl StreamStatsState {
         }
     }
 
-    // Saturates instead of wrapping, so a bookkeeping mismatch cannot report a huge count.
+    // Saturates instead of wrapping so release builds cannot report a huge count.
     fn subtract_in_flight(&self, records: u64) {
-        let _ =
-            self.records_in_flight
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_sub(records))
-                });
+        let previous = self
+            .records_in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(records))
+            })
+            .unwrap_or_else(|previous| previous);
+        debug_assert!(
+            previous >= records,
+            "records in flight underflow: {previous} < {records}"
+        );
     }
 }
 
@@ -178,6 +185,14 @@ impl ServerErrorSender {
         if let Some(error) = &value {
             self.stats.record_error(error);
         }
+        self.tx.send(value)
+    }
+
+    /// Publishes a value without recording it as the last error, for clean closes.
+    pub(crate) fn send_unrecorded(
+        &self,
+        value: Option<ZerobusError>,
+    ) -> Result<(), watch::error::SendError<Option<ZerobusError>>> {
         self.tx.send(value)
     }
 
@@ -243,7 +258,17 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_saturates_at_zero() {
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "records in flight underflow")]
+    fn in_flight_underflow_is_caught_in_debug_builds() {
+        let state = StreamStatsState::default();
+        state.record_admitted(2);
+        state.record_acked_records(5);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn in_flight_underflow_saturates_in_release_builds() {
         let state = StreamStatsState::default();
         state.record_admitted(2);
         state.record_acked_records(5);
