@@ -1292,7 +1292,6 @@ impl ZerobusArrowStream {
         }
     }
 
-    /// Returns the table name for this stream.
     /// Returns a snapshot of this stream's counters.
     ///
     /// Reads atomics and does not wait on the stream's tasks. Multiplexed streams do not
@@ -1307,6 +1306,7 @@ impl ZerobusArrowStream {
         self.stream_stats.reader()
     }
 
+    /// Returns the table name for this stream.
     pub fn table_name(&self) -> &str {
         &self.table_properties.table_name
     }

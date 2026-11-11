@@ -257,6 +257,9 @@ impl Supervisor {
             };
             // Preserve failures for retry gating and finalization; a clean rotation
             // uses the retryable rotation sentinel.
+            if let ReconnectReason::TransientFailure(error) = &reconnect_reason {
+                self.stream_stats.record_error(error);
+            }
             let active_error = AckProcessor::recovery_error(&reconnect_reason);
 
             if !reconnect_auth_retry {
@@ -322,7 +325,6 @@ impl Supervisor {
                         error = %error,
                         "Supervisor: Attempting recovery after retriable error"
                     );
-                    self.stream_stats.record_error(&error);
 
                     pause_and_detach_sender(&self.ingest_mutex, &self.is_paused, &self.batch_tx)
                         .await;

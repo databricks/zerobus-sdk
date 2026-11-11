@@ -1262,7 +1262,7 @@ How a call behaves:
 See [`examples/json/unary.rs`](examples/json/unary.rs) for a complete program.
 ### Stream Statistics
 
-`stats()` returns a point-in-time snapshot of a stream's counters. It reads atomics and does not wait on the stream's tasks, so it is safe to call from the ingest loop.
+`stats()` returns a point-in-time snapshot of a stream's counters. It reads atomics and does not wait on the stream's tasks.
 
 ```rust
 let stats = stream.stats();
@@ -1274,7 +1274,7 @@ if let Some(err) = &stats.last_error {
 }
 ```
 
-- `records_in_flight` counts records accepted by ingest and not yet acknowledged. It counts records, not batches. A partially acknowledged Arrow batch counts only its unacknowledged rows.
+- `records_in_flight` counts records accepted by ingest and not yet acknowledged. It counts records, not batches, and counting starts when a batch is admitted, not when it reaches the wire. A record whose ingest call returned an error is not counted. Records retained after a terminal failure, or left unacknowledged at close, stay counted. A partially acknowledged Arrow batch counts only its unacknowledged rows.
 - `last_acked_offset` is the offset of the most recent batch the server fully acknowledged. It is `None` until the first acknowledgment and never decreases.
 - `reconnects` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
 - `last_error` is the most recent error the stream recorded, including errors that were recovered from. It is kept after a successful recovery.
@@ -1744,6 +1744,10 @@ for record in stream.get_unacked_records().await? {
 }
 ```
 
+**`stats()`** returns a `StreamStats` snapshot with `records_in_flight`, `last_acked_offset`, `reconnects` and `last_error`. It reads atomics and does not wait on the stream's tasks.
+
+**`stats_reader()`** returns a cloneable `StreamStatsReader` that reads the same counters without borrowing the stream.
+
 ### `StreamBuilder`
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
@@ -1840,6 +1844,15 @@ The same as `ingest_records` with one record. For very sparse traffic only.
 ### `UnaryIngestResult`
 
 The result of a successful unary ingest call. It has no fields: the server returns no data for `InsertRecords`. It is `#[non_exhaustive]`, so fields can be added later without a breaking change.
+
+### `ZerobusArrowStream`
+
+`PersistentStream` and `ZerobusArrowStream` have the same statistics accessors as `ZerobusStream`:
+
+- `stats() -> StreamStats` returns a snapshot of `records_in_flight`, `last_acked_offset`, `reconnects` and `last_error`. It reads atomics and does not wait on the stream's tasks.
+- `stats_reader() -> StreamStatsReader` returns a cloneable reader for the same counters, for use when the stream is held behind a lock.
+
+See [Stream Statistics](#stream-statistics) for the field semantics.
 
 ### `MultiplexedStream`
 
