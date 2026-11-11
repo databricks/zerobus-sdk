@@ -1260,6 +1260,26 @@ How a call behaves:
 **Settings:** the builder offers `table()`, the authentication setters, `json()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, with the same defaults as streams. Stream-only settings are not offered.
 
 See [`examples/json/unary.rs`](examples/json/unary.rs) for a complete program.
+### Stream Statistics
+
+`stats()` returns a point-in-time snapshot of a stream's counters. It reads atomics and does not wait on the stream's tasks, so it is safe to call from the ingest loop.
+
+```rust
+let stats = stream.stats();
+println!("in flight: {} records", stats.records_in_flight);
+println!("last acked offset: {:?}", stats.last_acked_offset);
+println!("reconnects: {}", stats.reconnects);
+if let Some(err) = &stats.last_error {
+    println!("last error ({}): {}", if err.is_retryable { "retryable" } else { "terminal" }, err.message);
+}
+```
+
+- `records_in_flight` counts records accepted by ingest and not yet acknowledged. It counts records, not batches. A partially acknowledged Arrow batch counts only its unacknowledged rows.
+- `last_acked_offset` is the offset of the most recent batch the server fully acknowledged. It is `None` until the first acknowledgment and never decreases.
+- `reconnects` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
+- `last_error` is the most recent error the stream recorded, including errors that were recovered from. It is kept after a successful recovery.
+
+The snapshot is not atomic across fields. A snapshot taken during concurrent ingest or acknowledgment can mix values from slightly different moments. Multiplexed streams (`MultiplexedStream`, `MultiplexedArrowStream`) do not expose statistics.
 
 ## Client-side warnings
 

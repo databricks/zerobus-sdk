@@ -19,6 +19,11 @@
   `ingest_records()` sends one batch per `InsertRecords` call and returns once it
   is durable. JSON only. Retries are on by default, so a batch can be written
   twice after a timeout; `.recovery(false)` sends each batch at most once.
+- Added `stats()` to `ZerobusStream`, `ZerobusArrowStream` and `PersistentStream`. It returns a
+  `StreamStats` snapshot of records in flight, the last acknowledged offset, the number of
+  successful automatic reconnects, and the most recent error (`LastStreamError`). The accessor
+  reads atomic counters and does not wait on the stream's tasks. Multiplexed streams do not
+  expose these counters.
 
 ### Bug Fixes
 

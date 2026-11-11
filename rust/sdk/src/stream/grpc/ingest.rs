@@ -280,6 +280,7 @@ impl ZerobusStream {
             "Ingesting record(s)"
         );
         let hook_result = on_offset(offset_id).await?;
+        let record_count = encoded_batch.get_record_count() as u64;
         self.landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
                 payload: encoded_batch,
@@ -287,6 +288,7 @@ impl ZerobusStream {
             }),
             reservation,
         );
+        self.stream_stats.record_admitted(record_count);
         Ok((offset_id, hook_result))
     }
 

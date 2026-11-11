@@ -13,7 +13,7 @@ use tracing::error;
 use super::transport::OutboundSink;
 use super::types::RecordLandingZone;
 use super::ZerobusStream;
-use crate::{ZerobusError, ZerobusResult};
+use crate::ZerobusResult;
 
 impl ZerobusStream {
     /// Spawns a task that continuously sends records to the Zerobus API by observing the landing zone
@@ -22,7 +22,7 @@ impl ZerobusStream {
         sink: OutboundSink,
         landing_zone: RecordLandingZone,
         is_paused: Arc<AtomicBool>,
-        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        server_error_tx: crate::stream_stats::ServerErrorSender,
         cancellation_token: CancellationToken,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {

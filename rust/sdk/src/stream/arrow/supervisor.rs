@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::{spawn, AbortHandle, JoinError, JoinHandle};
 use tokio::time::{sleep, sleep_until, timeout_at, Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -26,6 +26,7 @@ use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::ConnectorFactory;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
+use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -44,7 +45,8 @@ pub(super) struct Supervisor {
     request_bodies: RequestBodyRegistry,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     recovery_attempts: Arc<AtomicU32>,
-    server_error_tx: watch::Sender<Option<ZerobusError>>,
+    server_error_tx: ServerErrorSender,
+    stream_stats: Arc<StreamStatsState>,
     cumulative_records_assigned: Arc<AtomicU64>,
     submitted_records: Arc<AtomicU64>,
     last_acked_records: Arc<AtomicU64>,
@@ -95,6 +97,7 @@ impl Supervisor {
             pending_batches: Arc::clone(&stream.pending_batches),
             recovery_attempts: Arc::clone(&stream.recovery_attempts),
             server_error_tx: stream.server_error_tx.clone(),
+            stream_stats: Arc::clone(&stream.stream_stats),
             cumulative_records_assigned: Arc::clone(&stream.cumulative_records_assigned),
             submitted_records: Arc::clone(&stream.submitted_records),
             last_acked_records: Arc::clone(&stream.last_acked_records),
@@ -319,6 +322,7 @@ impl Supervisor {
                         error = %error,
                         "Supervisor: Attempting recovery after retriable error"
                     );
+                    self.stream_stats.record_error(&error);
 
                     pause_and_detach_sender(&self.ingest_mutex, &self.is_paused, &self.batch_tx)
                         .await;
@@ -374,6 +378,7 @@ impl Supervisor {
                     match reconnect_result {
                         Some(Ok(Some(connection))) => {
                             info!(target: super::LOG_TARGET, "Supervisor: Recovery successful, resuming");
+                            self.stream_stats.record_reconnect();
                             self.recovery_attempts.store(0, Ordering::Relaxed);
                             if let Some(exporter) = &self.stats_exporter {
                                 crate::stats::dispatch(
