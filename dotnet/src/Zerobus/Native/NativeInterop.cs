@@ -105,6 +105,9 @@ internal static class NativeInterop
             throw ex;
     }
 
+    private static ArgumentNullException NullRecordException(int index) =>
+        new("records", $"Record at index {index} is null.");
+
     /// <summary>
     /// Creates a stream with OAuth credentials.
     /// </summary>
@@ -508,9 +511,10 @@ internal static class NativeInterop
         {
             for (var i = 0; i < records.Length; i++)
             {
-                handles[i] = GCHandle.Alloc(records[i], GCHandleType.Pinned);
+                var record = records[i] ?? throw NullRecordException(i);
+                handles[i] = GCHandle.Alloc(record, GCHandleType.Pinned);
                 ptrs[i] = handles[i].AddrOfPinnedObject();
-                lens[i] = (nuint)records[i].Length;
+                lens[i] = (nuint)record.Length;
             }
 
             fixed (IntPtr* pointers = ptrs)
@@ -561,7 +565,7 @@ internal static class NativeInterop
         {
             unsafe { ApplyResult(tcs, (CResult*)result, offset == -2 ? -1 : offset); }
         });
-        var callbackHandle = GCHandle.Alloc(callback);
+        GCHandle callbackHandle;
 
         var ptrs = records.Length * IntPtr.Size <= StackAllocThresholdBytes
             ? stackalloc IntPtr[records.Length]
@@ -574,10 +578,14 @@ internal static class NativeInterop
         {
             for (var i = 0; i < records.Length; i++)
             {
-                handles[i] = GCHandle.Alloc(records[i], GCHandleType.Pinned);
+                var record = records[i] ?? throw NullRecordException(i);
+                handles[i] = GCHandle.Alloc(record, GCHandleType.Pinned);
                 ptrs[i] = handles[i].AddrOfPinnedObject();
-                lens[i] = (nuint)records[i].Length;
+                lens[i] = (nuint)record.Length;
             }
+
+            // Root the callback after preparation so a rejected record cannot leak its handle.
+            callbackHandle = GCHandle.Alloc(callback);
 
             unsafe
             {
@@ -643,10 +651,12 @@ internal static class NativeInterop
         {
             for (var i = 0; i < records.Length; i++)
             {
+                var record = records[i] ?? throw NullRecordException(i);
+
                 // Encode with null terminator
-                var byteCount = Encoding.UTF8.GetByteCount(records[i]);
+                var byteCount = Encoding.UTF8.GetByteCount(record);
                 var utf8 = new byte[byteCount + 1];
-                Encoding.UTF8.GetBytes(records[i], utf8);
+                Encoding.UTF8.GetBytes(record, utf8);
                 handles[i] = GCHandle.Alloc(utf8, GCHandleType.Pinned);
                 ptrs[i] = handles[i].AddrOfPinnedObject();
             }
@@ -697,7 +707,7 @@ internal static class NativeInterop
         {
             unsafe { ApplyResult(tcs, (CResult*)result, offset == -2 ? -1 : offset); }
         });
-        var callbackHandle = GCHandle.Alloc(callback);
+        GCHandle callbackHandle;
 
         var ptrs = records.Length * IntPtr.Size <= StackAllocThresholdBytes
             ? stackalloc IntPtr[records.Length]
@@ -707,12 +717,16 @@ internal static class NativeInterop
         {
             for (var i = 0; i < records.Length; i++)
             {
-                var byteCount = Encoding.UTF8.GetByteCount(records[i]);
+                var record = records[i] ?? throw NullRecordException(i);
+                var byteCount = Encoding.UTF8.GetByteCount(record);
                 var utf8 = new byte[byteCount + 1];
-                Encoding.UTF8.GetBytes(records[i], utf8);
+                Encoding.UTF8.GetBytes(record, utf8);
                 handles[i] = GCHandle.Alloc(utf8, GCHandleType.Pinned);
                 ptrs[i] = handles[i].AddrOfPinnedObject();
             }
+
+            // Root the callback after preparation so a rejected record cannot leak its handle.
+            callbackHandle = GCHandle.Alloc(callback);
 
             unsafe
             {
