@@ -148,13 +148,18 @@ impl StreamStatsState {
     }
 
     // Saturates instead of wrapping so release builds cannot report a huge count.
+    // `fetch_update` is deprecated on newer toolchains and its replacement is too
+    // new for the supported minimum, so this is the same loop written out.
     fn subtract_in_flight(&self, records: u64) {
-        let previous = self
-            .records_in_flight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(records))
-            })
-            .unwrap_or_else(|previous| previous);
+        let mut previous = self.records_in_flight.load(Ordering::Relaxed);
+        while let Err(actual) = self.records_in_flight.compare_exchange_weak(
+            previous,
+            previous.saturating_sub(records),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            previous = actual;
+        }
         debug_assert!(
             previous >= records,
             "records in flight underflow: {previous} < {records}"
