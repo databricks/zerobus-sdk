@@ -21,7 +21,8 @@ SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 
 # Compile
 javac -d . -cp "$SDK_JAR" \
   json/SingleRecordExample.java \
-  json/BatchIngestionExample.java
+  json/BatchIngestionExample.java \
+  json/FederatedAuthExample.java
 
 # Set environment variables
 export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
@@ -37,6 +38,16 @@ java -cp ".:$SDK_JAR" \
 # Run batch example
 java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.BatchIngestionExample
+
+# Run the federated auth example (Entra ID instead of a Databricks OAuth secret)
+export ENTRA_TENANT_ID="your-entra-tenant-id"
+export ENTRA_CLIENT_ID="your-entra-app-client-id"
+export ENTRA_CLIENT_SECRET="your-entra-app-client-secret"
+# Optional: workload identity federation as this Databricks service principal.
+# Leave unset for account-level federation.
+export DATABRICKS_SP_CLIENT_ID="your-databricks-sp-client-id"
+java -cp ".:$SDK_JAR" \
+  com.databricks.zerobus.examples.json.FederatedAuthExample
 ```
 
 ## API Overview
@@ -135,6 +146,15 @@ Demonstrates both batch ingestion methods plus recreateStream:
 3. **RecreateStream demo** - 5 records
 
 **Total: 225 records**
+
+### FederatedAuthExample
+
+Authenticates with an Entra ID token instead of a Databricks OAuth secret, then ingests 100 records and flushes once:
+
+1. **Token supplier** - Requests an Entra ID token with the client credentials grant. The SDK calls it only when it must mint or refresh the exchanged Databricks token.
+2. **Mode selection** - `FederatedToken.accountLevel(...)`, or `FederatedToken.workloadIdentity(..., spClientId)` when `DATABRICKS_SP_CLIENT_ID` is set.
+
+See [External-IdP federation](../../README.md#external-idp-federation-eg-entra-id) in the SDK README.
 
 ## Using JSON Libraries
 

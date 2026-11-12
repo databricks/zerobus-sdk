@@ -39,6 +39,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
+- **External-IdP federation**: Authenticate with a token from an external identity provider such as Microsoft Entra ID, with no Databricks OAuth secret
 - **Framework compatible**: Works inside Spring Boot and other frameworks with isolated classloaders
 
 ## Architecture
@@ -790,6 +791,52 @@ Providers may override `invalidate()` to clear cached credentials after an authe
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
 
+### External-IdP federation (e.g. Entra ID)
+
+Use `federatedAuth(FederatedToken)` to authenticate with a token from an external identity
+provider instead of a Databricks OAuth secret. You provide an `IdpTokenSupplier` that returns the
+current IdP token. The SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange), caches the exchanged token, and refreshes it before it expires. The federation policy
+must already be configured in Databricks.
+
+```java
+IdpTokenSupplier idpToken = () -> fetchEntraIdToken(); // return the current IdP access token
+
+// Account-level federation: no Databricks service principal. The identity is synced into
+// Databricks through automatic identity management.
+FederatedToken auth = FederatedToken.accountLevel(idpToken);
+
+// Workload identity federation: a Databricks service principal with a federation policy and no
+// secret, named by its client ID.
+FederatedToken workloadAuth = FederatedToken.workloadIdentity(idpToken, spClientId);
+
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .federatedAuth(auth)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
+```
+
+`federatedAuth` works with every format selector (`json()`, `compiledProto()`, `avro()`, and
+`arrow()`), and `recreateStream` reuses the stream's `FederatedToken`.
+
+- **Reuse one `FederatedToken` per identity.** The exchanged Databricks token is cached per
+  `FederatedToken` instance, so streams created with the same instance share one token. A new
+  instance, even with the same supplier, mints its own token.
+- **The supplier is called only when a token must be minted** (on a cache miss or a proactive
+  refresh), not on every request. It runs on an SDK thread, so it may call the identity provider
+  over the network, but a slow supplier delays stream creation and recovery.
+- **Errors:** an exception from `getToken()` is treated as retryable. Throw
+  `NonRetriableException` for a permanent failure. Returning `null` is a non-retryable error.
+- Implementations must be thread-safe: the SDK may call the supplier concurrently for streams on
+  different tables.
+
+See [`examples/json/FederatedAuthExample.java`](examples/json/FederatedAuthExample.java) for a
+complete example.
+
 ---
 
 ## API Styles
@@ -1224,6 +1271,7 @@ Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](
 StreamBuilder table(String tableName)
 StreamBuilder oauth(String clientId, String clientSecret)
 StreamBuilder headersProvider(HeadersProvider headersProvider)
+StreamBuilder federatedAuth(FederatedToken federatedToken)
 StreamBuilder recovery(boolean recovery)
 StreamBuilder recoveryTimeoutMs(int ms)
 StreamBuilder recoveryBackoffMs(int ms)
@@ -1672,6 +1720,27 @@ T deserialize(String json)
 **Usage with Gson:**
 ```java
 List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
+```
+
+---
+
+### FederatedToken
+
+Authenticates a stream by federating an external IdP token. Pass it to `StreamBuilder.federatedAuth()`. Instances are immutable, and each instance has its own exchanged-token cache entry. See [External-IdP federation](#external-idp-federation-eg-entra-id).
+
+```java
+static FederatedToken accountLevel(IdpTokenSupplier idpTokenSupplier)
+static FederatedToken workloadIdentity(IdpTokenSupplier idpTokenSupplier, String clientId)
+```
+
+---
+
+### IdpTokenSupplier (Functional Interface)
+
+Supplies the current external IdP token for `FederatedToken`. Called only when a Databricks token must be minted. Implementations must be thread-safe.
+
+```java
+String getToken() throws Exception  // throw NonRetriableException for permanent failures
 ```
 
 ---
