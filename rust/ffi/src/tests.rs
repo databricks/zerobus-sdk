@@ -2477,6 +2477,7 @@ fn test_every_extern_c_entry_point_is_guarded() {
     let modules = [
         ("sdk.rs", include_str!("sdk.rs")),
         ("stream.rs", include_str!("stream.rs")),
+        ("multiplexed.rs", include_str!("multiplexed.rs")),
         ("builder.rs", include_str!("builder.rs")),
         ("proto_schema.rs", include_str!("proto_schema.rs")),
         ("arrow.rs", include_str!("arrow.rs")),

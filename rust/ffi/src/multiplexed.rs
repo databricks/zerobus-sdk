@@ -846,12 +846,13 @@ mod multiplexed_tests {
         }
     }
 
-    fn create_oauth(
+    /// Returns the handle and the unread `result`, so callers can check `is_retryable`.
+    fn create_oauth_raw(
         sdk: *mut CZerobusSdk,
         table: &str,
         stream_count: usize,
         options: &CStreamConfigurationOptions,
-    ) -> (*mut CZerobusMultiplexedStream, bool, String) {
+    ) -> (*mut CZerobusMultiplexedStream, CResult) {
         let table = CString::new(table).unwrap();
         let client_id = CString::new("client-id").unwrap();
         let client_secret = CString::new("client-secret").unwrap();
@@ -867,8 +868,27 @@ mod multiplexed_tests {
             options,
             &mut result,
         );
+        (mux, result)
+    }
+
+    fn create_oauth(
+        sdk: *mut CZerobusSdk,
+        table: &str,
+        stream_count: usize,
+        options: &CStreamConfigurationOptions,
+    ) -> (*mut CZerobusMultiplexedStream, bool, String) {
+        let (mux, mut result) = create_oauth_raw(sdk, table, stream_count, options);
         let (success, message) = take_result(&mut result);
         (mux, success, message)
+    }
+
+    /// Polls `condition` until it holds, failing after 5 seconds.
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -917,20 +937,136 @@ mod multiplexed_tests {
     }
 
     #[test]
-    fn null_record_pointers_are_rejected() {
+    fn null_handle_is_rejected_by_batch_and_nowait_ingest() {
+        let null = ptr::null_mut();
+        let data = [1u8];
+        let proto_ptrs = [data.as_ptr()];
+        let proto_lens = [data.len()];
+        let json = CString::new("{}").unwrap();
+        let json_ptrs = [json.as_ptr()];
+        let null_handle = || (false, "Multiplexed stream pointer is null".to_string());
         let mut result = unwritten_result();
+
         let id = zerobus_multiplexed_stream_ingest_proto_records(
-            ptr::null_mut(),
-            ptr::null(),
-            ptr::null(),
+            null,
+            proto_ptrs.as_ptr(),
+            proto_lens.as_ptr(),
             1,
             &mut result,
         );
         assert_eq!(id, INGEST_ERROR);
-        assert_eq!(
-            take_result(&mut result),
-            (false, "Invalid records pointer".into())
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), null_handle());
+
+        let id = zerobus_multiplexed_stream_ingest_json_records(
+            null,
+            json_ptrs.as_ptr(),
+            1,
+            &mut result,
         );
+        assert_eq!(id, INGEST_ERROR);
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), null_handle());
+
+        zerobus_multiplexed_stream_ingest_proto_record_nowait(
+            null,
+            data.as_ptr(),
+            data.len(),
+            &mut result,
+        );
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), null_handle());
+
+        zerobus_multiplexed_stream_ingest_proto_records_nowait(
+            null,
+            proto_ptrs.as_ptr(),
+            proto_lens.as_ptr(),
+            1,
+            &mut result,
+        );
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), null_handle());
+
+        zerobus_multiplexed_stream_ingest_json_records_nowait(
+            null,
+            json_ptrs.as_ptr(),
+            1,
+            &mut result,
+        );
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), null_handle());
+    }
+
+    /// Pointer arguments are checked before the handle, so a NULL handle
+    /// reports the pointer error.
+    #[test]
+    fn null_record_pointers_are_rejected() {
+        let null = ptr::null_mut();
+        let data = [1u8];
+        let proto_ptrs = [data.as_ptr()];
+        let proto_lens = [data.len()];
+        let invalid_data = || (false, "Invalid data pointer".to_string());
+        let invalid_records = || (false, "Invalid records pointer".to_string());
+        let mut result = unwritten_result();
+
+        let id = zerobus_multiplexed_stream_ingest_proto_record(null, ptr::null(), 1, &mut result);
+        assert_eq!(id, INGEST_ERROR);
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), invalid_data());
+
+        zerobus_multiplexed_stream_ingest_proto_record_nowait(null, ptr::null(), 1, &mut result);
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), invalid_data());
+
+        // NULL records with valid lengths, then valid records with NULL lengths.
+        for (records, lens) in [
+            (ptr::null(), proto_lens.as_ptr()),
+            (proto_ptrs.as_ptr(), ptr::null()),
+        ] {
+            let id = zerobus_multiplexed_stream_ingest_proto_records(
+                null,
+                records,
+                lens,
+                1,
+                &mut result,
+            );
+            assert_eq!(id, INGEST_ERROR);
+            assert!(!result.is_retryable);
+            assert_eq!(take_result(&mut result), invalid_records());
+
+            zerobus_multiplexed_stream_ingest_proto_records_nowait(
+                null,
+                records,
+                lens,
+                1,
+                &mut result,
+            );
+            assert!(!result.is_retryable);
+            assert_eq!(take_result(&mut result), invalid_records());
+        }
+
+        let id = zerobus_multiplexed_stream_ingest_json_records(null, ptr::null(), 1, &mut result);
+        assert_eq!(id, INGEST_ERROR);
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), invalid_records());
+
+        zerobus_multiplexed_stream_ingest_json_records_nowait(null, ptr::null(), 1, &mut result);
+        assert!(!result.is_retryable);
+        assert_eq!(take_result(&mut result), invalid_records());
+    }
+
+    #[test]
+    fn copy_proto_records_preserves_bytes_and_order() {
+        let first = [0x00u8, 0xff, 0x01];
+        let second = [0x7fu8];
+        let ptrs = [first.as_ptr(), second.as_ptr()];
+        let lens = [first.len(), second.len()];
+
+        let records = unsafe { copy_proto_records(ptrs.as_ptr(), lens.as_ptr(), 2) }.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[0], EncodedRecord::Proto(bytes) if bytes[..] == first));
+        assert!(matches!(&records[1], EncodedRecord::Proto(bytes) if bytes[..] == second));
     }
 
     #[test]
@@ -1019,6 +1155,200 @@ mod multiplexed_tests {
         assert!(mux.is_null());
         assert!(!take_result(&mut result).0);
         assert_eq!(FREES.load(Ordering::SeqCst) - before, 1);
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn create_rejects_invalid_arguments_before_connecting() {
+        static FREES: AtomicUsize = AtomicUsize::new(0);
+        static SENTINEL: u8 = 0;
+        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+            if ptr::eq(user_data as *const u8, &SENTINEL) {
+                FREES.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let sdk = test_sdk();
+        let table = CString::new("main.default.events").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let options = json_options();
+        // A truncated varint: not a decodable DescriptorProto.
+        let malformed: &[u8] = &[0xff, 0xff, 0xff];
+        let none: &[u8] = &[];
+        let null_sdk = ptr::null_mut();
+        let null_str = ptr::null();
+
+        let oauth_cases = [
+            (
+                "sdk=NULL",
+                null_sdk,
+                table.as_ptr(),
+                none,
+                client_id.as_ptr(),
+                client_secret.as_ptr(),
+            ),
+            (
+                "table_name=NULL",
+                sdk,
+                null_str,
+                none,
+                client_id.as_ptr(),
+                client_secret.as_ptr(),
+            ),
+            (
+                "client_id=NULL",
+                sdk,
+                table.as_ptr(),
+                none,
+                null_str,
+                client_secret.as_ptr(),
+            ),
+            (
+                "client_secret=NULL",
+                sdk,
+                table.as_ptr(),
+                none,
+                client_id.as_ptr(),
+                null_str,
+            ),
+            (
+                "malformed descriptor",
+                sdk,
+                table.as_ptr(),
+                malformed,
+                client_id.as_ptr(),
+                client_secret.as_ptr(),
+            ),
+        ];
+        for (case, sdk_arg, table_arg, descriptor, id_arg, secret_arg) in oauth_cases {
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream(
+                sdk_arg,
+                table_arg,
+                descriptor.as_ptr(),
+                descriptor.len(),
+                id_arg,
+                secret_arg,
+                2,
+                &options,
+                &mut result,
+            );
+            assert!(mux.is_null(), "OAuth {case}");
+            let retryable = result.is_retryable;
+            let (success, message) = take_result(&mut result);
+            assert!(!success && !retryable, "OAuth {case}: {message}");
+        }
+
+        let headers_cases = [
+            ("sdk=NULL", null_sdk, table.as_ptr(), none),
+            ("table_name=NULL", sdk, null_str, none),
+            ("malformed descriptor", sdk, table.as_ptr(), malformed),
+        ];
+        for (case, sdk_arg, table_arg, descriptor) in headers_cases {
+            let before = FREES.load(Ordering::SeqCst);
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+                sdk_arg,
+                table_arg,
+                descriptor.as_ptr(),
+                descriptor.len(),
+                empty_headers,
+                (&SENTINEL as *const u8) as *mut std::ffi::c_void,
+                Some(free_user_data),
+                2,
+                &options,
+                &mut result,
+            );
+            assert!(mux.is_null(), "headers {case}");
+            let retryable = result.is_retryable;
+            let (success, message) = take_result(&mut result);
+            assert!(!success && !retryable, "headers {case}: {message}");
+            assert_eq!(
+                FREES.load(Ordering::SeqCst) - before,
+                1,
+                "headers {case}: user_data must be freed exactly once"
+            );
+        }
+
+        // A NULL `result` is allowed; the failure is reported by the NULL handle.
+        let mux = zerobus_sdk_create_multiplexed_stream(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            0,
+            &options,
+            ptr::null_mut(),
+        );
+        assert!(mux.is_null());
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn create_that_fails_to_connect_is_retryable_and_releases_resources() {
+        extern "C" fn noop_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
+        static FREES: AtomicUsize = AtomicUsize::new(0);
+        static SENTINEL: u8 = 0;
+        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+            if ptr::eq(user_data as *const u8, &SENTINEL) {
+                FREES.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = crate::tests::ACK_DROP_TEST_LOCK.lock().unwrap();
+
+        // `test_sdk()` points at 127.0.0.1:1, so every sub-stream open fails.
+        let sdk = test_sdk();
+        let mut options = json_options();
+        options.ack_on_ack = Some(noop_ack);
+        options.ack_user_data =
+            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
+
+        let drops_before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
+        let (mux, mut result) = create_oauth_raw(sdk, "main.default.events", 2, &options);
+        assert!(mux.is_null());
+        let retryable = result.is_retryable;
+        let (success, message) = take_result(&mut result);
+        assert!(!success && retryable, "OAuth create: {message}");
+        wait_until("OAuth create drops the ack callback", || {
+            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
+        });
+        assert_eq!(
+            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
+            1
+        );
+
+        let table = CString::new("main.default.events").unwrap();
+        let drops_before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
+        let frees_before = FREES.load(Ordering::SeqCst);
+        let mut result = unwritten_result();
+        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            (&SENTINEL as *const u8) as *mut std::ffi::c_void,
+            Some(free_user_data),
+            2,
+            &options,
+            &mut result,
+        );
+        assert!(mux.is_null());
+        let retryable = result.is_retryable;
+        let (success, message) = take_result(&mut result);
+        assert!(!success && retryable, "headers create: {message}");
+        wait_until("headers create releases its resources", || {
+            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
+                && FREES.load(Ordering::SeqCst) - frees_before >= 1
+        });
+        assert_eq!(
+            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
+            1
+        );
+        assert_eq!(FREES.load(Ordering::SeqCst) - frees_before, 1);
         crate::zerobus_sdk_free(sdk);
     }
 
