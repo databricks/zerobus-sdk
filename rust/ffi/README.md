@@ -111,7 +111,8 @@ sub-stream. Ingest calls return an opaque message ID instead of an offset:
 ```c
 CResult r = {0};
 CStreamConfigurationOptions opts = zerobus_get_default_config();
-/* max_inflight_requests is split evenly across the sub-streams. */
+/* max_inflight_requests is split evenly across the sub-streams and must be
+   at least stream_count, or create fails. */
 CZerobusMultiplexedStream *mux = zerobus_sdk_create_multiplexed_stream(
     sdk, "catalog.schema.table", descriptor, descriptor_len,
     client_id, client_secret, /* stream_count */ 4, &opts, &r);
@@ -131,7 +132,7 @@ while (i < n) {
     zerobus_free_error_message(r.error_message);
     if (zerobus_multiplexed_stream_is_closed(mux)) break;
     if (!retryable) { reject_record(i++); continue; }  /* the record is invalid */
-    /* Retryable while the mux is open: back off, then try rec[i] again. */
+    backoff();  /* retryable while the mux is open: try rec[i] again */
 }
 
 r = (CResult){0};

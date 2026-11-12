@@ -822,7 +822,8 @@ bool zerobus_stream_get_unacked_records_async(struct CZerobusStream *stream,
                                               struct CResult *result);
 
 /**
- * Free a CRecordArray returned by zerobus_stream_get_unacked_records
+ * Free a CRecordArray returned by zerobus_stream_get_unacked_records or
+ * zerobus_multiplexed_stream_get_unacked_records
  */
 void zerobus_free_record_array(struct CRecordArray array);
 
@@ -1036,6 +1037,12 @@ void zerobus_multiplexed_stream_ingest_json_records_nowait(struct CZerobusMultip
 
 /**
  * Wait until the record or batch behind `message_id` is acknowledged.
+ *
+ * Returns false with `result` set if the sub-stream that owns `message_id`
+ * fails or the wait exceeds `flush_timeout_ms`. A failure on another
+ * sub-stream does not fail this wait. Pass only IDs returned by a successful
+ * ingest on this same stream; -1, -2, and IDs from another stream are not
+ * valid input and may fail or wait on an unrelated record.
  *
  * For high throughput, prefer one `zerobus_multiplexed_stream_flush` after an
  * ingest loop over waiting on every message ID.

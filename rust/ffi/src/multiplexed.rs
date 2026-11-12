@@ -665,6 +665,12 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_nowait(
 
 /// Wait until the record or batch behind `message_id` is acknowledged.
 ///
+/// Returns false with `result` set if the sub-stream that owns `message_id`
+/// fails or the wait exceeds `flush_timeout_ms`. A failure on another
+/// sub-stream does not fail this wait. Pass only IDs returned by a successful
+/// ingest on this same stream; -1, -2, and IDs from another stream are not
+/// valid input and may fail or wait on an unrelated record.
+///
 /// For high throughput, prefer one `zerobus_multiplexed_stream_flush` after an
 /// ingest loop over waiting on every message ID.
 #[no_mangle]
