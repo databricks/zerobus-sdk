@@ -607,6 +607,7 @@ fn partial_open_failure_frees_shared_headers_provider_once() {
     expect_permanent_failure(&mut result, "zerobus_sdk_create_multiplexed_stream");
 
     wait_until("user_data is freed", || provider.frees() >= 1);
+    std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
     zerobus_sdk_free(sdk);
 }
@@ -653,6 +654,9 @@ fn free_with_pending_nowait_keeps_mux_alive_until_task_ends() {
     zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
     expect_success(&mut result, "ingest_json_record_nowait");
     zerobus_multiplexed_stream_free(mux);
+    // Teardown would release the provider asynchronously, so give a wrongly
+    // dropped mux time to do it before checking that it didn't.
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(provider.frees(), 0, "the pending task keeps the mux alive");
     assert_eq!(runtime.block_on(server.get_write_count()), 1);
 
@@ -660,6 +664,7 @@ fn free_with_pending_nowait_keeps_mux_alive_until_task_ends() {
     wait_until("the task's reference releases the provider", || {
         provider.frees() >= 1
     });
+    std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
     zerobus_sdk_free(sdk);
 }

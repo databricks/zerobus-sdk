@@ -1303,6 +1303,8 @@ mod multiplexed_tests {
         // `test_sdk()` points at 127.0.0.1:1, so every sub-stream open fails.
         let sdk = test_sdk();
         let mut options = json_options();
+        // Fail on the first connect error instead of retrying it.
+        options.recovery = false;
         options.ack_on_ack = Some(noop_ack);
         options.ack_user_data =
             (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
@@ -1316,6 +1318,7 @@ mod multiplexed_tests {
         wait_until("OAuth create drops the ack callback", || {
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
         });
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
             1
@@ -1345,6 +1348,7 @@ mod multiplexed_tests {
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
                 && FREES.load(Ordering::SeqCst) - frees_before >= 1
         });
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
             1
