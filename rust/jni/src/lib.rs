@@ -8,6 +8,7 @@ mod async_bridge;
 mod callbacks;
 mod class_cache;
 mod errors;
+mod federated_auth;
 mod headers_provider;
 mod options;
 mod runtime;

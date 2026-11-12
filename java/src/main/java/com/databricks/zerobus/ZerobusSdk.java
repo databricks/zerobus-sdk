@@ -1039,6 +1039,19 @@ public class ZerobusSdk implements AutoCloseable {
       HeadersProvider headersProvider,
       Object options,
       int formatCode) {
+    if (headersProvider instanceof FederatedAuthHeadersProvider) {
+      FederatedToken token = ((FederatedAuthHeadersProvider) headersProvider).token();
+      return nativeCreateStreamWithFederatedAuth(
+          sdkHandle,
+          tableName,
+          descriptorProto,
+          avroSchemaJson,
+          token.getIdpTokenSupplier(),
+          token.getClientId(),
+          token.getCacheIdentity(),
+          options,
+          formatCode);
+    }
     if (headersProvider == null) {
       return nativeCreateStream(
           sdkHandle,
@@ -1070,6 +1083,17 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       HeadersProvider headersProvider,
       Object options) {
+    if (headersProvider instanceof FederatedAuthHeadersProvider) {
+      FederatedToken token = ((FederatedAuthHeadersProvider) headersProvider).token();
+      return nativeCreateArrowStreamWithFederatedAuth(
+          sdkHandle,
+          tableName,
+          arrowSchema,
+          token.getIdpTokenSupplier(),
+          token.getClientId(),
+          token.getCacheIdentity(),
+          options);
+    }
     if (headersProvider == null) {
       return nativeCreateArrowStream(
           sdkHandle, tableName, arrowSchema, clientId, clientSecret, options);
@@ -1112,6 +1136,17 @@ public class ZerobusSdk implements AutoCloseable {
       Object options,
       int formatCode);
 
+  private native CompletableFuture<Long> nativeCreateStreamWithFederatedAuth(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String avroSchemaJson,
+      IdpTokenSupplier idpTokenSupplier,
+      String federatedClientId,
+      String cacheIdentity,
+      Object options,
+      int formatCode);
+
   private native CompletableFuture<Long> nativeCreateArrowStream(
       long sdkHandle,
       String tableName,
@@ -1127,5 +1162,14 @@ public class ZerobusSdk implements AutoCloseable {
       String clientId,
       String clientSecret,
       HeadersProvider headersProvider,
+      Object options);
+
+  private native CompletableFuture<Long> nativeCreateArrowStreamWithFederatedAuth(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      IdpTokenSupplier idpTokenSupplier,
+      String federatedClientId,
+      String cacheIdentity,
       Object options);
 }
