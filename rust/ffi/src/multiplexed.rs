@@ -334,8 +334,9 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
 ///
 /// Call `zerobus_multiplexed_stream_close` first to flush pending records;
 /// freeing an open stream abandons them. Background `_nowait` tasks keep the
-/// stream alive until they finish. Must not run concurrently with any other
-/// call on `mux`, and `mux` must not be used afterwards.
+/// stream alive only until they have queued their records; those records are
+/// then abandoned too. Must not run concurrently with any other call on `mux`,
+/// and `mux` must not be used afterwards.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedStream) {
     ffi_guard(ptr::null_mut(), (), move || {
