@@ -357,8 +357,11 @@ pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedS
 ///
 /// A failed call did not queue the record, and it will not be returned by
 /// `zerobus_multiplexed_stream_get_unacked_records`. If
-/// `zerobus_multiplexed_stream_is_closed` is false, retry it; otherwise send
-/// it, together with the unacknowledged records, on a new stream.
+/// `zerobus_multiplexed_stream_is_closed` is true, send it, together with the
+/// unacknowledged records, on a new stream. Otherwise retry it only when
+/// `result->is_retryable` is set; a non-retryable error on an open mux means
+/// the record itself is invalid (for example, its type does not match the
+/// stream).
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
     mux: *mut CZerobusMultiplexedStream,

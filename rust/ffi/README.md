@@ -120,15 +120,18 @@ if (mux == NULL) {
     return;
 }
 
-for (size_t i = 0; i < n; i++) {
+size_t i = 0;
+while (i < n) {
     /* Returns once queued; do not wait for each record. */
     r = (CResult){0};
     zerobus_multiplexed_stream_ingest_proto_record(mux, rec[i], rec_len[i], &r);
-    if (!r.success) {
-        /* rec[i] was not queued: retry it while the mux is open. */
-        zerobus_free_error_message(r.error_message);
-        if (zerobus_multiplexed_stream_is_closed(mux)) break;
-    }
+    if (r.success) { i++; continue; }
+    /* rec[i] was not queued. */
+    bool retryable = r.is_retryable;
+    zerobus_free_error_message(r.error_message);
+    if (zerobus_multiplexed_stream_is_closed(mux)) break;
+    if (!retryable) { reject_record(i++); continue; }  /* the record is invalid */
+    /* Retryable while the mux is open: back off, then try rec[i] again. */
 }
 
 r = (CResult){0};
@@ -136,12 +139,11 @@ bool ok = zerobus_multiplexed_stream_flush(mux, &r);  /* wait once for every ack
 if (!ok) zerobus_free_error_message(r.error_message);
 r = (CResult){0};
 ok = zerobus_multiplexed_stream_close(mux, &r) && ok;
-if (!ok) {
-    zerobus_free_error_message(r.error_message);
+if (!ok) zerobus_free_error_message(r.error_message);
+if (!ok || i < n) {
     r = (CResult){0};
     CRecordArray unacked = zerobus_multiplexed_stream_get_unacked_records(mux, &r);
-    /* Re-send unacked.records (and any record that failed to ingest)
-       on a new stream. */
+    /* Re-send unacked.records, then rec[i..n), on a new stream. */
     zerobus_free_record_array(unacked);
     zerobus_free_error_message(r.error_message);
 }
@@ -153,7 +155,10 @@ zerobus_multiplexed_stream_free(mux);
   `zerobus_multiplexed_stream_wait_for_message_id` on the same stream. An
   empty batch returns -2 with `r.success` set; -2 is not a message ID.
 - A failed ingest call queued nothing, and its records will not come back from
-  `zerobus_multiplexed_stream_get_unacked_records`.
+  `zerobus_multiplexed_stream_get_unacked_records`. Retry it only when
+  `r.is_retryable` is set and the mux is still open. A non-retryable error on
+  an open mux means the record itself is invalid; once the mux is closed,
+  re-send it on a new stream.
 - A batch call sends the whole batch to one sub-stream. To use every
   sub-stream, send at least `stream_count` batches.
 - For JSON, pass options with `record_type = 2` and a NULL descriptor. NULL

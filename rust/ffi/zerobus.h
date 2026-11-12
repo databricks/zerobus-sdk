@@ -939,8 +939,11 @@ void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
  *
  * A failed call did not queue the record, and it will not be returned by
  * `zerobus_multiplexed_stream_get_unacked_records`. If
- * `zerobus_multiplexed_stream_is_closed` is false, retry it; otherwise send
- * it, together with the unacknowledged records, on a new stream.
+ * `zerobus_multiplexed_stream_is_closed` is true, send it, together with the
+ * unacknowledged records, on a new stream. Otherwise retry it only when
+ * `result->is_retryable` is set; a non-retryable error on an open mux means
+ * the record itself is invalid (for example, its type does not match the
+ * stream).
  */
 int64_t zerobus_multiplexed_stream_ingest_proto_record(struct CZerobusMultiplexedStream *mux,
                                                        const uint8_t *data,
