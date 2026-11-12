@@ -3,10 +3,16 @@
 //! A [`GrpcChannelSource`] hands out the channel for gRPC streams. Before it
 //! reuses a channel, it reads the TLS settings again and opens a new channel if
 //! they changed, so rotated certificates reach a shared channel and recovery
-//! attempts, not only new dedicated channels.
+//! attempts, not only new dedicated channels. Until a call on the new channel
+//! reaches the server, the source keeps the channel it replaced, and goes back
+//! to it when the new channel fails first.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 
+use tonic::body::Body;
+use tonic::codegen::{http, BoxFuture, Service};
 use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
 
@@ -15,17 +21,153 @@ use crate::proxy::{self, ConnectorFactory};
 use crate::tls_config::{ResolvedTls, TlsFingerprint};
 use crate::{TlsConfig, ZerobusError, ZerobusResult};
 
+/// The gRPC client that streams use.
+pub(crate) type GrpcClient = ZerobusClient<TrackedChannel>;
+
 pub(crate) struct GrpcChannelSource {
     endpoint: String,
     sdk_identifier: Arc<str>,
     tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
-    current: tokio::sync::Mutex<Option<OpenChannel>>,
+    /// Counts failed calls across this source's channels, to order the failures.
+    failures: Arc<AtomicU64>,
+    channels: Mutex<Option<Channels>>,
 }
 
+/// The open channels of a source.
+struct Channels {
+    /// The channel opened with the newest TLS settings.
+    current: OpenChannel,
+    /// A channel that reached the server, kept until `current` does too.
+    previous: Option<OpenChannel>,
+    /// Whether the switch back to `previous` was logged.
+    fallback_logged: bool,
+}
+
+#[derive(Clone)]
 struct OpenChannel {
-    client: ZerobusClient<Channel>,
+    client: GrpcClient,
     tls: TlsFingerprint,
+    health: Arc<ChannelHealth>,
+}
+
+/// What the calls on one channel showed.
+#[derive(Debug)]
+struct ChannelHealth {
+    failures: Arc<AtomicU64>,
+    /// Whether any call got a response from the server.
+    reached_server: AtomicBool,
+    /// The number of the latest finished call in the source's count of failed
+    /// calls, if it failed without a response. 0 if it got one, or before any
+    /// call finished.
+    last_failure: AtomicU64,
+}
+
+impl ChannelHealth {
+    fn new(failures: Arc<AtomicU64>) -> Self {
+        Self {
+            failures,
+            reached_server: AtomicBool::new(false),
+            last_failure: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, reached_server: bool) {
+        if reached_server {
+            self.reached_server.store(true, Ordering::Relaxed);
+            self.last_failure.store(0, Ordering::Relaxed);
+        } else {
+            let failure = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+            self.last_failure.store(failure, Ordering::Relaxed);
+        }
+    }
+
+    fn reached_server(&self) -> bool {
+        self.reached_server.load(Ordering::Relaxed)
+    }
+
+    fn last_failure(&self) -> u64 {
+        self.last_failure.load(Ordering::Relaxed)
+    }
+}
+
+/// A channel that records whether each call got a response from the server.
+///
+/// A response with an error status still counts: the server answered, so the
+/// TLS handshake worked. Under TLS 1.3 the server checks the client certificate
+/// after the client considers the handshake done, so connecting alone doesn't
+/// show that the server accepts the certificate. The first call does.
+#[derive(Clone, Debug)]
+pub(crate) struct TrackedChannel {
+    channel: Channel,
+    health: Arc<ChannelHealth>,
+}
+
+impl Service<http::Request<Body>> for TrackedChannel {
+    type Response = http::Response<Body>;
+    type Error = tonic::transport::Error;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.channel.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        let response = self.channel.call(request);
+        let health = Arc::clone(&self.health);
+        Box::pin(async move {
+            let response = response.await;
+            health.record(response.is_ok());
+            response
+        })
+    }
+}
+
+impl Channels {
+    /// Returns the current channel, unless it failed more recently than the
+    /// previous one. While both fail, the two take turns.
+    fn choose(&mut self) -> OpenChannel {
+        if let Some(previous) = &self.previous {
+            if self.current.health.reached_server() {
+                info!("The gRPC channel with the new TLS settings reached the server; dropping the previous channel");
+                self.previous = None;
+            } else if self.current.health.last_failure() > previous.health.last_failure() {
+                if !self.fallback_logged {
+                    warn!("The gRPC channel with the new TLS settings failed before reaching the server; using the previous channel until the TLS settings change or the previous channel fails too");
+                    self.fallback_logged = true;
+                }
+                return previous.clone();
+            }
+        }
+        self.current.clone()
+    }
+
+    /// Returns a channel for the TLS material `tls`, if one is open.
+    fn reuse(&mut self, tls: TlsFingerprint) -> Option<OpenChannel> {
+        if self.current.tls != tls {
+            if self.previous.as_ref()?.tls != tls {
+                return None;
+            }
+            // The settings went back to the material of the channel that reached the server.
+            self.current = self.previous.take()?;
+        }
+        Some(self.choose())
+    }
+
+    /// Makes `opened` the current channel, unless another call already opened a
+    /// channel with the same material.
+    fn replace(&mut self, opened: OpenChannel) -> OpenChannel {
+        if self.current.tls != opened.tls {
+            info!("TLS settings changed; opened a new gRPC channel");
+            let replaced = std::mem::replace(&mut self.current, opened);
+            // A channel that never reached the server is no better than the new one.
+            if replaced.health.reached_server() {
+                self.previous = Some(replaced);
+            }
+            self.fallback_logged = false;
+        }
+        self.choose()
+    }
 }
 
 impl GrpcChannelSource {
@@ -40,7 +182,8 @@ impl GrpcChannelSource {
             sdk_identifier,
             tls_config,
             connector_factory,
-            current: tokio::sync::Mutex::new(None),
+            failures: Arc::new(AtomicU64::new(0)),
+            channels: Mutex::new(None),
         }
     }
 
@@ -50,43 +193,60 @@ impl GrpcChannelSource {
     /// the TLS settings again and open a new channel if they changed. If the
     /// settings can't be read or applied at that point, the current channel is
     /// kept, so a broken rotation doesn't take down a channel that still works.
-    pub(crate) async fn client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        let mut current = self.current.lock().await;
-        if let Some(open) = current.as_ref() {
-            let (tls, client) = (open.tls, open.client.clone());
-            return match self.reopen_if_changed(tls) {
-                Ok(None) => Ok(client),
-                Ok(Some(reopened)) => {
-                    info!("TLS settings changed; opening a new gRPC channel");
-                    let client = reopened.client.clone();
-                    *current = Some(reopened);
-                    Ok(client)
-                }
-                Err(err) => {
+    /// A new channel replaces one that reached the server only once a call on
+    /// it reaches the server too.
+    pub(crate) async fn client(&self) -> ZerobusResult<GrpcClient> {
+        self.acquire().await.map(|open| open.client)
+    }
+
+    async fn acquire(&self) -> ZerobusResult<OpenChannel> {
+        match self.open_if_changed().await {
+            Ok(open) => Ok(open),
+            Err(err) => match self.lock().as_mut() {
+                Some(channels) => {
                     warn!(error = %err, "Keeping the current gRPC channel: cannot use the current TLS settings");
-                    Ok(client)
+                    Ok(channels.choose())
                 }
-            };
+                None => Err(err),
+            },
         }
-
-        let settings = self.tls_config.tls_settings()?;
-        let opened = self.open(&settings.resolve()?)?;
-        let client = opened.client.clone();
-        *current = Some(opened);
-        Ok(client)
     }
 
-    fn reopen_if_changed(&self, tls: TlsFingerprint) -> ZerobusResult<Option<OpenChannel>> {
+    // The settings are read before taking the lock, so a slow certificate
+    // volume doesn't hold up other streams that share this source.
+    async fn open_if_changed(&self) -> ZerobusResult<OpenChannel> {
         let settings = self.tls_config.tls_settings()?;
-        let resolved = settings.resolve()?;
-        if resolved.fingerprint() == tls {
-            return Ok(None);
+        let resolved = settings.resolve_off_runtime().await?;
+        let tls = resolved.fingerprint();
+        if let Some(open) = self
+            .lock()
+            .as_mut()
+            .and_then(|channels| channels.reuse(tls))
+        {
+            return Ok(open);
         }
-        self.open(&resolved).map(Some)
+
+        let opened = self.open(&resolved, tls)?;
+        let mut channels = self.lock();
+        Ok(match channels.as_mut() {
+            Some(channels) => channels.replace(opened),
+            None => {
+                *channels = Some(Channels {
+                    current: opened.clone(),
+                    previous: None,
+                    fallback_logged: false,
+                });
+                opened
+            }
+        })
     }
 
-    fn open(&self, tls: &ResolvedTls<'_>) -> ZerobusResult<OpenChannel> {
-        let endpoint = tls.apply(base_endpoint(&self.endpoint, &self.sdk_identifier)?)?;
+    fn lock(&self) -> MutexGuard<'_, Option<Channels>> {
+        self.channels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn open(&self, resolved: &ResolvedTls<'_>, tls: TlsFingerprint) -> ZerobusResult<OpenChannel> {
+        let endpoint = resolved.apply(base_endpoint(&self.endpoint, &self.sdk_identifier)?)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
         let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
         let channel = match proxy_connector {
@@ -94,11 +254,17 @@ impl GrpcChannelSource {
             None => endpoint.connect_lazy(),
         };
 
+        let health = Arc::new(ChannelHealth::new(Arc::clone(&self.failures)));
+        let tracked = TrackedChannel {
+            channel,
+            health: Arc::clone(&health),
+        };
         Ok(OpenChannel {
-            client: ZerobusClient::new(channel)
+            client: ZerobusClient::new(tracked)
                 .max_decoding_message_size(usize::MAX)
                 .max_encoding_message_size(usize::MAX),
-            tls: tls.fingerprint(),
+            tls,
+            health,
         })
     }
 }
@@ -114,8 +280,7 @@ pub(crate) fn base_endpoint(endpoint: &str, sdk_identifier: &str) -> ZerobusResu
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     use super::*;
     use crate::TlsSettings;
@@ -169,8 +334,12 @@ mod tests {
         )
     }
 
-    async fn current_fingerprint(source: &GrpcChannelSource) -> TlsFingerprint {
-        source.current.lock().await.as_ref().unwrap().tls
+    fn current_fingerprint(source: &GrpcChannelSource) -> TlsFingerprint {
+        source.lock().as_ref().unwrap().current.tls
+    }
+
+    fn has_previous(source: &GrpcChannelSource) -> bool {
+        source.lock().as_ref().unwrap().previous.is_some()
     }
 
     #[tokio::test]
@@ -179,10 +348,10 @@ mod tests {
         let source = source(Arc::clone(&tls));
 
         source.client().await.unwrap();
-        let first = current_fingerprint(&source).await;
+        let first = current_fingerprint(&source);
         source.client().await.unwrap();
 
-        assert_eq!(current_fingerprint(&source).await, first);
+        assert_eq!(current_fingerprint(&source), first);
         // Each call reads the settings, so a change would be noticed.
         assert_eq!(tls.calls.load(Ordering::SeqCst), 2);
     }
@@ -192,12 +361,12 @@ mod tests {
         let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
         let source = source(Arc::clone(&tls));
         source.client().await.unwrap();
-        let first = current_fingerprint(&source).await;
+        let first = current_fingerprint(&source);
 
         tls.set(Ok(settings_for("b.example.com")));
         source.client().await.unwrap();
 
-        assert_ne!(current_fingerprint(&source).await, first);
+        assert_ne!(current_fingerprint(&source), first);
     }
 
     #[tokio::test]
@@ -205,14 +374,14 @@ mod tests {
         let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
         let source = source(Arc::clone(&tls));
         source.client().await.unwrap();
-        let first = current_fingerprint(&source).await;
+        let first = current_fingerprint(&source);
 
         tls.set(Err(ZerobusError::InvalidArgument(
             "cannot read TLS file".to_string(),
         )));
 
         assert!(source.client().await.is_ok());
-        assert_eq!(current_fingerprint(&source).await, first);
+        assert_eq!(current_fingerprint(&source), first);
     }
 
     #[tokio::test]
@@ -220,13 +389,121 @@ mod tests {
         let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
         let source = source(Arc::clone(&tls));
         source.client().await.unwrap();
-        let first = current_fingerprint(&source).await;
+        let first = current_fingerprint(&source);
 
         // Trusts no CA, so applying the settings fails.
         tls.set(Ok(TlsSettings::new().without_native_roots()));
 
         assert!(source.client().await.is_ok());
-        assert_eq!(current_fingerprint(&source).await, first);
+        assert_eq!(current_fingerprint(&source), first);
+    }
+
+    /// Rotates from a channel that reached the server to one that has not been
+    /// used yet, and returns the two.
+    async fn rotate_from_a_working_channel(
+        tls: &SwitchableTlsConfig,
+        source: &GrpcChannelSource,
+    ) -> (OpenChannel, OpenChannel) {
+        let working = source.acquire().await.unwrap();
+        working.health.record(true);
+
+        tls.set(Ok(settings_for("b.example.com")));
+        let rotated = source.acquire().await.unwrap();
+        assert_ne!(
+            rotated.tls, working.tls,
+            "the first call after a change must try the new channel"
+        );
+        (working, rotated)
+    }
+
+    #[tokio::test]
+    async fn client_goes_back_to_the_previous_channel_when_the_new_one_fails_first() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        rotated.health.record(false);
+
+        // The files haven't changed again, so later calls keep using the channel that works.
+        for _ in 0..2 {
+            let next = source.acquire().await.unwrap();
+            assert_eq!(next.tls, working.tls);
+            next.health.record(true);
+        }
+        assert_eq!(current_fingerprint(&source), rotated.tls);
+    }
+
+    #[tokio::test]
+    async fn client_drops_the_previous_channel_once_the_new_one_reaches_the_server() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        rotated.health.record(true);
+
+        assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
+        assert!(!has_previous(&source));
+    }
+
+    #[tokio::test]
+    async fn client_tries_the_new_channel_again_when_the_previous_one_fails_too() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        rotated.health.record(false);
+        let fallback = source.acquire().await.unwrap();
+        assert_eq!(fallback.tls, working.tls);
+
+        // While both fail, the channel that failed longer ago goes next.
+        fallback.health.record(false);
+        let retried = source.acquire().await.unwrap();
+        assert_eq!(retried.tls, rotated.tls);
+        retried.health.record(false);
+        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+    }
+
+    #[tokio::test]
+    async fn client_reuses_the_previous_channel_when_the_settings_change_back() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (working, _) = rotate_from_a_working_channel(&tls, &source).await;
+
+        tls.set(Ok(settings_for("a.example.com")));
+
+        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+        assert_eq!(current_fingerprint(&source), working.tls);
+        assert!(!has_previous(&source));
+    }
+
+    #[tokio::test]
+    async fn client_keeps_the_working_channel_across_more_than_one_failed_rotation() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+        rotated.health.record(false);
+
+        tls.set(Ok(settings_for("c.example.com")));
+        let rotated_again = source.acquire().await.unwrap();
+        assert_ne!(rotated_again.tls, working.tls);
+        rotated_again.health.record(false);
+
+        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+    }
+
+    #[tokio::test]
+    async fn client_keeps_no_previous_channel_that_never_reached_the_server() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let never_worked = source.acquire().await.unwrap();
+        never_worked.health.record(false);
+
+        tls.set(Ok(settings_for("b.example.com")));
+        let rotated = source.acquire().await.unwrap();
+        rotated.health.record(false);
+
+        assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
+        assert!(!has_previous(&source));
     }
 
     #[tokio::test]
@@ -237,7 +514,7 @@ mod tests {
         let err = source.client().await.unwrap_err();
 
         assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
-        assert!(source.current.lock().await.is_none());
+        assert!(source.lock().is_none());
     }
 
     /// The first open runs inside the stream's retry loop, so an endpoint or a
