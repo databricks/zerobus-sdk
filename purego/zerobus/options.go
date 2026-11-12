@@ -18,6 +18,8 @@ type sdkConfig struct {
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 	connectionPerStream       bool
+	// insecureForTesting disables TLS on the data-plane connection. TESTING ONLY.
+	insecureForTesting bool
 }
 
 func defaultSDKConfig() sdkConfig {

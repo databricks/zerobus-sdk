@@ -38,6 +38,11 @@
 
 ### Internal Changes
 
+- `WithInsecureTransportForTesting` selects a plaintext (non-TLS) data-plane
+  connection for the Layer-1 conformance test harness. It is gated behind the
+  `testing` build tag (build with `-tags testing`) and sends tokens and data in
+  plaintext, so it must never be used against a real endpoint. This mirrors the
+  testing-only no-TLS path the other SDKs gate behind their `testing` feature.
 - Generalize the stream core's durability model so one implementation serves both
   the atomic proto and JSON protocols and the record-count protocol the Arrow
   Flight path needs: acknowledgments are tracked as cumulative durability units,
