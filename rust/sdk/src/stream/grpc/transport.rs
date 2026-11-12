@@ -19,15 +19,14 @@
 //! differences so the sender/receiver tasks never mention a concrete RPC.
 
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 
 use crate::databricks::zerobus::ephemeral_stream_request::Payload as EphemeralRequestPayload;
 use crate::databricks::zerobus::ephemeral_stream_response::Payload as EphemeralResponsePayload;
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse,
 };
+use crate::grpc_channel::GrpcClient;
 use crate::grpc_status::GrpcStatus;
 use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, RecordType, ZerobusError, ZerobusResult};
 
@@ -358,7 +357,7 @@ pub(super) fn make_outbound(kind: &GrpcConnectionMode) -> OutboundConnection {
 /// both normalized connection halves.
 pub(super) async fn open_rpc(
     outbound: OutboundConnection,
-    channel: &mut ZerobusClient<Channel>,
+    channel: &mut GrpcClient,
     metadata: tonic::metadata::MetadataMap,
 ) -> ZerobusResult<(OutboundSink, InboundStream)> {
     match outbound {

@@ -55,13 +55,23 @@ async fn ingest_one_record(
 
 /// Opens a stream on `sdk`, ingests one record, and closes the stream.
 async fn ingest_one_record_with(sdk: &ZerobusSdk) -> Result<(), Box<dyn std::error::Error>> {
+    ingest_one_record_with_retries(sdk, 0).await
+}
+
+/// Like [`ingest_one_record_with`], with `retries` stream creation retries.
+async fn ingest_one_record_with_retries(
+    sdk: &ZerobusSdk,
+    retries: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = sdk
         .stream_builder()
         .table(TABLE_NAME)
         .headers_provider(Arc::new(TestHeadersProvider::default()))
         .json()
         .max_inflight_requests(10)
-        .recovery(false)
+        .recovery(retries > 0)
+        .recovery_retries(retries)
+        .recovery_backoff_ms(100)
         .build()
         .await?;
 
@@ -141,7 +151,7 @@ async fn client_identity_opens_a_stream_and_a_missing_identity_does_not(
 /// A mutual TLS mock server that trusts one client identity, and identity files
 /// that start out holding an identity the server doesn't trust.
 struct RotationFixture {
-    _mock_server: MockZerobusServer,
+    mock_server: MockZerobusServer,
     server_url: String,
     server_ca_pem: Vec<u8>,
     _dir: tempfile::TempDir,
@@ -149,40 +159,30 @@ struct RotationFixture {
     key_path: PathBuf,
     trusted_cert_pem: String,
     trusted_key_pem: String,
+    untrusted_cert_pem: String,
+    untrusted_key_pem: String,
 }
 
 impl RotationFixture {
-    async fn start(stream_id: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Starts the server, which serves one stream per id in `stream_ids`.
+    async fn start(stream_ids: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
         let trusted = generate_simple_self_signed(vec!["zerobus-test-client".to_string()])?;
         let untrusted = generate_simple_self_signed(vec!["zerobus-untrusted-client".to_string()])?;
         let trusted_cert_pem = trusted.cert.pem();
 
         let (mock_server, server_url, server_ca_pem) =
             start_mock_mtls_server(trusted_cert_pem.as_bytes()).await?;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: stream_id.to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
 
         let dir = tempfile::tempdir()?;
         let cert_path = dir.path().join("tls.crt");
         let key_path = dir.path().join("tls.key");
-        std::fs::write(&cert_path, untrusted.cert.pem())?;
-        std::fs::write(&key_path, untrusted.key_pair.serialize_pem())?;
+        let untrusted_cert_pem = untrusted.cert.pem();
+        let untrusted_key_pem = untrusted.key_pair.serialize_pem();
+        std::fs::write(&cert_path, &untrusted_cert_pem)?;
+        std::fs::write(&key_path, &untrusted_key_pem)?;
 
-        Ok(Self {
-            _mock_server: mock_server,
+        let fixture = Self {
+            mock_server,
             server_url,
             server_ca_pem,
             _dir: dir,
@@ -190,7 +190,11 @@ impl RotationFixture {
             key_path,
             trusted_cert_pem,
             trusted_key_pem: trusted.key_pair.serialize_pem(),
-        })
+            untrusted_cert_pem,
+            untrusted_key_pem,
+        };
+        fixture.serve_streams(stream_ids).await;
+        Ok(fixture)
     }
 
     fn settings(&self) -> TlsSettings {
@@ -206,6 +210,47 @@ impl RotationFixture {
         std::fs::write(&self.cert_path, &self.trusted_cert_pem)?;
         std::fs::write(&self.key_path, &self.trusted_key_pem)
     }
+
+    /// Replaces the identity files with an identity the server rejects.
+    fn rotate_to_untrusted(&self) -> std::io::Result<()> {
+        std::fs::write(&self.cert_path, &self.untrusted_cert_pem)?;
+        std::fs::write(&self.key_path, &self.untrusted_key_pem)
+    }
+
+    /// Serves one stream per id, each acknowledging one record, in place of the
+    /// responses served so far.
+    async fn serve_streams(&self, stream_ids: &[&str]) {
+        let responses = stream_ids
+            .iter()
+            .flat_map(|stream_id| {
+                [
+                    MockResponse::CreateStream {
+                        stream_id: stream_id.to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ]
+            })
+            .collect();
+        self.mock_server
+            .inject_responses(TABLE_NAME, responses)
+            .await;
+    }
+}
+
+fn shared_channel_sdk(
+    server_url: &str,
+    tls_config: Arc<dyn TlsConfig>,
+) -> Result<ZerobusSdk, Box<dyn std::error::Error>> {
+    Ok(ZerobusSdk::builder()
+        .endpoint(server_url)
+        .unity_catalog_url("https://mock-uc.com")
+        .tls_config(tls_config)
+        .connection_per_stream(false)
+        .build()?)
 }
 
 /// Opens a stream on `sdk` with the original identity files, which the server
@@ -241,7 +286,7 @@ async fn replaced_client_identity_files_take_effect_on_the_next_stream(
     setup_tracing();
     info!("Starting replaced_client_identity_files_take_effect_on_the_next_stream");
 
-    let fixture = RotationFixture::start("mtls_rotation_stream").await?;
+    let fixture = RotationFixture::start(&["mtls_rotation_stream"]).await?;
     let sdk = sdk_over(&fixture.server_url, fixture.settings())?;
 
     assert_next_stream_picks_up_rotation(&sdk, &fixture).await
@@ -256,15 +301,138 @@ async fn shared_channel_picks_up_replaced_identity_files_on_the_next_stream(
     setup_tracing();
     info!("Starting shared_channel_picks_up_replaced_identity_files_on_the_next_stream");
 
-    let fixture = RotationFixture::start("mtls_shared_rotation_stream").await?;
-    let sdk = ZerobusSdk::builder()
-        .endpoint(&fixture.server_url)
-        .unity_catalog_url("https://mock-uc.com")
-        .tls_config(Arc::new(fixture.settings()))
-        .connection_per_stream(false)
-        .build()?;
+    let fixture = RotationFixture::start(&["mtls_shared_rotation_stream"]).await?;
+    let sdk = shared_channel_sdk(&fixture.server_url, Arc::new(fixture.settings()))?;
 
     assert_next_stream_picks_up_rotation(&sdk, &fixture).await
+}
+
+/// The server rejects the identity in the replaced files. The first attempt of
+/// the next stream fails on the new channel, and the retry goes back to the
+/// shared channel that reached the server.
+#[tokio::test]
+async fn shared_channel_keeps_working_when_the_server_rejects_replaced_identity_files(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!("Starting shared_channel_keeps_working_when_the_server_rejects_replaced_identity_files");
+
+    let fixture = RotationFixture::start(&["before_rotation", "after_rotation"]).await?;
+    fixture.rotate()?;
+    let sdk = shared_channel_sdk(&fixture.server_url, Arc::new(fixture.settings()))?;
+    tokio::time::timeout(Duration::from_secs(30), ingest_one_record_with(&sdk))
+        .await
+        .map_err(|_| "the stream before rotation timed out")??;
+
+    fixture.rotate_to_untrusted()?;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        ingest_one_record_with_retries(&sdk, 3),
+    )
+    .await
+    .map_err(|_| "the stream after rotation timed out")??;
+    Ok(())
+}
+
+/// The replaced CA file doesn't trust the server, so the new channel can't
+/// connect, and the retry goes back to the shared channel that reached the server.
+#[tokio::test]
+async fn shared_channel_keeps_working_when_a_replaced_ca_file_does_not_trust_the_server(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!(
+        "Starting shared_channel_keeps_working_when_a_replaced_ca_file_does_not_trust_the_server"
+    );
+
+    let fixture = RotationFixture::start(&["before_rotation", "after_rotation"]).await?;
+    let ca_path = fixture.cert_path.with_file_name("ca.pem");
+    std::fs::write(&ca_path, &fixture.server_ca_pem)?;
+    let settings = TlsSettings::new()
+        .without_native_roots()
+        .with_ca_certificate_file(&ca_path)
+        .with_domain_name("localhost")
+        .with_client_identity_pem(
+            fixture.trusted_cert_pem.clone(),
+            fixture.trusted_key_pem.clone(),
+        );
+    let sdk = shared_channel_sdk(&fixture.server_url, Arc::new(settings))?;
+    tokio::time::timeout(Duration::from_secs(30), ingest_one_record_with(&sdk))
+        .await
+        .map_err(|_| "the stream before rotation timed out")??;
+
+    let other_ca = generate_simple_self_signed(vec!["zerobus-other-ca".to_string()])?;
+    std::fs::write(&ca_path, other_ca.cert.pem())?;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        ingest_one_record_with_retries(&sdk, 3),
+    )
+    .await
+    .map_err(|_| "the stream after rotation timed out")??;
+    Ok(())
+}
+
+/// A stream with its own channel recovers after the identity files were
+/// replaced with one the server rejects: the first recovery attempt fails on
+/// the new channel, and the next one reconnects over the channel the stream had.
+#[tokio::test]
+async fn recovery_keeps_the_stream_channel_when_the_server_rejects_replaced_identity_files(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!("Starting recovery_keeps_the_stream_channel_when_the_server_rejects_replaced_identity_files");
+
+    let fixture = RotationFixture::start(&[]).await?;
+    fixture.rotate()?;
+    fixture
+        .mock_server
+        .inject_responses(
+            TABLE_NAME,
+            vec![
+                MockResponse::CreateStream {
+                    stream_id: "before_rotation".to_string(),
+                    delay_ms: 0,
+                },
+                MockResponse::Error {
+                    status: tonic::Status::unavailable("server restarting"),
+                    delay_ms: 0,
+                },
+                MockResponse::CreateStream {
+                    stream_id: "after_recovery".to_string(),
+                    delay_ms: 0,
+                },
+                MockResponse::RecordAck {
+                    ack_up_to_offset: 0,
+                    delay_ms: 0,
+                },
+            ],
+        )
+        .await;
+    let sdk = sdk_over(&fixture.server_url, fixture.settings())?;
+    let build = sdk
+        .stream_builder()
+        .table(TABLE_NAME)
+        .headers_provider(Arc::new(TestHeadersProvider::default()))
+        .json()
+        .max_inflight_requests(10)
+        .recovery(true)
+        .recovery_retries(3)
+        .recovery_backoff_ms(100)
+        .build();
+    let mut stream = tokio::time::timeout(Duration::from_secs(30), build)
+        .await
+        .map_err(|_| "opening the stream timed out")??;
+
+    fixture.rotate_to_untrusted()?;
+
+    // The server fails the stream on this record, and recovery sends it again.
+    stream
+        .ingest_record_offset(r#"{"id": 1, "message": "mtls fallback test"}"#.to_string())
+        .await?;
+    tokio::time::timeout(Duration::from_secs(30), stream.flush())
+        .await
+        .map_err(|_| "flushing after recovery timed out")??;
+    stream.close().await?;
+    Ok(())
 }
 
 /// Replaces the identity files the first time a stream asks for headers. An
@@ -295,7 +463,7 @@ async fn recovery_picks_up_identity_files_replaced_during_a_failed_attempt(
     setup_tracing();
     info!("Starting recovery_picks_up_identity_files_replaced_during_a_failed_attempt");
 
-    let fixture = Arc::new(RotationFixture::start("mtls_recovery_stream").await?);
+    let fixture = Arc::new(RotationFixture::start(&["mtls_recovery_stream"]).await?);
     let sdk = sdk_over(&fixture.server_url, fixture.settings())?;
     let headers_provider = Arc::new(RotateOnFirstHeaders {
         fixture: Arc::clone(&fixture),
@@ -355,7 +523,7 @@ async fn stream_creation_retries_identity_files_caught_mid_rotation(
     setup_tracing();
     info!("Starting stream_creation_retries_identity_files_caught_mid_rotation");
 
-    let fixture = Arc::new(RotationFixture::start("mtls_mid_rotation_stream").await?);
+    let fixture = Arc::new(RotationFixture::start(&["mtls_mid_rotation_stream"]).await?);
     // Only the certificate is replaced yet, so it doesn't match the key.
     std::fs::write(&fixture.cert_path, &fixture.trusted_cert_pem)?;
     let tls_config = Arc::new(RotateOnSecondTlsCall {

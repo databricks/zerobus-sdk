@@ -621,11 +621,15 @@ The SDK reads the files each time it opens a channel, and before it reuses a gRP
 
 If the SDK can't read or use the files before it reuses a gRPC channel, it keeps the channel it has and logs a warning.
 
+It also keeps the gRPC channel it replaced until a call on the new channel reaches the server. If the new channel fails first, for example because the server rejects the new client certificate or the new CA doesn't trust the server, the SDK goes back to the replaced channel and logs a warning. It tries the new channel again when the files change again or when the replaced channel fails too. The first channel of a stream and every Arrow Flight connection have no channel to go back to, so they use the files as they are.
+
+The SDK reads the files on a blocking thread, so a slow volume doesn't stall the async runtime.
+
 Replace the certificate and the key together: write both into a new directory, then switch a symbolic link to that directory, as Kubernetes secret volumes do. The SDK reads the certificate again after the key, and reads the pair again if the certificate changed in between. Use absolute paths, because the SDK resolves a relative path when it opens the channel.
 
 A path that is missing, unreadable, not a regular file, or larger than 1 MiB gives a non-retryable `ZerobusError::InvalidArgument` with the path. Content read from a file that the SDK can't use, such as a file with no certificate or a certificate that doesn't match the key, gives a retryable `ZerobusError::ChannelCreationError`, because a rotation may be in progress. When the settings mix files and PEM data and the SDK can't tell which input it can't use, the error is retryable.
 
-For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
+For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed, keeping the replaced gRPC channel as described above. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
 
 A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
