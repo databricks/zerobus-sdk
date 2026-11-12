@@ -53,14 +53,14 @@ pub(crate) fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<Callback
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct SendPtr<T>(*mut T);
+struct SendPtr<T>(*mut T);
 
 impl<T> SendPtr<T> {
-    pub(crate) const fn new(ptr: *mut T) -> Self {
+    const fn new(ptr: *mut T) -> Self {
         Self(ptr)
     }
 
-    pub(crate) const fn get(self) -> *mut T {
+    const fn get(self) -> *mut T {
         self.0
     }
 }

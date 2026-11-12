@@ -861,12 +861,16 @@ struct CStreamConfigurationOptions zerobus_get_default_config(void);
  * records round-robin across them. Use it when one stream is the throughput
  * bottleneck and global ordering is not required: order is preserved only
  * within each sub-stream. Construction is all-or-nothing; if any sub-stream
- * fails to open, the opened ones are closed and NULL is returned.
+ * fails to open, the opened ones are closed and NULL is returned. Sub-stream
+ * opens are staggered by a random delay of up to 1 second each, so creation
+ * takes up to that much longer than a single stream.
  *
- * `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto (NULL for
- * JSON streams). `options` may be NULL for defaults. Its
- * `max_inflight_requests` is a budget for the whole mux, divided evenly
- * across sub-streams, so it must be at least `stream_count`.
+ * `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto, required
+ * for protobuf streams. `options` may be NULL for defaults, which select
+ * protobuf records; for JSON, pass options with `record_type = 2` and a NULL
+ * descriptor. `max_inflight_requests` in `options` is a budget for the whole
+ * mux: each sub-stream gets `max_inflight_requests / stream_count` (any
+ * remainder is unused), so it must be at least `stream_count`.
  *
  * Ack callbacks in `options` receive message IDs rather than offsets. Each
  * sub-stream delivers its callbacks on its own background task, so callbacks
@@ -892,6 +896,10 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream(struct C
  * Behaves like `zerobus_sdk_create_multiplexed_stream`, but authenticates
  * with `headers_callback`. One provider is shared by every sub-stream; calls
  * into `headers_callback` are serialized, so it need not be reentrant.
+ * Because sub-streams wait for each other's calls, time spent in the callback
+ * counts against every sub-stream's `recovery_timeout_ms` open deadline. With
+ * many sub-streams, a slow callback can make late ones time out, failing the
+ * whole create, so keep it fast (for example, return a cached token).
  *
  * Ownership of `user_data` follows
  * `zerobus_sdk_create_stream_with_headers_provider`: once this function is
@@ -915,7 +923,8 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_hea
  *
  * Call `zerobus_multiplexed_stream_close` first to flush pending records;
  * freeing an open stream abandons them. Background `_nowait` tasks keep the
- * stream alive until they finish.
+ * stream alive until they finish. Must not run concurrently with any other
+ * call on `mux`, and `mux` must not be used afterwards.
  */
 void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
 
@@ -927,6 +936,11 @@ void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
  * seconds) when the chosen sub-stream is at capacity. Returns -1 on error.
  * Valid message IDs can be negative, so check `result->success` rather than
  * the sign of the return value.
+ *
+ * A failed call did not queue the record, and it will not be returned by
+ * `zerobus_multiplexed_stream_get_unacked_records`. If
+ * `zerobus_multiplexed_stream_is_closed` is false, retry it; otherwise send
+ * it, together with the unacknowledged records, on a new stream.
  */
 int64_t zerobus_multiplexed_stream_ingest_proto_record(struct CZerobusMultiplexedStream *mux,
                                                        const uint8_t *data,
@@ -946,8 +960,15 @@ int64_t zerobus_multiplexed_stream_ingest_json_record(struct CZerobusMultiplexed
  * Ingest a batch of protobuf-encoded records into a single sub-stream.
  *
  * The whole batch lands on one sub-stream, and the returned message ID covers
- * all of it. Returns -1 on error and -2 for an empty batch. Valid message IDs
- * can be negative, so check `result->success` rather than the sign.
+ * all of it. To spread load across sub-streams, send at least `stream_count`
+ * batches rather than one large one.
+ *
+ * Returns -1 on error. For an empty batch it returns -2 with
+ * `result->success` set; -2 is not a message ID, so do not wait on it.
+ * Valid message IDs can be negative, so check `result->success` rather than
+ * the sign. Errors follow
+ * `zerobus_multiplexed_stream_ingest_proto_record`: a failed call queued none
+ * of the batch.
  */
 int64_t zerobus_multiplexed_stream_ingest_proto_records(struct CZerobusMultiplexedStream *mux,
                                                         const uint8_t *const *records,
@@ -1042,9 +1063,10 @@ bool zerobus_multiplexed_stream_close(struct CZerobusMultiplexedStream *mux,
                                       struct CResult *result);
 
 /**
- * Returns whether the mux is closed, either explicitly or because a
- * sub-stream failed. Also returns true while a close is in progress and for
- * a null handle.
+ * Returns whether the mux is closed, either explicitly or because an ingest,
+ * flush, or wait call on it observed a sub-stream failure. A failure that no
+ * call has observed yet does not set it. Also returns true while a close is
+ * in progress and for a null handle.
  */
 bool zerobus_multiplexed_stream_is_closed(struct CZerobusMultiplexedStream *mux);
 

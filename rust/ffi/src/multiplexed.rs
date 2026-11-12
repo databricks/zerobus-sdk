@@ -6,6 +6,14 @@
 //! that sub-stream's offset. Pass it back to
 //! `zerobus_multiplexed_stream_wait_for_message_id`; do not compare or order
 //! message IDs, and only use them with the stream that produced them.
+//!
+//! Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
+//! run concurrently on the same handle from any thread. `_free` must not
+//! overlap any other call on that handle.
+//!
+//! Ack and headers callbacks run on the FFI's runtime threads. They must not
+//! call `zerobus_multiplexed_stream_*` functions, and must not block on a
+//! thread that is inside one: the call would fail or deadlock.
 
 use crate::common::*;
 use crate::stream::{
@@ -25,7 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 
 /// Returned by ingest calls on failure; `result` carries the error.
 const INGEST_ERROR: i64 = -1;
-/// Returned by batch ingest calls when the batch is empty.
+/// Returned by batch ingest calls when the batch is empty. Not a message ID.
 const EMPTY_BATCH: i64 = -2;
 
 /// Opaque handle for a multiplexed stream. Created by
@@ -98,11 +106,13 @@ unsafe fn decode_descriptor(
 }
 
 /// Copies a borrowed byte buffer; a null pointer is accepted only when `len` is 0.
-unsafe fn copy_bytes(data: *const u8, len: usize) -> Vec<u8> {
+unsafe fn copy_bytes(data: *const u8, len: usize) -> Result<Vec<u8>, &'static str> {
     if len == 0 {
-        Vec::new()
+        Ok(Vec::new())
+    } else if data.is_null() {
+        Err("Invalid data pointer")
     } else {
-        std::slice::from_raw_parts(data, len).to_vec()
+        Ok(std::slice::from_raw_parts(data, len).to_vec())
     }
 }
 
@@ -111,12 +121,12 @@ unsafe fn copy_proto_records(
     records: *const *const u8,
     record_lens: *const usize,
     num_records: usize,
-) -> Vec<EncodedRecord> {
+) -> Result<Vec<EncodedRecord>, &'static str> {
     let ptrs = std::slice::from_raw_parts(records, num_records);
     let lens = std::slice::from_raw_parts(record_lens, num_records);
     ptrs.iter()
         .zip(lens)
-        .map(|(&data, &len)| EncodedRecord::Proto(copy_bytes(data, len)))
+        .map(|(&data, &len)| copy_bytes(data, len).map(EncodedRecord::Proto))
         .collect()
 }
 
@@ -202,12 +212,16 @@ async fn build_mux_from_parts(
 /// records round-robin across them. Use it when one stream is the throughput
 /// bottleneck and global ordering is not required: order is preserved only
 /// within each sub-stream. Construction is all-or-nothing; if any sub-stream
-/// fails to open, the opened ones are closed and NULL is returned.
+/// fails to open, the opened ones are closed and NULL is returned. Sub-stream
+/// opens are staggered by a random delay of up to 1 second each, so creation
+/// takes up to that much longer than a single stream.
 ///
-/// `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto (NULL for
-/// JSON streams). `options` may be NULL for defaults. Its
-/// `max_inflight_requests` is a budget for the whole mux, divided evenly
-/// across sub-streams, so it must be at least `stream_count`.
+/// `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto, required
+/// for protobuf streams. `options` may be NULL for defaults, which select
+/// protobuf records; for JSON, pass options with `record_type = 2` and a NULL
+/// descriptor. `max_inflight_requests` in `options` is a budget for the whole
+/// mux: each sub-stream gets `max_inflight_requests / stream_count` (any
+/// remainder is unused), so it must be at least `stream_count`.
 ///
 /// Ack callbacks in `options` receive message IDs rather than offsets. Each
 /// sub-stream delivers its callbacks on its own background task, so callbacks
@@ -261,6 +275,10 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
 /// Behaves like `zerobus_sdk_create_multiplexed_stream`, but authenticates
 /// with `headers_callback`. One provider is shared by every sub-stream; calls
 /// into `headers_callback` are serialized, so it need not be reentrant.
+/// Because sub-streams wait for each other's calls, time spent in the callback
+/// counts against every sub-stream's `recovery_timeout_ms` open deadline. With
+/// many sub-streams, a slow callback can make late ones time out, failing the
+/// whole create, so keep it fast (for example, return a cached token).
 ///
 /// Ownership of `user_data` follows
 /// `zerobus_sdk_create_stream_with_headers_provider`: once this function is
@@ -316,7 +334,8 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
 ///
 /// Call `zerobus_multiplexed_stream_close` first to flush pending records;
 /// freeing an open stream abandons them. Background `_nowait` tasks keep the
-/// stream alive until they finish.
+/// stream alive until they finish. Must not run concurrently with any other
+/// call on `mux`, and `mux` must not be used afterwards.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedStream) {
     ffi_guard(ptr::null_mut(), (), move || {
@@ -335,6 +354,11 @@ pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedS
 /// seconds) when the chosen sub-stream is at capacity. Returns -1 on error.
 /// Valid message IDs can be negative, so check `result->success` rather than
 /// the sign of the return value.
+///
+/// A failed call did not queue the record, and it will not be returned by
+/// `zerobus_multiplexed_stream_get_unacked_records`. If
+/// `zerobus_multiplexed_stream_is_closed` is false, retry it; otherwise send
+/// it, together with the unacknowledged records, on a new stream.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
     mux: *mut CZerobusMultiplexedStream,
@@ -355,7 +379,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
             }
         };
 
-        let record = EncodedRecord::Proto(unsafe { copy_bytes(data, data_len) });
+        let record = match unsafe { copy_bytes(data, data_len) } {
+            Ok(bytes) => EncodedRecord::Proto(bytes),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return INGEST_ERROR;
+            }
+        };
         let res = RUNTIME.block_on(async { handle.read().await.ingest_record(record).await });
         complete(result, res.map(|id| id.raw()), INGEST_ERROR)
     })
@@ -394,8 +424,15 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record(
 /// Ingest a batch of protobuf-encoded records into a single sub-stream.
 ///
 /// The whole batch lands on one sub-stream, and the returned message ID covers
-/// all of it. Returns -1 on error and -2 for an empty batch. Valid message IDs
-/// can be negative, so check `result->success` rather than the sign.
+/// all of it. To spread load across sub-streams, send at least `stream_count`
+/// batches rather than one large one.
+///
+/// Returns -1 on error. For an empty batch it returns -2 with
+/// `result->success` set; -2 is not a message ID, so do not wait on it.
+/// Valid message IDs can be negative, so check `result->success` rather than
+/// the sign. Errors follow
+/// `zerobus_multiplexed_stream_ingest_proto_record`: a failed call queued none
+/// of the batch.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records(
     mux: *mut CZerobusMultiplexedStream,
@@ -417,7 +454,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records(
             }
         };
 
-        let batch = unsafe { copy_proto_records(records, record_lens, num_records) };
+        let batch = match unsafe { copy_proto_records(records, record_lens, num_records) } {
+            Ok(batch) => batch,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return INGEST_ERROR;
+            }
+        };
         let res = RUNTIME.block_on(async { handle.read().await.ingest_records(batch).await });
         complete(
             result,
@@ -509,7 +552,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
             return;
         }
 
-        let record = EncodedRecord::Proto(unsafe { copy_bytes(data, data_len) });
+        let record = match unsafe { copy_bytes(data, data_len) } {
+            Ok(bytes) => EncodedRecord::Proto(bytes),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return;
+            }
+        };
         unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
         write_success_result(result);
     })
@@ -565,7 +614,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_nowait(
             return;
         }
         if num_records > 0 {
-            let batch = unsafe { copy_proto_records(records, record_lens, num_records) };
+            let batch = match unsafe { copy_proto_records(records, record_lens, num_records) } {
+                Ok(batch) => batch,
+                Err(e) => {
+                    write_error_result(result, e, false);
+                    return;
+                }
+            };
             unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
         }
         write_success_result(result);
@@ -681,9 +736,10 @@ pub extern "C" fn zerobus_multiplexed_stream_close(
     })
 }
 
-/// Returns whether the mux is closed, either explicitly or because a
-/// sub-stream failed. Also returns true while a close is in progress and for
-/// a null handle.
+/// Returns whether the mux is closed, either explicitly or because an ingest,
+/// flush, or wait call on it observed a sub-stream failure. A failure that no
+/// call has observed yet does not set it. Also returns true while a close is
+/// in progress and for a null handle.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_is_closed(
     mux: *mut CZerobusMultiplexedStream,
