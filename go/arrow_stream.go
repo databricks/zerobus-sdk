@@ -159,6 +159,39 @@ func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
 	return stream, nil
 }
 
+// CreateArrowStreamWithFederatedToken creates an Arrow Flight stream authenticated
+// by external-IdP token federation (for example Microsoft Entra ID). See
+// FederatedToken and CreateStreamWithFederatedToken.
+//
+// schemaIpcBytes must be Arrow IPC stream bytes containing only the schema (no data batches).
+func (s *ZerobusSdk) CreateArrowStreamWithFederatedToken(
+	tableName string,
+	schemaIpcBytes []byte,
+	token *FederatedToken,
+	options *ArrowStreamConfigurationOptions,
+) (*ZerobusArrowStream, error) {
+	if s.ptr == nil {
+		return nil, &ZerobusError{Message: "SDK has been freed", IsRetryable: false}
+	}
+	if token == nil {
+		return nil, &ZerobusError{Message: "FederatedToken must not be nil", IsRetryable: false}
+	}
+	if len(schemaIpcBytes) == 0 {
+		return nil, &ZerobusError{Message: "schemaIpcBytes must not be empty", IsRetryable: false}
+	}
+
+	ptr, err := sdkCreateArrowStreamWithFederatedToken(s.ptr, tableName, schemaIpcBytes, token, options)
+	if err != nil {
+		return nil, err
+	}
+
+	stream := &ZerobusArrowStream{ptr: ptr}
+	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
+		st.Close() //nolint:errcheck
+	})
+	return stream, nil
+}
+
 // IngestBatch queues one Arrow RecordBatch for ingestion and returns its logical offset.
 // ipcBytes must be Arrow IPC stream bytes containing exactly one RecordBatch.
 // Use WaitForOffset or Flush to wait for server acknowledgment.

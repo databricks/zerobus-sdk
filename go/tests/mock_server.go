@@ -66,6 +66,16 @@ type MockZerobusServer struct {
 	// Last user-agent observed on an incoming stream.
 	lastUserAgent      string
 	lastUserAgentMutex sync.RWMutex
+
+	// Authentication headers observed on each incoming stream, in order.
+	streamAuths      []StreamAuth
+	streamAuthsMutex sync.Mutex
+}
+
+// StreamAuth is the authentication metadata one incoming stream carried.
+type StreamAuth struct {
+	Authorization string
+	TableName     string
 }
 
 // NewMockZerobusServer creates a new mock server
@@ -103,6 +113,13 @@ func (m *MockZerobusServer) GetWriteCount() uint64 {
 	return m.writeCount
 }
 
+// GetStreamAuths returns the authentication headers of every stream received so far.
+func (m *MockZerobusServer) GetStreamAuths() []StreamAuth {
+	m.streamAuthsMutex.Lock()
+	defer m.streamAuthsMutex.Unlock()
+	return append([]StreamAuth(nil), m.streamAuths...)
+}
+
 // GetLastUserAgent returns the most recent user-agent observed on a stream.
 func (m *MockZerobusServer) GetLastUserAgent() string {
 	m.lastUserAgentMutex.RLock()
@@ -135,6 +152,10 @@ func (m *MockZerobusServer) Reset() {
 	m.lastUserAgentMutex.Lock()
 	m.lastUserAgent = ""
 	m.lastUserAgentMutex.Unlock()
+
+	m.streamAuthsMutex.Lock()
+	m.streamAuths = nil
+	m.streamAuthsMutex.Unlock()
 }
 
 // EphemeralStream implements the bidirectional streaming RPC
@@ -145,6 +166,18 @@ func (m *MockZerobusServer) EphemeralStream(stream pb.Zerobus_EphemeralStreamSer
 			m.lastUserAgent = values[0]
 			m.lastUserAgentMutex.Unlock()
 		}
+		first := func(key string) string {
+			if values := incoming.Get(key); len(values) > 0 {
+				return values[0]
+			}
+			return ""
+		}
+		m.streamAuthsMutex.Lock()
+		m.streamAuths = append(m.streamAuths, StreamAuth{
+			Authorization: first("authorization"),
+			TableName:     first("x-databricks-zerobus-table-name"),
+		})
+		m.streamAuthsMutex.Unlock()
 	}
 
 	// Send initial headers/metadata to signal readiness
