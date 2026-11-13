@@ -339,7 +339,9 @@ impl HeadersProvider for OAuthHeadersProvider {
 /// refresh. The supplier is invoked only when a fresh Databricks token must be
 /// minted (a cache miss or a proactive refresh), never on every request, so a
 /// cache hit incurs neither the callback nor the exchange. A caller that truly
-/// holds a static token can wrap it in a trivial closure.
+/// holds a static token can wrap it in a trivial closure. An empty or
+/// whitespace-only token is rejected with a non-retryable
+/// [`ZerobusError::InvalidArgument`] and never sent.
 pub type IdpTokenCallback =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ZerobusResult<String>> + Send>> + Send + Sync>;
 
@@ -528,6 +530,13 @@ impl HeadersProvider for FederatedTokenProvider {
             // Only reached on a cache miss/refresh: fetch the current IdP token,
             // then exchange it for a Zerobus-scoped Databricks token.
             let idp_token = self.idp_token_supplier.invoke().await?;
+            // An empty subject_token can never be exchanged, and retrying won't
+            // fix the supplier, so fail permanently instead of sending it.
+            if idp_token.trim().is_empty() {
+                return Err(ZerobusError::InvalidArgument(
+                    "IdP token supplier returned an empty token".to_string(),
+                ));
+            }
             DefaultTokenFactory::fetch_exchanged_token(
                 &self.unity_catalog_url,
                 &self.table_name,

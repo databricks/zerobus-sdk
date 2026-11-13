@@ -13,6 +13,10 @@ name = "oauth_token_tests"
 path = "src/oauth_token_tests.rs"
 
 [[test]]
+name = "federated_token_tests"
+path = "src/federated_token_tests.rs"
+
+[[test]]
 name = "proxy_tests"
 path = "src/proxy_tests.rs"
 

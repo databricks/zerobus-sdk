@@ -8,6 +8,10 @@
 
 ### Bug Fixes
 
+- A `FederatedToken` whose `idp_token_supplier` returns an empty or
+  whitespace-only string now fails `create_stream` with `NonRetriableException`.
+  Before, the SDK sent an empty `subject_token` to the token endpoint.
+
 ### Documentation
 
 - Documented the GCP workspace URL and Zerobus endpoint formats. The formats for
@@ -19,6 +23,11 @@
   falling back to placeholder values.
 
 ### Internal Changes
+
+- Added end-to-end tests for `FederatedToken` that call `create_stream` against a
+  mock token endpoint, covering the exchange request in both modes, token caching
+  and isolation, refresh, supplier errors, and token-endpoint errors, on the sync
+  and async SDKs.
 
 ### Breaking Changes
 
