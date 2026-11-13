@@ -30,8 +30,9 @@ class FederatedToken:
 
     Args:
         idp_token_supplier: A zero-arg callable returning the current external
-            IdP token as a string, synchronous (``str``) or asynchronous (an
-            awaitable of ``str``; async requires the async SDK). Called only when
+            IdP token as a non-empty string, synchronous (``str``) or asynchronous
+            (an awaitable of ``str``; async requires the async SDK). An empty
+            token fails with ``NonRetriableException``. Called only when
             a fresh token must be minted, not on every request. Keep a *synchronous*
             callback fast: it runs inline and holds the interpreter (GIL) while it
             blocks, so a slow blocking one stalls the SDK for the whole IdP
