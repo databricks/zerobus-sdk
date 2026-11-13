@@ -348,6 +348,43 @@ mod stream_initialization_and_basic_lifecycle_tests {
         Ok(())
     }
 
+    /// The first channel open runs inside the retry loop, so an endpoint that
+    /// isn't a valid URI must fail at once instead of after the recovery retries.
+    #[tokio::test]
+    async fn test_invalid_endpoint_fails_stream_creation_without_retrying(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_invalid_endpoint_fails_stream_creation_without_retrying");
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint("https://bad host.example.com")
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
+
+        let build = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .recovery_backoff_ms(60_000)
+            .build();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+            .await
+            .map_err(|_| "stream creation retried an invalid endpoint")?
+            .err()
+            .expect("an invalid endpoint must fail stream creation");
+
+        assert!(
+            matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_retriable_error_without_recovery_during_stream_creation(
     ) -> Result<(), Box<dyn std::error::Error>> {

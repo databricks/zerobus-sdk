@@ -59,6 +59,7 @@ mod client_warnings;
 mod default_token_factory;
 mod dynamic_proto;
 mod errors;
+mod grpc_channel;
 mod grpc_status;
 mod headers_provider;
 mod landing_zone;

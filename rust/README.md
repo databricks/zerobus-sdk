@@ -604,28 +604,29 @@ let sdk = ZerobusSdk::builder()
 
 Call `without_native_roots()` to trust only the CA certificates that you add. You must add at least one PEM certificate. The SDK rejects a CA entry that holds no certificate, such as a private key file. Use `with_domain_name(...)` to check the server certificate against a different domain name.
 
-If the SDK cannot use a CA certificate or a client identity that you set, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
+If the SDK cannot use a CA certificate or a client identity that you pass as PEM data, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
 
-To read the certificates again for each new channel, for example to rotate them, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel:
+To pick up certificates that rotate on disk, pass file paths instead of PEM data:
 
 ```rust
-use databricks_zerobus_ingest_sdk::{TlsConfig, TlsSettings, ZerobusResult};
-
-struct RotatingTlsConfig {
-    ca_path: std::path::PathBuf,
-}
-
-impl TlsConfig for RotatingTlsConfig {
-    fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
-        let ca_pem = std::fs::read(&self.ca_path).map_err(|e| {
-            databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
-                "Cannot read the CA certificate: {e}"
-            ))
-        })?;
-        Ok(TlsSettings::new().with_ca_certificate_pem(ca_pem))
-    }
-}
+let tls = TlsSettings::new()
+    .without_native_roots()
+    .with_ca_certificate_file("/etc/zerobus/ca.pem")
+    .with_client_identity_files("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key");
 ```
+
+The SDK reads the files each time it opens a channel, and before it reuses a gRPC channel. When the files changed, it opens a new channel, so replaced files take effect without a restart:
+
+- A gRPC stream gets its channel when it is created and before each recovery attempt. This holds for a dedicated channel per stream (the `connection_per_stream` default) and for a shared channel. A stream that doesn't reconnect keeps its connection, because certificates are only checked when a connection is set up.
+- An Arrow Flight stream opens a channel on every connection and reconnection.
+
+If the SDK can't read or use the files before it reuses a gRPC channel, it keeps the channel it has and logs a warning.
+
+Replace the certificate and the key together: write both into a new directory, then switch a symbolic link to that directory, as Kubernetes secret volumes do. The SDK reads the certificate again after the key, and reads the pair again if the certificate changed in between. Use absolute paths, because the SDK resolves a relative path when it opens the channel.
+
+A path that is missing, unreadable, not a regular file, or larger than 1 MiB gives a non-retryable `ZerobusError::InvalidArgument` with the path. Content read from a file that the SDK can't use, such as a file with no certificate or a certificate that doesn't match the key, gives a retryable `ZerobusError::ChannelCreationError`, because a rotation may be in progress. When the settings mix files and PEM data and the SDK can't tell which input it can't use, the error is retryable.
+
+For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
 
 A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
@@ -1373,16 +1374,17 @@ Auto-recovered if `recovery` is enabled:
 - Connection timeouts
 - Temporary server errors
 - Stream closed by server
+- `ChannelCreationError` - The SDK couldn't open a channel, for example while TLS certificate files are being replaced
 
 ### Non-Retryable Errors
 Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
+- `InvalidZerobusEndpointError` - The Zerobus endpoint isn't a valid URI
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `InvalidSchema` (Arrow Flight) - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
-- `ChannelCreationError` - Failed to establish TLS connection
 
 `Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
 require manual intervention. During initial stream setup only, if recovery is enabled
@@ -1805,7 +1807,9 @@ pub fn new() -> Self                                  // TLS with the system CA 
 pub fn plaintext() -> Self                            // No TLS (requires `testing` feature)
 pub fn without_native_roots(self) -> Self             // Trust only the CA certificates you add
 pub fn with_ca_certificate_pem(self, pem: impl Into<Vec<u8>>) -> Self
+pub fn with_ca_certificate_file(self, path: impl Into<PathBuf>) -> Self             // Read on every new channel
 pub fn with_client_identity_pem(self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self
+pub fn with_client_identity_files(self, cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self  // Read on every new channel
 pub fn with_domain_name(self, domain_name: impl Into<String>) -> Self
 ```
 
