@@ -5,9 +5,10 @@
 //! classloader cannot see the SDK classes.
 
 use crate::class_cache::{as_jclass, get_class_cache};
+use crate::federated_auth::{get_token_blocking, java_idp_token_supplier};
 use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
 use crate::runtime::{get_jvm, get_runtime};
-use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError};
+use databricks_zerobus_ingest_sdk::{FederatedTokenProvider, HeadersProvider, ZerobusError};
 use jni::objects::{JClass, JObject, JString};
 use jni::JNIEnv;
 use std::sync::Arc;
@@ -266,6 +267,105 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
             Ok(Ok(_)) => "second provider call returned unexpected headers".to_string(),
             Ok(Err(error)) => format!("second provider call failed: {error}"),
             Err(_) => "second provider call timed out".to_string(),
+        }
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Exercises `IdpTokenSupplier.getToken()` error classification on one native
+/// blocking thread. The Java supplier must, in order: throw a plain exception,
+/// return `"idp-token"`, throw `NonRetriableException`, throw a `java.lang.Error`,
+/// and return `null`.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestIdpTokenSupplierCallbacks<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    let supplier_ref = match env.new_global_ref(supplier) {
+        Ok(supplier_ref) => supplier_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        tokio::task::spawn_blocking(move || {
+            let first = get_token_blocking(supplier_ref.clone());
+            if !first.is_err_and(|error| {
+                error.is_retryable()
+                    && matches!(&error, ZerobusError::TokenFetchError(message) if message.contains("Java IdpTokenSupplier error"))
+            }) {
+                return "supplier exception was not a retryable token-fetch error".to_string();
+            }
+
+            let second = get_token_blocking(supplier_ref.clone());
+            if !second.is_ok_and(|token| token == "idp-token") {
+                return "supplier token was not returned".to_string();
+            }
+
+            let third = get_token_blocking(supplier_ref.clone());
+            if !third.is_err_and(|error| !error.is_retryable()) {
+                return "NonRetriableException was retryable".to_string();
+            }
+
+            let fourth = get_token_blocking(supplier_ref.clone());
+            if !fourth.is_err_and(|error| !error.is_retryable()) {
+                return "Java Error was retryable".to_string();
+            }
+
+            let fifth = get_token_blocking(supplier_ref);
+            if !fifth.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("getToken returned null"))
+            }) {
+                return "null token was not rejected clearly".to_string();
+            }
+
+            "OK".to_string()
+        })
+        .await
+        .unwrap_or_else(|error| format!("callback task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Drives a Java `IdpTokenSupplier` through the core's `FederatedTokenProvider`
+/// (the async bridge, not `get_token_blocking` directly). The supplier must throw
+/// `NonRetriableException("idp unavailable")`; the provider must surface that as a
+/// non-retryable error before attempting any token exchange.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFederatedProviderSupplierError<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    let supplier_ref = match env.new_global_ref(supplier) {
+        Ok(supplier_ref) => supplier_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        let provider = FederatedTokenProvider::new(
+            None,
+            java_idp_token_supplier(supplier_ref, "java:native-test".to_string()),
+            "catalog.schema.table".to_string(),
+            "1234567890".to_string(),
+            // Never contacted: the supplier fails before the exchange.
+            "http://127.0.0.1:9".to_string(),
+        );
+        match provider.get_headers().await {
+            Ok(_) => "provider returned headers despite supplier failure".to_string(),
+            Err(error) if error.is_retryable() => {
+                format!("supplier failure became retryable: {error}")
+            }
+            Err(error) if !error.to_string().contains("idp unavailable") => {
+                format!("supplier failure detail was lost: {error}")
+            }
+            Err(_) => "OK".to_string(),
         }
     });
 

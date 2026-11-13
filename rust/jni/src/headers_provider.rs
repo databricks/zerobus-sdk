@@ -239,12 +239,12 @@ fn java_call_error(env: &mut JNIEnv<'_>, method: &str, error: JniError) -> Zerob
     }
 }
 
-struct JavaException {
-    message: Option<String>,
-    non_retryable: bool,
+pub(crate) struct JavaException {
+    pub(crate) message: Option<String>,
+    pub(crate) non_retryable: bool,
 }
 
-fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
+pub(crate) fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
     let throwable = match env.exception_occurred() {
         Ok(throwable) => throwable,
         Err(_) => {
