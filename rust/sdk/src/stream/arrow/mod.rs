@@ -405,8 +405,10 @@ impl ZerobusArrowStream {
             }
         };
         // Keep auth errors globally non-retryable, but let initial setup refresh one
-        // stale credential when recovery has at least one retry in its budget.
-        let mut auth_retry_available = options.recovery_retries > 0;
+        // stale credential when recovery has at least one retry in its budget and the
+        // provider can actually refresh it.
+        let mut auth_retry_available =
+            options.recovery_retries > 0 && headers_provider.can_refresh();
         let should_retry = |e: &ZerobusError| {
             should_retry_initial_connection(e, options.recovery, &mut auth_retry_available)
         };

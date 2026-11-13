@@ -17,6 +17,8 @@ use std::time::Duration;
 
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
+#[cfg(feature = "pat-auth")]
+use crate::headers_provider::PatHeadersProvider;
 use crate::headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
 };
@@ -45,6 +47,10 @@ enum AuthConfig {
         client_id: Option<String>,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
+    #[cfg(feature = "pat-auth")]
+    PersonalAccessToken {
+        token: String,
+    },
     #[cfg(feature = "testing")]
     NoAuth,
 }
@@ -109,14 +115,20 @@ impl FormatConfig {
     }
 }
 
-const fn missing_auth_error() -> &'static str {
+// Lists `.personal_access_token()` in the missing-auth error only when that setter exists.
+#[cfg(feature = "pat-auth")]
+const PAT_AUTH_HINT: &str = ".personal_access_token(), ";
+#[cfg(not(feature = "pat-auth"))]
+const PAT_AUTH_HINT: &str = "";
+
+pub(super) fn missing_auth_error() -> String {
     #[cfg(feature = "testing")]
     {
-        "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
+        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}.headers_provider(), or .no_auth()")
     }
     #[cfg(not(feature = "testing"))]
     {
-        "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
+        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}or .headers_provider()")
     }
 }
 
@@ -171,6 +183,11 @@ impl<'a> ClientBuilderCore<'a> {
         self.auth = Some(AuthConfig::HeadersProvider(provider));
     }
 
+    #[cfg(feature = "pat-auth")]
+    pub(super) fn set_personal_access_token(&mut self, token: String) {
+        self.auth = Some(AuthConfig::PersonalAccessToken { token });
+    }
+
     #[cfg(feature = "testing")]
     pub(super) fn set_no_auth(&mut self) {
         self.auth = Some(AuthConfig::NoAuth);
@@ -182,6 +199,8 @@ impl<'a> ClientBuilderCore<'a> {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
             Some(AuthConfig::FederatedAuth { .. }) => "FederatedAuth",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
+            #[cfg(feature = "pat-auth")]
+            Some(AuthConfig::PersonalAccessToken { .. }) => "PersonalAccessToken",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
             None => "None",
@@ -210,7 +229,14 @@ impl<'a> ClientBuilderCore<'a> {
             ));
         }
         if self.auth.is_none() {
-            return Err(ZerobusError::InvalidArgument(missing_auth_error().into()));
+            return Err(ZerobusError::InvalidArgument(missing_auth_error()));
+        }
+        #[cfg(feature = "pat-auth")]
+        if matches!(&self.auth, Some(AuthConfig::PersonalAccessToken { token }) if token.is_empty())
+        {
+            return Err(ZerobusError::InvalidArgument(
+                "personal access token must not be empty".into(),
+            ));
         }
         Ok(())
     }
@@ -252,9 +278,13 @@ impl<'a> ClientBuilderCore<'a> {
                 )))
             }
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
+            #[cfg(feature = "pat-auth")]
+            Some(AuthConfig::PersonalAccessToken { token }) => Ok(Arc::new(
+                PatHeadersProvider::new(token.clone(), self.table_name.clone()),
+            )),
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
-            None => Err(ZerobusError::InvalidArgument(missing_auth_error().into())),
+            None => Err(ZerobusError::InvalidArgument(missing_auth_error())),
         }
     }
 }

@@ -229,6 +229,31 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Authenticate with a Databricks personal access token (PAT).
+    ///
+    /// **Private Preview:** PAT authentication for Zerobus requires server-side
+    /// enablement. Available behind the `pat-auth` feature.
+    ///
+    /// The PAT must be created with the `zerobus` API scope in the workspace that
+    /// the Zerobus endpoint belongs to. The SDK sends it as a bearer token and
+    /// cannot refresh it: once it expires or is revoked, creating or recovering a
+    /// stream fails with an authentication error. An empty token is rejected by
+    /// [`validate`](Self::validate) and the build methods.
+    ///
+    /// Not available for Arrow Flight streams (`build_arrow()`) yet: the server does
+    /// not accept a PAT there, so use [`oauth`](Self::oauth) or
+    /// [`headers_provider`](Self::headers_provider) for those. Because the token
+    /// cannot be refreshed, an authentication rejection while creating the stream is
+    /// not retried, unlike the one-shot refresh retry OAuth credentials get.
+    ///
+    /// Of this, [`oauth`](Self::oauth), [`federated_auth`](Self::federated_auth),
+    /// and [`headers_provider`](Self::headers_provider), the last call wins.
+    #[cfg(feature = "pat-auth")]
+    pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
+        self.core.set_personal_access_token(token.into());
+        self
+    }
+
     /// Authenticate with a custom headers provider.
     pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
         self.core.set_headers_provider(provider);
@@ -685,4 +710,4 @@ impl<'a> StreamBuilder<'a> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
