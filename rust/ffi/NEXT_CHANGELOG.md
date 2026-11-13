@@ -6,6 +6,18 @@
 
 ### New Features and Improvements
 
+- Added external-IdP token federation, for example with Microsoft Entra ID.
+  `zerobus_sdk_create_stream_with_federated_token` and
+  `zerobus_sdk_create_arrow_stream_with_federated_token` take an
+  `IdpTokenSupplierCallback` that returns the current IdP token (or an error and
+  whether it is retryable) as a `CIdpToken`. The SDK exchanges the token for a
+  Zerobus-scoped Databricks token (RFC 8693), caches it, and refreshes it before
+  it expires. A null `client_id` selects account-level federation; a non-null
+  one selects workload identity federation as that service principal.
+  `cache_identity` partitions the token cache per logical identity. Ownership of
+  `user_data` and `free_user_data` follows the headers-provider entry points
+  ([#1069](https://github.com/databricks/zerobus-sdk/issues/1069)).
+
 ### Bug Fixes
 
 - The library is now built with `rustls-webpki` 0.103.16 and `webpki-roots`
@@ -41,3 +53,8 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `CIdpToken`, `IdpTokenSupplierCallback`,
+  `zerobus_sdk_create_stream_with_federated_token`, and
+  `zerobus_sdk_create_arrow_stream_with_federated_token`. The change to
+  `zerobus.h` is additive.

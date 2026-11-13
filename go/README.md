@@ -22,6 +22,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
   - [Data Flow](#data-flow)
   - [Authentication Flow](#authentication-flow)
   - [Custom Authentication](#custom-authentication)
+  - [External-IdP Federation (e.g. Entra ID)](#external-idp-federation-eg-entra-id)
 - [Usage Guide](#usage-guide)
   - [1. Initialize the SDK](#1-initialize-the-sdk)
   - [2. Configure Authentication](#2-configure-authentication)
@@ -56,6 +57,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Static Linking** - Self-contained binaries with no runtime dependencies or LD_LIBRARY_PATH configuration
 - **High-throughput streaming ingestion** into Databricks Delta tables
 - **Automatic OAuth 2.0 authentication** with Unity Catalog
+- **External-IdP federation** - Authenticate with a Microsoft Entra ID (or other OIDC) token instead of a Databricks OAuth secret
 - **Simple JSON ingestion** - No code generation required for basic use cases
 - **Protocol Buffers support** for type-safe, efficient data encoding
 - **Batch ingestion** - Ingest multiple records at once for maximum throughput
@@ -417,6 +419,55 @@ func example(sdk *zerobus.ZerobusSdk, tableProps zerobus.TableProperties) error 
 - **Token caching**: Implement custom token refresh logic
 - **Alternative auth mechanisms**: Use different authentication providers
 - **Dynamic credentials**: Fetch credentials on-demand from secret managers
+
+### External-IdP Federation (e.g. Entra ID)
+
+Authenticate with a token from an external identity provider, such as Microsoft Entra ID, instead of a Databricks OAuth client secret. You supply the current IdP token through an `IdpTokenSupplier`. The SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token exchange), caches the exchanged token, and refreshes it before it expires. The supplier is called only when a token must be minted or refreshed, not per record.
+
+A federation policy must already be configured in Databricks. Two modes are supported:
+
+- **Account-level federation** (the default): no Databricks service principal. The token's subject resolves to an identity synced into Databricks, for example through automatic identity management.
+- **Workload identity federation** (`WithClientID`): authenticate as a Databricks service principal that has a federation policy and no secret.
+
+```go
+// Called only when the SDK must mint or refresh the Databricks token.
+fetchEntraIDToken := func() (string, error) {
+    // For example, use the Azure SDK's azidentity package or the client credentials grant.
+    return getTokenFromEntraID()
+}
+
+// Workload identity federation; omit WithClientID for account-level federation.
+token, err := zerobus.NewFederatedToken(fetchEntraIDToken, zerobus.WithClientID(spClientID))
+if err != nil {
+    log.Fatal(err)
+}
+
+stream, err := sdk.CreateStreamWithFederatedToken(
+    zerobus.TableProperties{TableName: "catalog.schema.table"},
+    token,
+    options,
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+
+for _, record := range records {
+    if _, err := stream.IngestRecordOffset(record); err != nil {
+        log.Fatal(err)
+    }
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
+```
+
+- Reuse one `FederatedToken` across streams for the same identity: streams created with the same instance share one exchanged token. Two instances never share a token.
+- The supplier must be safe for concurrent use. The SDK calls it from internal threads, including during stream recovery.
+- A returned error is retried like a failed OAuth token request. Return a `*ZerobusError` with `IsRetryable: false` (it may be wrapped) for a permanent failure that should stop recovery. A panic in the supplier is recovered and treated as a permanent failure.
+- Arrow Flight streams use `CreateArrowStreamWithFederatedToken`.
+
+See [`examples/json/federated`](examples/json/federated) for a runnable example.
 
 ## Usage Guide
 
@@ -809,6 +860,7 @@ The `examples/` directory contains complete, runnable examples organized by form
 **JSON Examples:**
 - **`examples/json/single/`** - Single record ingestion with JSON
 - **`examples/json/batch/`** - Batch ingestion with JSON
+- **`examples/json/federated/`** - JSON ingestion authenticated with external-IdP federation (Microsoft Entra ID)
 
 **Protocol Buffer Examples:**
 - **`examples/proto/single/`** - Single record ingestion with protobuf
@@ -1124,10 +1176,42 @@ stream, err := sdk.CreateStreamWithHeadersProvider(
 ```
 
 ```go
+func (sdk *ZerobusSdk) CreateStreamWithFederatedToken(
+    tableProps TableProperties,
+    token *FederatedToken,
+    options *StreamConfigurationOptions,
+) (*ZerobusStream, error)
+```
+
+Creates a new ingestion stream authenticated by external-IdP token federation (for example Microsoft Entra ID). See [External-IdP Federation](#external-idp-federation-eg-entra-id).
+
+```go
 func (sdk *ZerobusSdk) Free()
 ```
 
 Explicitly releases SDK resources. Called automatically by finalizer.
+
+### `FederatedToken`
+
+The federated identity for `CreateStreamWithFederatedToken` and `CreateArrowStreamWithFederatedToken`. Immutable and safe for concurrent use.
+
+```go
+func NewFederatedToken(supplier IdpTokenSupplier, opts ...FederatedTokenOption) (*FederatedToken, error)
+```
+
+Creates a `FederatedToken` for account-level federation, or workload identity federation with `WithClientID`. Returns an error if `supplier` is nil or an option is invalid.
+
+```go
+func WithClientID(clientID string) FederatedTokenOption
+```
+
+Selects workload identity federation as the Databricks service principal with the given client ID. The client ID must not be empty.
+
+```go
+type IdpTokenSupplier func() (string, error)
+```
+
+Returns the current external IdP token. Called only on a token cache miss or refresh, from internal SDK threads, so it must be safe for concurrent use. Errors are retryable unless the error is (or wraps) a `*ZerobusError` with `IsRetryable: false`.
 
 ### `ZerobusStream`
 
@@ -1485,6 +1569,15 @@ func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
     tableName string,
     schemaIpcBytes []byte,
     headersProvider HeadersProvider,
+    options *ArrowStreamConfigurationOptions,
+) (*ZerobusArrowStream, error)
+```
+
+```go
+func (s *ZerobusSdk) CreateArrowStreamWithFederatedToken(
+    tableName string,
+    schemaIpcBytes []byte,
+    token *FederatedToken,
     options *ArrowStreamConfigurationOptions,
 ) (*ZerobusArrowStream, error)
 ```

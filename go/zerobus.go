@@ -413,6 +413,63 @@ func (s *ZerobusSdk) CreateStreamWithHeadersProvider(
 	return stream, nil
 }
 
+// CreateStreamWithFederatedToken creates a new JSON or Protocol Buffer stream
+// authenticated by external-IdP token federation (for example Microsoft Entra ID)
+// instead of a Databricks OAuth client secret.
+//
+// The SDK calls the token's IdpTokenSupplier for the current IdP token, exchanges
+// it for a Zerobus-scoped Databricks token, caches the exchanged token, and
+// refreshes it before it expires. See FederatedToken.
+//
+// Parameters:
+//   - tableProps: Table properties including name and optional protobuf descriptor
+//   - token: The federated identity, from NewFederatedToken
+//   - options: Stream configuration options (nil for defaults)
+//
+// Example:
+//
+//	token, err := zerobus.NewFederatedToken(fetchEntraIDToken)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	stream, err := sdk.CreateStreamWithFederatedToken(
+//	    zerobus.TableProperties{TableName: "catalog.schema.table"},
+//	    token,
+//	    options,
+//	)
+func (s *ZerobusSdk) CreateStreamWithFederatedToken(
+	tableProps TableProperties,
+	token *FederatedToken,
+	options *StreamConfigurationOptions,
+) (*ZerobusStream, error) {
+	if s.ptr == nil {
+		return nil, &ZerobusError{Message: "SDK has been freed", IsRetryable: false}
+	}
+	if token == nil {
+		return nil, &ZerobusError{Message: "FederatedToken must not be nil", IsRetryable: false}
+	}
+
+	ptr, err := sdkCreateStreamWithFederatedToken(
+		s.ptr,
+		tableProps.TableName,
+		tableProps.DescriptorProto,
+		token,
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	stream := &ZerobusStream{ptr: ptr}
+
+	// Set up finalizer for automatic cleanup
+	runtime.SetFinalizer(stream, func(st *ZerobusStream) {
+		st.Close()
+	})
+
+	return stream, nil
+}
+
 // IngestRecord ingests a record into the stream and returns an acknowledgment.
 // This method blocks until the record is queued and the offset is available.
 //

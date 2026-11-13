@@ -11,6 +11,7 @@ releases/
 # Example binaries
 examples/json/single/json-single
 examples/json/batch/json-batch
+examples/json/federated/json-federated
 examples/proto/single/proto-single
 examples/proto/batch/proto-batch
 
