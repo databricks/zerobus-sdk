@@ -2,6 +2,7 @@
 
 use crate::arrow_c_data::{CArrowArray, CArrowSchema};
 use crate::common::*;
+use crate::federated::{federated_auth, CallbackIdpTokenSupplier, IdpTokenSupplierCallback};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use bytes::Bytes;
 use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
@@ -299,6 +300,92 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
             }
             Err(err) => {
                 write_error_result(result, &err, false);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Creates an Arrow Flight stream authenticated by external-IdP token
+/// federation (for example Microsoft Entra ID).
+///
+/// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the
+/// schema. `idp_token_callback`, `client_id`, and `cache_identity` follow
+/// `zerobus_sdk_create_stream_with_federated_token`, as does the ownership of
+/// `user_data` / `free_user_data`: once called the FFI owns `user_data` and
+/// invokes `free_user_data` exactly once on every path, possibly just after a
+/// failed create returns. The caller must never free `user_data` itself.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_arrow_stream_with_federated_token(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    schema_ipc_bytes: *const u8,
+    schema_ipc_len: usize,
+    idp_token_callback: IdpTokenSupplierCallback,
+    user_data: *mut std::ffi::c_void,
+    // Written inline so cbindgen emits a nullable C function pointer.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    client_id: *const c_char,
+    cache_identity: *const c_char,
+    options: *const CArrowStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CArrowStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        // INVARIANT: take ownership of `user_data` *before* any fallible work, so
+        // that the supplier's Drop frees it exactly once on every error path below.
+        let owner = CallbackIdpTokenSupplier::new(idp_token_callback, user_data, free_user_data);
+
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let auth = unsafe { federated_auth(owner, client_id, cache_identity)? };
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+
+            if schema_ipc_bytes.is_null() || schema_ipc_len == 0 {
+                return Err(ZerobusError::InvalidArgument(
+                    "Schema IPC bytes are required for Arrow stream".to_string(),
+                ));
+            }
+            let schema_bytes =
+                unsafe { std::slice::from_raw_parts(schema_ipc_bytes, schema_ipc_len) };
+            let schema = ipc_bytes_to_schema(schema_bytes)?;
+
+            let mut builder = sdk_ref
+                .stream_builder()
+                .table(table_name_str)
+                .federated_auth(auth.idp_token_supplier, auth.client_id)
+                .arrow(schema);
+            if !options.is_null() {
+                builder = apply_c_arrow_stream_options(builder, unsafe { &*options });
+            }
+
+            let stream = builder.build_arrow().await?;
+            Ok::<*mut CArrowStream, ZerobusError>(
+                Box::into_raw(Box::new(stream)) as *mut CArrowStream
+            )
+        });
+
+        match res {
+            Ok(ptr) => {
+                write_success_result(result);
+                ptr
+            }
+            Err(err) => {
+                // Keep the typed error so a transient IdP failure stays retryable.
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
                 ptr::null_mut()
             }
         }

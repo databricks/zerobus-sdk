@@ -90,6 +90,43 @@ typedef struct CResult {
 typedef struct CHeaders (*HeadersProviderCallback)(void *user_data);
 
 /**
+ * The result of an IdP token callback.
+ *
+ * On success set `token` and leave `error_message` null. On failure set
+ * `error_message` (and `is_retryable`) and leave `token` null. Both strings
+ * must be NUL-terminated and allocated with `zerobus_alloc_cstring` or
+ * `malloc`; the FFI takes ownership and frees them. If both are set, the error
+ * wins and both are freed.
+ */
+typedef struct CIdpToken {
+  /**
+   * The current external IdP token, or null on failure.
+   */
+  char *token;
+  /**
+   * A description of the failure, or null on success.
+   */
+  char *error_message;
+  /**
+   * Whether the failure is transient. A retryable failure is retried like a
+   * failed OAuth token request; a non-retryable one stops stream recovery.
+   * Ignored on success.
+   */
+  bool is_retryable;
+} CIdpToken;
+
+/**
+ * Function pointer type for the IdP token callback.
+ *
+ * Called only when the SDK must mint or refresh the exchanged Databricks token
+ * (a cache miss or a proactive refresh), never per request. It runs on an
+ * internal blocking thread, may run concurrently for streams on different
+ * tables, and may perform a network call, so it must be thread-safe. It must
+ * not unwind across the FFI boundary.
+ */
+typedef struct CIdpToken (*IdpTokenSupplierCallback)(void *user_data);
+
+/**
  * Opaque C ABI view of a canonical Arrow C Data Interface ArrowArray.
  */
 typedef struct CArrowArray {
@@ -302,6 +339,29 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
                                                                            void (*free_user_data)(void *user_data),
                                                                            const struct CArrowStreamConfigurationOptions *options,
                                                                            struct CResult *result);
+
+/**
+ * Creates an Arrow Flight stream authenticated by external-IdP token
+ * federation (for example Microsoft Entra ID).
+ *
+ * `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the
+ * schema. `idp_token_callback`, `client_id`, and `cache_identity` follow
+ * `zerobus_sdk_create_stream_with_federated_token`, as does the ownership of
+ * `user_data` / `free_user_data`: once called the FFI owns `user_data` and
+ * invokes `free_user_data` exactly once on every path, possibly just after a
+ * failed create returns. The caller must never free `user_data` itself.
+ */
+struct CArrowStream *zerobus_sdk_create_arrow_stream_with_federated_token(struct CZerobusSdk *sdk,
+                                                                          const char *table_name,
+                                                                          const uint8_t *schema_ipc_bytes,
+                                                                          uintptr_t schema_ipc_len,
+                                                                          IdpTokenSupplierCallback idp_token_callback,
+                                                                          void *user_data,
+                                                                          void (*free_user_data)(void *user_data),
+                                                                          const char *client_id,
+                                                                          const char *cache_identity,
+                                                                          const struct CArrowStreamConfigurationOptions *options,
+                                                                          struct CResult *result);
 
 /**
  * Frees an Arrow Flight stream instance.
@@ -603,6 +663,47 @@ bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *s
                                                            CreateStreamAsyncCallback callback,
                                                            void *callback_user_data,
                                                            struct CResult *result);
+
+/**
+ * Create a stream authenticated by external-IdP token federation (for example
+ * Microsoft Entra ID).
+ *
+ * The SDK calls `idp_token_callback` for the current IdP token, exchanges it
+ * for a Zerobus-scoped Databricks token (RFC 8693 token exchange), caches the
+ * exchanged token, and refreshes it before it expires. The callback runs only
+ * when a token must be minted or refreshed, never per request. A federation
+ * policy must already be configured in Databricks.
+ *
+ * - `client_id`: the Databricks service principal for workload identity
+ *   federation, or null for account-level federation.
+ * - `cache_identity`: a stable, non-empty id for one logical federated
+ *   identity. Streams created with the same id share one exchanged token; two
+ *   ids never share a token. Never derive it from a pointer, which can be
+ *   reused.
+ *
+ * Ownership: once this function is called the FFI owns `user_data` and invokes
+ * `free_user_data` exactly once on every path, never while an
+ * `idp_token_callback` is running:
+ * - on success, once the stream is freed and its internal tasks have finished;
+ * - on failure, when the last internal reference drops. For an invalid
+ *   argument that is before this call returns. For a failure while the stream
+ *   starts (for example the callback's error, or a failed connection) it can be
+ *   just after this call returns, on an internal SDK thread.
+ *
+ * The caller must never free `user_data` itself, not even when create fails.
+ * `free_user_data` may run on an internal SDK thread.
+ */
+struct CZerobusStream *zerobus_sdk_create_stream_with_federated_token(struct CZerobusSdk *sdk,
+                                                                      const char *table_name,
+                                                                      const uint8_t *descriptor_proto_bytes,
+                                                                      uintptr_t descriptor_proto_len,
+                                                                      IdpTokenSupplierCallback idp_token_callback,
+                                                                      void *user_data,
+                                                                      void (*free_user_data)(void *user_data),
+                                                                      const char *client_id,
+                                                                      const char *cache_identity,
+                                                                      const struct CStreamConfigurationOptions *options,
+                                                                      struct CResult *result);
 
 /**
  * Recreate a stream from an existing stream

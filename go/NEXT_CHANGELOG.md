@@ -8,6 +8,14 @@
   `DefaultArrowStreamConfigurationOptions()` sets `IPCCompression` to `IPCCompressionZstd`, and the
   zero value `IPCCompressionDefault` and nil options also mean ZSTD instead of no compression. To
   keep sending uncompressed payloads, set `IPCCompression` to `IPCCompressionNone`.
+- Added external-IdP token federation, for example with Microsoft Entra ID, so a
+  stream can authenticate with an IdP token instead of a Databricks OAuth client
+  secret. Build a `FederatedToken` with `NewFederatedToken` from an
+  `IdpTokenSupplier`, optionally with `WithClientID` for workload identity
+  federation, and pass it to `CreateStreamWithFederatedToken` or
+  `CreateArrowStreamWithFederatedToken`. The SDK exchanges the IdP token for a
+  Zerobus-scoped Databricks token (RFC 8693), caches it, and refreshes it before
+  it expires ([#1069](https://github.com/databricks/zerobus-sdk/issues/1069)).
 
 ### Deprecations
 
@@ -24,3 +32,8 @@
 ### Internal Changes
 
 ### API Changes
+
+- Added `IdpTokenSupplier`, `FederatedToken`, `FederatedTokenOption`,
+  `NewFederatedToken`, `WithClientID`,
+  `ZerobusSdk.CreateStreamWithFederatedToken`, and
+  `ZerobusSdk.CreateArrowStreamWithFederatedToken`.

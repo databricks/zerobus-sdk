@@ -18,6 +18,8 @@ extern crate libc;
 // A comment between each declaration breaks rustfmt's contiguous-`mod` grouping,
 // so it cannot alphabetize them and reorder the generated header.
 mod common;
+// federated declares callback types only (no exported functions).
+mod federated;
 // C Data types must precede the Arrow entry points that reference them.
 mod arrow_c_data;
 // arrow must follow common and arrow_c_data and precede builder/sdk/stream/proto_schema.
@@ -39,6 +41,7 @@ pub use arrow::*;
 pub use arrow_c_data::*;
 pub use builder::*;
 pub use common::*;
+pub use federated::{CIdpToken, IdpTokenSupplierCallback};
 // Re-exported SDK types referenced via `crate::` paths by the test module.
 #[cfg(test)]
 pub(crate) use databricks_zerobus_ingest_sdk::ZerobusError;

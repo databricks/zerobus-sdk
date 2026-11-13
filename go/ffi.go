@@ -107,6 +107,29 @@ extern CZerobusStream* zerobus_sdk_create_stream_with_headers_provider(
     HeadersProviderFreeCallback free_user_data,
     const CStreamConfigurationOptions* options,
     CResult* result);
+
+// External-IdP token federation. The callback returns the current IdP token or
+// an error; the FFI takes ownership of both strings and frees them.
+typedef struct CIdpToken {
+    char* token;
+    char* error_message;
+    bool is_retryable;
+} CIdpToken;
+
+typedef CIdpToken (*IdpTokenSupplierCallback)(void* user_data);
+
+extern CZerobusStream* zerobus_sdk_create_stream_with_federated_token(
+    CZerobusSdk* sdk,
+    const char* table_name,
+    const uint8_t* descriptor_proto_bytes,
+    uintptr_t descriptor_proto_len,
+    IdpTokenSupplierCallback idp_token_callback,
+    void* user_data,
+    HeadersProviderFreeCallback free_user_data,
+    const char* client_id,
+    const char* cache_identity,
+    const CStreamConfigurationOptions* options,
+    CResult* result);
 extern void zerobus_stream_free(CZerobusStream* stream);
 extern int64_t zerobus_stream_ingest_proto_record(CZerobusStream* stream,
                                                    const uint8_t* data,
@@ -183,6 +206,32 @@ static void cFreeHeadersProvider(void* userData) {
 
 static HeadersProviderFreeCallback getFreeHeadersProviderCallback() {
     return (HeadersProviderFreeCallback)cFreeHeadersProvider;
+}
+
+extern void goGetIdpToken(void* userData, char** token, char** error, bool* isRetryable);
+extern void goFreeIdpTokenSupplier(void* userData);
+
+// C callback matching IdpTokenSupplierCallback.
+static CIdpToken cIdpTokenCallback(void* userData) {
+    CIdpToken result;
+    result.token = NULL;
+    result.error_message = NULL;
+    result.is_retryable = false;
+    goGetIdpToken(userData, &result.token, &result.error_message, &result.is_retryable);
+    return result;
+}
+
+static IdpTokenSupplierCallback getIdpTokenCallback() {
+    return (IdpTokenSupplierCallback)cIdpTokenCallback;
+}
+
+// Deletes the cgo.Handle once the Rust core is done with the supplier.
+static void cFreeIdpTokenSupplier(void* userData) {
+    goFreeIdpTokenSupplier(userData);
+}
+
+static HeadersProviderFreeCallback getFreeIdpTokenSupplierCallback() {
+    return (HeadersProviderFreeCallback)cFreeIdpTokenSupplier;
 }
 */
 import "C"
@@ -528,6 +577,107 @@ func sdkCreateStreamWithHeadersProvider(
 		// The FFI owns the handle once create is called and releases it via
 		// goFreeHeadersProvider on every path — including this failure — so we
 		// must NOT delete it here (that would double-free the handle).
+		return nil, ffiResult(cres)
+	}
+
+	return unsafe.Pointer(ptr), nil
+}
+
+//export goGetIdpToken
+func goGetIdpToken(userData unsafe.Pointer, token **C.char, errorMsg **C.char, isRetryable *C.bool) {
+	var res idpTokenResult
+	if federated, ok := cgo.Handle(userData).Value().(*FederatedToken); ok {
+		res = callIdpTokenSupplier(federated.supplier)
+	} else {
+		res = idpTokenResult{errorMessage: "invalid IdP token supplier handle"}
+	}
+	if res.errorMessage != "" {
+		*errorMsg = C.CString(res.errorMessage)
+		*isRetryable = C.bool(res.retryable)
+		return
+	}
+	// The FFI rejects an empty token with a clear error.
+	*token = C.CString(res.token)
+}
+
+//export goFreeIdpTokenSupplier
+func goFreeIdpTokenSupplier(userData unsafe.Pointer) {
+	// The FFI owns the handle and calls this once, after any in-flight token
+	// callback has returned. Guard a zero handle: Delete() would panic across C.
+	if userData == nil {
+		return
+	}
+	cgo.Handle(userData).Delete()
+}
+
+// newFederatedTokenHandle wraps token in a cgo.Handle whose ownership passes to
+// the FFI, which releases it via goFreeIdpTokenSupplier on every path. The Go
+// side must never delete it, not even when create fails.
+func newFederatedTokenHandle(token *FederatedToken) unsafe.Pointer {
+	handle := cgo.NewHandle(token)
+	return *(*unsafe.Pointer)(unsafe.Pointer(&handle))
+}
+
+// federatedTokenCStrings returns the C client ID (nil for account-level
+// federation) and cache identity. The caller frees both with freeCStrings.
+func federatedTokenCStrings(token *FederatedToken) (clientID *C.char, cacheIdentity *C.char) {
+	if token.clientID != "" {
+		clientID = C.CString(token.clientID)
+	}
+	return clientID, C.CString(token.cacheIdentity)
+}
+
+func freeCStrings(values ...*C.char) {
+	for _, v := range values {
+		if v != nil {
+			C.free(unsafe.Pointer(v))
+		}
+	}
+}
+
+// sdkCreateStreamWithFederatedToken creates a stream authenticated by
+// external-IdP token federation via FFI.
+func sdkCreateStreamWithFederatedToken(
+	sdkPtr unsafe.Pointer,
+	tableName string,
+	descriptorProto []byte,
+	token *FederatedToken,
+	options *StreamConfigurationOptions,
+) (unsafe.Pointer, error) {
+	cTableName := C.CString(tableName)
+	cClientID, cCacheIdentity := federatedTokenCStrings(token)
+	defer freeCStrings(cTableName, cClientID, cCacheIdentity)
+
+	var cDescriptor *C.uint8_t
+	var descriptorLen C.size_t
+	var pinner runtime.Pinner
+
+	if len(descriptorProto) > 0 {
+		defer pinner.Unpin()
+		cDescriptor = (*C.uint8_t)(unsafe.SliceData(descriptorProto))
+		pinner.Pin(cDescriptor)
+		descriptorLen = C.size_t(len(descriptorProto))
+	}
+
+	cOpts := convertConfigToC(options)
+
+	var cres C.CResult
+	ptr := C.zerobus_sdk_create_stream_with_federated_token(
+		(*C.CZerobusSdk)(sdkPtr),
+		cTableName,
+		cDescriptor,
+		descriptorLen,
+		C.getIdpTokenCallback(),
+		newFederatedTokenHandle(token),
+		C.getFreeIdpTokenSupplierCallback(),
+		cClientID,
+		cCacheIdentity,
+		&cOpts,
+		&cres,
+	)
+
+	if ptr == nil {
+		// The FFI released the handle on this failure path; do not delete it.
 		return nil, ffiResult(cres)
 	}
 

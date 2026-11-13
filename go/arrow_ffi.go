@@ -118,6 +118,53 @@ extern CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(
     const CArrowStreamConfigurationOptions *options,
     CResult *result);
 
+// External-IdP token federation (see ffi.go for the callback contract).
+typedef struct CIdpToken {
+    char *token;
+    char *error_message;
+    bool is_retryable;
+} CIdpToken;
+
+typedef CIdpToken (*IdpTokenSupplierCallback)(void *user_data);
+
+extern void goGetIdpToken(void *userData, char **token, char **error, bool *isRetryable);
+extern void goFreeIdpTokenSupplier(void *userData);
+
+// Distinct statics from ffi.go's so the two translation units do not conflict.
+static CIdpToken cArrowIdpTokenCallback(void *userData) {
+    CIdpToken result;
+    result.token = NULL;
+    result.error_message = NULL;
+    result.is_retryable = false;
+    goGetIdpToken(userData, &result.token, &result.error_message, &result.is_retryable);
+    return result;
+}
+
+static IdpTokenSupplierCallback getArrowIdpTokenCallback() {
+    return (IdpTokenSupplierCallback)cArrowIdpTokenCallback;
+}
+
+static void cArrowFreeIdpTokenSupplier(void *userData) {
+    goFreeIdpTokenSupplier(userData);
+}
+
+static HeadersProviderFreeCallback getArrowFreeIdpTokenSupplierCallback() {
+    return (HeadersProviderFreeCallback)cArrowFreeIdpTokenSupplier;
+}
+
+extern CArrowStream *zerobus_sdk_create_arrow_stream_with_federated_token(
+    CZerobusSdk *sdk,
+    const char *table_name,
+    const uint8_t *schema_ipc_bytes,
+    uintptr_t schema_ipc_len,
+    IdpTokenSupplierCallback idp_token_callback,
+    void *user_data,
+    HeadersProviderFreeCallback free_user_data,
+    const char *client_id,
+    const char *cache_identity,
+    const CArrowStreamConfigurationOptions *options,
+    CResult *result);
+
 extern void    zerobus_arrow_stream_free(CArrowStream *stream);
 extern int64_t zerobus_arrow_stream_ingest_batch(CArrowStream *stream, const uint8_t *ipc_bytes, uintptr_t ipc_len, CResult *result);
 extern bool    zerobus_arrow_stream_wait_for_offset(CArrowStream *stream, int64_t offset, CResult *result);
@@ -306,6 +353,54 @@ func sdkCreateArrowStreamWithHeadersProvider(
 		// The FFI owns the handle once create is called and releases it via
 		// goFreeHeadersProvider on every path — including this failure — so we
 		// must NOT delete it here (that would double-free the handle).
+		return nil, arrowFfiResult(cres)
+	}
+
+	return unsafe.Pointer(ptr), nil
+}
+
+// sdkCreateArrowStreamWithFederatedToken creates an Arrow Flight stream
+// authenticated by external-IdP token federation.
+func sdkCreateArrowStreamWithFederatedToken(
+	sdkPtr unsafe.Pointer,
+	tableName string,
+	schemaIpcBytes []byte,
+	token *FederatedToken,
+	options *ArrowStreamConfigurationOptions,
+) (unsafe.Pointer, error) {
+	cTableName := C.CString(tableName)
+	defer C.free(unsafe.Pointer(cTableName))
+	var cClientID *C.char
+	if token.clientID != "" {
+		cClientID = C.CString(token.clientID)
+		defer C.free(unsafe.Pointer(cClientID))
+	}
+	cCacheIdentity := C.CString(token.cacheIdentity)
+	defer C.free(unsafe.Pointer(cCacheIdentity))
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	cSchema := (*C.uint8_t)(unsafe.SliceData(schemaIpcBytes))
+	pinner.Pin(cSchema)
+
+	cOpts := convertArrowConfigToC(options)
+	var cres C.CResult
+	ptr := C.zerobus_sdk_create_arrow_stream_with_federated_token(
+		(*C.CZerobusSdk)(sdkPtr),
+		cTableName,
+		cSchema,
+		C.uintptr_t(len(schemaIpcBytes)),
+		C.getArrowIdpTokenCallback(),
+		newFederatedTokenHandle(token),
+		C.getArrowFreeIdpTokenSupplierCallback(),
+		cClientID,
+		cCacheIdentity,
+		&cOpts,
+		&cres,
+	)
+	if ptr == nil {
+		// The FFI released the handle on this failure path; do not delete it.
 		return nil, arrowFfiResult(cres)
 	}
 
