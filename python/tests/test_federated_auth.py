@@ -1,10 +1,10 @@
 """Tests for the external-IdP federation auth surface (FederatedToken).
 
 These cover the pure-Python dispatch layer of ``create_stream`` with a fake
-native ``_inner`` so no network or gRPC server is needed. The Rust core's
-exchange/caching behavior is covered by the Rust unit tests; the Python->Rust
-callback bridge is exercised end-to-end separately against a mock token
-endpoint.
+native ``_inner``, plus the native supplier handle's ownership, so no network
+or gRPC server is needed. The Python->Rust callback bridge, the exchange request
+and token caching are covered end to end against a mock token endpoint in
+``test_federated_exchange.py``.
 """
 
 import dataclasses
