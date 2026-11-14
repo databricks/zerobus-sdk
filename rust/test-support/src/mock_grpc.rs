@@ -95,6 +95,39 @@ pub enum MockResponse {
     },
 }
 
+/// Credential metadata a stream was opened with. `authorization` is redacted from `Debug`
+/// so a failing assertion never prints a token.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CapturedAuthHeaders {
+    pub authorization: Option<String>,
+    pub table_name: Option<String>,
+}
+
+impl std::fmt::Debug for CapturedAuthHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedAuthHeaders")
+            .field(
+                "authorization",
+                &self.authorization.as_ref().map(|_| "<redacted>"),
+            )
+            .field("table_name", &self.table_name)
+            .finish()
+    }
+}
+
+fn capture_auth_headers(metadata: &tonic::metadata::MetadataMap) -> CapturedAuthHeaders {
+    let ascii = |name: &str| {
+        metadata
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    CapturedAuthHeaders {
+        authorization: ascii("authorization"),
+        table_name: ascii("x-databricks-zerobus-table-name"),
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum PersistentOpenFault {
@@ -126,6 +159,10 @@ pub struct MockZerobusServer {
     connection_addresses: Arc<Mutex<HashSet<SocketAddr>>>,
     /// Create requests received across logical streams.
     create_requests: Arc<Mutex<Vec<CreateIngestStreamRequest>>>,
+    /// Decoded `x-test-bin` request header bytes of each stream, in arrival order.
+    test_bin_headers: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    /// Credential headers of each stream received, in arrival order.
+    auth_headers: Arc<Mutex<Vec<CapturedAuthHeaders>>>,
     /// Single-record ingest requests received across logical streams.
     ingest_record_requests: Arc<Mutex<Vec<IngestRecordRequest>>>,
     /// Delay before the server acknowledges what it received once the client half-closes.
@@ -157,6 +194,8 @@ impl MockZerobusServer {
             delayed_setup_armed: Arc::new(Notify::new()),
             connection_addresses: Arc::new(Mutex::new(HashSet::new())),
             create_requests: Arc::new(Mutex::new(Vec::new())),
+            test_bin_headers: Arc::new(Mutex::new(Vec::new())),
+            auth_headers: Arc::new(Mutex::new(Vec::new())),
             ingest_record_requests: Arc::new(Mutex::new(Vec::new())),
             half_close_ack_delay_ms: Arc::new(Mutex::new(None)),
             persistent_offsets: Arc::new(Mutex::new(HashMap::new())),
@@ -208,6 +247,18 @@ impl MockZerobusServer {
         self.connection_addresses.lock().await.len()
     }
 
+    /// Decoded `x-test-bin` request header bytes of each stream received.
+    #[allow(dead_code)]
+    pub async fn get_test_bin_headers(&self) -> Vec<Option<Vec<u8>>> {
+        self.test_bin_headers.lock().await.clone()
+    }
+
+    /// `authorization` and table-name headers of each stream received, in arrival order.
+    #[allow(dead_code)]
+    pub async fn get_auth_headers(&self) -> Vec<CapturedAuthHeaders> {
+        self.auth_headers.lock().await.clone()
+    }
+
     /// Get the create requests received by the server.
     #[allow(dead_code)]
     pub async fn get_create_requests(&self) -> Vec<CreateIngestStreamRequest> {
@@ -257,6 +308,7 @@ impl MockZerobusServer {
         *self.stream_counter.lock().await = 0;
         self.connection_addresses.lock().await.clear();
         self.create_requests.lock().await.clear();
+        self.auth_headers.lock().await.clear();
         self.ingest_record_requests.lock().await.clear();
         *self.half_close_ack_delay_ms.lock().await = None;
         self.persistent_offsets.lock().await.clear();
@@ -277,6 +329,16 @@ impl Zerobus for MockZerobusServer {
         if let Some(remote_addr) = request.remote_addr() {
             self.connection_addresses.lock().await.insert(remote_addr);
         }
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
+        self.auth_headers
+            .lock()
+            .await
+            .push(capture_auth_headers(request.metadata()));
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
 
@@ -578,6 +640,16 @@ impl Zerobus for MockZerobusServer {
         &self,
         request: Request<Streaming<PersistentStreamRequest>>,
     ) -> Result<Response<Self::PersistentStreamStream>, Status> {
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
+        self.auth_headers
+            .lock()
+            .await
+            .push(capture_auth_headers(request.metadata()));
         let mut inbound = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
         let offsets = Arc::clone(&self.persistent_offsets);
@@ -793,6 +865,8 @@ async fn start_mock_server_inner(
         delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
         connection_addresses: Arc::clone(&mock_server.connection_addresses),
         create_requests: Arc::clone(&mock_server.create_requests),
+        test_bin_headers: Arc::clone(&mock_server.test_bin_headers),
+        auth_headers: Arc::clone(&mock_server.auth_headers),
         ingest_record_requests: Arc::clone(&mock_server.ingest_record_requests),
         half_close_ack_delay_ms: Arc::clone(&mock_server.half_close_ack_delay_ms),
         persistent_offsets: Arc::clone(&mock_server.persistent_offsets),

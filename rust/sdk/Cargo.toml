@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "3.1.1"
+version = "3.2.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -67,6 +67,7 @@ plotters = { version = "0.3", default-features = false, features = ["svg_backend
 prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -92,7 +93,7 @@ internal-arrow-c-data = [
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 # Persistent streams with exactly-once semantics (EoS); API is in development.
 eos = []
-# Personal access token (PAT) authentication (Beta, private preview), opt-in. Needs
+# Personal access token (PAT) authentication (Private Preview), opt-in. Needs
 # server-side enablement; adds no dependencies and no toolchain floor.
 pat-auth = []
 testing = []

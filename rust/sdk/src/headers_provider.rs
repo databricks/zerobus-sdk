@@ -1,6 +1,6 @@
 use crate::default_token_factory::{DefaultTokenFactory, FetchedToken, MintReason};
 use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
-use crate::ZerobusResult;
+use crate::{ZerobusError, ZerobusResult};
 use async_trait::async_trait;
 use std::collections::HashMap;
 #[cfg(feature = "pat-auth")]
@@ -47,6 +47,9 @@ pub trait HeadersProvider: Send + Sync {
     /// # Returns
     ///
     /// A `ZerobusResult` containing a `HashMap` of header names and values.
+    /// Names ending in `-bin` carry standard base64-encoded binary metadata, with
+    /// or without padding. Other values are ASCII metadata. Binary values are
+    /// marked sensitive and forwarded through tonic's binary metadata API.
     ///
     /// # Errors
     ///
@@ -62,6 +65,45 @@ pub trait HeadersProvider: Send + Sync {
     /// a concurrent refresh already replaced it with a newer token, which is kept and
     /// served without re-minting.
     async fn invalidate(&self) {}
+
+    /// Whether a rejected credential can be replaced by a fresh one.
+    ///
+    /// When the server rejects the credentials while a stream is being created and
+    /// recovery is on, the SDK calls [`invalidate`](Self::invalidate) and retries once
+    /// so a refreshed credential can be sent. A provider whose credential is fixed,
+    /// such as a personal access token, returns `false` to skip that retry and surface
+    /// the rejection immediately. The default is `true`.
+    fn can_refresh(&self) -> bool {
+        true
+    }
+}
+
+/// Both transports must decode provider binary values before tonic encodes them on the wire.
+pub(crate) fn insert_header_metadata(
+    metadata: &mut tonic::metadata::MetadataMap,
+    key: &str,
+    value: &str,
+) -> ZerobusResult<()> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    use base64::Engine as _;
+    use tonic::metadata::{Ascii, Binary, MetadataKey, MetadataValue};
+
+    let invalid = || ZerobusError::InvalidArgument(format!("Invalid metadata for header '{key}'"));
+    if key.ends_with("-bin") {
+        let name = MetadataKey::<Binary>::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+        let bytes = STANDARD
+            .decode(value)
+            .or_else(|_| STANDARD_NO_PAD.decode(value))
+            .map_err(|_| invalid())?;
+        let mut value = MetadataValue::<Binary>::from_bytes(&bytes);
+        value.set_sensitive(true);
+        metadata.insert_bin(name, value);
+    } else {
+        let name = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+        let value = MetadataValue::try_from(value).map_err(|_| invalid())?;
+        metadata.insert(name, value);
+    }
+    Ok(())
 }
 
 /// Selects how a token provider keys the shared [`TokenCache`]: OAuth keys by
@@ -540,8 +582,8 @@ impl HeadersProvider for FederatedTokenProvider {
 
 /// A headers provider that authenticates with a Databricks personal access token (PAT).
 ///
-/// **Beta (private preview):** PAT authentication for Zerobus requires server-side
-/// enablement, and this API can change. Available behind the `pat-auth` feature.
+/// **Private Preview:** PAT authentication for Zerobus requires server-side enablement.
+/// Available behind the `pat-auth` feature.
 ///
 /// Sends the token as a bearer credential, together with the table name, on every
 /// stream creation. It holds no cache and makes no network calls. The PAT must be
@@ -597,6 +639,11 @@ impl HeadersProvider for PatHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
         Ok(bearer_headers(&self.token, &self.table_name))
     }
+
+    // A rejected PAT stays rejected, so the one-shot auth retry would only repeat the failure.
+    fn can_refresh(&self) -> bool {
+        false
+    }
 }
 
 /// A headers provider that returns no headers.
@@ -629,6 +676,57 @@ impl HeadersProvider for NoAuthHeadersProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn binary_provider_metadata_preserves_bytes_and_wire_encoding() {
+        use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+        use base64::Engine as _;
+        use tonic::metadata::MetadataMap;
+
+        let bytes = b"\0\xff\r\n\x80";
+        for encoded in [STANDARD.encode(bytes), STANDARD_NO_PAD.encode(bytes)] {
+            let mut metadata = MetadataMap::new();
+            insert_header_metadata(&mut metadata, "x-context-bin", &encoded).unwrap();
+            let binary = metadata.get_bin("x-context-bin").unwrap();
+            assert_eq!(binary.to_bytes().unwrap().as_ref(), bytes);
+            assert!(binary.is_sensitive());
+            assert_eq!(
+                metadata.into_headers()["x-context-bin"],
+                STANDARD_NO_PAD.encode(bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_metadata_validates_keys_and_values_without_exposing_values() {
+        use tonic::metadata::MetadataMap;
+
+        let mut metadata = MetadataMap::new();
+        insert_header_metadata(&mut metadata, "x-tenant", "tenant-a").unwrap();
+        assert_eq!(
+            metadata.get("x-tenant").unwrap().to_str().unwrap(),
+            "tenant-a"
+        );
+        insert_header_metadata(&mut metadata, "x-empty-bin", "").unwrap();
+        assert!(metadata
+            .get_bin("x-empty-bin")
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .is_empty());
+        for (key, value) in [
+            ("invalid name-bin", "YQ=="),
+            ("invalid name", "value-should-not-appear"),
+            ("x-context-bin", "secret!invalid-base64"),
+            ("x-ascii", "secret\ninvalid-ascii"),
+        ] {
+            let error = insert_header_metadata(&mut metadata, key, value)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key));
+            assert!(!error.contains(value));
+        }
+    }
 
     /// A minimal blocking HTTP mock of the UC `/oidc/v1/token` endpoint. It runs
     /// on its own OS thread (blocking std IO) so the async test can drive the
@@ -1007,16 +1105,12 @@ mod tests {
     }
 
     #[cfg(feature = "pat-auth")]
-    #[tokio::test]
-    async fn pat_provider_serves_same_token_after_invalidate() {
+    #[test]
+    fn pat_provider_cannot_refresh() {
         let provider =
             PatHeadersProvider::new("dapi-secret-token".to_string(), "cat.sch.tbl".to_string());
 
-        let before = provider.get_headers().await.unwrap();
-        provider.invalidate().await;
-        let after = provider.get_headers().await.unwrap();
-
-        assert_eq!(before, after);
+        assert!(!provider.can_refresh());
     }
 
     #[cfg(feature = "pat-auth")]

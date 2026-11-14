@@ -6,7 +6,7 @@ use std::time::Duration;
 use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
 use prost_types::DescriptorProto;
 use tokio::time::timeout;
-use utils::TestHeadersProvider;
+use utils::{BinaryHeadersProvider, TestHeadersProvider};
 use zerobus_test_support::mock_grpc::start_mock_server;
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -113,6 +113,15 @@ async fn personal_access_token_creates_and_resumes() {
         server.persistent_committed_offset(&stream_id).await,
         Some(0)
     );
+    let auth = server.get_auth_headers().await;
+    assert_eq!(auth.len(), 2, "one capture for build, one for resume");
+    for captured in &auth {
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer dapi-test-token")
+        );
+        assert_eq!(captured.table_name.as_deref(), Some(TABLE_NAME));
+    }
 }
 
 #[tokio::test]
@@ -392,4 +401,24 @@ async fn resume_with_mismatched_record_type_fails() {
         .resume(stream_id)
         .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn binary_header_reaches_server_decoded() {
+    let (server, endpoint) = start_mock_server().await.expect("start mock");
+    let sdk = sdk(endpoint);
+    let mut stream = sdk
+        .persistent_stream_builder()
+        .table(TABLE_NAME)
+        .headers_provider(Arc::new(BinaryHeadersProvider("AP8NCg==")))
+        .json()
+        .recovery(false)
+        .build()
+        .await
+        .expect("create persistent stream");
+    stream.close().await.expect("close");
+    assert_eq!(
+        server.get_test_bin_headers().await,
+        vec![Some(b"\0\xff\r\n".to_vec())]
+    );
 }

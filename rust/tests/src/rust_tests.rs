@@ -8,7 +8,7 @@ use databricks_zerobus_ingest_sdk::{
 use tracing::info;
 use utils::{
     advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
-    run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
+    run_with_paused_time_watchdog, setup_tracing, BinaryHeadersProvider, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
 use zerobus_test_support::databricks::zerobus::RecordType as WireRecordType;
@@ -64,6 +64,38 @@ mod stream_initialization_and_basic_lifecycle_tests {
             Some(WireRecordType::Proto as i32)
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_binary_header_reaches_server_decoded() -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "test_stream_1".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let _stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(BinaryHeadersProvider("AP8NCg==")))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(false)
+            .build()
+            .await?;
+        assert_eq!(
+            mock_server.get_test_bin_headers().await,
+            vec![Some(b"\0\xff\r\n".to_vec())]
+        );
         Ok(())
     }
 
@@ -136,6 +168,65 @@ mod stream_initialization_and_basic_lifecycle_tests {
         stream.close().await?;
 
         assert_eq!(mock_server.get_create_requests().await.len(), 1);
+        let auth = mock_server.get_auth_headers().await;
+        assert_eq!(auth.len(), 1);
+        assert_eq!(
+            auth[0].authorization.as_deref(),
+            Some("Bearer dapi-test-token")
+        );
+        assert_eq!(auth[0].table_name.as_deref(), Some(TABLE_NAME));
+        Ok(())
+    }
+
+    // A PAT cannot be refreshed, so the one-shot auth retry that re-mints OAuth
+    // credentials is skipped: one create request, then the rejection surfaces.
+    #[tokio::test]
+    async fn test_personal_access_token_auth_rejection_is_not_retried(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("revoked token"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("revoked token"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let err = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .personal_access_token("dapi-test-token")
+            .json()
+            .recovery(true)
+            .recovery_retries(3)
+            .recovery_backoff_ms(0)
+            .build()
+            .await
+            .err()
+            .expect("a rejected PAT must fail stream creation");
+
+        assert!(
+            matches!(&err, ZerobusError::CreateStreamError(status) if status.code() == GrpcCode::Unauthenticated),
+            "expected the server's Unauthenticated rejection, got {err:?}"
+        );
+        assert!(!err.is_retryable(), "{err:?}");
+        assert_eq!(
+            mock_server.get_create_requests().await.len(),
+            1,
+            "the one-shot auth retry must be skipped for a PAT"
+        );
         Ok(())
     }
 
@@ -253,6 +344,43 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .unwrap()
             .to_string()
             .contains("Non-retriable error"));
+
+        Ok(())
+    }
+
+    /// The first channel open runs inside the retry loop, so an endpoint that
+    /// isn't a valid URI must fail at once instead of after the recovery retries.
+    #[tokio::test]
+    async fn test_invalid_endpoint_fails_stream_creation_without_retrying(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_invalid_endpoint_fails_stream_creation_without_retrying");
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint("https://bad host.example.com")
+            .unity_catalog_url("https://mock-uc.com")
+            .build()?;
+
+        let build = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .recovery_backoff_ms(60_000)
+            .build();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+            .await
+            .map_err(|_| "stream creation retried an invalid endpoint")?
+            .err()
+            .expect("an invalid endpoint must fail stream creation");
+
+        assert!(
+            matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
 
         Ok(())
     }

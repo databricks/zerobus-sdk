@@ -78,9 +78,8 @@ impl<'a> PersistentStreamBuilder<'a> {
 
     /// Authenticate with a Databricks personal access token (PAT).
     ///
-    /// **Beta (private preview):** PAT authentication for Zerobus requires
-    /// server-side enablement, and this API can change. Available behind the
-    /// `eos` and `pat-auth` features.
+    /// **Private Preview:** PAT authentication for Zerobus requires server-side
+    /// enablement. Available behind the `eos` and `pat-auth` features.
     ///
     /// Same as [`StreamBuilder::personal_access_token`]: the PAT needs the
     /// `zerobus` API scope, an empty token is rejected, and of this,
@@ -230,52 +229,11 @@ impl<'a> PersistentStreamBuilder<'a> {
 
 #[cfg(all(test, feature = "pat-auth"))]
 mod tests {
-    use std::sync::Arc;
+    use crate::builder::stream_builder::tests::test_sdk;
+    use crate::ZerobusError;
 
-    use crate::{ZerobusError, ZerobusSdk};
-
-    fn test_sdk() -> ZerobusSdk {
-        ZerobusSdk::new_with_config(
-            "http://localhost:1234".to_string(),
-            "http://localhost:5678".to_string(),
-            "test-workspace".to_string(),
-            Arc::new(crate::tls_config::SecureTlsConfig::new()),
-            None,
-            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
-            true,
-            crate::token_cache::DEFAULT_REFRESH_BUFFER,
-            true,
-        )
-    }
-
-    #[test]
-    fn personal_access_token_validates_and_last_auth_call_wins() {
-        let sdk = test_sdk();
-        let builder = || sdk.persistent_stream_builder().table("t").json();
-
-        builder()
-            .personal_access_token("dapi-test")
-            .validate()
-            .expect("a non-empty token should validate");
-        assert!(matches!(
-            builder().personal_access_token("").validate(),
-            Err(ZerobusError::InvalidArgument(_))
-        ));
-        // Each auth setter replaces the previous one, in both directions.
-        assert!(matches!(
-            builder()
-                .oauth("cid", "csec")
-                .personal_access_token("")
-                .validate(),
-            Err(ZerobusError::InvalidArgument(_))
-        ));
-        builder()
-            .personal_access_token("")
-            .oauth("cid", "csec")
-            .validate()
-            .expect("the later oauth() call should replace the empty token");
-    }
-
+    // The setter only forwards to `StreamBuilder`, whose tests cover validation and
+    // last-call-wins; this pins that the forwarded token still reaches `validate()`.
     #[tokio::test]
     async fn empty_personal_access_token_rejected_before_connecting() {
         let sdk = test_sdk();

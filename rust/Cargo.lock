@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "apache-avro",
  "arrow-array",
@@ -939,6 +939,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "strum 0.27.2",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry",
@@ -4439,10 +4440,17 @@ dependencies = [
 name = "zerobus-mock-server"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
  "databricks-zerobus-ingest-sdk",
+ "futures",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",

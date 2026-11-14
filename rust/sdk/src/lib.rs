@@ -59,6 +59,7 @@ mod client_warnings;
 mod default_token_factory;
 mod dynamic_proto;
 mod errors;
+mod grpc_channel;
 mod grpc_status;
 mod headers_provider;
 mod landing_zone;
@@ -124,8 +125,8 @@ pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
 #[cfg(feature = "arrow-flight")]
 pub use stream::{
-    ArrowCompression, ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch,
-    TimeUnit, ZerobusArrowStream,
+    ArrowCompression, ArrowDictionaryHandling, ArrowSchema, ArrowStreamConfigurationOptions,
+    DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream,
 };
 pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]

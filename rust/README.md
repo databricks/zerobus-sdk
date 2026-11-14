@@ -52,7 +52,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Multiplexed Streams** *(Beta)* - Raise aggregate ingestion throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow). Note: the `arrow-flight` feature requires Rust 1.88 (via Arrow 60); default builds are unaffected.
 - **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.88 (via `apache-avro`); default builds are unaffected. Feature in development.
-- **Personal Access Token Authentication** *(Beta, private preview, opt-in)* — Authenticate with a Databricks personal access token via `.personal_access_token(token)`. Enable with `features = ["pat-auth"]`; see [Personal access token](#personal-access-token-beta-private-preview-opt-in). Requires server-side enablement; default builds are unaffected.
+- **Personal Access Token Authentication** *(Private Preview, opt-in)* — Authenticate with a Databricks personal access token via `.personal_access_token(token)`. Enable with `features = ["pat-auth"]`; see [Personal access token](#personal-access-token-private-preview-opt-in). Requires server-side enablement; not available for Arrow Flight streams yet; default builds are unaffected.
 - **Persistent Streams** *(opt-in, in development)* — Create a durable stream, save its `stream_id()`, and resume it later from the server's committed offset, even from a new process. Enable with `features = ["eos"]`; see [Persistent Stream](#persistent-stream-in-development-opt-in) and [`examples/json/persistent.rs`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/json/persistent.rs). JSON and compiled Protocol Buffers only. Default builds are unaffected.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
@@ -444,7 +444,7 @@ The SDK uses OAuth 2.0 client credentials flow:
 
 OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (currently one hour) that the SDK cannot configure, while a single stream lives at most ~15 minutes. By default the SDK caches the token for each table on the `ZerobusSdk` instance and reuses it across stream creations and recoveries, refreshing it only once it nears the expiry the server reported (so it adapts to whatever lifetime UC returns). This avoids minting a fresh token on every stream and reduces load on the Unity Catalog token endpoint.
 
-Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. A personal access token (`.personal_access_token(...)`, feature `pat-auth`, Beta) is sent as given and never cached. Custom `HeadersProvider` implementations manage their own caching.
+Caching applies to the built-in OAuth path (`.oauth(...)`) and to federated authentication (`.federated_auth(...)`). Both share one cache on the `ZerobusSdk` instance, but never share a cached token: each slot is keyed by auth scheme, the token's identity (OAuth client_id, or the federation identity / service principal client_id), and the table, so OAuth and federated tokens (and distinct identities) stay in separate slots. Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. A personal access token (`.personal_access_token(...)`, feature `pat-auth`, Private Preview) is sent as given and never cached. Custom `HeadersProvider` implementations manage their own caching.
 
 SDK builder options tune connection and token behavior. Here and in the snippets below,
 `server_endpoint` and `workspace_url` hold your Zerobus server endpoint and workspace URL
@@ -604,28 +604,29 @@ let sdk = ZerobusSdk::builder()
 
 Call `without_native_roots()` to trust only the CA certificates that you add. You must add at least one PEM certificate. The SDK rejects a CA entry that holds no certificate, such as a private key file. Use `with_domain_name(...)` to check the server certificate against a different domain name.
 
-If the SDK cannot use a CA certificate or a client identity that you set, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
+If the SDK cannot use a CA certificate or a client identity that you pass as PEM data, it returns `ZerobusError::InvalidArgument` with the reason. This error is not retryable, so recovery does not retry a configuration mistake.
 
-To read the certificates again for each new channel, for example to rotate them, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel:
+To pick up certificates that rotate on disk, pass file paths instead of PEM data:
 
 ```rust
-use databricks_zerobus_ingest_sdk::{TlsConfig, TlsSettings, ZerobusResult};
-
-struct RotatingTlsConfig {
-    ca_path: std::path::PathBuf,
-}
-
-impl TlsConfig for RotatingTlsConfig {
-    fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
-        let ca_pem = std::fs::read(&self.ca_path).map_err(|e| {
-            databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
-                "Cannot read the CA certificate: {e}"
-            ))
-        })?;
-        Ok(TlsSettings::new().with_ca_certificate_pem(ca_pem))
-    }
-}
+let tls = TlsSettings::new()
+    .without_native_roots()
+    .with_ca_certificate_file("/etc/zerobus/ca.pem")
+    .with_client_identity_files("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key");
 ```
+
+The SDK reads the files each time it opens a channel, and before it reuses a gRPC channel. When the files changed, it opens a new channel, so replaced files take effect without a restart:
+
+- A gRPC stream gets its channel when it is created and before each recovery attempt. This holds for a dedicated channel per stream (the `connection_per_stream` default) and for a shared channel. A stream that doesn't reconnect keeps its connection, because certificates are only checked when a connection is set up.
+- An Arrow Flight stream opens a channel on every connection and reconnection.
+
+If the SDK can't read or use the files before it reuses a gRPC channel, it keeps the channel it has and logs a warning.
+
+Replace the certificate and the key together: write both into a new directory, then switch a symbolic link to that directory, as Kubernetes secret volumes do. The SDK reads the certificate again after the key, and reads the pair again if the certificate changed in between. Use absolute paths, because the SDK resolves a relative path when it opens the channel.
+
+A path that is missing, unreadable, not a regular file, or larger than 1 MiB gives a non-retryable `ZerobusError::InvalidArgument` with the path. Content read from a file that the SDK can't use, such as a file with no certificate or a certificate that doesn't match the key, gives a retryable `ZerobusError::ChannelCreationError`, because a rotation may be in progress. When the settings mix files and PEM data and the SDK can't tell which input it can't use, the error is retryable.
+
+For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
 
 A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
@@ -687,9 +688,9 @@ let stream = sdk
 
 The existing `.oauth(...)` and `.headers_provider(...)` paths are unchanged.
 
-#### Personal access token (Beta, private preview, opt-in)
+#### Personal access token (Private Preview, opt-in)
 
-*(Requires `features = ["pat-auth"]`. Beta (private preview): PAT authentication for Zerobus requires server-side enablement, and the API can change.)*
+*(Requires `features = ["pat-auth"]`. Private Preview: PAT authentication for Zerobus requires server-side enablement.)*
 
 ```bash
 cargo add databricks-zerobus-ingest-sdk --features pat-auth
@@ -700,7 +701,11 @@ To authenticate with a Databricks personal access token (PAT), use the
 the workspace that the Zerobus endpoint belongs to. The SDK sends it as a bearer token
 when it creates or recovers a stream. It does not exchange, cache, or refresh the token,
 so this mode does not need `unity_catalog_url`. Once the token expires or is revoked,
-creating or recovering a stream fails with a non-retryable authentication error.
+creating or recovering a stream fails with a non-retryable authentication error. That
+failure is immediate: the one-shot credential-refresh retry that OAuth streams get at
+creation is skipped, because a PAT cannot be refreshed. Arrow Flight streams
+(`build_arrow()`) do not support PAT authentication yet; use OAuth or a custom headers
+provider for them.
 
 ```rust,ignore
 let token = std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set");
@@ -1274,6 +1279,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
 | `compression` | `ArrowCompression` | `FallbackToLegacy` (uses `ipc_compression`) | Payload compression, set with `StreamBuilder::compression`: `IpcZstd`, `IpcLz4`, `GrpcZstd`, or `Uncompressed`. `GrpcZstd` compresses each whole gRPC request message, which is often smaller than IPC compression for wide or sparse schemas but can use more client CPU, especially on narrow, dense schemas. See the [Arrow example](examples/arrow/README.md#compression) |
 | `ipc_compression` | `Option<CompressionType>` | `Some(ZSTD)` | Deprecated: use `compression`. Arrow IPC compression, used only when `compression` is `FallbackToLegacy` |
+| `dictionary_handling` | `ArrowDictionaryHandling` | `Hydrate` | How dictionary-encoded columns are sent: `Hydrate` decodes them on the client, `Resend` and `Delta` send Arrow IPC dictionaries. Zerobus does not support Arrow dictionaries yet, so keep `Hydrate` |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
 
 ```rust
@@ -1288,6 +1294,15 @@ let stream = sdk
     .build_arrow()
     .await?;
 ```
+
+By default, dictionary-encoded columns are decoded on the client and sent as
+plain values. `.dictionary_handling(ArrowDictionaryHandling::Resend)` sends the
+dictionaries instead. `Delta` also sends dictionaries, but when a batch's
+dictionary starts with the previous batch's values for that column, it sends
+only the new values; otherwise it sends the full dictionary. Zerobus does not
+support Arrow dictionaries yet, so keep the default, `Hydrate`. Until it does,
+`Resend` or `Delta` with dictionary-encoded columns makes stream creation fail
+with `ZerobusError::InvalidSchema`.
 
 For Arrow Flight streams, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long the oldest batch may remain pending during normal
@@ -1359,16 +1374,17 @@ Auto-recovered if `recovery` is enabled:
 - Connection timeouts
 - Temporary server errors
 - Stream closed by server
+- `ChannelCreationError` - The SDK couldn't open a channel, for example while TLS certificate files are being replaced
 
 ### Non-Retryable Errors
 Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
+- `InvalidZerobusEndpointError` - The Zerobus endpoint isn't a valid URI
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `InvalidSchema` (Arrow Flight) - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
-- `ChannelCreationError` - Failed to establish TLS connection
 
 `Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
 require manual intervention. During initial stream setup only, if recovery is enabled
@@ -1752,10 +1768,15 @@ Trait for custom authentication header providers.
 #[async_trait]
 pub trait HeadersProvider: Send + Sync {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>>;
+    // Defaulted: drop cached state the server just rejected.
+    async fn invalidate(&self) {}
+    // Defaulted: `false` skips the one-shot auth retry at stream creation.
+    fn can_refresh(&self) -> bool { true }
 }
 ```
 
-Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` (feature `pat-auth`, Beta) sends a personal access token. Use this for:
+Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` (feature `pat-auth`, Private Preview) sends a personal access token and returns
+`false` from `can_refresh()`, so a rejected token fails stream creation without a retry. Use this for:
 - Custom token caching strategies
 - Alternative authentication mechanisms
 - Integration with centralized credential services
@@ -1786,7 +1807,9 @@ pub fn new() -> Self                                  // TLS with the system CA 
 pub fn plaintext() -> Self                            // No TLS (requires `testing` feature)
 pub fn without_native_roots(self) -> Self             // Trust only the CA certificates you add
 pub fn with_ca_certificate_pem(self, pem: impl Into<Vec<u8>>) -> Self
+pub fn with_ca_certificate_file(self, path: impl Into<PathBuf>) -> Self             // Read on every new channel
 pub fn with_client_identity_pem(self, cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self
+pub fn with_client_identity_files(self, cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self  // Read on every new channel
 pub fn with_domain_name(self, domain_name: impl Into<String>) -> Self
 ```
 
