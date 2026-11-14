@@ -922,11 +922,11 @@ if err := stream.Flush(); err != nil {
 | `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Server ack timeout (ms) |
 | `FlushTimeoutMs` | `uint64` | 300,000 | Flush timeout (ms) |
 | `ConnectionTimeoutMs` | `uint64` | 30,000 | Connection timeout (ms) |
-| `IPCCompression` | `IPCCompressionType` | IPCCompressionNone | IPC compression codec |
+| `IPCCompression` | `IPCCompressionType` | IPCCompressionZstd | IPC compression codec |
 
 `RecoverySetting`: `RecoveryEnabled` (default), `RecoveryDisabled`
 
-`IPCCompressionType`: `IPCCompressionNone` (default), `IPCCompressionLZ4Frame`, `IPCCompressionZstd`
+`IPCCompressionType`: `IPCCompressionZstd` (default), `IPCCompressionLZ4Frame`, `IPCCompressionNone`. The zero value, `IPCCompressionDefault`, also means ZSTD; set `IPCCompressionNone` to send uncompressed payloads.
 
 ```go
 opts := zerobus.DefaultArrowStreamConfigurationOptions()

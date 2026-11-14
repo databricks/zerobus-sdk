@@ -4,8 +4,9 @@
 //! watch-for-failure → recover loop. The high-level pattern is reusable
 //! across transports, but the current implementation is wired to the gRPC
 //! transport (it calls into `create_stream_connection`, spawns the gRPC
-//! sender/receiver tasks, and uses `ZerobusClient<Channel>`). Future work
-//! to share this with Arrow Flight should abstract the transport seams.
+//! sender/receiver tasks, and gets its channels from a `GrpcChannelSource`).
+//! Future work to share this with Arrow Flight should abstract the transport
+//! seams.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,14 +17,13 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
-use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
+use crate::grpc_channel::GrpcChannelSource;
 use crate::grpc_status::{GrpcCode, GrpcStatus};
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
@@ -50,7 +50,7 @@ impl ZerobusStream {
     #[allow(clippy::too_many_arguments)]
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     pub(super) async fn supervisor_task(
-        channel: ZerobusClient<Channel>,
+        channel_source: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -73,7 +73,9 @@ impl ZerobusStream {
         // One-shot budget: initial setup may spend a single recovery retry to refresh a
         // stale credential after an auth rejection. Reconnect iterations never consume it,
         // so mid-stream auth behavior is unchanged. Auth errors stay globally non-retryable.
-        let mut initial_auth_retry_available = options.recovery_retries > 0;
+        // A provider that cannot refresh its credential opts out, so its rejection surfaces at once.
+        let mut initial_auth_retry_available =
+            options.recovery_retries > 0 && headers_provider.can_refresh();
 
         loop {
             debug!("Supervisor task loop");
@@ -111,7 +113,7 @@ impl ZerobusStream {
             let is_initial = initial_stream_creation;
             let attempt = AtomicUsize::new(0);
             let create_attempt = || {
-                let channel = channel.clone();
+                let channel_source = Arc::clone(&channel_source);
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
@@ -120,18 +122,22 @@ impl ZerobusStream {
 
                 async move {
                     let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
-                    let result = if is_initial {
-                        Self::create_initial_stream_connection(
-                            channel,
-                            &table_properties,
-                            &headers_provider,
-                            record_type,
-                            kind,
-                            options.recovery_timeout_ms,
-                        )
-                        .await
-                    } else {
-                        tokio::time::timeout(
+                    // Asking the source on every attempt retries a failed first
+                    // open, and lets recovery pick up rotated TLS certificates.
+                    let result = match channel_source.client().await {
+                        Err(e) => Err(e),
+                        Ok(channel) if is_initial => {
+                            Self::create_initial_stream_connection(
+                                channel,
+                                &table_properties,
+                                &headers_provider,
+                                record_type,
+                                kind,
+                                options.recovery_timeout_ms,
+                            )
+                            .await
+                        }
+                        Ok(channel) => tokio::time::timeout(
                             Duration::from_millis(options.recovery_timeout_ms),
                             Self::create_stream_connection(
                                 channel,
@@ -147,7 +153,7 @@ impl ZerobusStream {
                                 "Stream creation timed out",
                             ))
                         })
-                        .and_then(|res| res)
+                        .and_then(|res| res),
                     };
                     if let Err(ref e) = result {
                         warn!(

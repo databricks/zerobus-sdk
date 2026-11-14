@@ -185,6 +185,8 @@ pub struct MockFlightServer {
     decoded_utf8_columns: Arc<Mutex<Vec<Vec<Option<String>>>>>,
     /// The `grpc-encoding` request header of each DoPut, in arrival order.
     grpc_encodings: Arc<Mutex<Vec<Option<String>>>>,
+    /// The decoded `x-test-bin` request header bytes of each DoPut, in arrival order.
+    test_bin_headers: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
 }
 
 impl MockFlightServer {
@@ -207,6 +209,7 @@ impl MockFlightServer {
             wire_ipc_schema_has_dictionary_encoding: Arc::new(Mutex::new(false)),
             decoded_utf8_columns: Arc::new(Mutex::new(Vec::new())),
             grpc_encodings: Arc::new(Mutex::new(Vec::new())),
+            test_bin_headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -295,6 +298,11 @@ impl MockFlightServer {
         self.grpc_encodings.lock().await.clone()
     }
 
+    /// The decoded `x-test-bin` request header bytes of each DoPut received.
+    pub async fn get_test_bin_headers(&self) -> Vec<Option<Vec<u8>>> {
+        self.test_bin_headers.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -312,6 +320,7 @@ impl MockFlightServer {
         *self.dictionary_message_count.lock().await = 0;
         *self.record_batch_message_count.lock().await = 0;
         self.grpc_encodings.lock().await.clear();
+        self.test_bin_headers.lock().await.clear();
         *self.wire_ipc_schema_has_dictionary_encoding.lock().await = false;
         self.decoded_utf8_columns.lock().await.clear();
     }
@@ -390,6 +399,12 @@ impl FlightService for MockFlightServer {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         self.grpc_encodings.lock().await.push(grpc_encoding);
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
@@ -910,6 +925,7 @@ async fn start_mock_flight_server_inner(
         ),
         decoded_utf8_columns: Arc::clone(&mock_server.decoded_utf8_columns),
         grpc_encodings: Arc::clone(&mock_server.grpc_encodings),
+        test_bin_headers: Arc::clone(&mock_server.test_bin_headers),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

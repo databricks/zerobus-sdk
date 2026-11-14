@@ -123,7 +123,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         }
 
         #[cfg(feature = "arrow-flight")]
-        if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
+        if matches!(self.inner.core.format, Some(FormatConfig::Arrow(_))) {
             self.inner.validate_arrow()?;
             if self.inner.stats_exporter.is_some() {
                 return Err(ZerobusError::InvalidArgument(
@@ -133,7 +133,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             if self.max_inflight_batches_per_stream().is_none() {
                 return Err(ZerobusError::InvalidArgument(format!(
                     "max_inflight_batches ({}) must be at least stream_count ({}) for multiplexed streams",
-                    self.inner.arrow_config.max_inflight_batches, self.stream_count
+                    self.inner.settings.max_inflight_batches, self.stream_count
                 )));
             }
             return Ok(());
@@ -142,11 +142,11 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         if self.max_inflight_requests_per_stream().is_none() {
             return Err(ZerobusError::InvalidArgument(format!(
                 "max_inflight_requests ({}) must be at least stream_count ({}) for multiplexed streams",
-                self.inner.grpc_config.max_inflight_requests, self.stream_count
+                self.inner.settings.max_inflight_requests, self.stream_count
             )));
         }
 
-        if self.inner.grpc_config.ack_callback.is_some() {
+        if self.inner.settings.ack_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
                 "ack_callback is only valid for ordinary streams; use multiplexed_ack_callback before .multiplexed(...)"
                     .into(),
@@ -157,7 +157,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
     pub(super) fn max_inflight_requests_per_stream(&self) -> Option<usize> {
         self.inner
-            .grpc_config
+            .settings
             .max_inflight_requests
             .checked_div(self.stream_count)
             .filter(|&capacity| capacity > 0)
@@ -199,24 +199,24 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         // immutable writer schema allocation across lanes, supervisors, and retries.
         let format = self
             .inner
+            .core
             .format
             .take()
             .expect("format was validated")
             .into_grpc()?;
-        self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
-            table_name: self.inner.table_name.clone(),
+            table_name: self.inner.core.table_name.clone(),
             descriptor_proto: format.descriptor_proto,
             message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
             avro_schema: format.avro_schema,
         };
-        let sdk = self.inner.sdk;
+        let sdk = self.inner.core.sdk;
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
-        let mut options = self.inner.grpc_config;
+        let mut options = self.inner.grpc_options(format.record_type);
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
@@ -227,7 +227,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
                 async move {
                     tokio::time::sleep(delay).await;
-                    let channel = sdk.get_or_create_channel_zerobus_client().await?;
+                    let channel = sdk.grpc_channel_source();
                     options.ack_callback = multiplexed_callback.map(|callback| {
                         crate::multiplexed_stream::multiplexed_ack_callback(stream_index, callback)
                     });
@@ -251,7 +251,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub(super) fn max_inflight_batches_per_stream(&self) -> Option<usize> {
         self.inner
-            .arrow_config
+            .settings
             .max_inflight_batches
             .checked_div(self.stream_count)
             .filter(|&capacity| capacity > 0)
@@ -275,13 +275,13 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .expect("capacity was validated");
         let inner = self.inner;
         inner.warn_arrow_ignored_options();
+        let mut options = inner.arrow_options();
+        options.max_inflight_batches = capacity;
         let table_properties = super::ArrowTableProperties {
-            table_name: inner.table_name,
+            table_name: inner.core.table_name,
             schema,
         };
-        let mut options = inner.arrow_config;
-        options.max_inflight_batches = capacity;
-        let sdk = inner.sdk;
+        let sdk = inner.core.sdk;
         let opens = delays
             .into_iter()
             .zip(headers_providers)

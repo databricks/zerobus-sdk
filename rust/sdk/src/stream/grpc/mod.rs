@@ -27,10 +27,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 use tracing::instrument;
 
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_channel::GrpcChannelSource;
 use crate::landing_zone::LandingZone;
 use crate::{
     DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
@@ -205,7 +204,7 @@ impl ZerobusStream {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
     pub(crate) async fn new_stream(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -232,7 +231,7 @@ impl ZerobusStream {
     #[allow(dead_code)]
     #[instrument(level = "debug", skip_all)]
     pub(crate) async fn new_persistent_stream(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -254,7 +253,7 @@ impl ZerobusStream {
     /// resume — reseeds the logical offset generator so records ingested after
     /// resume continue past the server's committed offset.
     async fn new_with_kind(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
