@@ -9,14 +9,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", mock_proto.display());
 
-    std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
-
-    let includes = vec![mock_proto_dir.clone(), protoc_bin_vendored::include_path()?];
+    if std::env::var_os("PROTOC").is_none() {
+        if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
+            std::env::set_var("PROTOC", protoc);
+        }
+    }
 
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
-        .compile_protos(&[mock_proto], &includes)?;
+        .compile_protos(&[mock_proto], &[mock_proto_dir])?;
 
     Ok(())
 }
