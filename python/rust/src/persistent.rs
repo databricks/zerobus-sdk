@@ -26,6 +26,7 @@ pub struct PersistentStreamSettings {
     client_id: Option<String>,
     client_secret: Option<String>,
     headers_provider: Option<Py<PyAny>>,
+    personal_access_token: Option<String>,
     recovery: Option<bool>,
     recovery_timeout_ms: Option<u64>,
     recovery_backoff_ms: Option<u64>,
@@ -48,6 +49,7 @@ impl PersistentStreamSettings {
         client_id = None,
         client_secret = None,
         headers_provider = None,
+        personal_access_token = None,
         recovery = None,
         recovery_timeout_ms = None,
         recovery_backoff_ms = None,
@@ -65,6 +67,7 @@ impl PersistentStreamSettings {
         client_id: Option<String>,
         client_secret: Option<String>,
         headers_provider: Option<Py<PyAny>>,
+        personal_access_token: Option<String>,
         recovery: Option<bool>,
         recovery_timeout_ms: Option<u64>,
         recovery_backoff_ms: Option<u64>,
@@ -81,6 +84,7 @@ impl PersistentStreamSettings {
             client_id,
             client_secret,
             headers_provider,
+            personal_access_token,
             recovery,
             recovery_timeout_ms,
             recovery_backoff_ms,
@@ -102,6 +106,7 @@ enum PersistentAuth {
         client_secret: String,
     },
     Headers(Arc<dyn RustHeadersProvider>),
+    PersonalAccessToken(String),
 }
 
 /// `PersistentStreamSettings` resolved into owned Rust values, so the async work does not
@@ -140,18 +145,20 @@ impl PersistentConfig {
             &settings.client_id,
             &settings.client_secret,
             &settings.headers_provider,
+            &settings.personal_access_token,
         ) {
-            (Some(client_id), Some(client_secret), None) => PersistentAuth::OAuth {
+            (Some(client_id), Some(client_secret), None, None) => PersistentAuth::OAuth {
                 client_id: client_id.clone(),
                 client_secret: client_secret.clone(),
             },
-            (None, None, Some(provider)) => PersistentAuth::Headers(Arc::new(
+            (None, None, Some(provider), None) => PersistentAuth::Headers(Arc::new(
                 HeadersProviderWrapper::new(provider.clone_ref(py)),
             )),
+            (None, None, None, Some(token)) => PersistentAuth::PersonalAccessToken(token.clone()),
             _ => {
                 return Err(PyValueError::new_err(
-                    "set exactly one authentication method: oauth(client_id, client_secret) \
-                     or headers_provider(provider)",
+                    "set exactly one authentication method: oauth(client_id, client_secret), \
+                     headers_provider(provider), or personal_access_token(token)",
                 ))
             }
         };
@@ -191,6 +198,7 @@ impl PersistentConfig {
                 client_secret,
             } => b.oauth(client_id, client_secret),
             PersistentAuth::Headers(provider) => b.headers_provider(provider),
+            PersistentAuth::PersonalAccessToken(token) => b.personal_access_token(token),
         };
         b = match self.table_properties.descriptor_proto.clone() {
             Some(descriptor) => b.compiled_proto(descriptor),
