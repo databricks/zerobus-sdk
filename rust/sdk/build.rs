@@ -5,7 +5,13 @@ use std::env;
 mod zeroparser_proto_build;
 
 fn main() {
-    env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
+    if env::var_os("PROTOC").is_none() {
+        if let Ok(protoc) = protoc_bin_vendored::protoc_bin_path() {
+            unsafe {
+                env::set_var("PROTOC", protoc);
+            }
+        }
+    }
     tonic_prost_build::configure()
         .build_server(false)
         .compile_protos(&["zerobus_service.proto"], &["."])
