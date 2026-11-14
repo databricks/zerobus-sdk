@@ -18,6 +18,7 @@ use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::sleep;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
@@ -152,6 +153,7 @@ pub enum MockFlightResponse {
 pub struct MockFlightServer {
     /// Responses to inject for each table
     responses: Arc<Mutex<HashMap<String, Vec<MockFlightResponse>>>>,
+    connection_count: Arc<AtomicU64>,
     /// Track the maximum offset received from clients
     max_offset_received: Arc<Mutex<i64>>,
     /// Track number of batches received
@@ -181,12 +183,17 @@ pub struct MockFlightServer {
     wire_ipc_schema_has_dictionary_encoding: Arc<Mutex<bool>>,
     /// Logical UTF-8 column values decoded from received record batches.
     decoded_utf8_columns: Arc<Mutex<Vec<Vec<Option<String>>>>>,
+    /// The `grpc-encoding` request header of each DoPut, in arrival order.
+    grpc_encodings: Arc<Mutex<Vec<Option<String>>>>,
+    /// The decoded `x-test-bin` request header bytes of each DoPut, in arrival order.
+    test_bin_headers: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
 }
 
 impl MockFlightServer {
     pub fn new() -> Self {
         Self {
             responses: Arc::new(Mutex::new(HashMap::new())),
+            connection_count: Arc::new(AtomicU64::new(0)),
             max_offset_received: Arc::new(Mutex::new(-1)),
             batch_count: Arc::new(Mutex::new(0)),
             row_count: Arc::new(Mutex::new(0)),
@@ -201,6 +208,8 @@ impl MockFlightServer {
             record_batch_message_count: Arc::new(Mutex::new(0)),
             wire_ipc_schema_has_dictionary_encoding: Arc::new(Mutex::new(false)),
             decoded_utf8_columns: Arc::new(Mutex::new(Vec::new())),
+            grpc_encodings: Arc::new(Mutex::new(Vec::new())),
+            test_bin_headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -223,6 +232,10 @@ impl MockFlightServer {
 
         let mut indices = self.response_indices.lock().await;
         indices.insert(table_name.to_string(), 0);
+    }
+
+    pub fn connection_count(&self) -> u64 {
+        self.connection_count.load(Ordering::Relaxed)
     }
 
     /// Get the maximum offset received from clients
@@ -280,6 +293,16 @@ impl MockFlightServer {
         self.decoded_utf8_columns.lock().await.clone()
     }
 
+    /// The `grpc-encoding` request header of each DoPut received, in arrival order.
+    pub async fn get_grpc_encodings(&self) -> Vec<Option<String>> {
+        self.grpc_encodings.lock().await.clone()
+    }
+
+    /// The decoded `x-test-bin` request header bytes of each DoPut received.
+    pub async fn get_test_bin_headers(&self) -> Vec<Option<Vec<u8>>> {
+        self.test_bin_headers.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -296,6 +319,8 @@ impl MockFlightServer {
         *self.zstd_compressed_record_batch_count.lock().await = 0;
         *self.dictionary_message_count.lock().await = 0;
         *self.record_batch_message_count.lock().await = 0;
+        self.grpc_encodings.lock().await.clear();
+        self.test_bin_headers.lock().await.clear();
         *self.wire_ipc_schema_has_dictionary_encoding.lock().await = false;
         self.decoded_utf8_columns.lock().await.clear();
     }
@@ -368,10 +393,23 @@ impl FlightService for MockFlightServer {
             .to_string();
 
         info!("Received DoPut request for table: {}", table_name);
+        let grpc_encoding = request
+            .metadata()
+            .get("grpc-encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        self.grpc_encodings.lock().await.push(grpc_encoding);
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
 
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
 
+        self.connection_count.fetch_add(1, Ordering::Relaxed);
         let responses = Arc::clone(&self.responses);
         let max_offset_received = Arc::clone(&self.max_offset_received);
         let batch_count = Arc::clone(&self.batch_count);
@@ -832,7 +870,15 @@ impl FlightService for MockFlightServer {
 /// Helper function to create a mock Flight server and return its address
 pub async fn start_mock_flight_server(
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
-    start_mock_flight_server_inner(None, "http", "127.0.0.1").await
+    start_mock_flight_server_inner(None, "http", "127.0.0.1", true).await
+}
+
+/// Starts a mock Flight server that, like a server without zstd support, rejects
+/// zstd-compressed requests.
+#[allow(dead_code)]
+pub async fn start_mock_flight_server_without_zstd(
+) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
+    start_mock_flight_server_inner(None, "http", "127.0.0.1", false).await
 }
 
 /// Starts the mock Flight server with a runtime-generated TLS identity.
@@ -845,7 +891,7 @@ pub async fn start_mock_tls_flight_server(
     let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
     let tls = ServerTlsConfig::new().identity(identity);
     let (server, server_url) =
-        start_mock_flight_server_inner(Some(tls), "https", "localhost").await?;
+        start_mock_flight_server_inner(Some(tls), "https", "localhost", true).await?;
     Ok((server, server_url, cert_pem.into_bytes()))
 }
 
@@ -853,11 +899,13 @@ async fn start_mock_flight_server_inner(
     tls: Option<ServerTlsConfig>,
     scheme: &str,
     endpoint_host: &str,
+    accept_zstd: bool,
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Arrow Flight server");
     let mock_server = MockFlightServer::new();
     let server_clone = MockFlightServer {
         responses: Arc::clone(&mock_server.responses),
+        connection_count: Arc::clone(&mock_server.connection_count),
         max_offset_received: Arc::clone(&mock_server.max_offset_received),
         batch_count: Arc::clone(&mock_server.batch_count),
         row_count: Arc::clone(&mock_server.row_count),
@@ -876,6 +924,8 @@ async fn start_mock_flight_server_inner(
             &mock_server.wire_ipc_schema_has_dictionary_encoding,
         ),
         decoded_utf8_columns: Arc::clone(&mock_server.decoded_utf8_columns),
+        grpc_encodings: Arc::clone(&mock_server.grpc_encodings),
+        test_bin_headers: Arc::clone(&mock_server.test_bin_headers),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
@@ -888,7 +938,13 @@ async fn start_mock_flight_server_inner(
     if let Some(tls) = tls {
         server = server.tls_config(tls)?;
     }
-    let router = server.add_service(FlightServiceServer::new(server_clone));
+    let service = FlightServiceServer::new(server_clone);
+    let service = if accept_zstd {
+        service.accept_compressed(CompressionEncoding::Zstd)
+    } else {
+        service
+    };
+    let router = server.add_service(service);
     tokio::spawn(async move {
         if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))

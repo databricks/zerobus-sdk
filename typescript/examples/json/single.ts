@@ -10,13 +10,13 @@
  */
 
 import { ZerobusSdk, StreamConfigurationOptions, TableProperties, RecordType } from '../../index';
+import { requiredEnv } from '../config';
 
-// Configuration - set via environment variables or modify these defaults
-const SERVER_ENDPOINT = process.env.ZEROBUS_SERVER_ENDPOINT || 'https://your-workspace-id.zerobus.region.cloud.databricks.com';
-const DATABRICKS_WORKSPACE_URL = process.env.DATABRICKS_WORKSPACE_URL || 'https://your-workspace.cloud.databricks.com';
-const TABLE_NAME = process.env.ZEROBUS_TABLE_NAME || 'catalog.schema.table';
-const CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || 'your-oauth-client-id';
-const CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || 'your-oauth-client-secret';
+const SERVER_ENDPOINT = requiredEnv('ZEROBUS_SERVER_ENDPOINT');
+const WORKSPACE_URL = requiredEnv('DATABRICKS_WORKSPACE_URL');
+const TABLE_NAME = requiredEnv('ZEROBUS_TABLE_NAME');
+const CLIENT_ID = requiredEnv('DATABRICKS_CLIENT_ID');
+const CLIENT_SECRET = requiredEnv('DATABRICKS_CLIENT_SECRET');
 
 /**
  * AirQuality record structure matching the table schema:
@@ -34,24 +34,8 @@ async function main() {
     console.log('JSON Single-Record Ingestion Example');
     console.log('='.repeat(60));
 
-    // Validate configuration
-    if (CLIENT_ID === 'your-oauth-client-id' || CLIENT_SECRET === 'your-oauth-client-secret') {
-        console.error('Error: Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables');
-        process.exit(1);
-    }
-
-    if (SERVER_ENDPOINT === 'https://your-workspace-id.zerobus.region.cloud.databricks.com') {
-        console.error('Error: Please set ZEROBUS_SERVER_ENDPOINT environment variable');
-        process.exit(1);
-    }
-
-    if (TABLE_NAME === 'catalog.schema.table') {
-        console.error('Error: Please set ZEROBUS_TABLE_NAME environment variable');
-        process.exit(1);
-    }
-
     // Initialize SDK
-    const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+    const sdk = new ZerobusSdk(SERVER_ENDPOINT, WORKSPACE_URL);
 
     // Configure table properties (no descriptor needed for JSON)
     const tableProperties: TableProperties = {

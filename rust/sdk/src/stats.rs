@@ -25,11 +25,13 @@ use crate::offset_generator::OffsetId;
 pub struct BatchStats {
     /// Rows in this transmission, which may be only an unacknowledged suffix on retry.
     pub records: u64,
-    /// Approximate wire payload size: the batch's FlightData data messages
-    /// (`data_header + data_body + app_metadata`), after IPC compression when enabled.
-    /// Excludes protobuf field overhead, gRPC/HTTP2/TLS framing, the schema message,
-    /// and the flight descriptor. Counts payload yielded to the transport, which may
-    /// be discarded before reaching the network.
+    /// Approximate wire payload size of the batch's FlightData data messages. Without
+    /// gRPC compression, this is `data_header + data_body + app_metadata`, after IPC
+    /// compression when enabled, excluding protobuf field overhead. With
+    /// `ArrowCompression::GrpcZstd`, it is each whole message's size after gRPC
+    /// compression. Excludes gRPC/HTTP2/TLS framing, the schema message, and the flight
+    /// descriptor. Counts payload yielded to the transport, which may be discarded
+    /// before reaching the network.
     pub approximate_wire_bytes: u64,
     /// IPC buffer bytes before compression for this transmission, including
     /// dictionary buffers when emitted. Follows the encoder's treatment of
@@ -65,7 +67,8 @@ pub enum StreamStat {
     /// A complete batch transmission was encoded and yielded to the transport.
     /// Emitted with its final data frame, including retransmissions during recovery,
     /// so a later cancellation or drop cannot discard the event. A transmission
-    /// canceled before its final frame does not emit this event.
+    /// canceled before its final frame does not emit this event. With
+    /// `ArrowCompression::GrpcZstd`, it is emitted once tonic has compressed that frame.
     ///
     /// If IPC statistics cannot be read, the SDK logs a warning and omits the event
     /// for that transmission. Ingestion and attempt counting continue.

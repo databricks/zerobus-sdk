@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import java.util.Collections;
@@ -93,6 +94,13 @@ public class StreamBuilderTest {
   @Test
   void arrowRejectsNullSchema() {
     assertThrows(NullPointerException.class, () -> builder().arrow(null));
+  }
+
+  @Test
+  void avroRejectsNullAndBlankSchema() {
+    assertThrows(NullPointerException.class, () -> builder().avro(null));
+    assertThrows(IllegalArgumentException.class, () -> builder().avro(""));
+    assertThrows(IllegalArgumentException.class, () -> builder().avro("   "));
   }
 
   @Test
@@ -217,6 +225,22 @@ public class StreamBuilderTest {
   }
 
   @Test
+  void arrowOptionsDefaultToZstdCompression() {
+    assertEquals(
+        IPCCompressionType.ZSTD, builder().arrow(emptySchema()).buildOptions().ipcCompression());
+    assertEquals(
+        IPCCompressionType.ZSTD,
+        ArrowStreamConfigurationOptions.builder().setIpcCompression(null).build().ipcCompression());
+    assertEquals(
+        IPCCompressionType.NONE,
+        builder()
+            .arrow(emptySchema())
+            .ipcCompression(IPCCompressionType.NONE)
+            .buildOptions()
+            .ipcCompression());
+  }
+
+  @Test
   void arrowOptionsApplySharedAndArrowSpecificSetters() {
     ArrowStreamConfigurationOptions options =
         builder()
@@ -226,7 +250,7 @@ public class StreamBuilderTest {
             .arrow(emptySchema())
             .maxInflightBatches(7)
             .connectionTimeoutMs(12345L)
-            .ipcCompression(IPCCompressionType.ZSTD)
+            .ipcCompression(IPCCompressionType.LZ4_FRAME)
             .streamPausedMaxWaitTimeMs(678L)
             .buildOptions();
 
@@ -238,7 +262,7 @@ public class StreamBuilderTest {
     // Arrow-specific values.
     assertEquals(7, options.maxInflightBatches());
     assertEquals(12345L, options.connectionTimeoutMs());
-    assertEquals(IPCCompressionType.ZSTD, options.ipcCompression());
+    assertEquals(IPCCompressionType.LZ4_FRAME, options.ipcCompression());
     assertEquals(678L, options.streamPausedMaxWaitTimeMs());
   }
 
@@ -277,8 +301,34 @@ public class StreamBuilderTest {
         .createJsonStreamInternal(
             eq("cat.sch.json"), eq("json-id"), eq("json-secret"), eq(null), opts.capture());
     assertEquals(4242, opts.getValue().maxInflightRecords());
-    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any(), any());
-    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any(), any());
+    verifyNoMoreInteractions(sdk);
+  }
+
+  @Test
+  void avroBuildRoutesToCreateAvroStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    String schemaJson = "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.avro")
+        .oauth("avro-id", "avro-secret")
+        .maxInflightRecords(777)
+        .avro(schemaJson)
+        .build();
+
+    ArgumentCaptor<StreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(StreamConfigurationOptions.class);
+    verify(sdk)
+        .createAvroStreamInternal(
+            eq("cat.sch.avro"),
+            eq(schemaJson),
+            eq("avro-id"),
+            eq("avro-secret"),
+            eq(null),
+            opts.capture());
+    assertEquals(777, opts.getValue().maxInflightRecords());
+    verifyNoMoreInteractions(sdk);
   }
 
   @Test

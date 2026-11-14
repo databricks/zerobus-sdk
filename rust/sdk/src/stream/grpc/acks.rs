@@ -10,6 +10,7 @@ use tokio::time::Duration;
 use tracing::{debug, error, instrument, trace};
 
 use super::ZerobusStream;
+use crate::grpc_status::GrpcStatus;
 use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
@@ -22,14 +23,6 @@ impl ZerobusStream {
             ZerobusError::CreateStreamError(status) => ZerobusError::StreamClosedError(status),
             error => error,
         }
-    }
-
-    /// Returns the final server error after this stream becomes terminal.
-    /// Multiplexed streams use this to preserve the lane's typed failure when
-    /// they discover an asynchronously closed lane.
-    pub(crate) async fn terminal_error(&self) -> Option<ZerobusError> {
-        self.terminal_token.cancelled().await;
-        self.server_error_rx.borrow().clone()
     }
 
     /// Internal method to wait for a specific offset to be acknowledged.
@@ -80,11 +73,11 @@ impl ZerobusStream {
                     }
                     // fail_stream sets is_closed, publishes the error, then cancels
                     // terminal_token. This path can observe closure before the final
-                    // watch value; mux terminal_error() waits on the token before reading it.
+                    // watch value; the mux terminal-cause hook waits on the token before reading it.
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(Self::normalize_wait_error(server_error));
                     }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    return Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                         format!("Stream closed during {}", operation_name.to_lowercase()),
                     )));
                 }
@@ -121,7 +114,7 @@ impl ZerobusStream {
                 }
             }
 
-            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+            Err(ZerobusError::StreamClosedError(GrpcStatus::internal(
                 format!("Stream closed during {}", operation_name.to_lowercase()),
             )))
         };
@@ -141,7 +134,7 @@ impl ZerobusStream {
                     error!(table_name = %self.table_properties.table_name, "{} timed out", operation_name);
                 }
                 Err(ZerobusError::StreamClosedError(
-                    tonic::Status::deadline_exceeded(format!("{} timed out", operation_name)),
+                    GrpcStatus::deadline_exceeded(format!("{} timed out", operation_name)),
                 ))
             }
         }

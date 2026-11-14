@@ -5,6 +5,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 
 use crate::errors::ZerobusError;
+use crate::grpc_status::GrpcStatus;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
 
@@ -151,7 +152,7 @@ impl CloseCoordinator {
     }
 
     pub(super) fn flush_timeout_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded("Flush timed out"))
+        ZerobusError::StreamClosedError(GrpcStatus::deadline_exceeded("Flush timed out"))
     }
 }
 

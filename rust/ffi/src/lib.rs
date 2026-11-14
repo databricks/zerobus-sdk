@@ -41,8 +41,6 @@ pub use builder::*;
 pub use common::*;
 // Re-exported SDK types referenced via `crate::` paths by the test module.
 #[cfg(test)]
-pub(crate) use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-#[cfg(test)]
 pub(crate) use databricks_zerobus_ingest_sdk::ZerobusError;
 pub use proto_schema::*;
 pub use sdk::*;

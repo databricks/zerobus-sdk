@@ -162,6 +162,11 @@ impl DescriptorWithFieldCache {
 /// A registry that holds all message descriptors by their full type name.
 /// Supports arbitrary nesting levels. Owns all data (no lifetime parameters).
 #[derive(Debug)]
+// Callers share one `Arc<MessageRegistry>` across threads and clone it for every record
+// (`OwnedParsedMessage::parse`). This keeps the fields that the parser reads for every field
+// off the cache line that holds the `Arc` reference counts. 128 and not 64, because Intel CPUs
+// prefetch cache lines in 128-byte pairs and some aarch64 cores have 128-byte lines.
+#[repr(align(128))]
 pub struct MessageRegistry {
     /// Map from full type name (e.g., ".MessageNested.MyNestedMessage") to descriptor cache.
     messages: HashMap<String, DescriptorWithFieldCache>,

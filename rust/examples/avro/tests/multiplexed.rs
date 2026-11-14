@@ -1,13 +1,8 @@
-#[path = "../../../tests/src/mock_grpc.rs"]
-mod mock_grpc;
-
 use std::sync::Arc;
 
-use databricks_zerobus_ingest_sdk::databricks::zerobus::{
-    ingest_record_request::Record, RecordType,
-};
 use databricks_zerobus_ingest_sdk::{AvroRecord, AvroValue, NoTlsConfig, ZerobusSdk};
-use mock_grpc::{start_mock_server, MockResponse};
+use zerobus_test_support::databricks::zerobus::{ingest_record_request::Record, RecordType};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
 
 const TABLE: &str = "avro.schema.multiplexed";
 const AVRO_SCHEMA: &str = r#"{

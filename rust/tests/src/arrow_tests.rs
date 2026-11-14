@@ -113,6 +113,42 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// An endpoint that isn't a valid URI can never connect, so stream creation
+        /// must fail at once instead of after the recovery retries.
+        #[tokio::test]
+        async fn test_invalid_endpoint_fails_stream_creation_without_retrying(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_invalid_endpoint_fails_stream_creation_without_retrying");
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint("https://bad host.example.com")
+                .unity_catalog_url("https://mock-uc.com")
+                .build()?;
+
+            let build = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(create_test_arrow_schema())
+                .recovery(true)
+                .recovery_backoff_ms(60_000)
+                .build_arrow();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(10), build)
+                .await
+                .map_err(|_| "stream creation retried an invalid endpoint")?
+                .err()
+                .expect("an invalid endpoint must fail stream creation");
+
+            assert!(
+                matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+                "{error:?}"
+            );
+            assert!(!error.is_retryable());
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_initial_auth_rejection_refreshes_once_then_succeeds(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -281,7 +317,10 @@ mod arrow_flight_tests {
                 .expect_err("close must observe the stored terminal error");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                     assert_eq!(status.message(), "permanent cleanup error");
                 }
                 other => panic!("expected the stored peer error, got {other:?}"),
@@ -691,6 +730,15 @@ mod arrow_flight_tests {
                 "empty-batch rejection is non-retryable, got: {}",
                 err
             );
+            let empty_ipc = record_batch_to_ipc_bytes(&arrow_array::RecordBatch::new_empty(schema));
+            let ipc_err = stream
+                .ingest_ipc_batch(empty_ipc)
+                .await
+                .expect_err("an empty IPC batch must be rejected");
+            assert!(matches!(
+                ipc_err,
+                ZerobusError::InvalidArgument(message) if message.contains("zero rows")
+            ));
 
             Ok(())
         }
@@ -719,14 +767,9 @@ mod arrow_flight_tests {
             let (mock_server, server_url) = start_mock_flight_server().await?;
             mock_server.inject_responses(TABLE_NAME, vec![]).await;
 
-            let cols = vec![UcColumn {
-                name: "attrs".into(),
-                type_name: "VARIANT".into(),
-                type_text: "variant".into(),
-                type_json: String::new(),
-                nullable: false,
-                position: 0,
-            }];
+            let cols = vec![UcColumn::new("attrs", "VARIANT")
+                .with_type_text("variant")
+                .with_nullable(false)];
             // Stream schema is annotated; the batch schema is not (same physical
             // shape). The marker is the only difference between them.
             let mut annotate = ArrowSchemaOptions::default();
@@ -1520,7 +1563,10 @@ mod arrow_flight_tests {
                 .expect_err("close must return the terminal peer error");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                 }
                 other => panic!("expected terminal stream error, got {other:?}"),
             }
@@ -2926,7 +2972,10 @@ mod arrow_flight_tests {
                 .expect_err("the post-deadline ACK must not replace the selected timeout");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::DeadlineExceeded
+                    );
                     assert_eq!(status.message(), "Flush timed out");
                 }
                 other => panic!("expected a flush timeout, got {other:?}"),
@@ -4315,7 +4364,10 @@ mod arrow_flight_tests {
                 .expect_err("close during recovery must preserve its current trigger");
             match error {
                 ZerobusError::CreateStreamError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(status.message(), "first reconnect failed");
                 }
                 other => panic!("expected the first attempt's reconnect error, got: {other:?}"),
@@ -5570,7 +5622,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5619,7 +5671,7 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
-                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .compression(databricks_zerobus_ingest_sdk::ArrowCompression::IpcZstd)
                 .build_arrow()
                 .await?;
 
@@ -5636,6 +5688,304 @@ mod arrow_flight_tests {
                 1,
                 "expected ZSTD compression metadata on the wire IPC record batch",
             );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ipc_compression_defaults_to_zstd() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ipc_compression_defaults_to_zstd");
+
+            for disable_compression in [false, true] {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        }],
+                    )
+                    .await;
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone());
+                if disable_compression {
+                    builder = builder
+                        .compression(databricks_zerobus_ingest_sdk::ArrowCompression::Uncompressed);
+                }
+                let stream = builder.build_arrow().await?;
+
+                let batch = create_test_record_batch(schema, vec![1], vec![Some("default")]);
+                stream.ingest_batch(batch).await?;
+                stream.flush().await?;
+
+                assert_eq!(mock_server.get_batch_count().await, 1);
+                assert_eq!(
+                    mock_server.get_zstd_compressed_record_batch_count().await,
+                    if disable_compression { 0 } else { 1 },
+                    "disable_compression={disable_compression}",
+                );
+            }
+
+            Ok(())
+        }
+
+        /// A compression setting and what the server should observe for it.
+        #[derive(Clone, Copy, Debug)]
+        struct CompressionCase {
+            /// `None` leaves the builder's default.
+            compression: Option<databricks_zerobus_ingest_sdk::ArrowCompression>,
+            expected_grpc_encoding: Option<&'static str>,
+            expected_ipc_zstd_batches: u64,
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_wire_encoding() -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_wire_encoding");
+
+            let cases = [
+                // Default: IPC zstd, no gRPC compression.
+                CompressionCase {
+                    compression: None,
+                    expected_grpc_encoding: None,
+                    expected_ipc_zstd_batches: 2,
+                },
+                // gRPC zstd sends buffers without IPC compression.
+                CompressionCase {
+                    compression: Some(ArrowCompression::GrpcZstd),
+                    expected_grpc_encoding: Some("zstd"),
+                    expected_ipc_zstd_batches: 0,
+                },
+            ];
+
+            for case in cases {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 0,
+                                delay_ms: 0,
+                                ack_up_to_records: 2,
+                            },
+                            MockFlightResponse::BatchAck {
+                                ack_up_to_offset: 1,
+                                delay_ms: 0,
+                                ack_up_to_records: 3,
+                            },
+                        ],
+                    )
+                    .await;
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone());
+                if let Some(compression) = case.compression {
+                    builder = builder.compression(compression);
+                }
+                let stream = builder.build_arrow().await?;
+
+                stream
+                    .ingest_batch(create_test_record_batch(
+                        schema.clone(),
+                        vec![1, 2],
+                        vec![Some("a"), Some("b")],
+                    ))
+                    .await?;
+                stream
+                    .ingest_batch(create_test_record_batch(schema, vec![3], vec![Some("c")]))
+                    .await?;
+                stream.flush().await?;
+
+                assert_eq!(mock_server.get_batch_count().await, 2, "{case:?}");
+                assert_eq!(
+                    mock_server.get_total_records_received().await,
+                    3,
+                    "{case:?}"
+                );
+                assert_eq!(mock_server.get_max_offset_received().await, 1, "{case:?}");
+                let encodings = mock_server.get_grpc_encodings().await;
+                assert!(!encodings.is_empty(), "{case:?}");
+                for encoding in encodings {
+                    assert_eq!(encoding.as_deref(), case.expected_grpc_encoding, "{case:?}");
+                }
+                assert_eq!(
+                    mock_server.get_zstd_compressed_record_batch_count().await,
+                    case.expected_ipc_zstd_batches,
+                    "{case:?}",
+                );
+            }
+
+            Ok(())
+        }
+
+        /// With gRPC compression, `BatchSent` reports the compressed size of the batch's
+        /// messages rather than their size before compression.
+        #[tokio::test]
+        async fn test_grpc_compression_batch_stats_count_compressed_bytes(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::{channel_exporter, ArrowCompression, StreamStat};
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_batch_stats_count_compressed_bytes");
+
+            const ROWS: i64 = 2_000;
+            let mut sent = Vec::new();
+            for compression in [ArrowCompression::Uncompressed, ArrowCompression::GrpcZstd] {
+                let (mock_server, server_url) = start_mock_flight_server().await?;
+                let schema = create_test_arrow_schema();
+                mock_server
+                    .inject_responses(
+                        TABLE_NAME,
+                        vec![MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: ROWS as u64,
+                        }],
+                    )
+                    .await;
+                let (exporter, mut stats_rx) =
+                    channel_exporter(std::num::NonZeroUsize::new(32).unwrap());
+
+                let sdk = ZerobusSdk::builder()
+                    .endpoint(server_url.clone())
+                    .unity_catalog_url("https://mock-uc.com")
+                    .tls_config(Arc::new(NoTlsConfig))
+                    .build()?;
+                let stream = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .compression(compression)
+                    .stats_exporter(exporter)
+                    .build_arrow()
+                    .await?;
+                let offset = stream
+                    .ingest_batch(create_test_record_batch(
+                        schema,
+                        (0..ROWS).collect(),
+                        vec![Some("the same message on every row"); ROWS as usize],
+                    ))
+                    .await?;
+                stream.flush().await?;
+
+                let stats = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if let Some(StreamStat::BatchSent {
+                            offset: sent_offset,
+                            stats,
+                            ..
+                        }) = stats_rx.recv().await
+                        {
+                            if sent_offset == offset {
+                                return stats;
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("the batch must emit send telemetry");
+                assert_eq!(stats.records, ROWS as u64, "{compression:?}");
+                sent.push(stats);
+            }
+
+            let (uncompressed, grpc_zstd) = (&sent[0], &sent[1]);
+            assert_eq!(
+                grpc_zstd.uncompressed_bytes,
+                uncompressed.uncompressed_bytes
+            );
+            assert!(grpc_zstd.approximate_wire_bytes > 0);
+            assert!(
+                grpc_zstd.approximate_wire_bytes * 4 < uncompressed.approximate_wire_bytes,
+                "gRPC zstd: {} bytes, uncompressed: {} bytes",
+                grpc_zstd.approximate_wire_bytes,
+                uncompressed.approximate_wire_bytes,
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_grpc_compression_rejected_by_server_without_zstd(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use databricks_zerobus_ingest_sdk::ArrowCompression;
+
+            setup_tracing();
+            info!("Starting test_grpc_compression_rejected_by_server_without_zstd");
+
+            let (mock_server, server_url) =
+                crate::mock_arrow_flight::start_mock_flight_server_without_zstd().await?;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Recovery is on to show the rejection is not retried. A single retry would wait
+            // out a backoff far longer than the timeout, so finishing in time proves there
+            // was none.
+            let recovery_backoff = std::time::Duration::from_secs(60);
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(create_test_arrow_schema())
+                    .recovery(true)
+                    .recovery_retries(5)
+                    .recovery_backoff_ms(recovery_backoff.as_millis() as u64)
+                    .compression(ArrowCompression::GrpcZstd)
+                    .build_arrow(),
+            )
+            .await
+            .expect("stream creation should fail fast, not retry");
+            assert!(started.elapsed() < recovery_backoff);
+
+            let Err(err) = result else {
+                panic!("expected stream creation to fail");
+            };
+            assert!(!err.is_retryable(), "{err:?}");
+            match err {
+                ZerobusError::CreateStreamError(status) => {
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unimplemented
+                    );
+                }
+                other => panic!("expected CreateStreamError(Unimplemented), got {other:?}"),
+            }
+            // The server rejects the request before reaching the DoPut handler.
+            assert_eq!(mock_server.connection_count(), 0);
 
             Ok(())
         }
@@ -6203,7 +6553,10 @@ mod arrow_flight_tests {
         fn assert_rotation_error(error: ZerobusError) {
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(
                         status.message(),
                         "Server requested graceful stream rotation"
@@ -6349,7 +6702,10 @@ mod arrow_flight_tests {
                 .expect_err("rotation must terminate when recovery is disabled");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::Unavailable
+                    );
                     assert_eq!(
                         status.message(),
                         "Server requested graceful stream rotation"
@@ -6792,7 +7148,10 @@ mod arrow_flight_tests {
                 .expect_err("peer error must win");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(
+                        status.code(),
+                        databricks_zerobus_ingest_sdk::GrpcCode::InvalidArgument
+                    );
                     assert_eq!(status.message(), "post-EOF rejection");
                 }
                 other => panic!("expected permanent peer status, got {other:?}"),
@@ -6912,3 +7271,5 @@ mod arrow_flight_tests {
         }
     }
 }
+
+mod multiplexed_arrow_tests;

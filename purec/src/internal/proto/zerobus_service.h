@@ -1,0 +1,127 @@
+/*
+ * Ingest requests, and the codec for the EphemeralStream envelope messages of
+ * rust/sdk/zerobus_service.proto (package databricks.zerobus).
+ */
+#ifndef ZB_PROTO_ZEROBUS_SERVICE_H
+#define ZB_PROTO_ZEROBUS_SERVICE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "zerobus/common.h"
+
+/* Largest table name or record the encoders accept, in bytes. */
+#define ZB_MAX_ENCODED_PAYLOAD ((size_t)INT32_MAX - 64u)
+
+/* One record of an ingest request, pointing into the request's own block. */
+typedef struct zb_record {
+    uint8_t *data;
+    size_t len;
+} zb_record_t;
+
+/*
+ * The records of one ingest request, as the landing zone holds them. A single
+ * allocation holds the request, then its batch entries, then the bytes they
+ * point to, so the request owns its records. Pass it by pointer only: a copy
+ * would still point into the original.
+ *
+ *   [count | batch[0] | batch[1] | ... | record 0 | record 1 | ...]
+ *               |          |             ^          ^
+ *               +----------|-------------+          |
+ *                          +------------------------+
+ *
+ * The records are JSON for now. Adding a kind enum here would let the same
+ * layout carry protobuf records as well.
+ */
+typedef struct zb_ingest_request {
+    size_t count;
+    zb_record_t batch[];
+} zb_ingest_request_t;
+
+/* Copies the count records into a new request. Returns NULL on size overflow,
+ * allocation failure, NULL records with nonzero count, or a record with NULL
+ * data and nonzero length. */
+zb_ingest_request_t *zb_ingest_request_new(const zerobus_string_view_t *records,
+                                           size_t count);
+
+/* Frees the request and its records. Accepts NULL. */
+void zb_ingest_request_free(zb_ingest_request_t *request);
+
+/*
+ * See "Known protobuf-c compatibility behavior" in
+ * tests/src/internal/proto/zerobus_service_test.c for accepted encoding and
+ * decoding edge cases.
+ */
+
+/*
+ * Encode EphemeralStreamRequest{create_stream: {table_name, record_type:JSON}}.
+ * Input must be valid UTF-8 without raw NUL bytes; empty input is permitted.
+ * On success *out_data is a malloc'd block of *out_len bytes that the caller
+ * owns and releases with free().
+ */
+zerobus_status_t zb_proto_encode_create_stream(zerobus_string_view_t table_name,
+                                               uint8_t **out_data,
+                                               size_t *out_len);
+
+/* Encode EphemeralStreamRequest{ingest_record: {offset_id, json_record}}.
+ * Input and ownership as for zb_proto_encode_create_stream. */
+zerobus_status_t
+zb_proto_encode_ingest_record(zerobus_offset_t offset_id,
+                              zerobus_string_view_t json_record,
+                              uint8_t **out_data, size_t *out_len);
+
+/* The bytes a record of len takes in a JSON batch: its field tag, its length
+ * prefix and its data. */
+size_t zb_proto_json_batch_record_size(size_t len);
+
+/* Encode EphemeralStreamRequest{ingest_record_batch: {offset_id, json_batch:
+ * {records}}} from the request's records. Each record, and ownership, as for
+ * zb_proto_encode_ingest_record. */
+zerobus_status_t zb_proto_encode_json_batch(zerobus_offset_t offset_id,
+                                            const zb_ingest_request_t *request,
+                                            uint8_t **out_data,
+                                            size_t *out_len);
+
+typedef enum zb_response_kind {
+    ZB_RESPONSE_NONE = 0, /* no payload, or one this SDK does not know */
+    ZB_RESPONSE_CREATE_STREAM,
+    ZB_RESPONSE_INGEST_RECORD,
+    ZB_RESPONSE_CLOSE_STREAM_SIGNAL
+} zb_response_kind_t;
+
+/* A decoded EphemeralStreamResponse. has_* flags report optional fields. */
+typedef struct zb_response {
+    zb_response_kind_t kind;
+    union {
+        struct {
+            char *stream_id; /* owned, NUL-terminated; NULL when absent */
+        } create_stream;
+        struct {
+            bool has_durability_ack_up_to_offset;
+            zerobus_offset_t durability_ack_up_to_offset;
+        } ingest_record;
+        struct {
+            bool has_duration;
+            int64_t duration_seconds;
+            int32_t duration_nanos;
+        } close_stream_signal;
+    } payload;
+} zb_response_t;
+
+/*
+ * Decode an EphemeralStreamResponse. Unknown fields with supported wire types
+ * are skipped. Returns INVALID_ARGUMENT for malformed or unsupported input
+ * and OUT_OF_MEMORY when an allocation fails.
+ * Treats *out_response as uninitialized and overwrites it without releasing
+ * owned fields. Clear a previous result with zb_response_clear before decoding
+ * into the same output again.
+ * On failure *out_response is left empty. Release with zb_response_clear.
+ */
+zerobus_status_t zb_proto_decode_response(const uint8_t *data, size_t len,
+                                          zb_response_t *out_response);
+
+/* Release owned fields and reset to NONE. NULL-safe. */
+void zb_response_clear(zb_response_t *response);
+
+#endif /* ZB_PROTO_ZEROBUS_SERVICE_H */

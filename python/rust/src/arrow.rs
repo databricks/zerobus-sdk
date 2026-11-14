@@ -10,8 +10,8 @@ use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream, ZerobusError as RustError,
-    ZerobusSdk as RustSdk,
+    ArrowCompression, StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream,
+    ZerobusError as RustError, ZerobusSdk as RustSdk,
 };
 
 use crate::auth::HeadersProviderWrapper;
@@ -84,13 +84,13 @@ fn ipc_schema_bytes_to_arrow_schema(
 #[pyclass(from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IPCCompression {
-    /// No compression (default).
+    /// No compression.
     #[pyo3(name = "NONE")]
     Uncompressed = 0,
     /// LZ4 frame compression.
     #[pyo3(name = "LZ4_FRAME")]
     LZ4Frame = 1,
-    /// Zstandard compression.
+    /// Zstandard compression (default).
     #[pyo3(name = "ZSTD")]
     Zstd = 2,
 }
@@ -107,11 +107,11 @@ impl IPCCompression {
 }
 
 impl IPCCompression {
-    fn to_rust(self) -> Option<arrow_ipc::CompressionType> {
+    fn to_rust(self) -> ArrowCompression {
         match self {
-            IPCCompression::Uncompressed => None,
-            IPCCompression::LZ4Frame => Some(arrow_ipc::CompressionType::LZ4_FRAME),
-            IPCCompression::Zstd => Some(arrow_ipc::CompressionType::ZSTD),
+            IPCCompression::Uncompressed => ArrowCompression::Uncompressed,
+            IPCCompression::LZ4Frame => ArrowCompression::IpcLz4,
+            IPCCompression::Zstd => ArrowCompression::IpcZstd,
         }
     }
 }
@@ -145,7 +145,7 @@ pub struct ArrowStreamConfigurationOptions {
     #[pyo3(get, set)]
     pub connection_timeout_ms: i64,
 
-    /// IPC compression codec. Default: IPCCompression.NONE
+    /// IPC compression codec. Default: IPCCompression.ZSTD
     #[pyo3(get, set)]
     pub ipc_compression: IPCCompression,
 
@@ -157,7 +157,7 @@ pub struct ArrowStreamConfigurationOptions {
 
 impl Default for ArrowStreamConfigurationOptions {
     fn default() -> Self {
-        // Mirror the Rust SDK 2.0.0 `ArrowStreamConfigurationOptions` defaults.
+        // Mirror the Rust SDK `ArrowStreamConfigurationOptions` defaults.
         // Hardcoded because the upstream struct is `#[non_exhaustive]` and
         // its `Default::default()` can no longer be destructured here.
         Self {
@@ -169,7 +169,7 @@ impl Default for ArrowStreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: 60_000,
             flush_timeout_ms: 300_000,
             connection_timeout_ms: 30_000,
-            ipc_compression: IPCCompression::Uncompressed,
+            ipc_compression: IPCCompression::Zstd,
             stream_paused_max_wait_time_ms: None,
         }
     }
@@ -281,7 +281,7 @@ impl ArrowStreamConfigurationOptions {
             .server_lack_of_ack_timeout_ms(self.server_lack_of_ack_timeout_ms as u64)
             .flush_timeout_ms(self.flush_timeout_ms as u64)
             .connection_timeout_ms(self.connection_timeout_ms as u64)
-            .ipc_compression(self.ipc_compression.to_rust())
+            .compression(self.ipc_compression.to_rust())
             .stream_paused_max_wait_time_ms(self.stream_paused_max_wait_time_ms.map(|v| v as u64));
         Ok(b)
     }

@@ -10,20 +10,23 @@ package com.databricks.zerobus;
  * <p>Supported codecs:
  *
  * <ul>
- *   <li>{@link #NONE} - No compression (default)
+ *   <li>{@link #NONE} - No compression
  *   <li>{@link #LZ4_FRAME} - LZ4 frame compression (fast, moderate ratio)
- *   <li>{@link #ZSTD} - Zstandard compression (slower, better ratio)
+ *   <li>{@link #ZSTD} - Zstandard compression (slower, better ratio). This is the default.
  * </ul>
  *
  * @see ArrowStreamConfigurationOptions.ArrowStreamConfigurationOptionsBuilder#setIpcCompression
  */
 public enum IPCCompressionType {
-  /** No compression. This is the default. */
+  /** No compression. */
   NONE,
 
   /** LZ4 frame compression. Offers fast compression with a moderate compression ratio. */
   LZ4_FRAME,
 
-  /** Zstandard compression. Offers slower compression with a better compression ratio. */
+  /**
+   * Zstandard compression. Offers slower compression with a better compression ratio. This is the
+   * default.
+   */
   ZSTD
 }

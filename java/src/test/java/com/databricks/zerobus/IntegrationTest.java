@@ -4,12 +4,19 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.databricks.test.table.AirQualityRow.AirQuality;
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumWriter;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.EncoderFactory;
 import org.junit.jupiter.api.*;
 
 /**
@@ -1179,5 +1186,76 @@ public class IntegrationTest {
       }
     }
     return result;
+  }
+
+  // ===================================================================================
+  // Avro stream - single (GenericRecord + byte[]), batch, and recreateStream
+  // ===================================================================================
+
+  private static final String AVRO_SCHEMA_JSON =
+      "{\"type\":\"record\",\"name\":\"AirQuality\",\"fields\":["
+          + "{\"name\":\"device_name\",\"type\":\"string\"},"
+          + "{\"name\":\"temp\",\"type\":\"int\"},"
+          + "{\"name\":\"humidity\",\"type\":\"long\"}]}";
+
+  private static GenericRecord avroRecord(Schema schema, String name, int temp, long humidity) {
+    GenericRecord record = new GenericData.Record(schema);
+    record.put("device_name", name);
+    record.put("temp", temp);
+    record.put("humidity", humidity);
+    return record;
+  }
+
+  @Test
+  @Order(17)
+  @DisplayName("Avro stream - GenericRecord + byte[], batch, recreate")
+  void testAvroStream() throws Exception {
+    Schema schema = new Schema.Parser().parse(AVRO_SCHEMA_JSON);
+    ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+    ZerobusAvroStream stream =
+        sdk.streamBuilder()
+            .table(tableName)
+            .oauth(clientId, clientSecret)
+            .avro(AVRO_SCHEMA_JSON)
+            .build()
+            .join();
+
+    try {
+      // GenericRecord objects, encoded by the SDK.
+      long last = -1;
+      for (int i = 0; i < 10; i++) {
+        last = stream.ingestRecordOffset(avroRecord(schema, "test-avro-rec-" + i, 20 + i, 50 + i));
+      }
+      stream.waitForOffset(last);
+
+      // Pre-encoded byte[] (encoded here against the same schema).
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(out, null);
+      new GenericDatumWriter<GenericRecord>(schema)
+          .write(avroRecord(schema, "test-avro-bytes", 99, 99L), encoder);
+      encoder.flush();
+      stream.waitForOffset(stream.ingestRecordOffset(out.toByteArray()));
+
+      // Batch of GenericRecords.
+      List<GenericRecord> batch = new ArrayList<>();
+      for (int i = 0; i < 100; i++) {
+        batch.add(avroRecord(schema, "test-avro-batch-" + i, i, i));
+      }
+      Optional<Long> batchOffset = stream.ingestRecordsOffset(batch);
+      assertTrue(batchOffset.isPresent());
+      stream.flush();
+    } finally {
+      stream.close();
+    }
+
+    // Recreate from the closed stream and ingest one more record.
+    ZerobusAvroStream recreated = sdk.recreateStream(stream).join();
+    try {
+      recreated.ingestRecordOffset(avroRecord(schema, "test-avro-recreated", 1, 1L));
+      recreated.flush();
+    } finally {
+      recreated.close();
+      sdk.close();
+    }
   }
 }

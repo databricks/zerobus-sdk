@@ -1,0 +1,953 @@
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::databricks;
+use databricks::zerobus::{
+    ephemeral_stream_request::Payload as RequestPayload,
+    ephemeral_stream_response::Payload as ResponsePayload,
+    persistent_stream_request::Payload as PersistentRequestPayload,
+    persistent_stream_response::Payload as PersistentResponsePayload,
+    resume_ingest_stream_request::Identifier as ResumeIdentifier,
+    zerobus_server::{Zerobus, ZerobusServer},
+    CloseStreamSignal, CreateIngestStreamRequest, CreateIngestStreamResponse,
+    EphemeralStreamRequest, EphemeralStreamResponse, IngestRecordRequest, IngestRecordResponse,
+    PersistentStreamRequest, PersistentStreamResponse, ResumeIngestStreamResponse,
+    RetireStreamRequest, RetireStreamResponse,
+};
+use prost_types::Duration as ProtobufDuration;
+use rcgen::{generate_simple_self_signed, CertifiedKey};
+use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
+use tokio::time::sleep;
+use tokio_stream::Stream;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+use tonic::{Request, Response, Status, Streaming};
+use tracing::{debug, error, info, warn};
+
+#[derive(Debug)]
+pub struct MockResponseGate {
+    semaphore: Semaphore,
+}
+
+impl Default for MockResponseGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockResponseGate {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            semaphore: Semaphore::new(0),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn release(&self) {
+        self.semaphore.add_permits(1);
+    }
+
+    async fn wait(&self) {
+        self.semaphore
+            .acquire()
+            .await
+            .expect("Mock response gate should remain open")
+            .forget();
+    }
+}
+
+/// Mock response that can be injected into the mock server
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum MockResponse {
+    /// Successful create stream response
+    CreateStream { stream_id: String, delay_ms: u64 },
+    /// Successful record acknowledgment
+    RecordAck {
+        ack_up_to_offset: i64,
+        delay_ms: u64,
+    },
+    /// Successful record acknowledgment released explicitly by a test
+    #[allow(dead_code)]
+    GatedRecordAck {
+        ack_up_to_offset: i64,
+        gate: Arc<MockResponseGate>,
+    },
+    /// Close stream signal
+    #[allow(dead_code)]
+    CloseStreamSignal {
+        duration_seconds: i64,
+        delay_ms: u64,
+    },
+    /// Error response
+    #[allow(dead_code)]
+    Error { status: Status, delay_ms: u64 },
+    /// Error response released explicitly by a test.
+    #[allow(dead_code)]
+    GatedError {
+        status: Status,
+        gate: Arc<MockResponseGate>,
+        sent: Arc<tokio::sync::Notify>,
+    },
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum PersistentOpenFault {
+    MissingStreamId,
+    UnexpectedResponse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistentStreamConfig {
+    record_type: Option<i32>,
+    descriptor_proto: Option<Vec<u8>>,
+}
+
+/// Mock gRPC server for testing the Rust SDK
+pub struct MockZerobusServer {
+    /// Responses to inject for each stream
+    responses: Arc<Mutex<HashMap<String, Vec<MockResponse>>>>,
+    /// Counter for generating unique stream IDs
+    stream_counter: Arc<Mutex<u32>>,
+    /// Track the maximum offset sent by clients
+    max_offset_sent: Arc<Mutex<i64>>,
+    /// Track number of writes received
+    write_count: Arc<Mutex<u64>>,
+    /// Track response index across multiple connection attempts
+    response_indices: Arc<Mutex<HashMap<String, usize>>>,
+    /// Observation that a delayed setup response registered its timer.
+    delayed_setup_armed: Arc<Notify>,
+    /// Distinct TCP peers used to open logical streams.
+    connection_addresses: Arc<Mutex<HashSet<SocketAddr>>>,
+    /// Create requests received across logical streams.
+    create_requests: Arc<Mutex<Vec<CreateIngestStreamRequest>>>,
+    /// Decoded `x-test-bin` request header bytes of each stream, in arrival order.
+    test_bin_headers: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    /// Single-record ingest requests received across logical streams.
+    ingest_record_requests: Arc<Mutex<Vec<IngestRecordRequest>>>,
+    /// Delay before the server acknowledges what it received once the client half-closes.
+    half_close_ack_delay_ms: Arc<Mutex<Option<u64>>>,
+    /// Durable offset retained across persistent-stream connections.
+    persistent_offsets: Arc<Mutex<HashMap<String, Option<i64>>>>,
+    /// Record configuration retained and validated when a stream resumes.
+    persistent_configs: Arc<Mutex<HashMap<String, PersistentStreamConfig>>>,
+    /// One-shot malformed response returned while opening a persistent stream.
+    persistent_open_fault: Arc<Mutex<Option<PersistentOpenFault>>>,
+    /// One-shot disconnect after committing a persistent write but before ACKing it.
+    fail_persistent_ack_once: Arc<AtomicBool>,
+}
+
+impl Default for MockZerobusServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockZerobusServer {
+    pub fn new() -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(HashMap::new())),
+            stream_counter: Arc::new(Mutex::new(0)),
+            max_offset_sent: Arc::new(Mutex::new(-1)),
+            write_count: Arc::new(Mutex::new(0)),
+            response_indices: Arc::new(Mutex::new(HashMap::new())),
+            delayed_setup_armed: Arc::new(Notify::new()),
+            connection_addresses: Arc::new(Mutex::new(HashSet::new())),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            test_bin_headers: Arc::new(Mutex::new(Vec::new())),
+            ingest_record_requests: Arc::new(Mutex::new(Vec::new())),
+            half_close_ack_delay_ms: Arc::new(Mutex::new(None)),
+            persistent_offsets: Arc::new(Mutex::new(HashMap::new())),
+            persistent_configs: Arc::new(Mutex::new(HashMap::new())),
+            persistent_open_fault: Arc::new(Mutex::new(None)),
+            fail_persistent_ack_once: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Returns a notification that fires immediately before the mock waits on a
+    /// scripted delayed setup response.
+    #[allow(dead_code)]
+    pub fn delayed_setup_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_setup_armed)
+    }
+
+    /// Makes the server acknowledge what it received on a connection `delay_ms` after the
+    /// client half-closes, then end the stream. Off by default.
+    #[allow(dead_code)]
+    pub async fn ack_on_half_close(&self, delay_ms: u64) {
+        *self.half_close_ack_delay_ms.lock().await = Some(delay_ms);
+    }
+
+    /// Inject responses for a specific stream (identified by table name for simplicity)
+    #[allow(dead_code)]
+    pub async fn inject_responses(&self, table_name: &str, responses: Vec<MockResponse>) {
+        let mut response_map = self.responses.lock().await;
+        response_map.insert(table_name.to_string(), responses);
+
+        let mut indices = self.response_indices.lock().await;
+        indices.insert(table_name.to_string(), 0);
+    }
+
+    /// Get the maximum offset sent by clients
+    #[allow(dead_code)]
+    pub async fn get_max_offset_sent(&self) -> i64 {
+        *self.max_offset_sent.lock().await
+    }
+
+    /// Get the number of writes received
+    #[allow(dead_code)]
+    pub async fn get_write_count(&self) -> u64 {
+        *self.write_count.lock().await
+    }
+
+    /// Get the number of distinct TCP connections that opened streams.
+    #[allow(dead_code)]
+    pub async fn get_connection_count(&self) -> usize {
+        self.connection_addresses.lock().await.len()
+    }
+
+    /// Decoded `x-test-bin` request header bytes of each stream received.
+    #[allow(dead_code)]
+    pub async fn get_test_bin_headers(&self) -> Vec<Option<Vec<u8>>> {
+        self.test_bin_headers.lock().await.clone()
+    }
+
+    /// Get the create requests received by the server.
+    #[allow(dead_code)]
+    pub async fn get_create_requests(&self) -> Vec<CreateIngestStreamRequest> {
+        self.create_requests.lock().await.clone()
+    }
+
+    /// Get the single-record ingest requests received by the server.
+    #[allow(dead_code)]
+    pub async fn get_ingest_record_requests(&self) -> Vec<IngestRecordRequest> {
+        self.ingest_record_requests.lock().await.clone()
+    }
+
+    #[allow(dead_code)]
+    pub async fn persistent_committed_offset(&self, stream_id: &str) -> Option<i64> {
+        self.persistent_offsets
+            .lock()
+            .await
+            .get(stream_id)
+            .copied()
+            .flatten()
+    }
+
+    #[allow(dead_code)]
+    pub async fn omit_next_persistent_stream_id(&self) {
+        *self.persistent_open_fault.lock().await = Some(PersistentOpenFault::MissingStreamId);
+    }
+
+    #[allow(dead_code)]
+    pub async fn send_unexpected_next_persistent_open_response(&self) {
+        *self.persistent_open_fault.lock().await = Some(PersistentOpenFault::UnexpectedResponse);
+    }
+
+    #[allow(dead_code)]
+    pub fn fail_next_persistent_ack_after_commit(&self) {
+        self.fail_persistent_ack_once.store(true, Ordering::SeqCst);
+    }
+
+    /// Reset the server state
+    #[allow(dead_code)]
+    pub async fn reset(&self) {
+        let mut responses = self.responses.lock().await;
+        responses.clear();
+        let mut indices = self.response_indices.lock().await;
+        indices.clear();
+        *self.max_offset_sent.lock().await = -1;
+        *self.write_count.lock().await = 0;
+        *self.stream_counter.lock().await = 0;
+        self.connection_addresses.lock().await.clear();
+        self.create_requests.lock().await.clear();
+        self.ingest_record_requests.lock().await.clear();
+        *self.half_close_ack_delay_ms.lock().await = None;
+        self.persistent_offsets.lock().await.clear();
+        self.persistent_configs.lock().await.clear();
+        *self.persistent_open_fault.lock().await = None;
+        self.fail_persistent_ack_once.store(false, Ordering::SeqCst);
+    }
+}
+
+#[tonic::async_trait]
+impl Zerobus for MockZerobusServer {
+    type EphemeralStreamStream =
+        Pin<Box<dyn Stream<Item = Result<EphemeralStreamResponse, Status>> + Send>>;
+    async fn ephemeral_stream(
+        &self,
+        request: Request<Streaming<EphemeralStreamRequest>>,
+    ) -> Result<Response<Self::EphemeralStreamStream>, Status> {
+        if let Some(remote_addr) = request.remote_addr() {
+            self.connection_addresses.lock().await.insert(remote_addr);
+        }
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
+        let mut stream = request.into_inner();
+        let (tx, rx) = mpsc::channel(100);
+
+        let responses = Arc::clone(&self.responses);
+        let stream_counter = Arc::clone(&self.stream_counter);
+        let max_offset_sent = Arc::clone(&self.max_offset_sent);
+        let write_count = Arc::clone(&self.write_count);
+        let response_indices = Arc::clone(&self.response_indices);
+        let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
+        let create_requests = Arc::clone(&self.create_requests);
+        let ingest_record_requests = Arc::clone(&self.ingest_record_requests);
+        let half_close_ack_delay_ms = Arc::clone(&self.half_close_ack_delay_ms);
+
+        tokio::spawn(async move {
+            let mut table_name = String::new();
+            // Highest offset received on this connection.
+            let mut last_offset_received: Option<i64> = None;
+            let stream_id;
+            let mut stream_responses: Vec<MockResponse> = Vec::new();
+            let mut response_index = 0;
+
+            if let Some(request_result) = stream.message().await.transpose() {
+                match request_result {
+                    Ok(request) => {
+                        if let Some(RequestPayload::CreateStream(create_request)) = request.payload
+                        {
+                            create_requests.lock().await.push(create_request.clone());
+                            table_name = create_request.table_name.unwrap_or_default();
+                            info!("Received CreateStream request for table: {}", table_name);
+
+                            {
+                                let mut counter = stream_counter.lock().await;
+                                *counter += 1;
+                                stream_id = format!("test_stream_{}", *counter);
+                            }
+                            debug!("Generated stream ID: {}", stream_id);
+
+                            {
+                                let response_map = responses.lock().await;
+                                if let Some(responses) = response_map.get(&table_name) {
+                                    stream_responses = responses.clone();
+                                } else {
+                                    warn!(
+                                        "No configured responses found for table: {}",
+                                        table_name
+                                    );
+                                }
+                            }
+
+                            {
+                                let indices = response_indices.lock().await;
+                                response_index = *indices.get(&table_name).unwrap_or(&0);
+                            }
+
+                            // Search for the next CreateStream response starting from response_index.
+                            // Bind the start separately so mutating `response_index` in the loop
+                            // body (to persist resume state) doesn't trip `clippy::mut_range_bound`.
+                            let mut create_stream_found = false;
+                            let search_start = response_index;
+                            for idx in search_start..stream_responses.len() {
+                                if let Some(mock_response) = stream_responses.get(idx) {
+                                    match mock_response {
+                                        MockResponse::CreateStream {
+                                            stream_id: custom_id,
+                                            delay_ms,
+                                        } => {
+                                            response_index = idx;
+                                            create_stream_found = true;
+                                            if *delay_ms > 0 {
+                                                sleep(Duration::from_millis(*delay_ms)).await;
+                                            }
+                                            info!(
+                                                "Sending CreateStream response with stream_id: {} at index {}",
+                                                custom_id, idx
+                                            );
+                                            let response = EphemeralStreamResponse {
+                                                payload: Some(
+                                                    ResponsePayload::CreateStreamResponse(
+                                                        CreateIngestStreamResponse {
+                                                            stream_id: Some(custom_id.clone()),
+                                                        },
+                                                    ),
+                                                ),
+                                            };
+                                            if tx.send(Ok(response)).await.is_err() {
+                                                return;
+                                            }
+                                            response_index += 1;
+
+                                            {
+                                                let mut indices = response_indices.lock().await;
+                                                indices.insert(table_name.clone(), response_index);
+                                            }
+                                            break;
+                                        }
+                                        MockResponse::Error { status, delay_ms } => {
+                                            if *delay_ms > 0 {
+                                                delayed_setup_armed.notify_one();
+                                                sleep(Duration::from_millis(*delay_ms)).await;
+                                            }
+                                            info!(
+                                                "Sending error response at index {}: {:?}",
+                                                idx, status
+                                            );
+
+                                            {
+                                                let mut indices = response_indices.lock().await;
+                                                indices.insert(table_name.clone(), idx + 1);
+                                            }
+
+                                            let _ = tx.send(Err(status.clone())).await;
+                                            return;
+                                        }
+                                        _ => {
+                                            // Skip non-CreateStream responses.
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !create_stream_found {
+                                let response = EphemeralStreamResponse {
+                                    payload: Some(ResponsePayload::CreateStreamResponse(
+                                        CreateIngestStreamResponse {
+                                            stream_id: Some(stream_id.clone()),
+                                        },
+                                    )),
+                                };
+                                if tx.send(Ok(response)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        return;
+                    }
+                }
+            }
+
+            while let Some(request_result) = stream.message().await.transpose() {
+                match request_result {
+                    Ok(request) => {
+                        match request.payload {
+                            Some(RequestPayload::IngestRecord(ingest_request)) => {
+                                ingest_record_requests
+                                    .lock()
+                                    .await
+                                    .push(ingest_request.clone());
+                                debug!(
+                                    "Received IngestRecord request with offset_id: {:?}",
+                                    ingest_request.offset_id
+                                );
+
+                                // Update max offset
+                                if let Some(offset_id) = ingest_request.offset_id {
+                                    last_offset_received = Some(offset_id);
+                                    let mut max_offset = max_offset_sent.lock().await;
+                                    if offset_id > *max_offset {
+                                        *max_offset = offset_id;
+                                    }
+                                }
+
+                                // Increment write count
+                                {
+                                    let mut count = write_count.lock().await;
+                                    *count += 1;
+                                    debug!("Incremented write count to: {}", *count);
+                                }
+
+                                // Process mock response
+                                if response_index < stream_responses.len() {
+                                    let (should_continue, new_index) = handle_mock_response(
+                                        &stream_responses[response_index],
+                                        ingest_request.offset_id,
+                                        "single record",
+                                        &tx,
+                                        response_index,
+                                    )
+                                    .await;
+                                    response_index = new_index;
+
+                                    {
+                                        let mut indices = response_indices.lock().await;
+                                        indices.insert(table_name.clone(), response_index);
+                                    }
+
+                                    if !should_continue {
+                                        return;
+                                    }
+                                }
+                            }
+                            Some(RequestPayload::IngestRecordBatch(batch_request)) => {
+                                debug!(
+                                    "Received IngestRecordBatch request with offset_id: {:?}",
+                                    batch_request.offset_id
+                                );
+
+                                // Count records in the batch
+                                let record_count = if let Some(batch) = &batch_request.batch {
+                                    use databricks::zerobus::ingest_record_batch_request::Batch;
+                                    match batch {
+                                        Batch::ProtoEncodedBatch(proto_batch) => {
+                                            proto_batch.records.len()
+                                        }
+                                        Batch::JsonBatch(json_batch) => json_batch.records.len(),
+                                        Batch::AvroBatch(avro_batch) => avro_batch.records.len(),
+                                    }
+                                } else {
+                                    0
+                                };
+
+                                debug!("Batch contains {} records", record_count);
+
+                                // Update max offset
+                                if let Some(offset_id) = batch_request.offset_id {
+                                    last_offset_received = Some(offset_id);
+                                    let mut max_offset = max_offset_sent.lock().await;
+                                    if offset_id > *max_offset {
+                                        *max_offset = offset_id;
+                                    }
+                                }
+
+                                // Increment write count by number of records
+                                {
+                                    let mut count = write_count.lock().await;
+                                    *count += record_count as u64;
+                                    debug!(
+                                        "Incremented write count by {} to: {}",
+                                        record_count, *count
+                                    );
+                                }
+
+                                // Process mock response
+                                if response_index < stream_responses.len() {
+                                    let (should_continue, new_index) = handle_mock_response(
+                                        &stream_responses[response_index],
+                                        batch_request.offset_id,
+                                        "batch",
+                                        &tx,
+                                        response_index,
+                                    )
+                                    .await;
+                                    response_index = new_index;
+
+                                    {
+                                        let mut indices = response_indices.lock().await;
+                                        indices.insert(table_name.clone(), response_index);
+                                    }
+
+                                    if !should_continue {
+                                        return;
+                                    }
+                                }
+                            }
+                            _ => {
+                                debug!("Received unknown request type");
+                            }
+                        }
+                    }
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        return;
+                    }
+                }
+            }
+
+            // The client half-closed. Like the real server, ack what it received.
+            let ack_delay_ms = *half_close_ack_delay_ms.lock().await;
+            if let (Some(delay_ms), Some(offset)) = (ack_delay_ms, last_offset_received) {
+                if delay_ms > 0 {
+                    sleep(Duration::from_millis(delay_ms)).await;
+                }
+                info!(
+                    "Sending final RecordAck after client half-close with ack_up_to_offset: {}",
+                    offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(offset),
+                        },
+                    )),
+                };
+                let _ = tx.send(Ok(response)).await;
+            }
+        });
+
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream)))
+    }
+
+    type PersistentStreamStream =
+        Pin<Box<dyn Stream<Item = Result<PersistentStreamResponse, Status>> + Send>>;
+
+    async fn persistent_stream(
+        &self,
+        request: Request<Streaming<PersistentStreamRequest>>,
+    ) -> Result<Response<Self::PersistentStreamStream>, Status> {
+        let test_bin = request
+            .metadata()
+            .get_bin("x-test-bin")
+            .and_then(|v| v.to_bytes().ok())
+            .map(|b| b.to_vec());
+        self.test_bin_headers.lock().await.push(test_bin);
+        let mut inbound = request.into_inner();
+        let (tx, rx) = mpsc::channel(100);
+        let offsets = Arc::clone(&self.persistent_offsets);
+        let configs = Arc::clone(&self.persistent_configs);
+        let counter = Arc::clone(&self.stream_counter);
+        let write_count = Arc::clone(&self.write_count);
+        let open_fault = Arc::clone(&self.persistent_open_fault);
+        let fail_ack_once = Arc::clone(&self.fail_persistent_ack_once);
+
+        tokio::spawn(async move {
+            let first = match inbound.message().await {
+                Ok(Some(message)) => message.payload,
+                Ok(None) => return,
+                Err(status) => {
+                    let _ = tx.send(Err(status)).await;
+                    return;
+                }
+            };
+
+            let stream_id = match first {
+                Some(PersistentRequestPayload::CreateStream(create)) => {
+                    let id = {
+                        let mut counter = counter.lock().await;
+                        *counter += 1;
+                        format!("persistent_stream_{}", *counter)
+                    };
+                    offsets.lock().await.insert(id.clone(), None);
+                    let create = create.create_stream.unwrap_or_default();
+                    configs.lock().await.insert(
+                        id.clone(),
+                        PersistentStreamConfig {
+                            record_type: create.record_type,
+                            descriptor_proto: create.descriptor_proto,
+                        },
+                    );
+                    let payload = match open_fault.lock().await.take() {
+                        Some(PersistentOpenFault::MissingStreamId) => {
+                            PersistentResponsePayload::CreateStreamResponse(
+                                CreateIngestStreamResponse { stream_id: None },
+                            )
+                        }
+                        Some(PersistentOpenFault::UnexpectedResponse) => {
+                            PersistentResponsePayload::IngestRecordResponse(IngestRecordResponse {
+                                durability_ack_up_to_offset: Some(0),
+                            })
+                        }
+                        None => PersistentResponsePayload::CreateStreamResponse(
+                            CreateIngestStreamResponse {
+                                stream_id: Some(id.clone()),
+                            },
+                        ),
+                    };
+                    let response = PersistentStreamResponse {
+                        payload: Some(payload),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                    id
+                }
+                Some(PersistentRequestPayload::ResumeStream(resume)) => {
+                    let Some(ResumeIdentifier::StreamId(id)) = resume.identifier else {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument("missing stream_id")))
+                            .await;
+                        return;
+                    };
+                    let committed = match offsets.lock().await.get(&id).copied() {
+                        Some(offset) => offset,
+                        None => {
+                            let _ = tx.send(Err(Status::not_found("unknown stream_id"))).await;
+                            return;
+                        }
+                    };
+                    let resume_config = PersistentStreamConfig {
+                        record_type: resume.record_type,
+                        descriptor_proto: resume.descriptor_proto,
+                    };
+                    if configs.lock().await.get(&id) != Some(&resume_config) {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(
+                                "record configuration does not match persistent stream",
+                            )))
+                            .await;
+                        return;
+                    }
+                    let response = PersistentStreamResponse {
+                        payload: Some(PersistentResponsePayload::ResumeStreamResponse(
+                            ResumeIngestStreamResponse {
+                                last_committed_offset: committed,
+                            },
+                        )),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                    id
+                }
+                _ => {
+                    let _ = tx
+                        .send(Err(Status::invalid_argument(
+                            "first persistent message must create or resume",
+                        )))
+                        .await;
+                    return;
+                }
+            };
+
+            while let Ok(Some(message)) = inbound.message().await {
+                let (offset, records) = match message.payload {
+                    Some(PersistentRequestPayload::IngestRecord(record)) => (record.offset_id, 1),
+                    Some(PersistentRequestPayload::IngestRecordBatch(batch)) => {
+                        let records = batch.batch.as_ref().map_or(0, |batch| match batch {
+                            databricks::zerobus::ingest_record_batch_request::Batch::ProtoEncodedBatch(batch) => batch.records.len(),
+                            databricks::zerobus::ingest_record_batch_request::Batch::JsonBatch(batch) => batch.records.len(),
+                            databricks::zerobus::ingest_record_batch_request::Batch::AvroBatch(batch) => batch.records.len(),
+                        });
+                        (batch.offset_id, records)
+                    }
+                    _ => continue,
+                };
+                if let Some(offset) = offset {
+                    offsets.lock().await.insert(stream_id.clone(), Some(offset));
+                    *write_count.lock().await += records as u64;
+                    if fail_ack_once.swap(false, Ordering::SeqCst) {
+                        let _ = tx
+                            .send(Err(Status::unavailable(
+                                "injected disconnect after persistent commit",
+                            )))
+                            .await;
+                        return;
+                    }
+                    let response = PersistentStreamResponse {
+                        payload: Some(PersistentResponsePayload::IngestRecordResponse(
+                            IngestRecordResponse {
+                                durability_ack_up_to_offset: Some(offset),
+                            },
+                        )),
+                    };
+                    if tx.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    /// Not exercised by the existing tests; returns `Unimplemented`.
+    async fn retire_stream(
+        &self,
+        _request: Request<RetireStreamRequest>,
+    ) -> Result<Response<RetireStreamResponse>, Status> {
+        Err(Status::unimplemented(
+            "RetireStream is not implemented in the mock server",
+        ))
+    }
+}
+
+/// Helper function to create a mock server and return its address
+pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>>
+{
+    start_mock_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_server(
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    start_mock_tls_server_with_client_ca(None).await
+}
+
+/// Starts the mock server with a runtime-generated TLS identity. The server
+/// rejects clients that do not present a certificate that chains to `client_ca_pem`.
+#[allow(dead_code)]
+pub async fn start_mock_mtls_server(
+    client_ca_pem: &[u8],
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    start_mock_tls_server_with_client_ca(Some(client_ca_pem)).await
+}
+
+async fn start_mock_tls_server_with_client_ca(
+    client_ca_pem: Option<&[u8]>,
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let mut tls = ServerTlsConfig::new().identity(identity);
+    if let Some(client_ca_pem) = client_ca_pem {
+        tls = tls.client_ca_root(Certificate::from_pem(client_ca_pem));
+    }
+    let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>> {
+    info!("Starting mock Zerobus server");
+    let mock_server = MockZerobusServer::new();
+    let server_clone = MockZerobusServer {
+        responses: Arc::clone(&mock_server.responses),
+        stream_counter: Arc::clone(&mock_server.stream_counter),
+        max_offset_sent: Arc::clone(&mock_server.max_offset_sent),
+        write_count: Arc::clone(&mock_server.write_count),
+        response_indices: Arc::clone(&mock_server.response_indices),
+        delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
+        connection_addresses: Arc::clone(&mock_server.connection_addresses),
+        create_requests: Arc::clone(&mock_server.create_requests),
+        test_bin_headers: Arc::clone(&mock_server.test_bin_headers),
+        ingest_record_requests: Arc::clone(&mock_server.ingest_record_requests),
+        half_close_ack_delay_ms: Arc::clone(&mock_server.half_close_ack_delay_ms),
+        persistent_offsets: Arc::clone(&mock_server.persistent_offsets),
+        persistent_configs: Arc::clone(&mock_server.persistent_configs),
+        persistent_open_fault: Arc::clone(&mock_server.persistent_open_fault),
+        fail_persistent_ack_once: Arc::clone(&mock_server.fail_persistent_ack_once),
+    };
+
+    let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
+    info!("Mock server will listen on: {}", server_url);
+
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(ZerobusServer::new(server_clone));
+    tokio::spawn(async move {
+        if let Err(e) = router
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+        {
+            error!("Mock server error: {}", e);
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    info!("Mock server started successfully at: {}", server_url);
+
+    Ok((mock_server, server_url))
+}
+
+/// Helper function to handle mock response processing
+/// Returns (should_continue, new_response_index)
+async fn handle_mock_response(
+    mock_response: &MockResponse,
+    offset: Option<i64>,
+    request_type: &str,
+    tx: &mpsc::Sender<Result<EphemeralStreamResponse, Status>>,
+    current_index: usize,
+) -> (bool, usize) {
+    match mock_response {
+        MockResponse::RecordAck {
+            ack_up_to_offset,
+            delay_ms,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                if *delay_ms > 0 {
+                    sleep(Duration::from_millis(*delay_ms)).await;
+                }
+                info!(
+                    "Sending RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::GatedRecordAck {
+            ack_up_to_offset,
+            gate,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                gate.wait().await;
+                info!(
+                    "Sending gated RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::CloseStreamSignal {
+            duration_seconds,
+            delay_ms,
+        } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            info!(
+                "Sending CloseStreamSignal with duration: {}s",
+                duration_seconds
+            );
+            let response = EphemeralStreamResponse {
+                payload: Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
+                    duration: Some(ProtobufDuration {
+                        seconds: *duration_seconds,
+                        nanos: 0,
+                    }),
+                })),
+            };
+            if tx.send(Ok(response)).await.is_err() {
+                return (false, current_index);
+            }
+            (true, current_index + 1)
+        }
+        MockResponse::Error { status, delay_ms } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            let _ = tx.send(Err(status.clone())).await;
+            (false, current_index + 1)
+        }
+        MockResponse::GatedError { status, gate, sent } => {
+            gate.wait().await;
+            let _ = tx.send(Err(status.clone())).await;
+            sent.notify_waiters();
+            (false, current_index + 1)
+        }
+        MockResponse::CreateStream { .. } => (true, current_index + 1),
+    }
+}

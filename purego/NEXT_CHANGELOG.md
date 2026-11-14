@@ -4,6 +4,9 @@
 
 ### New Features and Improvements
 
+- Give each PureGo stream a dedicated gRPC connection by default, matching the
+  other SDKs. Pass `WithConnectionPerStream(false)` to keep the previous shared
+  connection behavior for many low-throughput streams.
 - Tear the connection down gracefully when the server requests a stream pause
   (`CloseStreamSignal`), as a clean `Close` already did: the client half-closes
   the request stream and drains remaining acknowledgments before reconnecting,
@@ -27,6 +30,11 @@
   exit.
 - Corrected the README's dynamic JSON rules: a payload carrying a field the
   descriptor does not declare fails conversion; unknown fields are not ignored.
+- Documented the GCP workspace URL and Zerobus endpoint formats. The formats for
+  AWS, Azure, and GCP now live in one [connection URL
+  table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id),
+  and this SDK's README, examples, and API docs link to it instead of repeating
+  cloud-specific URLs.
 
 ### Internal Changes
 

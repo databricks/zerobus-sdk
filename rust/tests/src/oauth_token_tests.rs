@@ -10,10 +10,6 @@
 //! returned token and `mock_oauth`'s mint counter (how many times the SDK hit
 //! the endpoint rather than serving from cache).
 
-// The shared gRPC mock is only partially used here (stream creation and error
-// injection), so silence dead-code warnings for its unused response variants.
-#[allow(dead_code)]
-mod mock_grpc;
 mod mock_oauth;
 mod utils;
 
@@ -26,9 +22,9 @@ use databricks_zerobus_ingest_sdk::{
 };
 
 use futures::future::join_all;
-use mock_grpc::{start_mock_server, MockResponse};
 use mock_oauth::{start_mock_oauth_server, MockTokenResponse};
 use utils::setup_tracing;
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
 
 const TABLE_NAME: &str = "catalog.schema.orders";
 const OTHER_TABLE: &str = "catalog.schema.events";

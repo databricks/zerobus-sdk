@@ -22,7 +22,7 @@ pub unsafe fn import_c_data_record_batch(
     array: FFI_ArrowArray,
     schema: FFI_ArrowSchema,
 ) -> ZerobusResult<RecordBatch> {
-    if array.is_released() || schema.release.is_none() {
+    if array.is_released() || schema.release().is_none() {
         return Err(ZerobusError::InvalidArgument(
             "Arrow C Data input has already been released".to_string(),
         ));
@@ -82,9 +82,11 @@ mod tests {
 
     unsafe extern "C" fn counting_release(array: *mut FFI_ArrowArray) {
         let array = unsafe { &mut *array };
-        let state = unsafe { Box::from_raw(array.private_data.cast::<CountingRelease>()) };
-        array.release = state.inner_release;
-        array.private_data = state.inner_private_data;
+        let state = unsafe { Box::from_raw(array.private_data().cast::<CountingRelease>()) };
+        unsafe {
+            array.set_release(state.inner_release);
+            array.set_private_data(state.inner_private_data);
+        }
         state.releases.fetch_add(1, Ordering::SeqCst);
         if let Some(release) = state.inner_release {
             unsafe { release(array) };
@@ -93,12 +95,14 @@ mod tests {
 
     fn count_releases(array: &mut FFI_ArrowArray, releases: Arc<AtomicUsize>) {
         let state = Box::new(CountingRelease {
-            inner_release: array.release,
-            inner_private_data: array.private_data,
+            inner_release: array.release(),
+            inner_private_data: array.private_data(),
             releases,
         });
-        array.release = Some(counting_release);
-        array.private_data = Box::into_raw(state).cast();
+        unsafe {
+            array.set_release(Some(counting_release));
+            array.set_private_data(Box::into_raw(state).cast());
+        }
     }
 
     fn export_batch(
@@ -199,13 +203,13 @@ mod tests {
     }
 
     fn release_ffi_array(array: &mut FFI_ArrowArray) {
-        if let Some(release) = array.release {
+        if let Some(release) = array.release() {
             unsafe { release(array) };
         }
     }
 
     fn release_ffi_schema(schema: &mut FFI_ArrowSchema) {
-        if let Some(release) = schema.release {
+        if let Some(release) = schema.release() {
             unsafe { release(schema) };
         }
     }

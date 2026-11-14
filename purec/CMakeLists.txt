@@ -1,14 +1,15 @@
 # Zerobus Pure C SDK build: the library, examples, and tests.
+
 cmake_minimum_required(VERSION 3.13)
 project(zerobus_c LANGUAGES C VERSION 0.0.1)
 
+# ---------------------------------------------------------------------------
+# Build settings
+# ---------------------------------------------------------------------------
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # Keep consumers on strict C99, library targets opt into C11 privately.
 set(CMAKE_C_EXTENSIONS OFF)
-
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -20,9 +21,6 @@ endif()
 set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-# Optional sanitizer, e.g. -DZEROBUS_SANITIZE=address (or thread, undefined).
-set(ZEROBUS_SANITIZE "" CACHE STRING "Runtime sanitizer: address|thread|undefined")
-
 # Treat compiler warnings as errors (used by `make lint`; off for normal builds).
 option(ZEROBUS_WERROR "Treat compiler warnings as errors" OFF)
 
@@ -33,13 +31,79 @@ if(ZEROBUS_WERROR)
   list(APPEND ZEROBUS_WARN_FLAGS -Werror)
 endif()
 
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+find_package(OpenSSL 1.1.1 REQUIRED)
+
+find_path(PROTOBUF_C_INCLUDE_DIR NAMES protobuf-c/protobuf-c.h)
+find_library(PROTOBUF_C_LIBRARY NAMES protobuf-c libprotobuf-c)
+if(NOT PROTOBUF_C_INCLUDE_DIR OR NOT PROTOBUF_C_LIBRARY)
+  message(FATAL_ERROR "libprotobuf-c headers and library are required")
+endif()
+add_library(zerobus_protobuf_c UNKNOWN IMPORTED)
+set_target_properties(zerobus_protobuf_c PROPERTIES
+  IMPORTED_LOCATION "${PROTOBUF_C_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${PROTOBUF_C_INCLUDE_DIR}")
+
+find_path(JANSSON_INCLUDE_DIR NAMES jansson.h)
+find_library(JANSSON_LIBRARY NAMES jansson)
+if(NOT JANSSON_INCLUDE_DIR OR NOT JANSSON_LIBRARY)
+  message(FATAL_ERROR "jansson headers and library are required")
+endif()
+add_library(zerobus_jansson UNKNOWN IMPORTED)
+set_target_properties(zerobus_jansson PROPERTIES
+  IMPORTED_LOCATION "${JANSSON_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${JANSSON_INCLUDE_DIR}")
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2>=1.40)
+
+# ---------------------------------------------------------------------------
+# Committed protobuf bindings
+# ---------------------------------------------------------------------------
+set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto/generated")
+
+# protoc-gen-c 1.3.3 emits a union initializer that GCC warns about.
+# Keep this exception on generated code; handwritten sources retain -Werror.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set_source_files_properties(
+    "${GENERATED_DIR}/zerobus_service.pb-c.c"
+    PROPERTIES COMPILE_OPTIONS -Wno-missing-braces)
+endif()
+
+# ---------------------------------------------------------------------------
+# Library targets
+# ---------------------------------------------------------------------------
 set(ZEROBUS_SOURCES
-  src/internal/concurrency.c
+  src/internal/common/utils.c
+  src/internal/common/queue.c
+  src/internal/platform/concurrency.c
+  src/internal/platform/log.c
+  src/internal/platform/network.c
+  src/internal/proto/zerobus_service.c
+  src/internal/network/tls.c
+  src/internal/network/grpc.c
+  src/internal/network/grpc_utils.c
+  src/internal/network/channel.c
+  src/internal/network/connection.c
+  src/internal/network/io.c
+  src/internal/network/transport.c
+  src/internal/network/http_client.c
+  src/internal/oauth/oauth.c
+  src/internal/landing_zone.c
+  src/internal/stream/supervisor.c
+  src/internal/stream/sender.c
+  src/internal/stream/receiver.c
   src/error.c
-  src/internal/log.c
-  src/utils.c
+  src/headers_provider.c
   src/sdk.c
   src/stream.c
+
+  "${GENERATED_DIR}/google/protobuf/duration.pb-c.c"
+  "${GENERATED_DIR}/zerobus_service.pb-c.c"
 )
 
 add_library(zerobus_c STATIC ${ZEROBUS_SOURCES})
@@ -47,23 +111,32 @@ add_library(zerobus::c ALIAS zerobus_c)
 
 target_include_directories(zerobus_c
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+          "${GENERATED_DIR}")
 
 target_compile_options(zerobus_c PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c PRIVATE c_std_11)
-target_link_libraries(zerobus_c PUBLIC Threads::Threads)
+target_compile_definitions(zerobus_c PRIVATE ZEROBUS_VERSION="${PROJECT_VERSION}")
+target_link_libraries(zerobus_c PUBLIC Threads::Threads zerobus_protobuf_c zerobus_jansson PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto)
 
 # Same sources compiled with ZB_TESTING, which gives ZB_STATIC helpers external
 # linkage so unit tests can call them directly. Not shipped.
 add_library(zerobus_c_testing STATIC ${ZEROBUS_SOURCES})
-target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING)
+target_compile_definitions(zerobus_c_testing PUBLIC ZB_TESTING
+  PRIVATE ZEROBUS_VERSION="${PROJECT_VERSION}")
 target_include_directories(zerobus_c_testing
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          ${CMAKE_CURRENT_SOURCE_DIR}/src
-         ${CMAKE_CURRENT_SOURCE_DIR}/tests/src)
+  PRIVATE "${GENERATED_DIR}")
 target_compile_options(zerobus_c_testing PRIVATE ${ZEROBUS_WARN_FLAGS})
 target_compile_features(zerobus_c_testing PRIVATE c_std_11)
-target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads)
+target_link_libraries(zerobus_c_testing PUBLIC Threads::Threads zerobus_protobuf_c zerobus_jansson PkgConfig::NGHTTP2 OpenSSL::SSL OpenSSL::Crypto)
+
+# ---------------------------------------------------------------------------
+# Sanitizers
+# ---------------------------------------------------------------------------
+# Optional sanitizer, e.g. -DZEROBUS_SANITIZE=address (or thread, undefined).
+set(ZEROBUS_SANITIZE "" CACHE STRING "Runtime sanitizer: address|thread|undefined")
 
 if(ZEROBUS_SANITIZE)
   foreach(lib zerobus_c zerobus_c_testing)
@@ -72,6 +145,9 @@ if(ZEROBUS_SANITIZE)
   endforeach()
 endif()
 
+# ---------------------------------------------------------------------------
+# Tests and examples
+# ---------------------------------------------------------------------------
 enable_testing()
 add_subdirectory(examples)
 add_subdirectory(tests)

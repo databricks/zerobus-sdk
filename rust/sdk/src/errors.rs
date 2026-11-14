@@ -1,3 +1,4 @@
+use crate::grpc_status::{GrpcCode, GrpcStatus};
 use thiserror::Error;
 #[cfg(feature = "arrow-flight")]
 use tonic_types::StatusExt;
@@ -71,7 +72,7 @@ pub enum ZerobusError {
     ChannelCreationError(String),
     /// Returned when the client failed to create a stream.
     #[error("Failed to create stream: {0}.")]
-    CreateStreamError(tonic::Status),
+    CreateStreamError(GrpcStatus),
     /// Returned when TLS handshake failed during connection setup.
     #[error("Failed to establish TLS connection.")]
     FailedToEstablishTlsConnectionError,
@@ -89,7 +90,7 @@ pub enum ZerobusError {
     InvalidUCTokenError(String),
     /// Returned when the stream is closed.
     #[error("Stream is closed: {0}")]
-    StreamClosedError(tonic::Status),
+    StreamClosedError(GrpcStatus),
     /// Returned when the client provided an invalid argument.
     #[error("Invalid argument: {0}.")]
     InvalidArgument(String),
@@ -142,13 +143,13 @@ pub enum ZerobusError {
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
-const UNRETRIABLE_STATUS_CODES: &[tonic::Code] = &[
-    tonic::Code::InvalidArgument,
-    tonic::Code::Unauthenticated,
-    tonic::Code::PermissionDenied,
-    tonic::Code::OutOfRange,
-    tonic::Code::Unimplemented,
-    tonic::Code::NotFound,
+const UNRETRIABLE_STATUS_CODES: &[GrpcCode] = &[
+    GrpcCode::InvalidArgument,
+    GrpcCode::Unauthenticated,
+    GrpcCode::PermissionDenied,
+    GrpcCode::OutOfRange,
+    GrpcCode::Unimplemented,
+    GrpcCode::NotFound,
 ];
 
 impl ZerobusError {
@@ -186,7 +187,7 @@ impl ZerobusError {
                 };
             }
         }
-        ZerobusError::CreateStreamError(status)
+        ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
     }
 
     /// Determines whether this error can be automatically recovered through stream recovery.
@@ -235,7 +236,7 @@ impl ZerobusError {
             ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status)
                 if matches!(
                     status.code(),
-                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                    GrpcCode::Unauthenticated | GrpcCode::PermissionDenied
                 )
         )
     }
@@ -276,9 +277,9 @@ mod tests {
     #[test]
     fn initial_connection_auth_retry_is_one_shot() {
         let unauthenticated =
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
+            ZerobusError::CreateStreamError(GrpcStatus::unauthenticated("stale token"));
         let permission_denied =
-            ZerobusError::CreateStreamError(tonic::Status::permission_denied("stale token"));
+            ZerobusError::CreateStreamError(GrpcStatus::permission_denied("stale token"));
         let mut auth_retry_available = true;
 
         assert!(should_retry_initial_connection(
@@ -299,9 +300,9 @@ mod tests {
     #[test]
     fn initial_connection_auth_retry_requires_recovery_and_budget() {
         let auth_error =
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
+            ZerobusError::CreateStreamError(GrpcStatus::unauthenticated("stale token"));
         let permanent_error =
-            ZerobusError::CreateStreamError(tonic::Status::invalid_argument("bad schema"));
+            ZerobusError::CreateStreamError(GrpcStatus::invalid_argument("bad schema"));
 
         let mut auth_retry_available = true;
         assert!(!should_retry_initial_connection(
@@ -330,28 +331,51 @@ mod tests {
     #[test]
     fn auth_rejection_classification() {
         assert!(
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("x"))
-                .is_auth_rejection()
+            ZerobusError::CreateStreamError(GrpcStatus::unauthenticated("x")).is_auth_rejection()
         );
         assert!(
-            ZerobusError::CreateStreamError(tonic::Status::permission_denied("x"))
-                .is_auth_rejection()
+            ZerobusError::CreateStreamError(GrpcStatus::permission_denied("x")).is_auth_rejection()
         );
         assert!(
-            ZerobusError::StreamClosedError(tonic::Status::unauthenticated("x"))
-                .is_auth_rejection()
+            ZerobusError::StreamClosedError(GrpcStatus::unauthenticated("x")).is_auth_rejection()
         );
         // Non-auth gRPC codes are not rejections.
-        assert!(!ZerobusError::CreateStreamError(tonic::Status::internal("x")).is_auth_rejection());
-        assert!(
-            !ZerobusError::CreateStreamError(tonic::Status::unavailable("x")).is_auth_rejection()
-        );
+        assert!(!ZerobusError::CreateStreamError(GrpcStatus::internal("x")).is_auth_rejection());
+        assert!(!ZerobusError::CreateStreamError(GrpcStatus::unavailable("x")).is_auth_rejection());
         // Other variants are never auth rejections.
         assert!(!ZerobusError::TokenFetchError("x".to_string()).is_auth_rejection());
     }
 
+    /// The language bindings surface `ZerobusError::to_string()`. Pins the full
+    /// message of both status-carrying variants to the text that the
+    /// `tonic::Status`-based variants produced, so the move to `GrpcStatus`
+    /// does not change the strings users see.
+    #[test]
+    fn status_variant_messages_match_the_tonic_based_text() {
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::Unauthenticated,
+            tonic::Code::DeadlineExceeded,
+        ] {
+            for message in ["", "Service unavailable"] {
+                let tonic_status = tonic::Status::new(code, message);
+                let status = GrpcStatus::from_tonic(&tonic_status);
+
+                assert_eq!(
+                    ZerobusError::CreateStreamError(status.clone()).to_string(),
+                    format!("Failed to create stream: {tonic_status}.")
+                );
+                assert_eq!(
+                    ZerobusError::StreamClosedError(status).to_string(),
+                    format!("Stream is closed: {tonic_status}")
+                );
+            }
+        }
+    }
+
     /// Pins the cross-crate invariant the Arrow path relies on: `FlightError ->
-    /// tonic::Status` via `From` preserves the inner gRPC code (unlike
+    /// tonic::Status` via `From` (used by `GrpcStatus::from_flight_error`)
+    /// preserves the inner gRPC code (unlike
     /// `Status::from_error`, which flattens it to `Unknown`). A future
     /// `arrow-flight` change to that `From` impl fails here instead of silently
     /// disabling Arrow auth-rejection detection.
@@ -360,12 +384,14 @@ mod tests {
     fn auth_rejection_survives_flight_error_conversion() {
         use arrow_flight::error::FlightError;
 
-        let auth: tonic::Status =
-            FlightError::Tonic(Box::new(tonic::Status::permission_denied("denied"))).into();
+        let auth = GrpcStatus::from_flight_error(FlightError::Tonic(Box::new(
+            tonic::Status::permission_denied("denied"),
+        )));
         assert!(ZerobusError::CreateStreamError(auth).is_auth_rejection());
 
-        let non_auth: tonic::Status =
-            FlightError::Tonic(Box::new(tonic::Status::unavailable("blip"))).into();
+        let non_auth = GrpcStatus::from_flight_error(FlightError::Tonic(Box::new(
+            tonic::Status::unavailable("blip"),
+        )));
         assert!(!ZerobusError::CreateStreamError(non_auth).is_auth_rejection());
     }
 

@@ -11,6 +11,7 @@
 //! |-----------------------|----------------------------------------------------|--------------------|
 //! | `types.rs`            | Internal types (`IngestRequest`, channel messages) | Transport-agnostic |
 //! | `ingest.rs`           | Public `ingest_*` methods                          | Transport-agnostic |
+//! | `mux_lane.rs`         | Private mux lane hooks and gRPC adapter            | gRPC-specific      |
 //! | `acks.rs`             | `flush`, `wait_for_offset`, unacked queries        | Transport-agnostic |
 //! | `close.rs`            | `close`, `is_closed`, task shutdown                | Transport-agnostic |
 //! | `callback_handler.rs` | User-callback dispatch task                        | Transport-agnostic |
@@ -26,10 +27,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 use tracing::instrument;
 
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_channel::GrpcChannelSource;
 use crate::landing_zone::LandingZone;
 use crate::{
     DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
@@ -41,6 +41,7 @@ mod callback_handler;
 mod close;
 mod connection;
 mod ingest;
+mod mux_lane;
 mod receiver;
 mod sender;
 mod supervisor;
@@ -53,8 +54,8 @@ use types::{IngestRequest, OneshotMap, RecordLandingZone};
 #[cfg(feature = "testing")]
 pub use callback_handler::CallbackHandlerHarness;
 
-/// Maximum time to wait for the receiver/sender tasks to finish during stream
-/// teardown.
+/// Maximum time to read the response stream after the request stream ends, and to wait
+/// for the receiver/sender tasks to finish during stream teardown.
 pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
 /// Represents an active ingestion stream to a Databricks Delta table.
@@ -144,6 +145,9 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Stops the callback handler task. Close cancels it only after the supervisor has shut
+    /// down, so acks applied during that shutdown still reach the callback.
+    callback_cancellation_token: CancellationToken,
     /// Resolved message descriptor for building dynamic-proto records, supplied by
     /// the builder. `None` for JSON and compiled-proto streams.
     dynamic_message_descriptor: Option<MessageDescriptor>,
@@ -200,7 +204,7 @@ impl ZerobusStream {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
     pub(crate) async fn new_stream(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -227,7 +231,7 @@ impl ZerobusStream {
     #[allow(dead_code)]
     #[instrument(level = "debug", skip_all)]
     pub(crate) async fn new_persistent_stream(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -249,7 +253,7 @@ impl ZerobusStream {
     /// resume — reseeds the logical offset generator so records ingested after
     /// resume continue past the server's committed offset.
     async fn new_with_kind(
-        channel: ZerobusClient<Channel>,
+        channel: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -274,13 +278,14 @@ impl ZerobusStream {
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
         let terminal_token = CancellationToken::new();
+        let callback_cancellation_token = CancellationToken::new();
         // Create callback channel and spawn callback handler task only if callback is defined
         let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let task = Self::spawn_callback_handler_task(
                 rx,
                 options.ack_callback.clone(),
-                cancellation_token.clone(),
+                callback_cancellation_token.clone(),
             );
             (Some(tx), Some(task))
         } else {
@@ -363,6 +368,7 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            callback_cancellation_token,
             dynamic_message_descriptor,
         };
 

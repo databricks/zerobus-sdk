@@ -1,7 +1,8 @@
 // Covers to_c(ArrowStreamOptions)'s client-side validation and optional-field
 // handling: the stream_paused_max_wait_time_ms set-value round-trip and
-// >INT64_MAX rejection, and the max_inflight_batches == 0 rejection
-// (arrow_config_defaults_test only pins the nullopt -> -1 default).
+// >INT64_MAX rejection, the max_inflight_batches == 0 rejection, and the ZSTD
+// ipc_compression default (arrow_config_defaults_test only checks that the C++
+// and FFI defaults match).
 
 #include <cstdint>
 #include <cstdio>
@@ -96,6 +97,24 @@ int main() {
     }
     if (!threw) {
       fail("max_inflight_batches == 0 was NOT rejected");
+    }
+  }
+
+  // ipc_compression defaults to ZSTD (1); NoCompression maps to -1.
+  {
+    const zerobus::CArrowStreamConfigurationOptions c =
+        zerobus::detail::to_c(zerobus::ArrowStreamOptions{});
+    if (c.ipc_compression != 1) {
+      fail("default ipc_compression did not map to 1 (ZSTD)");
+    }
+  }
+  {
+    zerobus::ArrowStreamOptions opts{};
+    opts.ipc_compression = zerobus::IpcCompression::NoCompression;
+    const zerobus::CArrowStreamConfigurationOptions c =
+        zerobus::detail::to_c(opts);
+    if (c.ipc_compression != -1) {
+      fail("NoCompression ipc_compression did not map to -1");
     }
   }
 

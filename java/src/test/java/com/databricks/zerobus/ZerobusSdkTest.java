@@ -83,8 +83,21 @@ public class ZerobusSdkTest {
             byte[].class,
             String.class,
             String.class,
+            String.class,
             Object.class,
-            boolean.class));
+            int.class));
+    assertNotNull(
+        ZerobusSdk.class.getDeclaredMethod(
+            "nativeCreateStreamWithHeadersProvider",
+            long.class,
+            String.class,
+            byte[].class,
+            String.class,
+            String.class,
+            String.class,
+            HeadersProvider.class,
+            Object.class,
+            int.class));
     assertNotNull(
         ZerobusSdk.class.getDeclaredMethod(
             "nativeCreateArrowStream",

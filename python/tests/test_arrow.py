@@ -179,7 +179,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIsInstance(options.server_lack_of_ack_timeout_ms, int)
         self.assertIsInstance(options.flush_timeout_ms, int)
         self.assertIsInstance(options.connection_timeout_ms, int)
-        self.assertEqual(options.ipc_compression, IPCCompression.NONE)
+        self.assertEqual(options.ipc_compression, IPCCompression.ZSTD)
         self.assertIsNone(options.stream_paused_max_wait_time_ms)
 
     def test_kwargs_construction(self):
@@ -239,9 +239,9 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         options = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.NONE)
         self.assertEqual(options.ipc_compression, IPCCompression.NONE)
 
-    def test_ipc_compression_default_is_none(self):
+    def test_ipc_compression_default_is_zstd(self):
         options = ArrowStreamConfigurationOptions()
-        self.assertEqual(options.ipc_compression, IPCCompression.NONE)
+        self.assertEqual(options.ipc_compression, IPCCompression.ZSTD)
 
     def test_ipc_compression_setter(self):
         options = ArrowStreamConfigurationOptions()

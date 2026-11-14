@@ -23,6 +23,7 @@ ZerobusArrowStream::ingest_batch
 FlightDataEncoder
     |
     +-- schema message
+    +-- dictionary messages (`ArrowDictionaryHandling::Resend` and `Delta` only)
     +-- one or more physical RecordBatch messages
     |
     v
@@ -63,6 +64,31 @@ rotation, recovery, and terminal finalization.
 - `c_data.rs`, when enabled internally, imports canonical Arrow C Data into a
   Rust-owned `RecordBatch`.
 
+## Multiplexed Arrow streams
+
+`MultiplexedArrowStream` wraps homogeneous Arrow lanes through the private
+`MuxCore<S>` and MSRV-compatible `MuxLane` contract in `multiplexed_stream/`.
+The builder divides `max_inflight_batches` by the lane count using integer
+division, opens all lanes concurrently, and returns a mux only after every open
+succeeds. Construction cancellation drops completed lanes and pending opens.
+
+The core selects a lane round-robin and acquires an owned capacity reservation
+before taking that lane's `ingest_mutex`. Arrow's admitted-enqueue hook checks
+the mux under this mutex before assigning an offset or retaining the batch.
+Dropping an unused reservation returns its permit. Admission rejects closure
+without waiting for finalization, preserving ordinary Arrow ingest behavior. The
+core recognizes terminal admission and awaits the finalized typed cause through
+`terminal_error` before returning an error and poisoning ingestion. Retryable
+recovery does not close admission and remains entirely lane-local.
+
+Arrow close skips the gRPC pre-flush barrier. Each lane's supervisor owns its
+original close target/deadline, recovery interruption, and suffix retention.
+The shared core closes lanes concurrently and preserves an existing mux failure
+or records the first observed close error before callback draining. Cancellation
+retains that error; additional close errors are logged. Recovery snapshots are
+aggregated in lane order.
+Stats exporters are shared without remapping lane-local offsets to `MessageId`.
+
 ## Logical offsets and wire offsets
 
 The SDK has two intentionally different offset domains.
@@ -84,9 +110,23 @@ renumbered from zero when pending work is rebuilt for replay.
 `FlightData` record-batch messages. Each physical message receives a sequential,
 connection-local wire offset in `FlightBatchMetadata`.
 
-The first Flight message is the schema and carries no batch offset. Dictionary
-arrays use Arrow Flight's default `DictionaryHandling::Hydrate`, so dictionary
-values are expanded and do not introduce dictionary side messages.
+The first Flight message is the schema and carries no batch offset. With the
+default `ArrowDictionaryHandling::Hydrate`, dictionary arrays are expanded to
+their value type, so no dictionary messages are sent. With
+`ArrowDictionaryHandling::Resend`, the encoder sends a dictionary message before
+the first record batch that uses a dictionary on each connection and again
+whenever its values change. `ArrowDictionaryHandling::Delta` uses the same
+encoder handling and sets `arrow_ipc::writer::DictionaryHandling::Delta` in the
+IPC write options, which the encoder passes to arrow-ipc: when a batch's
+dictionary starts with the previous batch's values, the dictionary message is a
+delta (`isDelta`) with only the new values; otherwise it carries the full
+dictionary.
+The server numbers only record-batch messages, so dictionary messages carry no
+wire offset.
+
+Zerobus does not support Arrow dictionaries yet, so callers keep `Hydrate`.
+Until it does, `Resend` or `Delta` with dictionary-encoded columns makes stream
+creation fail with `ZerobusError::InvalidSchema`.
 
 The server's `ack_up_to_offset` describes the physical Flight sequence. The SDK
 does not use that value to complete caller offsets. Completion is derived from

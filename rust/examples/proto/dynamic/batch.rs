@@ -12,23 +12,13 @@ use databricks_zerobus_ingest_sdk::{
     message_descriptor, ProtoBytes, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
 
-// Change constants to match your data.
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-
-// Uncomment the appropriate lines for your cloud.
-
-// For AWS:
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-
-// For Azure:
-// const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.azuredatabricks.net";
-// const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net";
+#[path = "../../config.rs"]
+mod config;
+use config::ExampleConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     // Build the descriptor at runtime instead of from a `.proto` file. A column's
     // proto field number is its `position + 1`, so positions must be distinct.
     let columns = vec![
@@ -41,14 +31,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor = message_descriptor(&descriptor_proto)?;
 
     let sdk_handle = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     let mut stream = sdk_handle
         .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .dynamic_proto(descriptor)
         .max_inflight_requests(100)
         .build()
@@ -100,12 +90,8 @@ async fn ingest_dynamic_batch(stream: &mut ZerobusStream) -> Result<(), Box<dyn 
 
 /// A non-nullable top-level column of the given UC type at a 0-based position.
 fn col(name: &str, type_name: &str, position: i32) -> UcColumn {
-    UcColumn {
-        name: name.to_string(),
-        type_name: type_name.to_string(),
-        type_text: type_name.to_string(),
-        nullable: false,
-        type_json: String::new(),
-        position,
-    }
+    UcColumn::new(name, type_name)
+        .with_type_text(type_name)
+        .with_nullable(false)
+        .with_position(position)
 }

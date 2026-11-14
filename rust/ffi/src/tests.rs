@@ -1,19 +1,20 @@
 use crate::{
-    c_record_type, ffi_guard, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
-    write_error_result, write_success_result, zerobus_free_error_message,
-    zerobus_get_default_config, zerobus_sdk_builder_application_name, zerobus_sdk_builder_build,
-    zerobus_sdk_builder_connection_per_stream, zerobus_sdk_builder_disable_tls,
-    zerobus_sdk_builder_endpoint, zerobus_sdk_builder_free, zerobus_sdk_builder_new,
-    zerobus_sdk_builder_sdk_identifier, zerobus_sdk_builder_unity_catalog_url,
-    zerobus_sdk_create_stream, zerobus_sdk_create_stream_async,
-    zerobus_sdk_create_stream_with_headers_provider_async, zerobus_sdk_free,
-    zerobus_sdk_recreate_stream_async, zerobus_stream_close_async, zerobus_stream_flush_async,
-    zerobus_stream_get_unacked_records_async, zerobus_stream_ingest_json_record_async,
-    zerobus_stream_ingest_json_records_async, zerobus_stream_ingest_proto_record_async,
-    zerobus_stream_ingest_proto_records_async, zerobus_stream_wait_for_offset_async, CHeaders,
-    CRecordArray, CResult, CallbackHeadersProvider, RecordType, ZerobusError,
+    c_record_type, encoded_records_to_c_array, ffi_guard, intern_header_key, validate_sdk_ptr,
+    validate_stream_ptr, write_error_result, write_success_result, zerobus_free_error_message,
+    zerobus_free_record_array, zerobus_get_default_config, zerobus_sdk_builder_application_name,
+    zerobus_sdk_builder_build, zerobus_sdk_builder_connection_per_stream,
+    zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint, zerobus_sdk_builder_free,
+    zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
+    zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
+    zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
+    zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
+    zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
+    zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
+    zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
+    zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CRecordType, CResult,
+    CallbackHeadersProvider, ZerobusError,
 };
-use databricks_zerobus_ingest_sdk::HeadersProvider;
+use databricks_zerobus_ingest_sdk::{EncodedRecord, HeadersProvider};
 use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::mpsc;
@@ -175,11 +176,11 @@ fn test_cresult_error() {
 
 #[test]
 fn test_c_record_type_mapping() {
-    assert_eq!(c_record_type(1), RecordType::Proto);
-    assert_eq!(c_record_type(2), RecordType::Json);
-    assert_eq!(c_record_type(4), RecordType::Avro);
-    assert_eq!(c_record_type(999), RecordType::Unspecified);
-    assert_eq!(c_record_type(0), RecordType::Unspecified);
+    assert_eq!(c_record_type(1), CRecordType::Proto);
+    assert_eq!(c_record_type(2), CRecordType::Json);
+    assert_eq!(c_record_type(4), CRecordType::Avro);
+    assert_eq!(c_record_type(999), CRecordType::Unspecified);
+    assert_eq!(c_record_type(0), CRecordType::Unspecified);
 }
 
 // ========================================================================
@@ -834,6 +835,36 @@ fn test_async_overloads_fail_fast_on_invalid_input() {
 }
 
 // ========================================================================
+// Record Array Conversion Tests
+// ========================================================================
+
+#[test]
+fn test_encoded_records_to_c_array_round_trip() {
+    let records = vec![
+        EncodedRecord::Json(r#"{"id":1}"#.to_string()),
+        EncodedRecord::Proto(vec![1, 2, 3]),
+        EncodedRecord::Json(r#"{"id":2}"#.to_string()),
+    ];
+    let expected: [(bool, &[u8]); 3] = [
+        (true, br#"{"id":1}"#),
+        (false, &[1, 2, 3]),
+        (true, br#"{"id":2}"#),
+    ];
+
+    let array = encoded_records_to_c_array(records).unwrap();
+
+    assert_eq!(array.len, expected.len());
+    let c_records = unsafe { std::slice::from_raw_parts(array.records, array.len) };
+    for (c_record, (is_json, bytes)) in c_records.iter().zip(expected) {
+        assert_eq!(c_record.is_json, is_json);
+        let data = unsafe { std::slice::from_raw_parts(c_record.data, c_record.data_len) };
+        assert_eq!(data, bytes);
+    }
+
+    zerobus_free_record_array(array);
+}
+
+// ========================================================================
 // C String Conversion Tests
 // ========================================================================
 
@@ -1443,7 +1474,7 @@ extern "C" fn noop_error(
 // JSON config with both ack callbacks set, keyed to this test-only sentinel.
 fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
     let mut config = zerobus_get_default_config();
-    config.record_type = 2; // RecordType::Json
+    config.record_type = 2; // CRecordType::Json
     config.ack_on_ack = Some(noop_ack);
     config.ack_on_error = Some(noop_error);
     config.ack_user_data =

@@ -385,13 +385,10 @@ mod tests {
     fn uc_descriptor_with_required_nested_field() -> MessageDescriptor {
         use crate::schema::{descriptor_from_uc_columns, UcColumn};
 
-        let col = |name: &str, type_name: &str, type_json: &str, position: i32| UcColumn {
-            name: name.to_string(),
-            type_name: type_name.to_string(),
-            type_text: String::new(),
-            type_json: type_json.to_string(),
-            nullable: true,
-            position,
+        let col = |name: &str, type_name: &str, type_json: &str, position: i32| {
+            UcColumn::new(name, type_name)
+                .with_type_json(type_json)
+                .with_position(position)
         };
         let address_json = r#"{
             "type":"struct",

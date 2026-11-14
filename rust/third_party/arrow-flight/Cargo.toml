@@ -11,9 +11,9 @@
 
 [package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 name = "arrow-flight"
-version = "59.2.0"
+version = "60.0.0"
 authors = ["Apache Arrow <dev@arrow.apache.org>"]
 build = false
 autolib = false
@@ -26,7 +26,6 @@ homepage = "https://github.com/apache/arrow-rs"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/apache/arrow-rs"
-resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -54,7 +53,6 @@ flight-sql = [
     "dep:arrow-string",
     "dep:once_cell",
 ]
-flight-sql-experimental = ["flight-sql"]
 tls-aws-lc = ["tonic/tls-aws-lc"]
 tls-native-roots = ["tonic/tls-native-roots"]
 tls-ring = ["tonic/tls-ring"]
@@ -69,41 +67,41 @@ version = "1.0"
 optional = true
 
 [dependencies.arrow-arith]
-version = "59.2.0"
+version = "60.0.0"
 optional = true
 
 [dependencies.arrow-array]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-buffer]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-cast]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-data]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-ipc]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-ord]
-version = "59.2.0"
+version = "60.0.0"
 optional = true
 
 [dependencies.arrow-row]
-version = "59.2.0"
+version = "60.0.0"
 optional = true
 
 [dependencies.arrow-schema]
-version = "59.2.0"
+version = "60.0.0"
 
 [dependencies.arrow-select]
-version = "59.2.0"
+version = "60.0.0"
 optional = true
 
 [dependencies.arrow-string]
-version = "59.2.0"
+version = "60.0.0"
 optional = true
 
 [dependencies.base64]
@@ -187,11 +185,11 @@ optional = true
 default-features = false
 
 [dev-dependencies.arrow-cast]
-version = "59.2.0"
+version = "60.0.0"
 features = ["prettyprint"]
 
 [dev-dependencies.arrow-ipc]
-version = "59.2.0"
+version = "60.0.0"
 features = [
     "lz4",
     "zstd",
@@ -232,18 +230,9 @@ features = ["net"]
 version = "0.5.0"
 features = ["util"]
 
-[dev-dependencies.tracing-log]
-version = "0.2"
-
-[dev-dependencies.tracing-subscriber]
-version = "0.3.1"
-features = [
-    "ansi",
-    "env-filter",
-    "fmt",
-]
-default-features = false
-
 [dev-dependencies.uuid]
 version = "1.10.0"
 features = ["v4"]
+
+# DATABRICKS PATCH: upstream's [lints] tables are dropped. This crate is a workspace
+# member, so `make lint` (-D warnings) would otherwise apply them to vendored code.

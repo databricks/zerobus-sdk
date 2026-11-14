@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.11.0"
+version = "3.2.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -35,10 +35,15 @@ tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
 tonic-types = { workspace = true, optional = true }
+rustls-pki-types.workspace = true
 tracing.workspace = true
+http-body = { workspace = true, optional = true }
 hyper-http-proxy.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+# Not imported; they set a security floor (see the `webpki-version-floor` feature).
+rustls-webpki = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 smallvec.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -62,6 +67,7 @@ plotters = { version = "0.3", default-features = false, features = ["svg_backend
 prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
+tempfile.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -69,11 +75,14 @@ protoc-bin-vendored.workspace = true
 prost-build = { version = "0.14", optional = true }
 
 [features]
-default = []
+default = ["webpki-version-floor"]
+# Requires the rustls-webpki and webpki-roots versions that distrust the compromised
+# eMudhra (emSign) CAs. Builds without it must get that distrust some other way.
+webpki-version-floor = ["dep:rustls-webpki", "dep:webpki-roots"]
 # Avro record format (Beta), opt-in. Requires Rust 1.88 (apache-avro 0.22).
 avro = ["dep:apache-avro"]
 # Arrow Flight support
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tonic-types"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tonic-types", "dep:http-body", "tonic/zstd"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
 internal-arrow-c-data = [
     "arrow-flight",
@@ -88,6 +97,12 @@ testing = []
 # Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
 # unless enabled; never enabled by FFI/production builds.
 test-hooks = ["arrow-flight"]
+
+[lints.clippy]
+# `async-trait` stamps `#[must_use]` on methods that already return a `#[must_use]`
+# boxed future; clippy >= 1.99's `double_must_use` flags that redundant tag in
+# generated and async-trait code we don't control. Allow it crate-wide.
+double_must_use = "allow"
 
 [[test]]
 name = "zeroparser_e2e"

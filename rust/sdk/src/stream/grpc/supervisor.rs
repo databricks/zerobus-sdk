@@ -4,8 +4,9 @@
 //! watch-for-failure → recover loop. The high-level pattern is reusable
 //! across transports, but the current implementation is wired to the gRPC
 //! transport (it calls into `create_stream_connection`, spawns the gRPC
-//! sender/receiver tasks, and uses `ZerobusClient<Channel>`). Future work
-//! to share this with Arrow Flight should abstract the transport seams.
+//! sender/receiver tasks, and gets its channels from a `GrpcChannelSource`).
+//! Future work to share this with Arrow Flight should abstract the transport
+//! seams.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,14 +17,14 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
-use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
+use crate::grpc_channel::GrpcChannelSource;
+use crate::grpc_status::{GrpcCode, GrpcStatus};
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -49,7 +50,7 @@ impl ZerobusStream {
     #[allow(clippy::too_many_arguments)]
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     pub(super) async fn supervisor_task(
-        channel: ZerobusClient<Channel>,
+        channel_source: Arc<GrpcChannelSource>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
@@ -110,7 +111,7 @@ impl ZerobusStream {
             let is_initial = initial_stream_creation;
             let attempt = AtomicUsize::new(0);
             let create_attempt = || {
-                let channel = channel.clone();
+                let channel_source = Arc::clone(&channel_source);
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
@@ -119,18 +120,22 @@ impl ZerobusStream {
 
                 async move {
                     let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
-                    let result = if is_initial {
-                        Self::create_initial_stream_connection(
-                            channel,
-                            &table_properties,
-                            &headers_provider,
-                            record_type,
-                            kind,
-                            options.recovery_timeout_ms,
-                        )
-                        .await
-                    } else {
-                        tokio::time::timeout(
+                    // Asking the source on every attempt retries a failed first
+                    // open, and lets recovery pick up rotated TLS certificates.
+                    let result = match channel_source.client().await {
+                        Err(e) => Err(e),
+                        Ok(channel) if is_initial => {
+                            Self::create_initial_stream_connection(
+                                channel,
+                                &table_properties,
+                                &headers_provider,
+                                record_type,
+                                kind,
+                                options.recovery_timeout_ms,
+                            )
+                            .await
+                        }
+                        Ok(channel) => tokio::time::timeout(
                             Duration::from_millis(options.recovery_timeout_ms),
                             Self::create_stream_connection(
                                 channel,
@@ -142,11 +147,11 @@ impl ZerobusStream {
                         )
                         .await
                         .map_err(|_| {
-                            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
                                 "Stream creation timed out",
                             ))
                         })
-                        .and_then(|res| res)
+                        .and_then(|res| res),
                     };
                     if let Err(ref e) = result {
                         warn!(
@@ -284,6 +289,7 @@ impl ZerobusStream {
                 options.clone(),
                 server_error_tx.clone(),
                 recv_drain_token.clone(),
+                per_stream_token.clone(),
                 callback_tx.clone(),
                 initial_last_acked_offset,
             ));
@@ -320,8 +326,12 @@ impl ZerobusStream {
                 }
                 send_result = &mut send_task => {
                     // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
-                    if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
-                        recv_drain_token.cancel();
+                    // The receiver also cancels `per_stream_token` to half-close. Let it apply the
+                    // final acks before it is aborted and `reset_observe` runs.
+                    if matches!(send_result, Ok(Ok(()))) {
+                        if cancellation_token.is_cancelled() {
+                            recv_drain_token.cancel();
+                        }
                         let _ = tokio::time::timeout(
                             Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
                             &mut recv_task,
@@ -346,7 +356,7 @@ impl ZerobusStream {
                     // Mapping this to pass certain e2e tests.
                     // TODO: Remove this once we fix tests.
                     ZerobusError::StreamClosedError(status)
-                        if status.code() == tonic::Code::InvalidArgument =>
+                        if status.code() == GrpcCode::InvalidArgument =>
                     {
                         ZerobusError::InvalidArgument(status.message().to_string())
                     }
@@ -507,8 +517,6 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    use smallvec::smallvec;
-
     use super::super::types::IngestRequest;
     use super::*;
     use crate::landing_zone::LandingZone;
@@ -532,7 +540,7 @@ mod tests {
         let callback_tx = None;
 
         let reservation = landing_zone.reserve_capacity().await;
-        let batch = EncodedBatch::Proto(smallvec![b"admitted".to_vec()]);
+        let batch = EncodedBatch::Proto(vec![b"admitted".to_vec()].into());
 
         // Model an ingest that has entered its ordering section but has not
         // enqueued yet. Polling the failure future explicitly proves that it
@@ -575,7 +583,7 @@ mod tests {
         is_closed.store(false, Ordering::Relaxed);
         let terminal_token = CancellationToken::new();
         let (server_error_tx, _) = tokio::sync::watch::channel(None);
-        let batch = EncodedBatch::Proto(smallvec![b"recoverable".to_vec()]);
+        let batch = EncodedBatch::Proto(vec![b"recoverable".to_vec()].into());
         let reservation = landing_zone.reserve_capacity().await;
         landing_zone.enqueue_reserved(
             Box::new(IngestRequest {

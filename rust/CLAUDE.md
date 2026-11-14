@@ -1,96 +1,65 @@
-# Rust SDK
+# Rust SDK — Contributor Guide (core)
 
-This is the core implementation. All other SDKs depend on it.
+The core SDK; every Rust-backed SDK binds it:
 
-## Client code patterns (examples, doc comments, generated code)
+- Go, C++, .NET — via the C FFI (`rust/ffi/`).
+- Java — via JNI (`rust/jni/`).
+- Python, TypeScript — via PyO3 / NAPI-RS.
 
-See the root `CLAUDE.md` "Writing SDK client code — performance rules" for the cross-SDK rule. In Rust specifically:
+Root `CLAUDE.md` has the shared rules; this is the Rust-core delta. The JSON/protobuf engine is in `sdk/src/stream/grpc/`; Arrow Flight is in `sdk/src/stream/arrow/` (feature `arrow-flight`).
 
-- `ingest_record_offset()` / `ingest_records_offset()` return the `OffsetId` once the record is **queued**; the network round-trip is async. **Never call `wait_for_offset()` after every ingest in a loop** — it forces one server round-trip per record.
-- Correct pattern: ingest in a loop, then `flush()` once (or periodically for unbounded streams). Or wait on only the **last** offset — the ack watermark is monotonic, so acking the last offset implies all prior are acked (`wait_for_offset_internal` waits for `last_received_offset >= target`).
-- Register an `ack_callback` for async ack/error tracking instead of blocking.
-- Any new example, `///` doc example, or test must show the loop-then-`flush()` pattern first; reserve per-record `wait_for_offset()` for clearly-labeled low-volume cases.
+## Build and test
 
-## Structure
+From `rust/`: `make build` / `build-release`, `build-ffi` (rebuilds `zerobus.h`), `build-jni`, `lint`, `fmt`, `check`. Not obvious:
 
-```
-rust/
-├── sdk/          # Core SDK crate (databricks-zerobus-ingest-sdk)
-├── ffi/          # C FFI crate — cbindgen generates zerobus.h (used by Go, Java)
-├── jni/          # JNI crate — Java Native Interface bindings
-├── examples/     # JSON, proto, Arrow Flight, and Avro ingestion examples
-├── tests/        # Integration tests
-└── tools/        # Schema generation CLI
-```
+- **`make test` is a feature matrix.** Workspace minus SDK+JNI, then SDK `--all-features`, then SDK `--no-default-features`, then `zerobus-jni --all-features`. Plain `cargo test --workspace` skips `avro` and no-default-features.
+- **`examples/avro` isn't in CI** (workspace-excluded). Check it with `cd examples/avro && cargo test`.
+- **A `tests/src/` file runs only if listed as `[[test]]`** in `tests/Cargo.toml`; otherwise it builds only when a registered target `mod`s it.
 
-This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
+## FFI and JNI rules
 
-## Key modules in `sdk/src/`
+- **Regenerate the header after FFI changes.** `ffi/build.rs` writes `zerobus.h`. After editing `rust/ffi/src`, run `cargo build -p zerobus-ffi` and commit it. A non-additive change breaks Go/C++/.NET — treat it as public-API.
+- **Don't let rustfmt reorder `ffi/src/lib.rs`.** The comments between `mod` lines block alphabetizing; that order is the header's declaration order.
+- **Keep the JNI ABI version in sync.** Bump `NATIVE_ABI_VERSION` (`jni/src/sdk.rs`) and `EXPECTED_NATIVE_ABI` (`NativeLoader.java`) together on any native-signature change; a mismatch is rejected at load.
+- **Leave `panic = "unwind"` (root `[profile.release]`).** `panic = "abort"` turns the FFI `catch_unwind` guards into process aborts, and Cargo ignores member-crate profiles.
+- **No ambient runtime** — the FFI and JNI crates each run their own tokio runtime.
 
-- `builder/sdk_builder.rs` — Typestate builder pattern for `ZerobusSdk`
-- `errors.rs` — `ZerobusError` enum with `is_retryable()` classification
-- `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
-- `landing_zone.rs` — Batches records before sending over gRPC
-- `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`; `AvroRecord`/`AvroBytes` and the `PreparedInput` ingest payload (Avro types behind `avro`)
-- `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules
-  (behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
+## Public API and breaking changes
 
-## Build commands
+A public-surface change reaches: `pub` items → Rust consumers; FFI signatures/structs → Go/C++/.NET; JNI methods → Java; PyO3 (`python/rust/src/lib.rs`) and NAPI (`typescript/src/lib.rs`) wrap the SDK directly, so refactors can break them via changed paths/types.
 
-Run from `rust/`:
+- **New trait methods need a default** — users implement `HeadersProvider`, `AckCallback`, `TlsConfig` externally.
+- **Additive-safe:** new `pub` items, new `#[non_exhaustive]` enum variants / struct fields, feature-gated modules. Don't derive `Copy` on a public event.
+- **Deprecate before removing:** `#[deprecated(since, note)]`, keep ≥1 minor, remove next major.
 
-- `make build` / `make build-release` — Build SDK
-- `make build-ffi` — Build C FFI library (generates `zerobus.h` + static/dynamic libs)
-- `make build-jni` — Build JNI library for Java
-- `make test` — Run all workspace tests
-- `make lint` — Clippy
-- `make fmt` — rustfmt
-- `make check` — fmt + lint
-
-## Breaking change rules
-
-Any change to the Rust SDK's public API surface has cascading effects:
-
-1. **Public types/traits** (`pub` items in `lib.rs`) — used directly by Rust consumers. Removing or renaming is a breaking change.
-2. **FFI functions** (`rust/ffi/`) — changing a C function signature, struct layout, or removing a function breaks Go and Java. The header `zerobus.h` is auto-generated; always review the diff.
-3. **JNI exports** (`rust/jni/`) — changing native method signatures breaks Java. Must stay in sync with `native` declarations in Java source.
-4. **PyO3 bindings** (`python/rust/src/lib.rs`) and **NAPI-RS bindings** (`typescript/src/lib.rs`) wrap the Rust SDK directly, so internal refactors can break them if module paths or type signatures change.
-
-**Safe changes**: adding new public items, adding optional parameters with defaults, adding new enum variants (if non-exhaustive), adding fields to `#[non_exhaustive]` structs, adding feature-gated modules.
-
-**Adding methods to public traits** (`HeadersProvider`, `AckCallback`, `TlsConfig`): always provide a default implementation. Users implement these traits externally; adding a method without a default breaks every external impl.
-
-**Deprecation path**: mark with `#[deprecated(since = "x.y.z", note = "Use X instead")]`, keep for at least one minor release, remove in next major.
+(Root owns the general semver rule.)
 
 ## Feature flags
 
-- `arrow-flight` — Arrow Flight support. Opt-in.
-- `avro` — Avro record format (Beta). Off by default; requires Rust 1.88 (via `apache-avro` 0.22). Select with `.avro(schema)`, then ingest `AvroRecord` (encoded against the writer schema) or pre-encoded `AvroBytes`. Ephemeral streams only; feature in development.
-- `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
-  the repository's native bindings. Disabled by default; external Rust users
-  must not depend on its API stability.
-- `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
-- `testing` — Test utilities.
+Off by default unless noted; these constraints aren't visible in `Cargo.toml`:
 
-## Error handling
+- `arrow-flight` — Arrow Flight ingestion.
+- `avro` — Avro (Beta). Ephemeral streams only; raises MSRV (apache-avro).
+- `eos` — persistent streams (in dev). JSON + compiled protobuf only; no Arrow, Avro, dynamic protobuf, or multiplexing.
+- `zeroparser` — zero-copy protobuf parser; opt-in (`sdk/src/zeroparser/`).
+- `internal-arrow-c-data` — wrapper-only C Data importer; unstable, don't depend on it.
+- `webpki-version-floor` — **on by default.** A `rustls-webpki`/`webpki-roots` floor distrusting compromised CAs (crates not imported). Bindings must keep it on; a `default-features = false` build must restore the distrust itself.
+- `test-hooks` — test-only; not in shipped artifacts (but a whole-workspace `cargo build` enables it via the tests crate).
+- `testing` — test utils; the FFI crate enables it, so testing-gated items reach native artifacts.
 
-`ZerobusError` variants are classified as retryable or non-retryable via `is_retryable()`. This distinction propagates through FFI (`CResult.is_retryable`) to all wrapper SDKs. When adding new error variants, always implement `is_retryable()` for them.
+**MSRV:** declared `1.70` is stale/unenforced — the default graph needs ~1.83, and `arrow-flight`/`avro` need 1.88. Not CI-gated; check before changing.
 
-## Async runtime
+## Errors, lifecycle, performance
 
-The SDK uses tokio. The FFI and JNI crates each manage their own tokio runtime instance — do not assume a runtime exists in the caller's context.
+- **Classify every new error** — `is_retryable()` (`errors.rs`) flows through the FFI (`CResult.is_retryable`) to all wrappers.
+- **Drop doesn't flush** — `Drop` aborts tasks and discards unacked data. `close()`/`flush()` first; check any wrapper/FFI path that drops a live stream.
+- **Ingest in a loop, then `flush()` once.** Never `wait_for_offset()` per record (a round-trip each). The watermark is monotonic, so waiting on the last offset confirms the run; or use an `ack_callback`. (Root has the cross-SDK rule.)
 
-## Changelog and documentation
+## Changelog, docs, release
 
-- Every PR must update `rust/NEXT_CHANGELOG.md` under the appropriate section if it changes user-facing behavior.
-- Update `rust/README.md` if the change affects usage, setup, or API surface.
-- Add or update examples in `rust/examples/` for new or modified APIs.
-- Add doc comments (`///`) for all new public items — these render on docs.rs.
+- **User-facing change:** update `rust/NEXT_CHANGELOG.md`, `rust/README.md`, `rust/examples/`, and `///` docs (they render on docs.rs). (Root owns the general rules.)
+- **Releases:** version in `rust/sdk/Cargo.toml`. Go and C++ rebuild the FFI from source (no `ffi/v*` wait; that release is for external C/FFI consumers); Java consumes the JNI build (`release-jni`). Coordinate when a core change touches FFI signatures or wrapper behavior.
 
-## Release
+## Arrow Flight
 
-- Version source: `rust/sdk/Cargo.toml` (`version = "x.y.z"`).
-- Tag: `rust/v<semver>` → triggers `release-rust.yml` → publishes to crates.io.
-- The FFI crate (`rust/ffi/`) has a separate version and tag (`ffi/v*`). An FFI release must happen before Go or Java can pick up Rust core changes, since they link the pre-built static library.
-- On version bump PR: move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md`, reset `NEXT_CHANGELOG.md` with the next version header.
-- Rust core version bumps may cascade: if the change affects FFI signatures or wrapper behavior, coordinate releases across affected SDKs.
+See `sdk/src/stream/arrow/README.md` for recovery/ACK invariants — notably: don't reorder the `biased` select arms without a deterministic race test, and use `test-hooks` barriers / paused time (not sleeps) for timing tests.

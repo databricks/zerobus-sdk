@@ -4,6 +4,8 @@
 #ifndef ZB_ERROR_H
 #define ZB_ERROR_H
 
+#include <stdbool.h>
+
 #include "zerobus/common.h"
 
 struct zerobus_error {
@@ -34,5 +36,9 @@ zerobus_status_t zb_fail(zerobus_error_t **out_error, zerobus_status_t code,
     __attribute__((format(printf, 3, 4)))
 #endif
     ;
+
+/* Whether a failure with status may succeed on retry. Backs
+ * zerobus_error_is_retryable and the stream's recovery. */
+bool zb_status_is_retryable(zerobus_status_t status);
 
 #endif /* ZB_ERROR_H */

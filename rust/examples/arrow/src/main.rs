@@ -4,10 +4,13 @@ use std::sync::Arc;
 use arrow_array::{
     Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
 };
-use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{
-    channel_exporter, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
+    channel_exporter, ArrowCompression, ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk,
 };
+
+#[path = "../../config.rs"]
+mod config;
+use config::ExampleConfig;
 
 /// One row of the `orders` table.
 #[derive(Clone)]
@@ -21,21 +24,6 @@ struct Order {
     created_at: i64,
     updated_at: i64,
 }
-
-// Change constants to match your data.
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-
-// Uncomment the appropriate lines for your cloud.
-
-// For AWS:
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-
-// For Azure:
-// const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.azuredatabricks.net";
-// const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 /// Builds the Arrow schema for the `orders` table, matching the canonical
 /// Arrow schema the Databricks Arrow Flight server derives from a Delta
@@ -85,25 +73,26 @@ fn build_orders_batch(schema: &Arc<ArrowSchema>, orders: &[Order]) -> RecordBatc
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     let schema = orders_schema();
 
     let sdk_handle = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     let (stats_exporter, mut stats_rx) =
         channel_exporter(std::num::NonZeroUsize::new(1024).unwrap());
 
-    // Optional IPC compression. Trades client CPU for fewer bytes on the wire —
-    // enable only when network bandwidth limits throughput. `LZ4_FRAME` is fast
-    // with a modest ratio; `ZSTD` compresses more at higher CPU cost.
+    // For managed fan-out across Flight streams, see ../multiplexed.rs.
+    // IPC compression defaults to `ZSTD`, trading client CPU for fewer bytes on
+    // the wire. `LZ4_FRAME` is faster with a modest ratio; `None` disables it.
     let mut stream = sdk_handle
         .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .arrow(schema.clone())
-        .ipc_compression(Some(CompressionType::ZSTD))
+        .compression(ArrowCompression::IpcZstd)
         .max_inflight_batches(100)
         .stats_exporter(stats_exporter)
         .build_arrow()

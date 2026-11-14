@@ -3,6 +3,36 @@
 use crate::stream_options::defaults;
 use arrow_ipc::CompressionType;
 
+/// How an Arrow Flight stream sends dictionary-encoded columns.
+///
+/// Zerobus does not support Arrow dictionaries yet, so keep the default,
+/// [`Hydrate`](Self::Hydrate). Until it does, [`Resend`](Self::Resend) or
+/// [`Delta`](Self::Delta) with dictionary-encoded columns makes stream creation
+/// fail with [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema).
+///
+/// Configure it with
+/// [`StreamBuilder::dictionary_handling`](crate::StreamBuilder::dictionary_handling).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArrowDictionaryHandling {
+    /// Decode dictionary-encoded columns to their value type before sending, so the
+    /// server receives plain values.
+    #[default]
+    Hydrate,
+
+    /// Send dictionary-encoded columns as Arrow IPC dictionaries for the server to
+    /// decode.
+    ///
+    /// Each connection sends a column's dictionary before the first batch that uses
+    /// it and again whenever its values change.
+    Resend,
+
+    /// Like [`Resend`](Self::Resend), but when a batch's dictionary starts with the
+    /// previous batch's values for that column, send only the new values.
+    /// Otherwise, send the full dictionary.
+    Delta,
+}
+
 /// Configuration options for Arrow Flight stream creation and operation.
 ///
 /// These options control the behavior of Arrow Flight ingestion streams, including
@@ -47,11 +77,11 @@ pub struct ArrowStreamConfigurationOptions {
     /// Values whose absolute deadline cannot be represented by the platform's
     /// monotonic clock are rejected when the stream is built.
     ///
-    /// For OAuth-authenticated streams this also caps a proactive token refresh at
-    /// half its value, but only when the cached token has more life left than that
-    /// cap, so a stalled endpoint falls back to the cached token before the attempt
-    /// deadline. When too little of the token's life remains, the refresh runs
-    /// unbounded, like a cold miss.
+    /// For streams authenticated with OAuth or federated auth, this also caps a
+    /// proactive token refresh at half its value, but only when the cached token
+    /// has more life left than that cap, so a stalled endpoint falls back to the
+    /// cached token before the attempt deadline. When too little of the token's
+    /// life remains, the refresh runs unbounded, like a cold miss.
     ///
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
@@ -102,14 +132,34 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 30,000 (30 seconds)
     pub connection_timeout_ms: u64,
 
-    /// Optional Arrow IPC compression for Flight payloads.
+    /// Arrow IPC compression for Flight payloads.
     ///
     /// Supported compression types from `arrow_ipc::CompressionType`:
     /// - `CompressionType::LZ4_FRAME` - LZ4 frame compression
     /// - `CompressionType::ZSTD` - Zstandard compression
     ///
-    /// Default: `None`
+    /// Set to `None` to send uncompressed payloads. Used only when
+    /// [`compression`](Self::compression) is [`ArrowCompression::FallbackToLegacy`].
+    ///
+    /// Default: `Some(CompressionType::ZSTD)`
+    #[deprecated(since = "3.0.0", note = "Use `compression` instead")]
     pub ipc_compression: Option<CompressionType>,
+
+    /// Compression for Arrow Flight payloads. See [`ArrowCompression`] for the options.
+    ///
+    /// Default: [`ArrowCompression::FallbackToLegacy`], which applies the deprecated
+    /// [`ipc_compression`](Self::ipc_compression) field and so compresses each IPC buffer with
+    /// zstd unless that field is changed.
+    pub compression: ArrowCompression,
+
+    /// How dictionary-encoded columns are sent. See [`ArrowDictionaryHandling`].
+    ///
+    /// Zerobus does not support Arrow dictionaries yet, so keep the default. Until it
+    /// does, `Resend` or `Delta` with dictionary-encoded columns makes stream creation
+    /// fail with [`ZerobusError::InvalidSchema`](crate::ZerobusError::InvalidSchema).
+    ///
+    /// Default: [`ArrowDictionaryHandling::Hydrate`]
+    pub dictionary_handling: ArrowDictionaryHandling,
 
     /// Maximum time in milliseconds to wait for acknowledgments during server-initiated
     /// graceful stream rotation.
@@ -150,6 +200,7 @@ pub struct ArrowStreamConfigurationOptions {
 }
 
 impl Default for ArrowStreamConfigurationOptions {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             max_inflight_batches: 1_000,
@@ -160,8 +211,40 @@ impl Default for ArrowStreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
-            ipc_compression: None,
+            ipc_compression: Some(CompressionType::ZSTD),
+            compression: ArrowCompression::FallbackToLegacy,
+            dictionary_handling: ArrowDictionaryHandling::Hydrate,
             stream_paused_max_wait_time_ms: None,
         }
     }
+}
+
+/// Compression for Arrow Flight payloads.
+///
+/// Set with [`StreamBuilder::compression`](crate::StreamBuilder::compression).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArrowCompression {
+    /// No compression.
+    Uncompressed,
+    /// Compress each Arrow IPC buffer with zstd.
+    IpcZstd,
+    /// Compress each Arrow IPC buffer with LZ4 frame compression.
+    IpcLz4,
+    /// Compress each whole gRPC request message with zstd.
+    ///
+    /// IPC compression compresses each Arrow buffer separately and leaves the IPC header and
+    /// alignment padding raw. This compresses the full `FlightData` message instead, which
+    /// helps most for wide or sparse schemas, whose messages are dominated by metadata.
+    /// Buffers are sent uncompressed with 8-byte alignment, because compressing them twice
+    /// doesn't reduce size and wider padding only adds bytes.
+    ///
+    /// It can cost noticeably more client CPU than [`IpcZstd`](Self::IpcZstd), and on narrow,
+    /// dense schemas it saves few bytes. Measure on your own data before switching.
+    GrpcZstd,
+    /// Apply the deprecated
+    /// [`ArrowStreamConfigurationOptions::ipc_compression`] field. This is the default until
+    /// that field is removed, when the default becomes [`IpcZstd`](Self::IpcZstd).
+    #[deprecated(since = "3.0.0", note = "Choose a compression explicitly")]
+    FallbackToLegacy,
 }

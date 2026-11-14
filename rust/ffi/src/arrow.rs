@@ -2,7 +2,7 @@
 
 use crate::arrow_c_data::{CArrowArray, CArrowSchema};
 use crate::common::*;
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
+use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use bytes::Bytes;
 use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
     import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
@@ -12,7 +12,8 @@ use databricks_zerobus_ingest_sdk::internal::{
     mark_arrow_stream_c_data_ingested,
 };
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream, ZerobusError, ZerobusResult,
+    ArrowCompression, HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream,
+    ZerobusError, ZerobusResult,
 };
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -60,11 +61,11 @@ pub struct CArrowStreamConfigurationOptions {
     pub stream_paused_max_wait_time_ms: i64,
 }
 
-fn c_to_compression(value: i32) -> Option<CompressionType> {
+fn c_to_compression(value: i32) -> ArrowCompression {
     match value {
-        0 => Some(CompressionType::LZ4_FRAME),
-        1 => Some(CompressionType::ZSTD),
-        _ => None,
+        0 => ArrowCompression::IpcLz4,
+        1 => ArrowCompression::IpcZstd,
+        _ => ArrowCompression::Uncompressed,
     }
 }
 
@@ -152,7 +153,7 @@ fn apply_c_arrow_stream_options<'a>(
         .server_lack_of_ack_timeout_ms(c.server_lack_of_ack_timeout_ms)
         .flush_timeout_ms(c.flush_timeout_ms)
         .connection_timeout_ms(c.connection_timeout_ms)
-        .ipc_compression(c_to_compression(c.ipc_compression))
+        .compression(c_to_compression(c.ipc_compression))
         .stream_paused_max_wait_time_ms(c_to_stream_paused_ms(c.stream_paused_max_wait_time_ms))
 }
 
@@ -508,7 +509,7 @@ pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
         let array = unsafe { FFI_ArrowArray::from_raw(array.cast::<FFI_ArrowArray>()) };
         let schema = unsafe { FFI_ArrowSchema::from_raw(schema.cast::<FFI_ArrowSchema>()) };
 
-        if array.is_released() || schema.release.is_none() {
+        if array.is_released() || schema.release().is_none() {
             write_error_result(
                 result,
                 "Arrow C Data input has already been released",
@@ -865,7 +866,7 @@ pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfiguratio
         server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
         flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
         connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
-        ipc_compression: -1,
+        ipc_compression: 1,
         stream_paused_max_wait_time_ms: -1,
     }
 }

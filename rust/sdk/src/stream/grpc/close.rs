@@ -33,6 +33,11 @@ impl ZerobusStream {
     /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
     /// These waits are separate from the flush timeout.
     ///
+    /// On a standard stream, if records are still unacknowledged after the flush, the SDK
+    /// also reads late acknowledgments from the server for up to 500 ms. This read removes
+    /// records from `get_unacked_records()` and calls `on_ack()` for each one, so `close()`
+    /// can return the flush error while that list is empty.
+    ///
     /// # Returns
     ///
     /// `Ok(())` if the stream was already closed or flushing succeeded. Task shutdown
@@ -71,32 +76,10 @@ impl ZerobusStream {
         flush_result
     }
 
-    /// Stops a mux lane after its flush attempt. Cache the outcome and close
-    /// the lane before the caller starts cancellable callback draining.
-    pub(crate) async fn close_after_flush(&mut self) -> Option<ZerobusError> {
-        if let Some(result) = &self.supervisor_shutdown_result {
-            return result.as_ref().err().cloned();
-        }
-        let task_error = self.shutdown_supervisor().await;
-        // The supervisor publishes the final error before cancelling this
-        // token. A clean shutdown's transient watch error must not be promoted
-        // to a terminal cause.
-        let lane_error = if self.terminal_token.is_cancelled() {
-            self.server_error_rx.borrow().clone()
-        } else {
-            None
-        };
-        let result = lane_error.or(task_error).map_or(Ok(()), Err);
-        self.supervisor_shutdown_result = Some(result.clone());
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.terminal_token.cancel();
-        result.err()
-    }
-
     /// Waits up to one second for cooperative shutdown, then at most 100ms
     /// after abort. Synchronous user code may outlive that budget; the retained
     /// handle is aborted and the timeout outcome is cached for retries.
-    async fn shutdown_supervisor(&mut self) -> Option<ZerobusError> {
+    pub(super) async fn shutdown_supervisor(&mut self) -> Option<ZerobusError> {
         if let Some(result) = &self.supervisor_shutdown_result {
             return result.as_ref().err().cloned();
         }
@@ -135,6 +118,8 @@ impl ZerobusStream {
 
     /// Retain the handle while awaiting callbacks so cancellation can be resumed.
     pub(crate) async fn shutdown_callbacks(&mut self) {
+        // The supervisor has shut down, so no more callbacks are produced. Queued ones run first.
+        self.callback_cancellation_token.cancel();
         if let Some(task) = self.callback_handler_task.as_mut() {
             Self::shutdown_callback_task(task, self.options.callback_max_wait_time_ms).await;
             self.callback_handler_task.take();
@@ -142,7 +127,7 @@ impl ZerobusStream {
     }
 
     /// Drains the callback handler task during teardown. The caller must have
-    /// already cancelled the `cancellation_token`. With `Some(ms)`, waits up to
+    /// already cancelled the callback task's token. With `Some(ms)`, waits up to
     /// that long then aborts; with `None`, waits indefinitely.
     ///
     /// Split out so the teardown can be exercised in isolation by tests
@@ -168,17 +153,6 @@ impl ZerobusStream {
             let _ = task.await;
         }
     }
-
-    // Signal the stream to stop accepting work and tear down its background
-    // tasks. Unlike `close`, this only needs `&self` — it relies on the
-    // cancellation token and `is_closed` flag, both of which are already
-    // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
-    // `close` or `Drop`.
-    pub(crate) fn signal_shutdown(&self) {
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.terminal_token.cancel();
-        self.cancellation_token.cancel();
-    }
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -190,6 +164,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::grpc_status::{GrpcCode, GrpcStatus};
     use crate::{
         landing_zone::LandingZone, MultiplexedStream, NoAuthHeadersProvider, StreamType,
         TableProperties,
@@ -234,6 +209,7 @@ mod tests {
             server_error_rx: error_rx,
             cancellation_token: CancellationToken::new(),
             callback_handler_task: callback,
+            callback_cancellation_token: CancellationToken::new(),
             dynamic_message_descriptor: None,
         };
         (stream, error_tx)
@@ -268,7 +244,7 @@ mod tests {
             .await
             .expect("retry must not flush the stopped lane for another second");
         assert!(
-            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::DeadlineExceeded)
+            matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::DeadlineExceeded)
         );
         let records: Vec<_> = mux.get_unacked_records().await.unwrap().collect();
         assert!(
@@ -297,7 +273,7 @@ mod tests {
         stream.supervisor_task = tokio::spawn(async move {
             cancelled.cancelled().await;
             let error =
-                ZerobusError::StreamClosedError(tonic::Status::permission_denied("terminal close"));
+                ZerobusError::StreamClosedError(GrpcStatus::permission_denied("terminal close"));
             closed.store(true, Ordering::Relaxed);
             error_tx.send(Some(error.clone())).unwrap();
             terminal.cancel();
@@ -313,7 +289,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied)
+                matches!(result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::PermissionDenied)
             );
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-sdk-ts"
-version = "1.4.0"
+version = "1.5.0"
 authors = ["Databricks"]
 edition = "2021"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
 napi-derive = "2"
 
-databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.9.0" }
+databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "3.0.0" }
 
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
@@ -32,9 +32,9 @@ async-trait = "0.1"
 # `Bytes` is the input type for the Rust SDK's `ingest_ipc_batch` entry.
 bytes = "1"
 
-arrow-array = { version = "59.2", optional = true }
-arrow-schema = { version = "59.2", optional = true }
-arrow-ipc = { version = "59.2", features = ["lz4", "zstd"], optional = true }
+arrow-array = { version = "60.0", optional = true }
+arrow-schema = { version = "60.0", optional = true }
+arrow-ipc = { version = "60.0", features = ["lz4", "zstd"], optional = true }
 
 [build-dependencies]
 napi-build = "2"
@@ -48,6 +48,8 @@ arrow-flight = [
     "dep:arrow-schema",
     "dep:arrow-ipc"
 ]
+# Avro record format. Enable with: npm run build:avro (pulls apache-avro 0.22, needs Rust 1.88).
+avro = ["databricks-zerobus-ingest-sdk/avro"]
 
 [profile.release]
 lto = true

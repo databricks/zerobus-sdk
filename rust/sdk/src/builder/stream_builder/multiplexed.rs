@@ -1,4 +1,4 @@
-//! Multiplexed gRPC stream construction.
+//! Multiplexed stream construction.
 
 use std::fmt;
 use std::sync::Arc;
@@ -11,12 +11,62 @@ use tracing::{error, warn};
 #[cfg(feature = "arrow-flight")]
 use super::FormatConfig;
 use super::StreamBuilder;
+use crate::callbacks::AckCallback;
+use crate::client_warnings::record_stream_creation;
 use crate::headers_provider::HeadersProvider;
-use crate::{MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusStream};
+use crate::{
+    MessageId, MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusStream,
+};
 
 pub(super) const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
 
-/// Terminal builder for a [`MultiplexedStream`].
+impl<'a> StreamBuilder<'a> {
+    /// Set the acknowledgment callback for a multiplexed gRPC stream.
+    ///
+    /// The callback receives the [`MessageId`] returned by multiplexed ingest
+    /// methods. Calling this setter again replaces the previous multiplexed
+    /// callback. Ordinary `build()` and `build_arrow()` reject it.
+    pub fn multiplexed_ack_callback(mut self, callback: Arc<dyn AckCallback<MessageId>>) -> Self {
+        self.multiplexed_callback = Some(callback);
+        self
+    }
+
+    /// Select a multiplexed stream composed of `stream_count` homogeneous
+    /// sub-streams.
+    ///
+    /// This is a terminal mode selection: configure table, authentication,
+    /// format, stream options, and an optional
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) before
+    /// calling it. The returned builder only supports validation and
+    /// construction.
+    ///
+    /// Use multiplexing when one gRPC stream is the throughput bottleneck
+    /// and global ordering is not required. Records retain ordering within
+    /// each sub-stream, but there is no global record, message-ID, or callback
+    /// order. Different sub-stream callback workers may invoke the shared
+    /// callback concurrently.
+    ///
+    /// For a JSON stream, first migrate to compiled Protocol Buffers and
+    /// measure throughput again before considering multiplexing.
+    ///
+    /// # Beta
+    ///
+    /// Multiplexed streams are a Beta API.
+    ///
+    /// `stream_count` must be in `1..=64` and cannot exceed the configured
+    /// `max_inflight_requests` (gRPC) or `max_inflight_batches` (Arrow). The
+    /// mux-wide in-flight budget is divided evenly
+    /// across sub-streams using integer division. JSON, compiled protobuf,
+    /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
+    /// Arrow Flight uses `.arrow(schema).multiplexed(n).build_arrow()` with the
+    /// `arrow-flight` feature. Arrow batches remain whole; callbacks and stats
+    /// exporters are unsupported.
+    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
+        MultiplexedStreamBuilder::new(self, stream_count)
+    }
+}
+
+/// Terminal builder for a [`MultiplexedStream`] or an Arrow Flight mux.
 ///
 /// Obtain this from [`StreamBuilder::multiplexed`] after setting all ordinary
 /// stream options. Construction opens every sub-stream concurrently after an
@@ -31,7 +81,7 @@ pub(super) const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
 /// # Beta
 ///
 /// Multiplexed streams are a Beta API.
-#[must_use = "a MultiplexedStreamBuilder does nothing until `.build()` is called"]
+#[must_use = "a MultiplexedStreamBuilder does nothing until `.build()` or `.build_arrow()` is called"]
 pub struct MultiplexedStreamBuilder<'a> {
     inner: StreamBuilder<'a>,
     stream_count: usize,
@@ -58,9 +108,11 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     /// Validate the common stream configuration, mux-compatible format,
     /// callback selection, and stream count without opening a connection.
     ///
-    /// This is a configuration check, not a guarantee that [`build`](Self::build)
-    /// succeeds: the Avro writer schema is parsed in `build()` (before any
-    /// connection), so a malformed schema surfaces there, not here.
+    /// Checks the configured format against its matching build method:
+    /// `build()` for gRPC formats or `build_arrow()` for Arrow Flight.
+    /// This is not a guarantee that building succeeds: the Avro writer schema
+    /// is parsed in `build()` (before any connection), so a malformed schema
+    /// surfaces there, not here.
     pub fn validate(&self) -> ZerobusResult<()> {
         self.inner.validate_common()?;
         let max_streams = crate::multiplexed_stream::MAX_STREAMS;
@@ -70,22 +122,31 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             )));
         }
 
+        #[cfg(feature = "arrow-flight")]
+        if matches!(self.inner.core.format, Some(FormatConfig::Arrow(_))) {
+            self.inner.validate_arrow()?;
+            if self.inner.stats_exporter.is_some() {
+                return Err(ZerobusError::InvalidArgument(
+                    "stats_exporter is not supported for multiplexed Arrow Flight streams".into(),
+                ));
+            }
+            if self.max_inflight_batches_per_stream().is_none() {
+                return Err(ZerobusError::InvalidArgument(format!(
+                    "max_inflight_batches ({}) must be at least stream_count ({}) for multiplexed streams",
+                    self.inner.settings.max_inflight_batches, self.stream_count
+                )));
+            }
+            return Ok(());
+        }
+
         if self.max_inflight_requests_per_stream().is_none() {
             return Err(ZerobusError::InvalidArgument(format!(
                 "max_inflight_requests ({}) must be at least stream_count ({}) for multiplexed streams",
-                self.inner.grpc_config.max_inflight_requests, self.stream_count
+                self.inner.settings.max_inflight_requests, self.stream_count
             )));
         }
 
-        #[cfg(feature = "arrow-flight")]
-        if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
-            return Err(ZerobusError::InvalidArgument(
-                "Arrow format is not supported for multiplexed streams; use .build_arrow() on an ordinary StreamBuilder"
-                    .into(),
-            ));
-        }
-
-        if self.inner.grpc_config.ack_callback.is_some() {
+        if self.inner.settings.ack_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
                 "ack_callback is only valid for ordinary streams; use multiplexed_ack_callback before .multiplexed(...)"
                     .into(),
@@ -96,7 +157,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
     pub(super) fn max_inflight_requests_per_stream(&self) -> Option<usize> {
         self.inner
-            .grpc_config
+            .settings
             .max_inflight_requests
             .checked_div(self.stream_count)
             .filter(|&capacity| capacity > 0)
@@ -138,24 +199,24 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         // immutable writer schema allocation across lanes, supervisors, and retries.
         let format = self
             .inner
+            .core
             .format
             .take()
             .expect("format was validated")
             .into_grpc()?;
-        self.inner.grpc_config.record_type = format.record_type;
 
         let table_properties = TableProperties {
-            table_name: self.inner.table_name.clone(),
+            table_name: self.inner.core.table_name.clone(),
             descriptor_proto: format.descriptor_proto,
             message_descriptor: format.message_descriptor,
             #[cfg(feature = "avro")]
             avro_schema: format.avro_schema,
         };
-        let sdk = self.inner.sdk;
+        let sdk = self.inner.core.sdk;
         let max_inflight_requests_per_stream = self
             .max_inflight_requests_per_stream()
             .expect("in-flight capacity was validated");
-        let mut options = self.inner.grpc_config;
+        let mut options = self.inner.grpc_options(format.record_type);
         options.max_inflight_requests = max_inflight_requests_per_stream;
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
@@ -166,7 +227,7 @@ impl<'a> MultiplexedStreamBuilder<'a> {
 
                 async move {
                     tokio::time::sleep(delay).await;
-                    let channel = sdk.get_or_create_channel_zerobus_client().await?;
+                    let channel = sdk.grpc_channel_source();
                     options.ack_callback = multiplexed_callback.map(|callback| {
                         crate::multiplexed_stream::multiplexed_ack_callback(stream_index, callback)
                     });
@@ -176,48 +237,225 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             },
         );
 
-        // `join_all` polls every open concurrently and preserves input order,
-        // so completion timing cannot change the assigned stream indices.
-        let results = join_all(opens).await;
-        let mut indexed_streams = Vec::with_capacity(self.stream_count);
-        let mut first_error = None;
-        for (stream_index, result) in results.into_iter().enumerate() {
-            match result {
-                Ok(stream) => indexed_streams.push((stream_index, stream)),
-                Err(err) => {
-                    error!(stream_index, error = %err, "Failed to create multiplexed sub-stream");
-                    first_error.get_or_insert(err);
-                }
-            }
-        }
-
-        if let Some(first_error) = first_error {
-            let cleanup_results = join_all(indexed_streams.into_iter().map(
-                |(successful_stream_index, mut stream)| async move {
-                    (successful_stream_index, stream.close().await)
-                },
-            ))
-            .await;
-            for (successful_stream_index, result) in cleanup_results {
-                if let Err(err) = result {
-                    warn!(
-                        stream_index = successful_stream_index,
-                        error = %err,
-                        "Failed to clean up multiplexed sub-stream after construction failure"
-                    );
-                }
-            }
-            return Err(first_error);
-        }
-
-        let streams: Vec<_> = indexed_streams
-            .into_iter()
-            .map(|(_stream_index, stream)| stream)
-            .collect();
+        let streams = collect_opened(opens, |mut stream: ZerobusStream| async move {
+            stream.close().await
+        })
+        .await?;
         debug_assert_eq!(streams.len(), self.stream_count);
         // This is one user-initiated logical stream creation. Counting each
         // internal lane would make the churn warning flag intentional muxes.
-        crate::client_warnings::record_stream_creation(&table_properties.table_name);
+        record_stream_creation(&table_properties.table_name);
         Ok(MultiplexedStream::from_streams(streams))
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    pub(super) fn max_inflight_batches_per_stream(&self) -> Option<usize> {
+        self.inner
+            .settings
+            .max_inflight_batches
+            .checked_div(self.stream_count)
+            .filter(|&capacity| capacity > 0)
+    }
+
+    /// Opens a multiplexed Arrow Flight stream. Requires `.arrow(schema)`.
+    ///
+    /// Whole batches route round-robin. `max_inflight_batches` is a mux-wide
+    /// budget divided evenly across lanes (unused remainder). Callbacks and
+    /// stats exporters are unsupported.
+    /// Construction is atomic and cancellation-safe, like [`Self::build`].
+    #[cfg(feature = "arrow-flight")]
+    pub async fn build_arrow(self) -> ZerobusResult<crate::MultiplexedArrowStream> {
+        self.inner.arrow_schema()?;
+        self.validate()?;
+        let schema = self.inner.validate_arrow()?;
+        let headers_providers = self.resolve_headers_providers()?;
+        let delays = self.sample_jitter_delays();
+        let capacity = self
+            .max_inflight_batches_per_stream()
+            .expect("capacity was validated");
+        let inner = self.inner;
+        inner.warn_arrow_ignored_options();
+        let mut options = inner.arrow_options();
+        options.max_inflight_batches = capacity;
+        let table_properties = super::ArrowTableProperties {
+            table_name: inner.core.table_name,
+            schema,
+        };
+        let sdk = inner.core.sdk;
+        let opens = delays
+            .into_iter()
+            .zip(headers_providers)
+            .map(|(delay, headers_provider)| {
+                let table_properties = table_properties.clone();
+                let options = options.clone();
+                async move {
+                    tokio::time::sleep(delay).await;
+                    crate::ZerobusArrowStream::new(
+                        &sdk.zerobus_endpoint,
+                        Arc::clone(&sdk.tls_config),
+                        sdk.connector_factory.clone(),
+                        table_properties,
+                        headers_provider,
+                        options,
+                        Arc::clone(&sdk.sdk_identifier),
+                        None,
+                    )
+                    .await
+                }
+            });
+        let streams = collect_opened(opens, |mut stream: crate::ZerobusArrowStream| async move {
+            stream.close().await
+        })
+        .await?;
+        record_stream_creation(&table_properties.table_name);
+        Ok(crate::MultiplexedArrowStream::from_streams(streams))
+    }
+}
+
+/// Preserves preassigned indices, waits for every open, and closes all successes
+/// before returning the lowest-index construction error. Cancelling this future
+/// drops pending opens and successfully constructed lanes together.
+async fn collect_opened<S, O, C, F>(
+    opens: impl IntoIterator<Item = O>,
+    close: C,
+) -> ZerobusResult<Vec<S>>
+where
+    O: std::future::Future<Output = ZerobusResult<S>>,
+    C: Fn(S) -> F,
+    F: std::future::Future<Output = ZerobusResult<()>>,
+{
+    // `join_all` polls every open concurrently and preserves input order,
+    // so completion timing cannot change the assigned stream indices.
+    let results = join_all(opens).await;
+    let mut indexed_streams = Vec::with_capacity(results.len());
+    let mut first_error = None;
+    for (stream_index, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(stream) => indexed_streams.push((stream_index, stream)),
+            Err(err) => {
+                error!(stream_index, error = %err, "Failed to create multiplexed sub-stream");
+                first_error.get_or_insert(err);
+            }
+        }
+    }
+
+    if let Some(first_error) = first_error {
+        let cleanup_results = join_all(indexed_streams.into_iter().map(
+            |(successful_stream_index, stream)| {
+                let close = &close;
+                async move { (successful_stream_index, close(stream).await) }
+            },
+        ))
+        .await;
+        for (successful_stream_index, result) in cleanup_results {
+            if let Err(err) = result {
+                warn!(
+                    stream_index = successful_stream_index,
+                    error = %err,
+                    "Failed to clean up multiplexed sub-stream after construction failure"
+                );
+            }
+        }
+        return Err(first_error);
+    }
+
+    let streams: Vec<_> = indexed_streams
+        .into_iter()
+        .map(|(_stream_index, stream)| stream)
+        .collect();
+    Ok(streams)
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct Opened(usize, Arc<AtomicUsize>);
+    impl Drop for Opened {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_order_does_not_change_lane_indices() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let opens = (0..3).map(|i| {
+            let dropped = dropped.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis((3 - i) as u64 * 100)).await;
+                Ok(Opened(i, dropped))
+            }
+        });
+        let lanes = collect_opened(opens, |_| async { Ok(()) }).await.unwrap();
+        assert_eq!(lanes.iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(lanes);
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lowest_index_failure_wins_after_all_opens_and_cleanup_settle() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let opens = (0..4).map(|i| {
+            let dropped = dropped.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis((4 - i) as u64 * 100)).await;
+                if i % 2 == 0 {
+                    Ok(Opened(i, dropped))
+                } else {
+                    Err(ZerobusError::InvalidArgument(format!("lane-{i}")))
+                }
+            }
+        });
+        let result = collect_opened(opens, |lane| {
+            let cleaned = cleaned.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                cleaned.fetch_add(1, Ordering::SeqCst);
+                drop(lane);
+                Err(ZerobusError::InvalidArgument("cleanup error".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(msg)) if msg == "lane-1"));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_completed_and_in_progress_opens() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reached = Arc::new(Notify::new());
+        let task = {
+            let dropped = dropped.clone();
+            let reached = reached.clone();
+            tokio::spawn(async move {
+                let opens = (0..3).map(|i| {
+                    let dropped = dropped.clone();
+                    let reached = reached.clone();
+                    async move {
+                        let lane = Opened(i, dropped);
+                        if i == 1 {
+                            reached.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                        if i == 2 {
+                            tokio::time::sleep(Duration::from_secs(3600)).await;
+                        }
+                        Ok(lane)
+                    }
+                });
+                collect_opened(opens, |_| async { Ok(()) }).await
+            })
+        };
+        reached.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
     }
 }

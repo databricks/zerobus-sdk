@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.databricks</groupId>
   <artifactId>zerobus-ingest-sdk</artifactId>
-  <version>1.7.0</version>
+  <version>1.8.1</version>
   <packaging>jar</packaging>
   <name>Zerobus Ingest SDK for Java</name>
   <description>Databricks Zerobus Ingest SDK for Java - Direct ingestion to Delta tables via native Rust SDK</description>
@@ -29,6 +29,7 @@
   </scm>
   <properties>
     <arrow.version>17.0.0</arrow.version>
+    <avro.version>1.12.2</avro.version>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -53,6 +54,14 @@
       <groupId>org.apache.arrow</groupId>
       <artifactId>arrow-vector</artifactId>
       <version>${arrow.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Apache Avro (provided - users must supply org.apache.avro:avro >= 1.12). Only needed
+         for Avro ingestion (Beta), which requires Java 11+. -->
+    <dependency>
+      <groupId>org.apache.avro</groupId>
+      <artifactId>avro</artifactId>
+      <version>${avro.version}</version>
       <scope>provided</scope>
     </dependency>
     <!-- Apache Arrow memory allocator (for tests only) -->
@@ -185,6 +194,24 @@
         <version>3.4.1</version>
         <executions>
           <execution>
+            <id>require-build-jdk</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <phase>validate</phase>
+            <configuration>
+              <rules>
+                <!-- Avro 1.12 class files are Java 11 bytecode, so compiling the SDK requires a
+                     JDK 11+ toolchain. The produced artifacts still target Java 8 (core) / Java 11
+                     (Avro) at runtime. -->
+                <requireJavaVersion>
+                  <version>[11,)</version>
+                  <message>Building the Zerobus Java SDK requires JDK 11 or newer (the Avro feature depends on Apache Avro 1.12, which is compiled for Java 11). The built artifacts still run on Java 8 for the non-Avro features.</message>
+                </requireJavaVersion>
+              </rules>
+            </configuration>
+          </execution>
+          <execution>
             <id>require-native-libs</id>
             <goals>
               <goal>enforce</goal>
@@ -304,7 +331,7 @@
       <plugin>
         <groupId>org.sonatype.central</groupId>
         <artifactId>central-publishing-maven-plugin</artifactId>
-        <version>0.11.0</version>
+        <version>0.12.0</version>
         <extensions>true</extensions>
         <configuration>
           <publishingServerId>central</publishingServerId>

@@ -242,14 +242,19 @@ fn config_setters_chain() {
 #[test]
 fn default_config_without_setters() {
     let sdk = test_sdk();
-    let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
-    assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
-    assert!(builder.grpc_config.recovery);
+    let options = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .json()
+        .grpc_options(RecordType::Json);
+    assert_eq!(options.max_inflight_requests, 1_000_000);
+    assert!(options.recovery);
     assert_eq!(
-        builder.grpc_config.max_ingest_payload_bytes,
+        options.max_ingest_payload_bytes,
         crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
     );
-    assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
+    assert!(options.max_ingest_payload_bytes < 10 * 1024 * 1024);
 }
 
 #[test]
@@ -262,9 +267,34 @@ fn max_ingest_payload_bytes_override() {
         .json()
         .max_ingest_payload_bytes(5 * 1024 * 1024);
     assert_eq!(
-        builder.grpc_config.max_ingest_payload_bytes,
+        builder
+            .grpc_options(RecordType::Json)
+            .max_ingest_payload_bytes,
         5 * 1024 * 1024
     );
+}
+
+#[test]
+fn shared_setters_reach_grpc_options() {
+    let sdk = test_sdk();
+    let options = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .json()
+        .recovery(false)
+        .recovery_backoff_ms(500)
+        .recovery_retries(2)
+        .server_lack_of_ack_timeout_ms(10_000)
+        .max_ingest_payload_bytes(1_000)
+        .max_inflight_requests(7)
+        .grpc_options(RecordType::Json);
+    assert!(!options.recovery);
+    assert_eq!(options.recovery_backoff_ms, 500);
+    assert_eq!(options.recovery_retries, 2);
+    assert_eq!(options.server_lack_of_ack_timeout_ms, 10_000);
+    assert_eq!(options.max_ingest_payload_bytes, 1_000);
+    assert_eq!(options.max_inflight_requests, 7);
 }
 
 #[tokio::test]
@@ -493,7 +523,7 @@ async fn arrow_builder_reports_format_error_before_ack_callback_error() {
 
 #[cfg(feature = "arrow-flight")]
 #[test]
-fn shared_setters_write_to_arrow_config() {
+fn shared_setters_reach_arrow_options() {
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
     let sdk = test_sdk();
@@ -514,14 +544,163 @@ fn shared_setters_write_to_arrow_config() {
         .server_lack_of_ack_timeout_ms(10_000)
         .flush_timeout_ms(20_000)
         .stream_paused_max_wait_time_ms(Some(5_000));
-    assert!(!builder.arrow_config.recovery);
-    assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
-    assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
-    assert_eq!(builder.arrow_config.recovery_retries, 2);
-    assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
-    assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
+    let options = builder.arrow_options();
+    assert!(!options.recovery);
+    assert_eq!(options.recovery_timeout_ms, 5_000);
+    assert_eq!(options.recovery_backoff_ms, 500);
+    assert_eq!(options.recovery_retries, 2);
+    assert_eq!(options.server_lack_of_ack_timeout_ms, 10_000);
+    assert_eq!(options.flush_timeout_ms, 20_000);
+    assert_eq!(options.stream_paused_max_wait_time_ms, Some(5_000));
+}
+
+#[cfg(feature = "arrow-flight")]
+fn arrow_test_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "id",
+        DataType::Int32,
+        false,
+    )]));
+    sdk.stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(schema)
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+#[allow(deprecated)]
+fn compression_defaults_to_deprecated_ipc_zstd() {
+    let sdk = test_sdk();
+    let config = arrow_test_builder(&sdk).arrow_options();
     assert_eq!(
-        builder.arrow_config.stream_paused_max_wait_time_ms,
-        Some(5_000)
+        config.compression,
+        crate::ArrowCompression::FallbackToLegacy
     );
+    assert_eq!(
+        config.ipc_compression,
+        Some(arrow_ipc::CompressionType::ZSTD)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
+#[test]
+#[allow(deprecated)]
+fn last_compression_setter_wins() {
+    let sdk = test_sdk();
+    let new_last = arrow_test_builder(&sdk)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .compression(crate::ArrowCompression::GrpcZstd)
+        .arrow_options();
+    assert_eq!(new_last.compression, crate::ArrowCompression::GrpcZstd);
+
+    let deprecated_last = arrow_test_builder(&sdk)
+        .compression(crate::ArrowCompression::GrpcZstd)
+        .ipc_compression(Some(arrow_ipc::CompressionType::LZ4_FRAME))
+        .arrow_options();
+    assert_eq!(
+        deprecated_last.compression,
+        crate::ArrowCompression::FallbackToLegacy
+    );
+    assert_eq!(
+        deprecated_last.ipc_compression,
+        Some(arrow_ipc::CompressionType::LZ4_FRAME)
+    );
+}
+
+#[cfg(feature = "arrow-flight")]
+#[tokio::test]
+async fn arrow_mux_validates_format_callbacks_and_mux_wide_capacity() {
+    let sdk = test_sdk();
+    let builder = || {
+        sdk.stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .arrow(Arc::new(arrow_schema::Schema::empty()))
+    };
+    for (lanes, capacity, valid) in [
+        (0, 100, false),
+        (65, 100, false),
+        (2, 0, false),
+        (2, 1, false),
+        (1, 1, true),
+        (2, 5, true),
+        (64, 64, true),
+    ] {
+        // A gRPC-specific bound has no effect on an Arrow mux.
+        let mux = builder()
+            .max_inflight_requests(0)
+            .max_inflight_batches(capacity)
+            .multiplexed(lanes);
+        assert_eq!(mux.validate().is_ok(), valid);
+        if valid {
+            assert_eq!(
+                mux.max_inflight_batches_per_stream(),
+                Some(capacity / lanes)
+            );
+        } else {
+            assert!(matches!(
+                mux.build_arrow().await,
+                Err(ZerobusError::InvalidArgument(_))
+            ));
+        }
+    }
+    assert!(
+        matches!(builder().multiplexed(2).build().await, Err(ZerobusError::InvalidArgument(msg)) if msg.contains("build_arrow"))
+    );
+    assert!(
+        matches!(sdk.stream_builder().table("t").oauth("a", "b").json().multiplexed(2).build_arrow().await,
+        Err(ZerobusError::InvalidArgument(msg)) if msg.contains(".build()"))
+    );
+    assert!(matches!(
+        sdk.stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .max_inflight_requests(1)
+            .multiplexed(2)
+            .build_arrow()
+            .await,
+        Err(ZerobusError::InvalidArgument(msg))
+            if msg == "non-Arrow format requires .build() instead of .build_arrow()"
+    ));
+    for mux in [
+        builder()
+            .ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed(2),
+        builder()
+            .multiplexed_ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed(2),
+    ] {
+        assert!(mux.validate().is_err());
+        assert!(
+            matches!(mux.build_arrow().await, Err(ZerobusError::InvalidArgument(msg)) if msg.contains("not supported for Arrow"))
+        );
+    }
+}
+
+#[cfg(feature = "arrow-flight")]
+#[tokio::test]
+async fn arrow_mux_rejects_stats_exporter() {
+    let sdk = test_sdk();
+    let (exporter, _rx) = crate::stats::channel_exporter(std::num::NonZeroUsize::new(4).unwrap());
+    let mux = sdk
+        .stream_builder()
+        .table("t")
+        .oauth("a", "b")
+        .arrow(Arc::new(arrow_schema::Schema::empty()))
+        .stats_exporter(exporter)
+        .multiplexed(2);
+    let expected = "stats_exporter is not supported for multiplexed Arrow Flight streams";
+
+    assert!(matches!(
+        mux.validate(),
+        Err(ZerobusError::InvalidArgument(message)) if message == expected
+    ));
+    assert!(matches!(
+        mux.build_arrow().await,
+        Err(ZerobusError::InvalidArgument(message)) if message == expected
+    ));
 }

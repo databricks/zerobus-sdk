@@ -24,6 +24,7 @@ use super::{ArrowStreamConfigurationOptions, BatchSender, ZerobusArrowStream};
 #[cfg(feature = "test-hooks")]
 use super::{TestHooks, TestNotifyGate};
 use crate::errors::ZerobusError;
+use crate::grpc_status::GrpcStatus;
 use crate::offset_generator::OffsetId;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
 use crate::ZerobusResult;
@@ -420,7 +421,7 @@ impl AckProcessor {
     }
 
     pub(super) fn rotation_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::unavailable(
+        ZerobusError::StreamClosedError(GrpcStatus::unavailable(
             "Server requested graceful stream rotation",
         ))
     }
@@ -701,10 +702,11 @@ impl AckProcessor {
                             }
                         }
                         Some(Err(error)) => {
-                            let status: tonic::Status = error.into();
                             Self::update_rotation_error(
                                 &mut terminal_error,
-                                ZerobusError::StreamClosedError(status),
+                                ZerobusError::StreamClosedError(GrpcStatus::from_flight_error(
+                                    error,
+                                )),
                             );
                             response_finished = true;
                         }
@@ -853,11 +855,11 @@ impl AckProcessor {
     }
 
     fn ack_timeout_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded("Server ack timeout"))
+        ZerobusError::StreamClosedError(GrpcStatus::deadline_exceeded("Server ack timeout"))
     }
 
     fn request_send_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::unavailable(
+        ZerobusError::StreamClosedError(GrpcStatus::unavailable(
             "Flight request stream closed while sending",
         ))
     }
@@ -1203,8 +1205,8 @@ impl AckProcessor {
                     }
                 }
                 AckEvent::Response(Some(Err(error))) => {
-                    let status: tonic::Status = error.into();
-                    let error = ZerobusError::StreamClosedError(status);
+                    let error =
+                        ZerobusError::StreamClosedError(GrpcStatus::from_flight_error(error));
                     if matches!(&connection, ConnectionState::Active) {
                         let _ = self.server_error_tx.send(Some(error.clone()));
                     }
@@ -1227,7 +1229,7 @@ impl AckProcessor {
                         Self::drain_from_waiting(target, TerminalEvent::ResponseError, error)?;
                 }
                 AckEvent::Response(None) => {
-                    let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
+                    let error = ZerobusError::StreamClosedError(GrpcStatus::unknown(
                         "Server closed the stream",
                     ));
                     let target = match &connection {
@@ -1274,6 +1276,7 @@ mod tests {
         FlightResponseStream, OffsetId, PendingBatch, RequestBodyControl, ZerobusError,
         MAX_SERVER_ROTATION_GRACE, ROTATION_DRAIN_TIMEOUT_MS,
     };
+    use crate::grpc_status::GrpcCode;
     use crate::stats::{channel_exporter, StreamStat};
 
     fn one_col_schema() -> Arc<ArrowSchema> {
@@ -1373,7 +1376,7 @@ mod tests {
         assert!(error.is_retryable());
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::Unavailable);
+                assert_eq!(status.code(), GrpcCode::Unavailable);
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
@@ -1425,7 +1428,7 @@ mod tests {
         let error = outcome.expect_err("an ACK applied at the deadline must time out");
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                assert_eq!(status.code(), GrpcCode::DeadlineExceeded);
             }
             other => panic!("expected a flush deadline error, got {other:?}"),
         }
@@ -1498,7 +1501,7 @@ mod tests {
         };
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::Unknown);
+                assert_eq!(status.code(), GrpcCode::Unknown);
                 assert_eq!(status.message(), "Server closed the stream");
             }
             other => panic!("expected terminal stream error, got {other:?}"),
@@ -1544,7 +1547,7 @@ mod tests {
 
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::Unavailable);
+                assert_eq!(status.code(), GrpcCode::Unavailable);
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
@@ -1575,7 +1578,7 @@ mod tests {
         assert!(!error.is_retryable());
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                assert_eq!(status.code(), GrpcCode::PermissionDenied);
                 assert_eq!(status.message(), "permanent server rejection");
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
@@ -1614,7 +1617,7 @@ mod tests {
         assert!(error.is_retryable());
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::Unavailable);
+                assert_eq!(status.code(), GrpcCode::Unavailable);
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
@@ -1678,13 +1681,13 @@ mod tests {
                 assert!(!error.is_retryable());
                 match error {
                     ZerobusError::StreamClosedError(status) => {
-                        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                        assert_eq!(status.code(), GrpcCode::PermissionDenied);
                     }
                     other => panic!("expected drained peer status, got {other:?}"),
                 }
             }
             Err(ZerobusError::StreamClosedError(status))
-                if status.code() == tonic::Code::Unavailable =>
+                if status.code() == GrpcCode::Unavailable =>
             {
                 panic!("empty-close peek discarded the buffered peer status");
             }
@@ -1732,7 +1735,7 @@ mod tests {
 
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(status.code(), GrpcCode::Unavailable);
                 }
                 other => panic!("expected a stream-closed error, got {other:?}"),
             }
@@ -1960,7 +1963,7 @@ mod tests {
 
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                assert_eq!(status.code(), GrpcCode::DeadlineExceeded);
             }
             other => panic!("expected ACK deadline error, got {other:?}"),
         }
@@ -2087,7 +2090,7 @@ mod tests {
             let error = outcome.expect_err("rotation remains the recovery trigger");
             match error {
                 ZerobusError::StreamClosedError(status) => {
-                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(status.code(), GrpcCode::Unavailable);
                 }
                 other => panic!("expected rotation error, got {other:?}"),
             }

@@ -12,6 +12,7 @@ This directory contains examples demonstrating JSON-based data ingestion into Da
 - [Batch Example](#batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+- [Persistent Stream Example](#persistent-stream-example)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -26,6 +27,7 @@ JSON examples are recommended for getting started - they're simpler and don't re
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
+- **`persistent.rs`** - Create a durable stream or resume it by `stream_id`
 
 ## Three Ways to Pass Data
 
@@ -46,7 +48,7 @@ The SDK supports three approaches for passing JSON data:
 
 ### Running the Example
 
-1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -98,8 +100,8 @@ stream.flush().await?;
 ```rust
 let stream = sdk
     .stream_builder()
-    .table(TABLE_NAME)
-    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
     .json()
     .build()
     .await?;
@@ -109,7 +111,7 @@ let stream = sdk
 
 ### Running the Example
 
-1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Export the environment variables listed in [Prerequisites](../README.md#3-configure-credentials)
 
 2. Run the example:
    ```bash
@@ -160,6 +162,31 @@ stream.flush().await?;
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
 
+## Persistent Stream Example
+
+Persistent streams retain their identity and committed offset on the server,
+allowing a later process to resume ingestion without restarting offsets.
+
+On the first run, leave `ZEROBUS_PERSISTENT_STREAM_ID` unset:
+
+```bash
+cargo run -p rust-examples-json --example json_persistent
+```
+
+The example prints the newly assigned stream ID. Save it, then resume on a
+later run:
+
+```bash
+ZEROBUS_PERSISTENT_STREAM_ID=<stream-id> \
+  cargo run -p rust-examples-json --example json_persistent
+```
+
+The example queues records in a loop and calls `flush()` once afterward. Each run
+writes new records. The record ids continue after the last committed offset: the
+first run writes ids 1 and 2, and the next run writes ids 3 and 4. Its final
+`close()` ends only the current connection; the durable stream remains available
+for another resume.
+
 ## Adapting for Your Custom Table
 
 JSON examples require no schema generation. Simply modify the struct and JSON to match your table:
@@ -185,4 +212,5 @@ let json = r#"{
 }"#.to_string();
 ```
 
-**3. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.
+**3. Configure the environment variables** listed in the
+[examples prerequisites](../README.md#3-configure-credentials).

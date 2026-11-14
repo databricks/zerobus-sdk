@@ -22,6 +22,7 @@ use super::{
     BatchSender, FlightConnectionParameters, OutboundBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
+use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::ConnectorFactory;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
@@ -634,9 +635,10 @@ impl Supervisor {
         close: &CloseCoordinator,
         failure_message: &'static str,
     ) -> ZerobusResult<bool> {
-        let permit = tx.reserve().await.map_err(|_| {
-            ZerobusError::StreamClosedError(tonic::Status::internal(failure_message))
-        })?;
+        let permit = tx
+            .reserve()
+            .await
+            .map_err(|_| ZerobusError::StreamClosedError(GrpcStatus::internal(failure_message)))?;
         // Capacity waits stay outside the ingest lock. The close check and handoff share
         // that lock with publication, ordering each replay batch wholly before or after it.
         let _ingest_guard = ingest_mutex.lock().await;

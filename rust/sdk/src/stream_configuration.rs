@@ -1,8 +1,28 @@
 use std::sync::Arc;
 
 use crate::callbacks::AckCallback;
-use crate::databricks::zerobus::RecordType;
 use crate::stream_options::defaults;
+
+/// Record encoding of a JSON, Protocol Buffers, or Avro stream.
+// The discriminants match the wire protocol's values, so `as i32` casts give
+// the same numbers as the generated enum this type replaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RecordType {
+    /// Protocol Buffers records.
+    Proto = 1,
+    /// JSON records.
+    Json = 2,
+    /// Avro records (requires the `avro` feature).
+    #[cfg(feature = "avro")]
+    Avro = 4,
+}
+
+impl RecordType {
+    pub(crate) fn to_wire(self) -> i32 {
+        self as i32
+    }
+}
 
 /// Configuration options for stream creation, recovery of broken streams and flushing.
 ///
@@ -48,11 +68,11 @@ pub struct StreamConfigurationOptions {
     ///
     /// If a recovery attempt takes longer than this, it will be retried.
     ///
-    /// For OAuth-authenticated streams this also caps a proactive token refresh at
-    /// half its value, but only when the cached token has more life left than that
-    /// cap, so a stalled endpoint falls back to the cached token before the attempt
-    /// deadline. When too little of the token's life remains, the refresh runs
-    /// unbounded, like a cold miss.
+    /// For streams authenticated with OAuth or federated auth, this also caps a
+    /// proactive token refresh at half its value, but only when the cached token
+    /// has more life left than that cap, so a stalled endpoint falls back to the
+    /// cached token before the attempt deadline. When too little of the token's
+    /// life remains, the refresh runs unbounded, like a cold miss.
     ///
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
@@ -86,15 +106,9 @@ pub struct StreamConfigurationOptions {
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
 
-    /// Type of record to ingest.
+    /// Type of record to ingest. The stream builder sets this from the chosen format.
     ///
-    /// Supported values:
-    /// - RecordType::Proto
-    /// - RecordType::Json
-    /// - RecordType::Avro (requires the `avro` feature)
-    /// - RecordType::Unspecified
-    ///
-    /// Default: RecordType::Proto
+    /// Default: `RecordType::Proto`
     pub record_type: RecordType,
 
     /// Maximum time in milliseconds to wait during graceful stream close.
@@ -108,7 +122,8 @@ pub struct StreamConfigurationOptions {
     ///
     /// Configuration values:
     /// - `None`: Wait for the full server-specified duration (most graceful)
-    /// - `Some(0)`: Immediate recovery, close stream right away (current behavior)
+    /// - `Some(0)`: Do not wait for acknowledgments. Standard streams still drain final
+    ///   acknowledgments from the connection.
     /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
     ///
     /// Default: `None` (wait for full server duration)

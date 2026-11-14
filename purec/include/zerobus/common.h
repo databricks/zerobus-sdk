@@ -42,6 +42,8 @@ typedef struct zerobus_sdk zerobus_sdk_t;
 typedef struct zerobus_stream_builder zerobus_stream_builder_t;
 typedef struct zerobus_stream zerobus_stream_t;
 typedef struct zerobus_error zerobus_error_t;
+typedef struct zerobus_headers zerobus_headers_t;
+typedef struct zerobus_headers_provider zerobus_headers_provider_t;
 
 /*
  * A borrowed view of UTF-8 text: the caller must pass valid UTF-8 with no
@@ -83,7 +85,8 @@ enum {
     ZEROBUS_STATUS_UNAVAILABLE = 10,
     ZEROBUS_STATUS_UNIMPLEMENTED = 11,
     ZEROBUS_STATUS_OUT_OF_MEMORY = 12,
-    ZEROBUS_STATUS_INTERNAL = 13
+    ZEROBUS_STATUS_INTERNAL = 13,
+    ZEROBUS_STATUS_OUT_OF_RANGE = 14
 };
 
 /* A record's position within its stream: returned by ingest as a handle to

@@ -11,8 +11,8 @@ every other Zerobus SDK.
 - **Proto and JSON** ingestion, single and batched.
 - **Dynamic protobuf** — build a descriptor and encode records straight from
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
-- **Arrow Flight** ingestion — streaming of Arrow record batches with optional
-  LZ4/ZSTD compression.
+- **Arrow Flight** ingestion — streaming of Arrow record batches with ZSTD
+  compression by default (LZ4 or none optional).
 - **Async ack callback** — register an `AckCallback` to be notified of durable
   acks and terminal errors on a background task, without blocking in
   `wait_for_offset()` / `flush()`.
@@ -175,14 +175,18 @@ the last offset, not each one.
 
 ## Quickstart
 
+In these snippets, `server_endpoint` is your Zerobus server endpoint and `workspace_url` is your
+workspace URL. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the format on each cloud.
+
 ### JSON ingestion
 
 ```cpp
 #include "zerobus/zerobus.hpp"
 
 zerobus::Sdk sdk = zerobus::Sdk::builder()
-                       .endpoint("https://<id>.zerobus.<region>.cloud.databricks.com")
-                       .unity_catalog_url("https://<workspace>.cloud.databricks.com")
+                       .endpoint(server_endpoint)
+                       .unity_catalog_url(workspace_url)
                        .application_name("my-app")
                        .build();
 
@@ -247,7 +251,7 @@ stream.flush();                     // wait once for all pending acks
 stream.close();
 ```
 
-Optional LZ4/ZSTD compression is set via `ArrowStreamOptions::ipc_compression`.
+Arrow IPC payloads are compressed with ZSTD by default. To use LZ4 or send uncompressed payloads, set `ArrowStreamOptions::ipc_compression`.
 
 ### Custom authentication
 
@@ -389,7 +393,7 @@ the FFI defaults.
 | `server_lack_of_ack_timeout_ms` | `std::uint64_t` | 60,000 | How long to wait for a server ack before the stream is considered stalled (ms) |
 | `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
 | `connection_timeout_ms` | `std::uint64_t` | 30,000 | Connection establishment timeout (ms) |
-| `ipc_compression` | `IpcCompression` | `IpcCompression::NoCompression` | Arrow IPC compression codec (`NoCompression`, `Lz4Frame`, or `Zstd`) |
+| `ipc_compression` | `IpcCompression` | `IpcCompression::Zstd` | Arrow IPC compression codec (`Zstd`, `Lz4Frame`, or `NoCompression`) |
 | `stream_paused_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max wait during a server-initiated pause before recovering (same semantics as above) |
 
 ## Examples
@@ -429,7 +433,7 @@ schema, authenticated with the OAuth client credentials. It lives in the
 ```bash
 cd ../rust/tools/generate_files
 cargo run -- \
-  --uc-endpoint "https://<workspace>.cloud.databricks.com" \
+  --uc-endpoint "<your-databricks-workspace-url>" \
   --client-id "$DATABRICKS_CLIENT_ID" \
   --client-secret "$DATABRICKS_CLIENT_SECRET" \
   --table "catalog.schema.table" \

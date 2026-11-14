@@ -98,13 +98,17 @@ go get github.com/databricks/zerobus-sdk/go@latest
 
 **In your code:**
 
+In these snippets, `serverEndpoint` is your Zerobus server endpoint and `workspaceURL` is your
+workspace URL. See the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id)
+for the format on each cloud.
+
 ```go
 import zerobus "github.com/databricks/zerobus-sdk/go"
 
 func main() {
     sdk, err := zerobus.NewZerobusSdk(
-        "https://your-shard.zerobus.region.cloud.databricks.com",
-        "https://your-workspace.cloud.databricks.com",
+        serverEndpoint,
+        workspaceURL,
     )
     if err != nil {
         log.Fatal(err)
@@ -158,14 +162,15 @@ package main
 
 import (
     "log"
+    "os"
     zerobus "github.com/databricks/zerobus-sdk/go"
 )
 
 func main() {
     // 1. Initialize SDK
     sdk, err := zerobus.NewZerobusSdk(
-        "https://your-shard-id.zerobus.region.cloud.databricks.com",
-        "https://your-workspace.cloud.databricks.com",
+        os.Getenv("ZEROBUS_SERVER_ENDPOINT"),
+        os.Getenv("DATABRICKS_WORKSPACE_URL"),
     )
     if err != nil {
         log.Fatal(err)
@@ -353,7 +358,7 @@ The Go SDK consists of three layers:
 The SDK uses OAuth 2.0 client credentials flow:
 
 1. SDK constructs authorization request with Unity Catalog privileges
-2. Sends request to `{uc_endpoint}/oidc/v1/token` with client credentials
+2. Sends request to `{workspace_url}/oidc/v1/token` with client credentials
 3. Token includes scoped permissions for the specific table
 4. Token is attached to gRPC metadata as Bearer token
 5. Fresh tokens are fetched automatically on each connection
@@ -426,19 +431,13 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 
 ### 1. Initialize the SDK
 
-Create an SDK instance with your Databricks workspace endpoints:
+Create an SDK instance with your Zerobus server endpoint and workspace URL. See the
+[connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id) for the format on each cloud.
 
 ```go
-// For AWS
 sdk, err := zerobus.NewZerobusSdk(
-    "https://your-shard-id.zerobus.region.cloud.databricks.com",
-    "https://your-workspace.cloud.databricks.com",
-)
-
-// For Azure
-sdk, err := zerobus.NewZerobusSdk(
-    "https://your-shard-id.zerobus.region.azuredatabricks.net",
-    "https://your-workspace.azuredatabricks.net",
+    serverEndpoint,
+    workspaceURL,
 )
 
 if err != nil {
@@ -455,8 +454,8 @@ attribution, use `NewZerobusSdkWithOptions` and `WithApplicationName`:
 
 ```go
 sdk, err := zerobus.NewZerobusSdkWithOptions(
-    "https://your-shard-id.zerobus.region.cloud.databricks.com",
-    "https://your-workspace.cloud.databricks.com",
+    serverEndpoint,
+    workspaceURL,
     zerobus.WithApplicationName("my-app/1.0"),
 )
 ```
@@ -825,8 +824,8 @@ The `examples/` directory contains complete, runnable examples organized by form
 cd examples/json/single
 
 # Set your credentials
-export ZEROBUS_SERVER_ENDPOINT="https://your-zerobus-endpoint.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.databricks.com"
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 export ZEROBUS_TABLE_NAME="catalog.schema.table"
@@ -923,11 +922,11 @@ if err := stream.Flush(); err != nil {
 | `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Server ack timeout (ms) |
 | `FlushTimeoutMs` | `uint64` | 300,000 | Flush timeout (ms) |
 | `ConnectionTimeoutMs` | `uint64` | 30,000 | Connection timeout (ms) |
-| `IPCCompression` | `IPCCompressionType` | IPCCompressionNone | IPC compression codec |
+| `IPCCompression` | `IPCCompressionType` | IPCCompressionZstd | IPC compression codec |
 
 `RecoverySetting`: `RecoveryEnabled` (default), `RecoveryDisabled`
 
-`IPCCompressionType`: `IPCCompressionNone` (default), `IPCCompressionLZ4Frame`, `IPCCompressionZstd`
+`IPCCompressionType`: `IPCCompressionZstd` (default), `IPCCompressionLZ4Frame`, `IPCCompressionNone`. The zero value, `IPCCompressionDefault`, also means ZSTD; set `IPCCompressionNone` to send uncompressed payloads.
 
 ```go
 opts := zerobus.DefaultArrowStreamConfigurationOptions()
@@ -1067,7 +1066,7 @@ func WithConnectionPerStream(enabled bool) SdkOption
 Creates a new SDK instance.
 
 - `zerobusEndpoint` - Zerobus gRPC service endpoint
-- `unityCatalogURL` - Unity Catalog URL for OAuth token acquisition
+- `unityCatalogURL` - Your Databricks workspace URL, used for Unity Catalog and OAuth
 - `SdkOption` - An optional SDK-construction setting passed to
   `NewZerobusSdkWithOptions`
 - `WithApplicationName` - Appends a trimmed application identifier to the
@@ -1082,8 +1081,8 @@ requests:
 
 ```go
 sdk, err := zerobus.NewZerobusSdkWithOptions(
-    zerobusEndpoint,
-    unityCatalogURL,
+    serverEndpoint,
+    workspaceURL,
     zerobus.WithApplicationName("my-app/1.0"),
 )
 ```

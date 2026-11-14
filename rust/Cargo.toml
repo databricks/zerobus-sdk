@@ -8,11 +8,13 @@ members = [
     "examples/arrow",
     "tools/*",
     "tests",
+    "test-support",
+    "../conformance/mock_server",
 ]
-# Excluded until ffi/jni support Avro (#830). As a workspace member it would unify the sdk
-# `avro` feature onto ffi/jni, whose exhaustive matches don't yet cover the gated Avro
-# variants. Build it standalone meanwhile; it rejoins `members` once ffi/jni enable `avro`
-# themselves — the feature stays permanently opt-in.
+# Excluded until ffi supports Avro (#830). As a workspace member it would unify the sdk `avro`
+# feature onto ffi, which doesn't handle Avro records yet. (The jni crate gates Avro behind its
+# own feature, so it is unaffected.) Build it standalone meanwhile; it rejoins `members` once ffi
+# enables `avro` itself — the feature stays permanently opt-in.
 exclude = ["examples/avro"]
 resolver = "2"
 
@@ -33,6 +35,8 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-types = "0.14"
+# PEM parsing for `TlsSettings` validation. `pem` support starts at 1.9.
+rustls-pki-types = "1.9"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
@@ -51,8 +55,14 @@ base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
 hyper-http-proxy = { version = "1.1", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
+http-body = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Minimum versions that distrust the compromised eMudhra (emSign) CAs. The SDK
+# does not import these crates; declaring them makes upgrading the SDK enough
+# to get the fix, because a downstream Cargo.lock would otherwise keep older ones.
+rustls-webpki = { version = "0.103.16", default-features = false }
+webpki-roots = "1.0.11"
 
 # Error handling
 thiserror = "1.0"
@@ -63,10 +73,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
 # arrow-flight is vendored locally with a slice-aware batch-split fix (arrow-rs#9388 / #5352).
-arrow-flight = { path = "third_party/arrow-flight", version = "59.2", default-features = false }
-arrow-array = { version = "59.2", default-features = false }
-arrow-schema = { version = "59.2", default-features = false }
-arrow-ipc = { version = "59.2", default-features = false }
+arrow-flight = { path = "third_party/arrow-flight", version = "60.0", default-features = false }
+arrow-array = { version = "60.0", default-features = false }
+arrow-schema = { version = "60.0", default-features = false }
+arrow-ipc = { version = "60.0", default-features = false }
 
 # Misc
 futures = "0.3"

@@ -13,28 +13,18 @@ use prost_reflect::prost_types;
 
 use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
+#[path = "../../config.rs"]
+mod config;
+use config::ExampleConfig;
+
 pub mod orders {
     include!("output/orders.rs");
 }
 use crate::orders::TableOrders;
 
-// Change constants to match your data.
-const TABLE_NAME: &str = "<your_table_name>";
-const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
-const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-
-// Uncomment the appropriate lines for your cloud.
-
-// For AWS:
-const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
-const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-
-// For Azure:
-// const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.azuredatabricks.net";
-// const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net";
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ExampleConfig::from_env()?;
     // Embed the descriptor at compile time (like the generated `orders.rs`
     // above), so it needs no runtime file read.
     let descriptor_proto = load_descriptor_proto(
@@ -43,14 +33,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "table_Orders",
     );
     let sdk_handle = ZerobusSdk::builder()
-        .endpoint(SERVER_ENDPOINT)
-        .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+        .endpoint(&config.server_endpoint)
+        .unity_catalog_url(&config.workspace_url)
         .build()?;
 
     let mut stream = sdk_handle
         .stream_builder()
-        .table(TABLE_NAME)
-        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .table(&config.table_name)
+        .oauth(&config.client_id, &config.client_secret)
         .compiled_proto(descriptor_proto)
         .max_inflight_requests(100)
         .build()

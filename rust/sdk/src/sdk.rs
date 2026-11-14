@@ -1,19 +1,19 @@
 //! The `ZerobusSdk` client — the entry point for creating ingestion streams.
 //!
-//! This module owns the shared gRPC channel, applies TLS and proxy
-//! configuration, and exposes `stream_builder` / `recreate_stream` for
-//! consumers. Stream-specific logic lives in `crate::stream`.
+//! This module owns the shared gRPC channel source and exposes
+//! `stream_builder` / `recreate_stream` for consumers. Channels, with their TLS
+//! and proxy configuration, are opened in `crate::grpc_channel`. Stream-specific
+//! logic lives in `crate::stream`.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info, instrument};
 
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::proxy::{self, ConnectorFactory};
+use crate::grpc_channel::GrpcChannelSource;
+use crate::proxy::ConnectorFactory;
 use crate::stream::ZerobusStream;
-use crate::{StreamBuilder, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdkBuilder};
+use crate::{StreamBuilder, TlsConfig, ZerobusResult, ZerobusSdkBuilder};
 
 #[cfg(feature = "arrow-flight")]
 use crate::stream::ZerobusArrowStream;
@@ -28,8 +28,8 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 /// ```rust,ignore
 /// // Create SDK using the builder
 /// let sdk = ZerobusSdk::builder()
-///     .endpoint("https://your-workspace.zerobus.region.cloud.databricks.com")
-///     .unity_catalog_url("https://your-workspace.cloud.databricks.com")
+///     .endpoint(server_endpoint)
+///     .unity_catalog_url(workspace_url)
 ///     .build()?;
 ///
 /// // Create a stream via the stream builder
@@ -50,7 +50,8 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
-    shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+    /// Created on first use, from the field values at that time.
+    shared_channel: OnceLock<Arc<GrpcChannelSource>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -73,10 +74,12 @@ impl ZerobusSdk {
     ///
     /// ```no_run
     /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    /// let server_endpoint = std::env::var("ZEROBUS_SERVER_ENDPOINT").expect("endpoint must be set");
+    /// let workspace_url = std::env::var("DATABRICKS_WORKSPACE_URL").expect("workspace URL must be set");
     ///
     /// let sdk = ZerobusSdk::builder()
-    ///     .endpoint("https://workspace.zerobus.databricks.com")
-    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
+    ///     .endpoint(server_endpoint)
+    ///     .unity_catalog_url(workspace_url)
     ///     .build()?;
     /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
     /// ```
@@ -117,6 +120,36 @@ impl ZerobusSdk {
         StreamBuilder::new(self)
     }
 
+    /// Creates a new builder for a persistent (Eos) ingestion stream.
+    ///
+    /// In development: this API can change. It is available behind the `eos`
+    /// feature.
+    ///
+    /// Persistent streams are durable and recoverable: the server records the
+    /// stream identity and its committed offset, so a client can reconnect after
+    /// a restart and continue from that offset. Configure the
+    /// builder like [`stream_builder`](Self::stream_builder), then call
+    /// [`build`](crate::PersistentStreamBuilder::build) to open a new stream or
+    /// [`resume`](crate::PersistentStreamBuilder::resume) to reconnect to one by
+    /// its `stream_id`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let stream = sdk
+    ///     .persistent_stream_builder()
+    ///     .table("catalog.schema.events")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    /// let id = stream.stream_id().unwrap().to_string(); // persist to resume later
+    /// ```
+    #[cfg(feature = "eos")]
+    pub fn persistent_stream_builder(&self) -> crate::PersistentStreamBuilder<'_> {
+        crate::PersistentStreamBuilder::new(StreamBuilder::new(self))
+    }
+
     /// Creates a new SDK instance with explicit configuration.
     ///
     /// This is used internally by the builder pattern. `sdk_identifier` is the
@@ -139,7 +172,7 @@ impl ZerobusSdk {
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
-            shared_channel: tokio::sync::Mutex::new(None),
+            shared_channel: OnceLock::new(),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -188,7 +221,7 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let channel = self.get_or_create_channel_zerobus_client().await?;
+        let channel = self.grpc_channel_source();
         let new_stream = ZerobusStream::new_stream(
             channel,
             stream.table_properties.clone(),
@@ -308,43 +341,28 @@ impl ZerobusSdk {
         }
     }
 
-    /// Creates a dedicated client or returns a clone of the SDK's shared client,
-    /// according to the SDK's `connection_per_stream` setting.
-    pub(crate) async fn get_or_create_channel_zerobus_client(
-        &self,
-    ) -> ZerobusResult<ZerobusClient<Channel>> {
+    /// Returns a dedicated channel source or the SDK's shared one, according to
+    /// the SDK's `connection_per_stream` setting.
+    ///
+    /// The stream's supervisor opens the channel inside its retry loop, so a
+    /// retryable setup error on the first open is retried like any other attempt.
+    pub(crate) fn grpc_channel_source(&self) -> Arc<GrpcChannelSource> {
         if self.connection_per_stream {
-            return self.create_channel_zerobus_client();
+            Arc::new(self.new_grpc_channel_source())
+        } else {
+            Arc::clone(
+                self.shared_channel
+                    .get_or_init(|| Arc::new(self.new_grpc_channel_source())),
+            )
         }
-
-        let mut guard = self.shared_channel.lock().await;
-
-        if guard.is_none() {
-            *guard = Some(self.create_channel_zerobus_client()?);
-        }
-
-        Ok(guard
-            .as_ref()
-            .expect("Channel was just initialized")
-            .clone())
     }
 
-    fn create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
-            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
-            .user_agent(self.sdk_identifier.as_ref())
-            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
-
-        let endpoint = self.tls_config.configure_endpoint(endpoint)?;
-        let host = endpoint.uri().host().unwrap_or_default().to_string();
-        let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
-        let channel = match proxy_connector {
-            Some(pc) => endpoint.connect_with_connector_lazy(pc),
-            None => endpoint.connect_lazy(),
-        };
-
-        Ok(ZerobusClient::new(channel)
-            .max_decoding_message_size(usize::MAX)
-            .max_encoding_message_size(usize::MAX))
+    fn new_grpc_channel_source(&self) -> GrpcChannelSource {
+        GrpcChannelSource::new(
+            self.zerobus_endpoint.clone(),
+            Arc::clone(&self.sdk_identifier),
+            Arc::clone(&self.tls_config),
+            self.connector_factory.clone(),
+        )
     }
 }
