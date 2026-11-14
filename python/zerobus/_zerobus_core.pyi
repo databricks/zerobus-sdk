@@ -499,6 +499,29 @@ class sync:
             """
             ...
 
+        def create_stream_pat(
+            self,
+            table_properties: TableProperties,
+            token: str,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream authenticated with a Databricks personal access token.
+
+            Beta (private preview): PAT authentication for Zerobus requires server-side
+            enablement, and this API can change.
+
+            Args:
+                table_properties: Table properties
+                token: Personal access token created with the ``zerobus`` API scope
+                    in the workspace the Zerobus endpoint belongs to; must be non-empty
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
         def create_stream_federated(
             self,
             table_properties: TableProperties,
@@ -733,6 +756,29 @@ class aio:
             Args:
                 table_properties: Table properties
                 headers_provider: Custom headers provider
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
+        async def create_stream_pat(
+            self,
+            table_properties: TableProperties,
+            token: str,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream authenticated with a Databricks personal access token.
+
+            Beta (private preview): PAT authentication for Zerobus requires server-side
+            enablement, and this API can change.
+
+            Args:
+                table_properties: Table properties
+                token: Personal access token created with the ``zerobus`` API scope
+                    in the workspace the Zerobus endpoint belongs to; must be non-empty
                 options: Optional configuration options
 
             Returns:

@@ -1,9 +1,11 @@
 """
-Federated external-IdP authentication for Zerobus streams.
+Alternative authentication methods for Zerobus streams.
 
-This module defines :class:`FederatedToken`, the opt-in configuration for
-authenticating a stream with an external identity provider (for example
-Entra ID) instead of a Databricks OAuth client_id/client_secret.
+This module defines the opt-in values for the ``auth`` argument of
+``create_stream``, used instead of a Databricks OAuth client_id/client_secret:
+:class:`FederatedToken` authenticates with an external identity provider (for
+example Entra ID), and :class:`PersonalAccessToken` with a Databricks personal
+access token.
 """
 
 import uuid
@@ -58,7 +60,44 @@ class FederatedToken:
     _cache_identity: str = field(default_factory=lambda: uuid.uuid4().hex, init=False, repr=False, compare=False)
 
 
+def _require_non_empty_token(token: str) -> str:
+    """Return ``token`` if it is a non-empty string; never echo it in the error."""
+    if not isinstance(token, str) or not token:
+        raise ValueError("personal access token must be a non-empty string")
+    return token
+
+
+@dataclass(frozen=True)
+class PersonalAccessToken:
+    """Authenticate a Zerobus stream with a Databricks personal access token (PAT),
+    passed as the ``auth`` argument to ``create_stream``.
+
+    Beta (private preview): PAT authentication for Zerobus requires server-side
+    enablement, and this API can change.
+
+    The PAT must be created with the ``zerobus`` API scope in the workspace that the
+    Zerobus endpoint belongs to. The SDK sends it as a bearer token and cannot refresh
+    it: once it expires or is revoked, creating or recovering a stream fails with an
+    authentication error.
+
+    The token is left out of ``repr()``, so printing or logging the object does not
+    reveal it.
+
+    Args:
+        token: The personal access token. Must be a non-empty string.
+
+    Raises:
+        ValueError: If ``token`` is empty or not a string.
+    """
+
+    token: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _require_non_empty_token(self.token)
+
+
 __all__ = [
     "FederatedToken",
     "IdpTokenSupplier",
+    "PersonalAccessToken",
 ]
