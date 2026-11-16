@@ -46,4 +46,12 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
+
+  /**
+   * Emits one core-style event from the native side at the given level.
+   *
+   * @param level 1 (error) through 5 (trace)
+   * @param message the message text
+   */
+  public static native void nativeTestEmitLog(int level, String message);
 }

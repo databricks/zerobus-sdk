@@ -9,6 +9,7 @@ use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHea
 use crate::runtime::{get_jvm, get_runtime};
 use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError};
 use jni::objects::{JClass, JObject, JString};
+use jni::sys::jint;
 use jni::JNIEnv;
 use std::sync::Arc;
 use std::time::Duration;
@@ -276,4 +277,36 @@ fn test_result<'local>(env: &mut JNIEnv<'local>, result: String) -> JObject<'loc
     env.new_string(result)
         .map(Into::into)
         .unwrap_or_else(|_| JObject::null())
+}
+
+/// Emits one core-style `tracing` event at `level` (1 error through 5 trace) on the calling
+/// thread, so tests can check the native-to-SLF4J path end to end.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestEmitLog<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    level: jint,
+    message: JString<'local>,
+) {
+    let message: String = match env.get_string(&message) {
+        Ok(s) => s.into(),
+        Err(_) => return,
+    };
+    match level {
+        1 => {
+            tracing::error!(target: "databricks_zerobus_ingest_sdk::native_log_test", table = "main.default.t1", "{message}")
+        }
+        2 => {
+            tracing::warn!(target: "databricks_zerobus_ingest_sdk::native_log_test", table = "main.default.t1", "{message}")
+        }
+        3 => {
+            tracing::info!(target: "databricks_zerobus_ingest_sdk::native_log_test", table = "main.default.t1", "{message}")
+        }
+        4 => {
+            tracing::debug!(target: "databricks_zerobus_ingest_sdk::native_log_test", table = "main.default.t1", "{message}")
+        }
+        _ => {
+            tracing::trace!(target: "databricks_zerobus_ingest_sdk::native_log_test", table = "main.default.t1", "{message}")
+        }
+    }
 }

@@ -12,7 +12,7 @@ use arrow_flight::PutResult;
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::{sleep_until, Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::batch::{
     oldest_pending_ack_deadline, PendingAckDeadline, PendingBatch, PendingBatchIdentity,
@@ -279,7 +279,7 @@ impl AckProgress<'_> {
         };
         let applied_at = Instant::now();
 
-        debug!(target: super::LOG_TARGET,
+        trace!(target: super::LOG_TARGET,
             ack_up_to_offset = ack.ack_up_to_offset,
             ack_up_to_records = acked_records,
             effective_acked_records,
