@@ -6,8 +6,8 @@
 
 ### New Features and Improvements
 
-- Added personal access token (PAT) authentication (Beta, private preview). PAT
-  authentication for Zerobus requires server-side enablement, and the API can change.
+- Added personal access token (PAT) authentication (Private Preview). PAT
+  authentication for Zerobus requires server-side enablement.
   Pass `auth=PersonalAccessToken(token)` to `create_stream()` (sync and async), or call
   `personal_access_token(token)` on the persistent stream builder, to authenticate with
   a Databricks PAT created with the `zerobus` API scope. The token stays in the Rust
@@ -35,9 +35,9 @@
 ### API Changes
 
 - Added `PersonalAccessToken`, exported from `zerobus` and `zerobus.sdk.shared`. It
-  raises `ValueError` for an empty token (Beta).
+  raises `ValueError` for an empty token (Private Preview).
 - `create_stream(auth=...)` now accepts a `PersonalAccessToken` as well as a
   `FederatedToken`. As before, `auth=` cannot be combined with
-  `client_id`/`client_secret` (Beta).
+  `client_id`/`client_secret` (Private Preview).
 - Added `PersistentStreamBuilder.personal_access_token(token)`. It replaces an earlier
-  `oauth()` or `headers_provider()` call, and they replace it (Beta).
+  `oauth()` or `headers_provider()` call, and they replace it (Private Preview).
