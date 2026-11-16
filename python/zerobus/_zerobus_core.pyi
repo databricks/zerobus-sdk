@@ -508,8 +508,8 @@ class sync:
             """
             Create a new stream authenticated with a Databricks personal access token.
 
-            Beta (private preview): PAT authentication for Zerobus requires server-side
-            enablement, and this API can change.
+            Private Preview: PAT authentication for Zerobus requires server-side
+            enablement.
 
             Args:
                 table_properties: Table properties
@@ -772,8 +772,8 @@ class aio:
             """
             Create a new stream authenticated with a Databricks personal access token.
 
-            Beta (private preview): PAT authentication for Zerobus requires server-side
-            enablement, and this API can change.
+            Private Preview: PAT authentication for Zerobus requires server-side
+            enablement.
 
             Args:
                 table_properties: Table properties

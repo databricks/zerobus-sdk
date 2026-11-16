@@ -7,7 +7,7 @@ token (PAT) instead of an OAuth client_id/client_secret. Create the PAT with the
 export it as DATABRICKS_TOKEN. The SDK sends the token as given; it does not
 refresh it, so a stream fails once the token expires or is revoked.
 
-PAT authentication is in beta (private preview) and requires server-side
+PAT authentication is in Private Preview and requires server-side
 enablement.
 
 Record Type Mode: JSON (omitting a descriptor from TableProperties selects JSON).

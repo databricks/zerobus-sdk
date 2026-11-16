@@ -384,8 +384,8 @@ class ZerobusSdk:
             options: Optional stream configuration
             headers_provider: Optional custom headers provider (if set, overrides OAuth)
             auth: Optional FederatedToken for external-IdP (e.g. Entra ID) federation,
-                or PersonalAccessToken for a Databricks personal access token (beta,
-                private preview); when set, client_id/client_secret are not required.
+                or PersonalAccessToken for a Databricks personal access token (Private
+                Preview); when set, client_id/client_secret are not required.
         """
         if auth is not None and (client_id is not None or client_secret is not None):
             raise ValueError(

@@ -72,8 +72,8 @@ class PersonalAccessToken:
     """Authenticate a Zerobus stream with a Databricks personal access token (PAT),
     passed as the ``auth`` argument to ``create_stream``.
 
-    Beta (private preview): PAT authentication for Zerobus requires server-side
-    enablement, and this API can change.
+    Private Preview: PAT authentication for Zerobus requires server-side
+    enablement.
 
     The PAT must be created with the ``zerobus`` API scope in the workspace that the
     Zerobus endpoint belongs to. The SDK sends it as a bearer token and cannot refresh

@@ -315,8 +315,8 @@ See the [`examples/`](examples/) directory for complete runnable examples.
 
 `create_stream()` supports four authentication methods: `client_id`/`client_secret`
 (OAuth), `auth=FederatedToken(...)` (external-IdP federation),
-`auth=PersonalAccessToken(...)` (a Databricks personal access token; beta, private
-preview), and a custom `headers_provider`. `auth` and `client_id`/`client_secret` are
+`auth=PersonalAccessToken(...)` (a Databricks personal access token; Private
+Preview), and a custom `headers_provider`. `auth` and `client_id`/`client_secret` are
 mutually exclusive — passing both raises `ValueError` rather than silently preferring
 one. When `auth` is given alongside `headers_provider`, `auth` takes precedence.
 
@@ -378,11 +378,10 @@ cached IdP token rather than doing a blocking network call on each invocation.
 
 See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
 
-### Personal access token (beta)
+### Personal access token (Private Preview)
 
-> **Beta (private preview).** PAT authentication for Zerobus requires server-side
-> enablement, and the API can change. It is compiled into the wheel, so no extra is
-> needed.
+> **Private Preview.** PAT authentication for Zerobus requires server-side
+> enablement. It is compiled into the wheel, so no extra is needed.
 
 Use `auth=PersonalAccessToken(...)` to authenticate with a Databricks personal access
 token (PAT). Create the PAT with the `zerobus` API scope in the workspace that the

@@ -53,7 +53,7 @@ Avro record format support is always compiled in — the `avro` feature is enabl
 extra installs `fastavro`, which is required only for encoding dict records; pre-encoded
 Avro bytes need no extra.
 
-Personal access token (PAT) authentication (Beta, private preview) is compiled in the same
+Personal access token (PAT) authentication (Private Preview; needs server-side enablement) is compiled in the same
 way: `python/rust/Cargo.toml` enables the SDK's `pat-auth` feature, so every wheel ships it.
 
 ## FFI boundary: PyO3

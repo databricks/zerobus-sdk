@@ -216,7 +216,7 @@ The examples use OAuth 2.0 authentication with `create_stream()` unless noted be
 `sync_example_pat.py` authenticates with a Databricks personal access token instead. Create the token with the
 `zerobus` API scope in the workspace that the Zerobus endpoint belongs to, and export it as `DATABRICKS_TOKEN`
 (the `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` variables are not needed for that example). PAT
-authentication is in beta (private preview) and requires server-side enablement.
+authentication is in Private Preview and requires server-side enablement.
 
 For advanced configurations with custom headers, see the commented examples of `CustomHeadersProvider` in each example file.
 
