@@ -73,7 +73,9 @@ impl ZerobusStream {
         // One-shot budget: initial setup may spend a single recovery retry to refresh a
         // stale credential after an auth rejection. Reconnect iterations never consume it,
         // so mid-stream auth behavior is unchanged. Auth errors stay globally non-retryable.
-        let mut initial_auth_retry_available = options.recovery_retries > 0;
+        // A provider that cannot refresh its credential opts out, so its rejection surfaces at once.
+        let mut initial_auth_retry_available =
+            options.recovery_retries > 0 && headers_provider.can_refresh();
 
         loop {
             debug!("Supervisor task loop");

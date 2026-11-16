@@ -94,6 +94,8 @@ pub use errors::{SchemaValidationCause, ZerobusError};
 pub use grpc_status::{GrpcCode, GrpcStatus};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
+#[cfg(feature = "pat-auth")]
+pub use headers_provider::PatHeadersProvider;
 pub use headers_provider::{
     FederatedTokenProvider, HeadersProvider, IdpTokenCallback, IdpTokenSupplier,
     OAuthHeadersProvider,

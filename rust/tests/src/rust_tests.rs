@@ -130,6 +130,107 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn test_personal_access_token_stream_ingests_and_flushes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_pat".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .personal_access_token("dapi-test-token")
+            .json()
+            .recovery(false)
+            .build()
+            .await?;
+        stream
+            .ingest_record_offset(r#"{"id":1}"#.to_string())
+            .await?;
+        stream.flush().await?;
+        stream.close().await?;
+
+        assert_eq!(mock_server.get_create_requests().await.len(), 1);
+        let auth = mock_server.get_auth_headers().await;
+        assert_eq!(auth.len(), 1);
+        assert_eq!(
+            auth[0].authorization.as_deref(),
+            Some("Bearer dapi-test-token")
+        );
+        assert_eq!(auth[0].table_name.as_deref(), Some(TABLE_NAME));
+        Ok(())
+    }
+
+    // A PAT cannot be refreshed, so the one-shot auth retry that re-mints OAuth
+    // credentials is skipped: one create request, then the rejection surfaces.
+    #[tokio::test]
+    async fn test_personal_access_token_auth_rejection_is_not_retried(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("revoked token"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("revoked token"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let err = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .personal_access_token("dapi-test-token")
+            .json()
+            .recovery(true)
+            .recovery_retries(3)
+            .recovery_backoff_ms(0)
+            .build()
+            .await
+            .err()
+            .expect("a rejected PAT must fail stream creation");
+
+        assert!(
+            matches!(&err, ZerobusError::CreateStreamError(status) if status.code() == GrpcCode::Unauthenticated),
+            "expected the server's Unauthenticated rejection, got {err:?}"
+        );
+        assert!(!err.is_retryable(), "{err:?}");
+        assert_eq!(
+            mock_server.get_create_requests().await.len(),
+            1,
+            "the one-shot auth retry must be skipped for a PAT"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_streams_can_share_one_connection() -> Result<(), Box<dyn std::error::Error>> {
         let (mock_server, server_url) = start_mock_server().await?;
         let sdk = ZerobusSdk::builder()
