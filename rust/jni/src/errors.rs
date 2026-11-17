@@ -296,3 +296,86 @@ pub enum JniError {
     #[error("Null pointer")]
     NullPointer,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Comment that exempts a thin wrapper forwarding to another guarded entry point.
+    const FORWARDS_MARKER: &str =
+        "// Not guarded itself: it only forwards to a guarded entry point.";
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `Java_*` export must run its body through `guard` / `guard_or`, so a
+    /// panic becomes a Java exception instead of aborting the JVM. A thin wrapper
+    /// that only calls another `Java_*` export may skip it, marked with
+    /// `FORWARDS_MARKER` above it. `JNI_OnLoad` / `JNI_OnUnload` are not `Java_*`
+    /// exports and are not checked.
+    #[test]
+    fn jni_exports_use_the_guard() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src_dir, &mut files);
+
+        let mut exports = 0;
+        let mut violations = Vec::new();
+        for path in files {
+            let file_name = path.strip_prefix(&src_dir).unwrap().display().to_string();
+            let content = fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = content.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains("extern \"system\" fn Java_") {
+                    continue;
+                }
+                exports += 1;
+
+                // The body starts after the first `{` (signatures contain no braces);
+                // its first expression must be the guard call.
+                let rest = lines[i..].join("\n");
+                let body = rest[rest.find('{').unwrap() + 1..].trim_start();
+                let guarded = ["guard(", "guard_or(", "errors::guard(", "errors::guard_or("]
+                    .iter()
+                    .any(|call| body.starts_with(call));
+
+                // Attributes and comments directly above the export.
+                let marked = lines[..i]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .take_while(|l| l.starts_with("#[") || l.starts_with("//"))
+                    .any(|l| l == FORWARDS_MARKER);
+                let forwards = marked && body.starts_with("Java_");
+
+                if !guarded && !forwards {
+                    violations.push(format!("  {}:{}: {}", file_name, i + 1, line.trim()));
+                }
+            }
+        }
+
+        assert!(
+            exports > 0,
+            "found no Java_* exports under {}",
+            src_dir.display()
+        );
+        assert!(
+            violations.is_empty(),
+            "\nFound JNI exports whose body does not go through errors::guard / guard_or.\n\
+             Wrap the body: guard(env, |env| native_fn(env, ...)), or guard_or(env, -1, ...).\n\
+             A wrapper that only calls another guarded Java_* export may instead carry\n\
+             the comment `{}` above it.\n\n{}\n",
+            FORWARDS_MARKER,
+            violations.join("\n")
+        );
+    }
+}
