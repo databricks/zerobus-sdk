@@ -292,9 +292,11 @@ class MultiplexedStream:
     ``wait_for_message_id()`` on this stream; do not compare them or use them with another
     stream.
 
-    Once a sub-stream fails, the stream rejects new records. Recover the unacknowledged ones
-    with ``get_unacked_records()`` or ``get_unacked_batches()`` and ingest them into a new
-    stream. Handles Avro encoding transparently on an Avro stream.
+    Once a sub-stream fails, ``is_closed`` is ``True`` and every call raises that
+    sub-stream's error again, which may be a retriable ``ZerobusException``. Retrying on this
+    stream does not help: recover the unacknowledged records with ``get_unacked_records()`` or
+    ``get_unacked_batches()`` and ingest them into a new stream. Handles Avro encoding
+    transparently on an Avro stream.
     """
 
     def __init__(self, rust_stream: _RustMultiplexedStream, avro_encoder=None):
@@ -323,7 +325,9 @@ class MultiplexedStream:
         Returns as soon as the record is queued; the SDK sends it and tracks its
         acknowledgment in the background. The idiomatic flow is to ingest in a loop and call
         ``flush()`` once to confirm durability (or use an ``AckCallback``). If the selected
-        sub-stream is at capacity, this waits for it to drain rather than rerouting.
+        sub-stream is at capacity, this waits for it to drain rather than rerouting, for at
+        most 30 seconds; then it raises a retriable ``ZerobusException`` and the record is not
+        queued, so ingest it again.
         """
         return self._inner.ingest_record(self._encode_payload(payload))
 
@@ -445,6 +449,8 @@ class StreamBuilder(_GrpcStreamBuilderBase):
 
         Raises:
             ValueError: If the table, authentication, or record format is not set.
+            NonRetriableException: If a setting is invalid.
+            ZerobusException: If the stream fails to open.
         """
         from zerobus.sdk.shared.avro import make_encoder
 

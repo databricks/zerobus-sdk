@@ -136,7 +136,7 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
         ``ack_callback()``, ``validate()``, and ``build()``.
 
         Use multiplexing when one stream is the throughput bottleneck and global ordering is
-        not required. The ``max_inflight_requests`` budget is divided evenly across
+        not required. The ``max_inflight_requests`` budget is divided across
         sub-streams, so it must be at least ``stream_count``.
 
         Args:
