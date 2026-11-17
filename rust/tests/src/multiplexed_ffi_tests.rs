@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
@@ -851,6 +851,39 @@ fn empty_json_batch_returns_sentinel_and_closed_mux_rejects_work() {
     assert!(!zerobus_multiplexed_stream_flush(mux, &mut result));
     expect_permanent_failure(&mut result, "flush on a closed mux");
 
+    // `_nowait` calls report the closed mux instead of dropping the record.
+    let closed = "Stream is in invalid state: MultiplexedStream is closed";
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, json.as_ptr(), &mut result);
+    let message = expect_permanent_failure(&mut result, "ingest_json_record_nowait");
+    assert_eq!(message, closed);
+    zerobus_multiplexed_stream_ingest_json_records_nowait(mux, ptrs.as_ptr(), 1, &mut result);
+    let message = expect_permanent_failure(&mut result, "ingest_json_records_nowait");
+    assert_eq!(message, closed);
+    zerobus_multiplexed_stream_ingest_json_records_nowait(mux, ptrs.as_ptr(), 0, &mut result);
+    let message = expect_permanent_failure(&mut result, "ingest_json_records_nowait (empty)");
+    assert_eq!(message, closed);
+
+    let proto = b"proto";
+    let proto_ptrs = [proto.as_ptr()];
+    let proto_lens = [proto.len()];
+    zerobus_multiplexed_stream_ingest_proto_record_nowait(
+        mux,
+        proto.as_ptr(),
+        proto.len(),
+        &mut result,
+    );
+    let message = expect_permanent_failure(&mut result, "ingest_proto_record_nowait");
+    assert_eq!(message, closed);
+    zerobus_multiplexed_stream_ingest_proto_records_nowait(
+        mux,
+        proto_ptrs.as_ptr(),
+        proto_lens.as_ptr(),
+        1,
+        &mut result,
+    );
+    let message = expect_permanent_failure(&mut result, "ingest_proto_records_nowait");
+    assert_eq!(message, closed);
+
     zerobus_multiplexed_stream_free(mux);
     zerobus_sdk_free(sdk);
 }
@@ -1034,8 +1067,8 @@ fn concurrent_callers_share_one_handle() {
 }
 
 /// While a flush holds the handle, a close queues behind it and
-/// `is_closed` turns true. An ingest that arrives after that fails instead
-/// of being queued and lost.
+/// `is_closed` turns true. A blocking or `_nowait` ingest that arrives after
+/// that fails instead of being queued and lost.
 #[test]
 fn ingest_after_queued_close_fails_instead_of_being_lost() {
     const TABLE: &str = "ffi.mux.close.queued";
@@ -1083,6 +1116,18 @@ fn ingest_after_queued_close_fails_instead_of_being_lost() {
         zerobus_multiplexed_stream_is_closed(mux)
     });
 
+    // The gate is still closed, so close can't have finished yet.
+    let r1 = CString::new(r#"{"id": 1}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+    let message = expect_permanent_failure(
+        &mut result,
+        "ingest_json_record_nowait after close was queued",
+    );
+    assert_eq!(
+        message,
+        "Stream is in invalid state: MultiplexedStream is closing"
+    );
+
     // Only decides whether the ingest below waits behind the close or finds
     // the mux already closed; both must fail.
     let releaser = {
@@ -1106,8 +1151,129 @@ fn ingest_after_queued_close_fails_instead_of_being_lost() {
     assert_eq!(
         runtime.block_on(server.get_write_count()),
         1,
-        "the rejected record never reaches the server"
+        "the rejected records never reach the server"
     );
     zerobus_multiplexed_stream_free(mux);
     zerobus_sdk_free(sdk);
+}
+
+/// Every `_nowait` record accepted while the mux is open is sent and
+/// covered by a close issued right after it, never silently dropped.
+#[test]
+fn nowait_records_accepted_before_close_are_never_lost() {
+    const TABLE: &str = "ffi.mux.nowait.close";
+    const RECORDS: usize = 200;
+    let (runtime, server, url) = start_server();
+
+    let mut options = json_options();
+    options.flush_timeout_ms = 500;
+    let sdk = create_sdk(&url);
+    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mut result = new_result();
+
+    let records = json_records(0..RECORDS);
+    let accepted: Vec<&CString> = records
+        .iter()
+        .filter(|json| {
+            zerobus_multiplexed_stream_ingest_json_record_nowait(mux, json.as_ptr(), &mut result);
+            let accepted = result.success;
+            take_message(&mut result);
+            accepted
+        })
+        .collect();
+    assert_eq!(accepted.len(), RECORDS, "an open mux accepts every record");
+
+    // The server never acks, so close fails on the flush timeout; only what
+    // it covers matters here.
+    zerobus_multiplexed_stream_close(mux, &mut result);
+    take_message(&mut result);
+    wait_for_writes(&runtime, &server, RECORDS as u64);
+    assert_eq!(unacked_json_payloads(mux), sorted_strings(accepted));
+
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// A `_nowait` call returns at once while another call (here a flush) holds
+/// the handle, and its record is still sent and acknowledged.
+#[test]
+fn nowait_does_not_wait_for_in_flight_flush() {
+    const TABLE: &str = "ffi.mux.nowait.fast";
+    let (runtime, server, url) = start_server();
+    let gate = Arc::new(MockResponseGate::new());
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::GatedRecordAck {
+                ack_up_to_offset: 0,
+                gate: Arc::clone(&gate),
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 1,
+                delay_ms: 0,
+            },
+        ],
+    ));
+
+    let ack_log = Box::new(AckLog::default());
+    let mut options = json_options();
+    with_ack_log(&mut options, &ack_log);
+    let sdk = create_sdk(&url);
+    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mux_addr = mux as usize;
+    let mut result = new_result();
+
+    let r0 = CString::new(r#"{"id": 0}"#).unwrap();
+    let r0_id = zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record");
+    wait_for_writes(&runtime, &server, 1);
+
+    // The flush waits on the gated ack while holding the handle.
+    let flusher = std::thread::spawn(move || {
+        let mut result = new_result();
+        let flushed = zerobus_multiplexed_stream_flush(mux_addr as *mut _, &mut result);
+        expect_success(&mut result, "flush");
+        flushed
+    });
+
+    // Releases the gate when told to, or after 5 s, so a `_nowait` call that
+    // blocks on the flush fails the test instead of hanging it.
+    let gate_released = Arc::new(AtomicBool::new(false));
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let releaser = {
+        let gate = Arc::clone(&gate);
+        let gate_released = Arc::clone(&gate_released);
+        std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            gate_released.store(true, Ordering::SeqCst);
+            gate.release();
+        })
+    };
+
+    let r1 = CString::new(r#"{"id": 1}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record_nowait");
+    assert!(
+        !gate_released.load(Ordering::SeqCst),
+        "_nowait returned only after the in-flight flush was unblocked"
+    );
+
+    release_tx.send(()).unwrap();
+    releaser.join().unwrap();
+    assert!(flusher.join().unwrap());
+    wait_for_writes(&runtime, &server, 2);
+    assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
+    expect_success(&mut result, "flush");
+    assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+    expect_success(&mut result, "close");
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+
+    let acks = ack_log.sorted_acks();
+    assert_eq!(acks.len(), 2, "r0 and r1 are both acknowledged: {acks:?}");
+    assert!(acks.contains(&r0_id));
 }
