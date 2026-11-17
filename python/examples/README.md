@@ -31,6 +31,7 @@ for the endpoint and workspace URL formats on each cloud:
 ```bash
 export DATABRICKS_CLIENT_ID="your-service-principal-application-id"
 export DATABRICKS_CLIENT_SECRET="your-service-principal-secret"
+export DATABRICKS_TOKEN="<your-personal-access-token>"  # only for sync_example_pat.py
 export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
 export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
 export ZEROBUS_TABLE_NAME="catalog.schema.table"
