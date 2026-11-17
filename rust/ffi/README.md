@@ -183,6 +183,11 @@ zerobus_multiplexed_stream_free(mux);
 - If a sub-stream fails, the mux stops accepting records once a call observes
   the failure. Recover anything unacknowledged with
   `zerobus_multiplexed_stream_get_unacked_records`.
+- Every call except `is_closed` and `free` has an `_async` variant that
+  returns at once and reports through a completion callback on a runtime
+  thread (`zerobus_sdk_create_multiplexed_stream_async`,
+  `zerobus_multiplexed_stream_ingest_proto_record_async`, ...). Flush and
+  close cover every `_nowait` and `_async` ingest accepted before them.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.
 
 ### Dynamic protobuf from a Unity Catalog schema (pure C)

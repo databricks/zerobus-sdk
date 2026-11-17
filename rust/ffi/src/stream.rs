@@ -53,14 +53,14 @@ fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<CallbackAckCallback
 }
 
 #[derive(Clone, Copy)]
-struct SendPtr<T>(*mut T);
+pub(crate) struct SendPtr<T>(*mut T);
 
 impl<T> SendPtr<T> {
-    const fn new(ptr: *mut T) -> Self {
+    pub(crate) const fn new(ptr: *mut T) -> Self {
         Self(ptr)
     }
 
-    const fn get(self) -> *mut T {
+    pub(crate) const fn get(self) -> *mut T {
         self.0
     }
 }
@@ -185,7 +185,7 @@ fn invoke_create_stream_async_callback(
     }
 }
 
-fn invoke_offset_async_callback(
+pub(crate) fn invoke_offset_async_callback(
     callback: OffsetAsyncCallback,
     offset: i64,
     result: CResult,
@@ -212,7 +212,7 @@ fn invoke_offset_async_callback(
     }
 }
 
-fn invoke_bool_async_callback(
+pub(crate) fn invoke_bool_async_callback(
     callback: BoolAsyncCallback,
     value: bool,
     result: CResult,
@@ -239,7 +239,7 @@ fn invoke_bool_async_callback(
     }
 }
 
-fn invoke_record_array_async_callback(
+pub(crate) fn invoke_record_array_async_callback(
     callback: RecordArrayAsyncCallback,
     records: CRecordArray,
     result: CResult,

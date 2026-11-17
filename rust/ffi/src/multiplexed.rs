@@ -16,7 +16,10 @@
 //! thread that is inside one: the call would fail or deadlock.
 
 use crate::common::*;
-use crate::stream::{configure_stream_builder, encoded_records_to_c_array, StreamCreateAuth};
+use crate::stream::{
+    configure_stream_builder, encoded_records_to_c_array, invoke_bool_async_callback,
+    invoke_offset_async_callback, invoke_record_array_async_callback, SendPtr, StreamCreateAuth,
+};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
     AckCallback, EncodedRecord, HeadersProvider, MessageId, MultiplexedStream, ZerobusError,
@@ -24,6 +27,7 @@ use databricks_zerobus_ingest_sdk::{
 };
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -132,7 +136,7 @@ impl NowaitTracker {
     }
 }
 
-/// Marks one `_nowait` submission as queued (or failed) when dropped.
+/// Marks one `_nowait` or `_async` submission as queued (or failed) when dropped.
 struct NowaitTicket {
     tracker: Arc<NowaitTracker>,
     epoch: u64,
@@ -484,13 +488,14 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
 /// many sub-streams, a slow callback can make late ones time out, failing the
 /// whole create, so keep it fast (for example, return a cached token).
 ///
-/// Ownership of `user_data` follows
-/// `zerobus_sdk_create_stream_with_headers_provider`: once this function is
-/// called, the FFI owns it and invokes `free_user_data` (when set) exactly
-/// once, from any thread, after the last sub-stream releases the provider,
-/// which can be after this function returns even when it fails. The ack
-/// parameters, and ownership of
-/// `ack_user_data`, follow `zerobus_sdk_create_multiplexed_stream`.
+/// Once this function is called, the FFI owns `user_data` and invokes
+/// `free_user_data` (when set) exactly once, from any thread, after the last
+/// sub-stream releases the provider. Unlike
+/// `zerobus_sdk_create_stream_with_headers_provider`, that can be after this
+/// function returns even when it fails, since sub-streams that started to
+/// open are torn down in the background. Never free `user_data` yourself.
+/// The ack parameters, and ownership of `ack_user_data`, follow
+/// `zerobus_sdk_create_multiplexed_stream`.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
@@ -746,16 +751,35 @@ enum NowaitPayload {
     Batch(Vec<EncodedRecord>),
 }
 
-/// Takes a shared lock on the mux for a `_nowait` call without blocking.
+impl NowaitPayload {
+    /// Ingests the payload; returns its raw message ID, or `EMPTY_BATCH`.
+    async fn ingest(self, mux: &MultiplexedStream) -> ZerobusResult<i64> {
+        match self {
+            NowaitPayload::Record(record) => mux.ingest_record(record).await.map(|id| id.raw()),
+            NowaitPayload::Batch(batch) => mux
+                .ingest_records(batch)
+                .await
+                .map(|id| id.map_or(EMPTY_BATCH, |id| id.raw())),
+        }
+    }
+}
+
+/// Takes a shared lock on the mux for a background task without blocking.
 ///
 /// The guard is taken before the call returns to C, so a later close or
-/// `get_unacked_records` waits until the spawned task has queued its payload.
+/// `get_unacked_records` waits until the spawned task is done with the mux.
 /// `try_read_owned` fails only while one of those holds or waits for the write
 /// lock; both close the mux, so the call reports it as closing.
-fn lock_for_nowait(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
-    let guard = Arc::clone(&handle.stream)
+fn read_now(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
+    Arc::clone(&handle.stream)
         .try_read_owned()
-        .map_err(|_| ZerobusError::InvalidStateError("MultiplexedStream is closing".to_string()))?;
+        .map_err(|_| ZerobusError::InvalidStateError("MultiplexedStream is closing".to_string()))
+}
+
+/// Like `read_now`, and also rejects a mux that is already closed, since a
+/// `_nowait` call has no other way to report it.
+fn lock_for_nowait(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
+    let guard = read_now(handle)?;
     if guard.is_closed() {
         return Err(ZerobusError::InvalidStateError(
             "MultiplexedStream is closed".to_string(),
@@ -771,11 +795,7 @@ fn spawn_ingest(handle: &MuxHandle, payload: NowaitPayload) -> ZerobusResult<()>
     let ticket = handle.nowait.begin();
     RUNTIME.spawn(async move {
         let mut ticket = ticket;
-        let res = match payload {
-            NowaitPayload::Record(record) => guard.ingest_record(record).await.map(Some),
-            NowaitPayload::Batch(batch) => guard.ingest_records(batch).await,
-        };
-        ticket.error = res.err();
+        ticket.error = payload.ingest(&guard).await.err();
         // The ticket drops before the guard, so close sees the error too.
         drop(ticket);
     });
@@ -1029,8 +1049,7 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 /// and for every accepted `_nowait` record to be queued, then flushes those
 /// too. `_nowait` calls made after close starts report an error. If close
 /// itself succeeds, a background `_nowait` failure that no flush has reported
-/// yet is returned instead. On error,
-/// recover unacknowledged records with
+/// yet is returned instead. On error, recover unacknowledged records with
 /// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
 /// released with `zerobus_multiplexed_stream_free`.
 #[no_mangle]
@@ -1095,6 +1114,587 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
             Ok(mux.get_unacked_records().await?.collect::<Vec<_>>())
         });
         complete(result, res.and_then(encoded_records_to_c_array), empty())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Async variants
+//
+// Each `_async` function validates its arguments and returns at once: false
+// with `result` set on an invalid argument (the callback is then never
+// invoked), or true once the work is queued on the FFI runtime. The callback
+// then runs exactly once, on a runtime thread, with a `CResult` valid only for
+// the call. Callbacks must be thread-safe, must not unwind, and must not call
+// the blocking `zerobus_multiplexed_stream_*` functions; calling `_async` ones
+// is fine. `callback_user_data` must stay valid until the callback runs.
+// ---------------------------------------------------------------------------
+
+/// Completion callback for the async multiplexed creates.
+///
+/// `mux` is non-null on success, and the caller then owns it; it is null on
+/// failure. `result` is valid only for the duration of the call.
+pub type CreateMultiplexedStreamAsyncCallback = extern "C" fn(
+    mux: *mut CZerobusMultiplexedStream,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+fn invoke_create_mux_async_callback(
+    callback: CreateMultiplexedStreamAsyncCallback,
+    mux: *mut CZerobusMultiplexedStream,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    if catch_unwind(AssertUnwindSafe(|| callback(mux, &result, user_data))).is_err() {
+        tracing::error!("async multiplexed create callback panicked; contained at FFI boundary");
+    }
+    if !result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(result.error_message);
+        }
+    }
+}
+
+/// Builds the mux on a runtime task and reports it through `callback`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_create(
+    sdk: *mut CZerobusSdk,
+    table_name: String,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    auth: StreamCreateAuth,
+    stream_count: usize,
+    options: Option<CStreamConfigurationOptions>,
+    ack_callback: MultiplexedCallbackAckCallback,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+) {
+    let sdk = SendPtr::new(sdk);
+    let callback_user_data = SendPtr::new(callback_user_data);
+    RUNTIME.spawn(async move {
+        let res = match validate_sdk_ptr(sdk.get()) {
+            Ok(sdk_ref) => {
+                build_mux_from_parts(
+                    sdk_ref,
+                    table_name,
+                    descriptor_proto,
+                    auth,
+                    stream_count,
+                    options,
+                    ack_callback,
+                )
+                .await
+            }
+            Err(msg) => Err(ZerobusError::InvalidArgument(msg.to_string())),
+        };
+        let (mux, result) = match res {
+            Ok(mux) => (mux, CResult::success()),
+            Err(err) => (ptr::null_mut(), CResult::error(err)),
+        };
+        invoke_create_mux_async_callback(callback, mux, result, callback_user_data.get());
+    });
+}
+
+/// Create a multiplexed stream with OAuth authentication on a background
+/// task (Beta).
+///
+/// Same arguments and ack-callback ownership as
+/// `zerobus_sdk_create_multiplexed_stream`; strings, the descriptor, and
+/// `options` are copied before this returns, but `sdk` must stay valid until
+/// `callback` runs. Errors found after validation, including a failed
+/// connect, reach `callback` with a null `mux`.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_multiplexed_stream_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        // Take ownership of `ack_user_data` before any fallible work, so an
+        // early return frees it exactly once.
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+        let parts = (|| {
+            let auth = StreamCreateAuth::OAuth {
+                client_id: unsafe { c_str_arg(client_id)? },
+                client_secret: unsafe { c_str_arg(client_secret)? },
+            };
+            ZerobusResult::Ok((
+                unsafe { c_str_arg(table_name)? },
+                unsafe { decode_descriptor(descriptor_proto_bytes, descriptor_proto_len)? },
+                auth,
+            ))
+        })();
+        let (table_name, descriptor_proto, auth) = match parts {
+            Ok(parts) => parts,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        spawn_create(
+            sdk,
+            table_name,
+            descriptor_proto,
+            auth,
+            stream_count,
+            (!options.is_null()).then(|| unsafe { *options }),
+            ack_callback,
+            callback,
+            callback_user_data,
+        );
+        write_success_result(result);
+        true
+    })
+}
+
+/// Create a multiplexed stream with a custom headers provider on a background
+/// task (Beta).
+///
+/// Same arguments and ownership of `user_data` and `ack_user_data` as
+/// `zerobus_sdk_create_multiplexed_stream_with_headers_provider`; otherwise
+/// behaves like `zerobus_sdk_create_multiplexed_stream_async`.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        // Construct the provider and the ack callback before any fallible
+        // work: they own `user_data` and `ack_user_data`, so dropping them on
+        // an early return frees each exactly once.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(SerializedHeadersProvider::new(
+            CallbackHeadersProvider::new(headers_callback, user_data, free_user_data),
+        ));
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+        let parts = (|| {
+            ZerobusResult::Ok((unsafe { c_str_arg(table_name)? }, unsafe {
+                decode_descriptor(descriptor_proto_bytes, descriptor_proto_len)?
+            }))
+        })();
+        let (table_name, descriptor_proto) = match parts {
+            Ok(parts) => parts,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        spawn_create(
+            sdk,
+            table_name,
+            descriptor_proto,
+            StreamCreateAuth::HeadersProvider { headers_provider },
+            stream_count,
+            (!options.is_null()).then(|| unsafe { *options }),
+            ack_callback,
+            callback,
+            callback_user_data,
+        );
+        write_success_result(result);
+        true
+    })
+}
+
+/// Queues an ingest on a background task and reports its message ID.
+///
+/// Like `_nowait`, the read guard and a flush ticket are taken before the call
+/// returns, so flush, close and `get_unacked_records` cover the submission.
+/// Both are released before `callback` runs.
+fn spawn_ingest_async(
+    handle: &MuxHandle,
+    payload: NowaitPayload,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+) -> ZerobusResult<()> {
+    let guard = read_now(handle)?;
+    let ticket = handle.nowait.begin();
+    let user_data = SendPtr::new(user_data);
+    RUNTIME.spawn(async move {
+        let res = payload.ingest(&guard).await;
+        drop(ticket);
+        drop(guard);
+        let (id, result) = match res {
+            Ok(id) => (id, CResult::success()),
+            Err(err) => (INGEST_ERROR, CResult::error(err)),
+        };
+        invoke_offset_async_callback(callback, id, result, user_data.get());
+    });
+    Ok(())
+}
+
+/// Ingest a protobuf record on a background task and report its message ID
+/// via `callback` (Beta).
+///
+/// Copies the record before returning. `callback` receives the message ID, or
+/// -1 with the error, exactly as `zerobus_multiplexed_stream_ingest_proto_record`
+/// would return it; a failed ingest queued nothing. Records accepted before a
+/// call to flush, close or `get_unacked_records` (blocking or async) are
+/// queued before it proceeds, so it covers them. Returns false with `result`
+/// set on an invalid argument or while a close is in progress.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_async(
+    mux: *mut CZerobusMultiplexedStream,
+    data: *const u8,
+    data_len: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if data.is_null() {
+            write_error_result(result, "Invalid data pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let record = match unsafe { copy_bytes(data, data_len) } {
+            Ok(bytes) => EncodedRecord::Proto(bytes),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let res = spawn_ingest_async(handle, NowaitPayload::Record(record), callback, user_data);
+        complete(result, res.map(|()| true), false)
+    })
+}
+
+/// Ingest a JSON record on a background task and report its message ID via
+/// `callback` (Beta).
+///
+/// Same contract as `zerobus_multiplexed_stream_ingest_proto_record_async`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record_async(
+    mux: *mut CZerobusMultiplexedStream,
+    json_data: *const c_char,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let record = match unsafe { c_str_to_string(json_data) } {
+            Ok(json) => EncodedRecord::Json(json),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let res = spawn_ingest_async(handle, NowaitPayload::Record(record), callback, user_data);
+        complete(result, res.map(|()| true), false)
+    })
+}
+
+/// Ingest a batch of protobuf records on a background task and report its
+/// message ID via `callback` (Beta).
+///
+/// Copies every record before returning. `callback` receives what
+/// `zerobus_multiplexed_stream_ingest_proto_records` would return: the
+/// batch's message ID, -2 with success for an empty batch (not a message ID),
+/// or -1 with the error. Otherwise as
+/// `zerobus_multiplexed_stream_ingest_proto_record_async`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if records.is_null() || record_lens.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let batch = match unsafe { copy_proto_records(records, record_lens, num_records) } {
+            Ok(batch) => batch,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let res = spawn_ingest_async(handle, NowaitPayload::Batch(batch), callback, user_data);
+        complete(result, res.map(|()| true), false)
+    })
+}
+
+/// Ingest a batch of JSON records on a background task and report its
+/// message ID via `callback` (Beta).
+///
+/// Same contract as `zerobus_multiplexed_stream_ingest_proto_records_async`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    json_records: *const *const c_char,
+    num_records: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if json_records.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let batch = match unsafe { copy_json_records(json_records, num_records) } {
+            Ok(batch) => batch,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let res = spawn_ingest_async(handle, NowaitPayload::Batch(batch), callback, user_data);
+        complete(result, res.map(|()| true), false)
+    })
+}
+
+/// Wait for a message ID on a background task and report completion via
+/// `callback` (Beta).
+///
+/// `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
+/// would return. Returns false with `result` set on a null handle or while a
+/// close is in progress.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
+    mux: *mut CZerobusMultiplexedStream,
+    message_id: i64,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let guard = match read_now(handle) {
+            Ok(guard) => guard,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        let user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let res = guard
+                .wait_for_message_id(MessageId::from_raw(message_id))
+                .await;
+            drop(guard);
+            let (value, result) = match res {
+                Ok(()) => (true, CResult::success()),
+                Err(err) => (false, CResult::error(err)),
+            };
+            invoke_bool_async_callback(callback, value, result, user_data.get());
+        });
+        write_success_result(result);
+        true
+    })
+}
+
+/// Flush on a background task and report completion via `callback` (Beta).
+///
+/// Covers the same records as `zerobus_multiplexed_stream_flush`: every
+/// blocking, `_nowait` and `_async` ingest accepted before this call.
+/// Returns false with `result` set on a null handle or while a close is in
+/// progress.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_flush_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let guard = match read_now(handle) {
+            Ok(guard) => guard,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        // Fix the epoch now, so submissions accepted later are not waited for.
+        let target = handle.nowait.start_flush();
+        let nowait = Arc::clone(&handle.nowait);
+        let user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            nowait.wait_drained(target).await;
+            let flushed = guard.flush().await;
+            drop(guard);
+            // As in the blocking flush: its own error wins, and a stored
+            // `_nowait` failure is reported once.
+            let res = flushed.and(nowait.take_error(Some(target)).map_or(Ok(()), Err));
+            let (value, result) = match res {
+                Ok(()) => (true, CResult::success()),
+                Err(err) => (false, CResult::error(err)),
+            };
+            invoke_bool_async_callback(callback, value, result, user_data.get());
+        });
+        write_success_result(result);
+        true
+    })
+}
+
+/// Flush and close every sub-stream on a background task and report
+/// completion via `callback` (Beta).
+///
+/// Behaves like `zerobus_multiplexed_stream_close`, waiting for in-flight
+/// calls and accepted `_nowait` and `_async` ingests first. The handle must
+/// still be released with `zerobus_multiplexed_stream_free`, which may happen
+/// before `callback` runs.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_close_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let stream = Arc::clone(&handle.stream);
+        let nowait = Arc::clone(&handle.nowait);
+        let user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let closed = stream.write_owned().await.close().await;
+            let res = closed.and(nowait.take_error(None).map_or(Ok(()), Err));
+            let (value, result) = match res {
+                Ok(()) => (true, CResult::success()),
+                Err(err) => (false, CResult::error(err)),
+            };
+            invoke_bool_async_callback(callback, value, result, user_data.get());
+        });
+        write_success_result(result);
+        true
+    })
+}
+
+/// Close the mux on a background task and report every unacknowledged record
+/// via `callback` (Beta).
+///
+/// Behaves like `zerobus_multiplexed_stream_get_unacked_records`. On success
+/// the callback owns the array and frees it with `zerobus_free_record_array`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: RecordArrayAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let stream = Arc::clone(&handle.stream);
+        let user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let res = async {
+                let mut mux = stream.write_owned().await;
+                Ok(mux.get_unacked_records().await?.collect::<Vec<_>>())
+            }
+            .await
+            .and_then(encoded_records_to_c_array);
+            let (records, result) = match res {
+                Ok(records) => (records, CResult::success()),
+                Err(err) => (
+                    CRecordArray {
+                        records: ptr::null_mut(),
+                        len: 0,
+                    },
+                    CResult::error(err),
+                ),
+            };
+            invoke_record_array_async_callback(callback, records, result, user_data.get());
+        });
+        write_success_result(result);
+        true
     })
 }
 
