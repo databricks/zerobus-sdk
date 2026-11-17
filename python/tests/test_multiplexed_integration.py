@@ -305,7 +305,7 @@ def test_rejected_record_reaches_on_error_and_comes_back(module):
 
 
 def _ingest_after_rejection(stream, calls):
-    """Make each (method, payload, expected) call and return the records expected back.
+    """Make each (method, payload, expected) call and return the records expected back, per call.
 
     The first call ingests a record the server rejects, which fails the stream. Queuing takes far
     less than the server's round trip, so every later call is still accepted; if one raises, the
@@ -314,12 +314,15 @@ def _ingest_after_rejection(stream, calls):
     accepted = []
     for method, payload, expected in calls:
         getattr(stream, method)(payload)
-        accepted.extend(expected)
+        accepted.append(expected)
     return accepted
 
 
 def _assert_records_come_back(stream, accepted, decode):
-    """Fail the stream, close it, and check that every accepted record comes back unacknowledged."""
+    """Fail the stream, close it, and check that every accepted record comes back unacknowledged.
+
+    ``accepted`` holds the expected records of each ingest call; a batch comes back as one group.
+    """
     with pytest.raises(core.ZerobusException):
         stream.flush()
     try:
@@ -327,9 +330,10 @@ def _assert_records_come_back(stream, accepted, decode):
     except core.ZerobusException:
         pass  # a multiplexed stream reports the failure again; an ordinary stream does not
     batches = list(stream.get_unacked_batches())
-    assert batches
     assert all(isinstance(batch, list) and all(isinstance(r, bytes) for r in batch) for batch in batches)
-    assert sorted(decode(r) for r in stream.get_unacked_records()) == sorted(accepted)
+    records = list(stream.get_unacked_records())
+    assert [r for batch in batches for r in batch] == records
+    assert sorted(sorted(decode(r) for r in batch) for batch in batches) == sorted(sorted(e) for e in accepted)
 
 
 def _avro_bytes(row):
@@ -493,13 +497,18 @@ def test_cancelled_flush_leaves_the_async_stream_usable():
             with pytest.raises(asyncio.CancelledError):
                 await flush
             assert flush.cancelled()
+
+            # The stream is still usable: it takes another record and flushes it.
+            assert not stream.is_closed
+            ids.add(await stream.ingest_record(_air_quality(f"{prefix}1000", 1000)))
+            await asyncio.wait_for(stream.flush(), CALLBACK_WAIT_SECONDS)
         finally:
             await asyncio.wait_for(stream.close(), CALLBACK_WAIT_SECONDS)
         return ids
 
     ids = asyncio.run(run())
     callback.wait_for(ids)
-    EXPECTED_ROWS[prefix] = 1000
+    EXPECTED_ROWS[prefix] = 1001
 
 
 def test_dropping_a_stream_without_close_leaves_the_sdk_usable():

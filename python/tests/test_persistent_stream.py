@@ -43,7 +43,9 @@ def _open(mode, op):
 class TestBuilderValidation:
     def test_build_requires_table(self, sdk, mode):
         builder = sdk.persistent_stream_builder().oauth("id", "secret").json()
-        with pytest.raises(ValueError, match="table is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("table is required: call table(...) before build() or resume()") + "$"
+        ):
             _open(mode, builder.build)
 
     def test_build_requires_auth(self, sdk, mode):
@@ -77,7 +79,9 @@ class TestBuilderValidation:
 
     def test_build_requires_format(self, sdk, mode):
         builder = sdk.persistent_stream_builder().table("c.s.t").oauth("id", "secret")
-        with pytest.raises(ValueError, match="record format is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("record format is required: call json() or compiled_proto(...)") + "$"
+        ):
             _open(mode, builder.build)
 
     def test_resume_requires_stream_id(self, sdk, mode):
@@ -88,7 +92,9 @@ class TestBuilderValidation:
 
     def test_resume_requires_table(self, sdk, mode):
         builder = sdk.persistent_stream_builder().oauth("id", "secret").json()
-        with pytest.raises(ValueError, match="table is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("table is required: call table(...) before build() or resume()") + "$"
+        ):
             _open(mode, lambda: builder.resume("stream-1"))
 
     @pytest.mark.parametrize(
