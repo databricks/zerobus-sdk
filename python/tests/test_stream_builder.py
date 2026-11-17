@@ -23,6 +23,14 @@ from zerobus.sdk import aio, sync
 SDK_ARGS = ("https://localhost", "https://localhost")
 # Nothing listens here, so an open fails fast with a Zerobus error.
 UNREACHABLE = ("http://127.0.0.1:1", "http://127.0.0.1:1")
+# The native layer's message when the settings carry no or several authentication methods.
+NATIVE_AUTH_MESSAGE = (
+    re.escape(
+        "set exactly one authentication method: oauth(client_id, client_secret), headers_provider(provider), "
+        "or federated_auth(token)"
+    )
+    + "$"
+)
 AVRO_SCHEMA = json.dumps({"type": "record", "name": "R", "fields": [{"name": "a", "type": "string"}]})
 
 
@@ -638,7 +646,7 @@ class TestFederatedAuth:
 
     @pytest.mark.parametrize("token", ["tok", None, lambda: "tok"])
     def test_rejects_anything_but_a_federated_token(self, sdk, token):
-        with pytest.raises(ValueError, match="token must be a FederatedToken instance"):
+        with pytest.raises(ValueError, match=re.escape("token must be a FederatedToken instance") + "$"):
             sdk.stream_builder().federated_auth(token)
 
     def test_native_settings_allow_only_one_auth_method(self, mode):
@@ -656,8 +664,17 @@ class TestFederatedAuth:
                 core.StreamSettings(client_secret="s"),
             ):
                 # The async call raises before it returns an awaitable.
-                with pytest.raises(ValueError, match="exactly one authentication method"):
+                with pytest.raises(ValueError, match=NATIVE_AUTH_MESSAGE):
                     native.open_stream(props, settings, idp_supplier=supplier)
+            # A Databricks client ID only selects workload identity federation.
+            for settings in (
+                core.StreamSettings(headers_provider=_Headers()),
+                core.StreamSettings(client_id="id", client_secret="s"),
+            ):
+                with pytest.raises(
+                    ValueError, match=re.escape("databricks_client_id is only valid with idp_supplier") + "$"
+                ):
+                    native.validate_stream(props, settings, databricks_client_id="sp")
 
         asyncio.run(run())
 
@@ -751,9 +768,9 @@ class TestNativeValidation:
             core.StreamSettings(client_id="id"),
             core.StreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
         ):
-            with pytest.raises(ValueError, match="exactly one authentication method"):
+            with pytest.raises(ValueError, match=NATIVE_AUTH_MESSAGE):
                 native.open_stream(props, settings)
-            with pytest.raises(ValueError, match="exactly one authentication method"):
+            with pytest.raises(ValueError, match=NATIVE_AUTH_MESSAGE):
                 native.open_multiplexed_stream(props, settings, 2)
 
     def test_async_requires_exactly_one_auth_method(self):
@@ -767,9 +784,9 @@ class TestNativeValidation:
                 core.StreamSettings(client_id="id"),
                 core.StreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
             ):
-                with pytest.raises(ValueError, match="exactly one authentication method"):
+                with pytest.raises(ValueError, match=NATIVE_AUTH_MESSAGE):
                     native.open_stream(props, settings)
-                with pytest.raises(ValueError, match="exactly one authentication method"):
+                with pytest.raises(ValueError, match=NATIVE_AUTH_MESSAGE):
                     native.open_multiplexed_stream(props, settings, 2)
 
         asyncio.run(run())
