@@ -10,6 +10,7 @@ acknowledgments, and recovery against a server are covered by the Rust core test
 import asyncio
 import inspect
 import json
+import re
 
 import pytest
 
@@ -91,7 +92,9 @@ class TestBuilderValidation:
 
     def test_build_requires_format(self, sdk, mode, kind):
         builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", "secret"), kind)
-        with pytest.raises(ValueError, match=r"record format is required: call json\(\), compiled_proto"):
+        with pytest.raises(
+            ValueError, match=re.escape("record format is required: call json(), compiled_proto(...), or avro(...)")
+        ):
             _open(mode, builder.build)
 
     def test_last_auth_setter_wins(self, sdk):
@@ -121,7 +124,7 @@ class TestBuilderValidation:
 
     @pytest.mark.parametrize("schema", ["", "   ", None, 7])
     def test_avro_rejects_empty_schema(self, sdk, schema):
-        with pytest.raises(ValueError, match="schema_json"):
+        with pytest.raises(ValueError, match=re.escape("schema_json must be a non-empty string")):
             sdk.stream_builder().avro(schema)
 
     @pytest.mark.parametrize(
@@ -177,7 +180,7 @@ class TestBuilderValidation:
 class TestMultiplexedStep:
     @pytest.mark.parametrize("count", [0, -1, 65, True, "4", 2.0])
     def test_rejects_out_of_range_stream_count(self, sdk, count):
-        with pytest.raises(ValueError, match="stream_count"):
+        with pytest.raises(ValueError, match=re.escape("stream_count must be an integer between 1 and 64")):
             sdk.stream_builder().multiplexed(count)
 
     @pytest.mark.parametrize("count", [1, 64])
