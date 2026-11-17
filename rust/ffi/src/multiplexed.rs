@@ -25,11 +25,11 @@ use databricks_zerobus_ingest_sdk::{
     ZerobusResult, ZerobusSdk,
 };
 use prost::Message;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{Mutex, Notify, OwnedRwLockReadGuard, RwLock};
 
 /// Returned by ingest calls on failure; `result` carries the error.
 const INGEST_ERROR: i64 = -1;
@@ -45,12 +45,98 @@ pub struct CZerobusMultiplexedStream {
 }
 
 /// Concrete type behind `*mut CZerobusMultiplexedStream`, held in an `Arc`.
+struct MuxHandle {
+    /// `close` and `get_unacked_records` need `&mut MultiplexedStream`, while
+    /// ingest, flush, and wait need only `&`, possibly from `_nowait` tasks
+    /// that hold their own owned read guard. The lock lets those share the mux
+    /// and makes a close wait for them instead of aliasing a `&mut` with live
+    /// `&` borrows.
+    stream: Arc<RwLock<MultiplexedStream>>,
+    /// `_nowait` submissions not yet queued into the core, so flush can wait
+    /// for them.
+    nowait: Arc<NowaitTracker>,
+}
+
+/// Counts `_nowait` submissions per flush epoch.
 ///
-/// `close` and `get_unacked_records` need `&mut MultiplexedStream`, while
-/// ingest, flush, and wait need only `&`, possibly from `_nowait` tasks that
-/// hold their own `Arc` clone. The lock lets those share the mux and makes a
-/// close wait for them instead of aliasing a `&mut` with live `&` borrows.
-type MuxHandle = RwLock<MultiplexedStream>;
+/// A flush starts a new epoch and waits only for submissions from earlier
+/// epochs, so producers that keep submitting cannot hold it off indefinitely.
+#[derive(Default)]
+struct NowaitTracker {
+    epochs: std::sync::Mutex<NowaitEpochs>,
+    drained: Notify,
+}
+
+#[derive(Default)]
+struct NowaitEpochs {
+    current: u64,
+    /// Submissions not yet queued, by epoch; empty epochs are removed.
+    pending: BTreeMap<u64, usize>,
+}
+
+impl NowaitTracker {
+    fn epochs(&self) -> std::sync::MutexGuard<'_, NowaitEpochs> {
+        // The state stays consistent even if a holder panicked.
+        self.epochs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a submission in the current epoch.
+    fn begin(self: &Arc<Self>) -> NowaitTicket {
+        let mut epochs = self.epochs();
+        let epoch = epochs.current;
+        *epochs.pending.entry(epoch).or_default() += 1;
+        NowaitTicket {
+            tracker: Arc::clone(self),
+            epoch,
+        }
+    }
+
+    /// Waits until every submission registered before this call is queued.
+    async fn wait_for_accepted(&self) {
+        let target = {
+            let mut epochs = self.epochs();
+            let target = epochs.current;
+            epochs.current += 1;
+            target
+        };
+        loop {
+            let mut notified = std::pin::pin!(self.drained.notified());
+            // Register before checking, so a drain in between is not missed.
+            notified.as_mut().enable();
+            if self.epochs().pending.range(..=target).next().is_none() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Marks one `_nowait` submission as queued (or failed) when dropped.
+struct NowaitTicket {
+    tracker: Arc<NowaitTracker>,
+    epoch: u64,
+}
+
+impl Drop for NowaitTicket {
+    fn drop(&mut self) {
+        let drained = {
+            let mut epochs = self.tracker.epochs();
+            match epochs.pending.get_mut(&self.epoch) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                _ => {
+                    epochs.pending.remove(&self.epoch);
+                    true
+                }
+            }
+        };
+        if drained {
+            self.tracker.drained.notify_waiters();
+        }
+    }
+}
 
 fn validate_mux_ptr<'a>(
     mux: *mut CZerobusMultiplexedStream,
@@ -59,16 +145,6 @@ fn validate_mux_ptr<'a>(
         return Err("Multiplexed stream pointer is null");
     }
     Ok(unsafe { &*(mux as *const MuxHandle) })
-}
-
-/// Clones the `Arc` behind `mux` without consuming the caller's reference.
-///
-/// # Safety
-/// `mux` must be a non-null handle from a multiplexed create call that has not
-/// been freed.
-unsafe fn clone_mux_arc(mux: *mut CZerobusMultiplexedStream) -> Arc<MuxHandle> {
-    Arc::increment_strong_count(mux as *const MuxHandle);
-    Arc::from_raw(mux as *const MuxHandle)
 }
 
 /// Writes the outcome into `result` and returns the value, or `failure` on error.
@@ -203,7 +279,11 @@ async fn build_mux_from_parts(
             builder.multiplexed_ack_callback(Arc::new(MultiplexedCallbackAckCallback(callback)));
     }
     let mux = builder.multiplexed(stream_count).build().await?;
-    Ok(Arc::into_raw(Arc::new(RwLock::new(mux))) as *mut CZerobusMultiplexedStream)
+    let handle = MuxHandle {
+        stream: Arc::new(RwLock::new(mux)),
+        nowait: Arc::default(),
+    };
+    Ok(Arc::into_raw(Arc::new(handle)) as *mut CZerobusMultiplexedStream)
 }
 
 /// Create a multiplexed stream with OAuth authentication (Beta).
@@ -390,7 +470,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
                 return INGEST_ERROR;
             }
         };
-        let res = RUNTIME.block_on(async { handle.read().await.ingest_record(record).await });
+        let res =
+            RUNTIME.block_on(async { handle.stream.read().await.ingest_record(record).await });
         complete(result, res.map(|id| id.raw()), INGEST_ERROR)
     })
 }
@@ -420,7 +501,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record(
             }
         };
 
-        let res = RUNTIME.block_on(async { handle.read().await.ingest_record(record).await });
+        let res =
+            RUNTIME.block_on(async { handle.stream.read().await.ingest_record(record).await });
         complete(result, res.map(|id| id.raw()), INGEST_ERROR)
     })
 }
@@ -465,7 +547,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records(
                 return INGEST_ERROR;
             }
         };
-        let res = RUNTIME.block_on(async { handle.read().await.ingest_records(batch).await });
+        let res =
+            RUNTIME.block_on(async { handle.stream.read().await.ingest_records(batch).await });
         complete(
             result,
             res.map(|id| id.map_or(EMPTY_BATCH, |id| id.raw())),
@@ -504,7 +587,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records(
             }
         };
 
-        let res = RUNTIME.block_on(async { handle.read().await.ingest_records(batch).await });
+        let res =
+            RUNTIME.block_on(async { handle.stream.read().await.ingest_records(batch).await });
         complete(
             result,
             res.map(|id| id.map_or(EMPTY_BATCH, |id| id.raw())),
@@ -524,13 +608,8 @@ enum NowaitPayload {
 /// `get_unacked_records` waits until the spawned task has queued its payload.
 /// `try_read_owned` fails only while one of those holds or waits for the write
 /// lock; both close the mux, so the call reports it as closing.
-///
-/// # Safety
-/// `mux` must be a valid, non-freed handle.
-unsafe fn lock_for_nowait(
-    mux: *mut CZerobusMultiplexedStream,
-) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
-    let guard = clone_mux_arc(mux)
+fn lock_for_nowait(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
+    let guard = Arc::clone(&handle.stream)
         .try_read_owned()
         .map_err(|_| ZerobusError::InvalidStateError("MultiplexedStream is closing".to_string()))?;
     if guard.is_closed() {
@@ -541,16 +620,13 @@ unsafe fn lock_for_nowait(
     Ok(guard)
 }
 
-/// Queues an ingest on a background task that holds the mux's read lock.
-///
-/// # Safety
-/// `mux` must be a valid, non-freed handle.
-unsafe fn spawn_ingest(
-    mux: *mut CZerobusMultiplexedStream,
-    payload: NowaitPayload,
-) -> ZerobusResult<()> {
-    let guard = lock_for_nowait(mux)?;
+/// Queues an ingest on a background task that holds the mux's read lock and
+/// a flush ticket, both released once the core has queued (or rejected) it.
+fn spawn_ingest(handle: &MuxHandle, payload: NowaitPayload) -> ZerobusResult<()> {
+    let guard = lock_for_nowait(handle)?;
+    let ticket = handle.nowait.begin();
     RUNTIME.spawn(async move {
+        let _ticket = ticket;
         let _ = match payload {
             NowaitPayload::Record(record) => guard.ingest_record(record).await.map(Some),
             NowaitPayload::Batch(batch) => guard.ingest_records(batch).await,
@@ -563,14 +639,19 @@ unsafe fn spawn_ingest(
 ///
 /// Copies the record and returns immediately. `result` reports argument
 /// validation errors and a closed or closing mux (non-retryable; re-send the
-/// record on a new stream). Later ingestion errors are discarded, but a
-/// sub-stream failure still surfaces from the next flush or close. Records
-/// submitted this way have no ordering guarantee relative to each other.
+/// record on a new stream). Records submitted this way have no ordering
+/// guarantee relative to each other.
 ///
-/// A record accepted here is covered by `zerobus_multiplexed_stream_close` and
-/// `zerobus_multiplexed_stream_get_unacked_records`, which wait for it to be
-/// queued. `zerobus_multiplexed_stream_flush` covers only records already
-/// queued, so it may miss one submitted just before it.
+/// A record accepted here is queued on a background task.
+/// `zerobus_multiplexed_stream_flush`, `zerobus_multiplexed_stream_close` and
+/// `zerobus_multiplexed_stream_get_unacked_records` first wait for every
+/// record accepted before they were called to be queued, so they cover it
+/// like a blocking ingest. If the background ingest itself fails (for example,
+/// the chosen sub-stream stays at capacity for 30 seconds, or fails while the
+/// task waits), the record is dropped: it is not returned by
+/// `zerobus_multiplexed_stream_get_unacked_records`, and only a sub-stream
+/// failure surfaces from the next flush or close. Use the blocking ingest
+/// calls when every record must be accounted for.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
     mux: *mut CZerobusMultiplexedStream,
@@ -583,10 +664,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
             write_error_result(result, "Invalid data pointer", false);
             return;
         }
-        if let Err(msg) = validate_mux_ptr(mux) {
-            write_error_result(result, msg, false);
-            return;
-        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return;
+            }
+        };
 
         let record = match unsafe { copy_bytes(data, data_len) } {
             Ok(bytes) => EncodedRecord::Proto(bytes),
@@ -595,7 +679,7 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
                 return;
             }
         };
-        let res = unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
+        let res = spawn_ingest(handle, NowaitPayload::Record(record));
         complete(result, res, ())
     })
 }
@@ -610,10 +694,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record_nowait(
     result: *mut CResult,
 ) {
     ffi_guard(result, (), move || {
-        if let Err(msg) = validate_mux_ptr(mux) {
-            write_error_result(result, msg, false);
-            return;
-        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return;
+            }
+        };
         let record = match unsafe { c_str_to_string(json_data) } {
             Ok(json) => EncodedRecord::Json(json),
             Err(e) => {
@@ -622,7 +709,7 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record_nowait(
             }
         };
 
-        let res = unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
+        let res = spawn_ingest(handle, NowaitPayload::Record(record));
         complete(result, res, ())
     })
 }
@@ -645,10 +732,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_nowait(
             write_error_result(result, "Invalid records pointer", false);
             return;
         }
-        if let Err(msg) = validate_mux_ptr(mux) {
-            write_error_result(result, msg, false);
-            return;
-        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return;
+            }
+        };
         if num_records > 0 {
             let batch = match unsafe { copy_proto_records(records, record_lens, num_records) } {
                 Ok(batch) => batch,
@@ -657,11 +747,11 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_nowait(
                     return;
                 }
             };
-            let res = unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            let res = spawn_ingest(handle, NowaitPayload::Batch(batch));
             complete(result, res, ())
         } else {
             // Nothing to queue, but report a closed mux like the blocking batch.
-            let res = unsafe { lock_for_nowait(mux) }.map(drop);
+            let res = lock_for_nowait(handle).map(drop);
             complete(result, res, ())
         }
     })
@@ -682,10 +772,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_nowait(
             write_error_result(result, "Invalid records pointer", false);
             return;
         }
-        if let Err(msg) = validate_mux_ptr(mux) {
-            write_error_result(result, msg, false);
-            return;
-        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return;
+            }
+        };
         if num_records > 0 {
             let batch = match unsafe { copy_json_records(json_records, num_records) } {
                 Ok(batch) => batch,
@@ -694,11 +787,11 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_nowait(
                     return;
                 }
             };
-            let res = unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            let res = spawn_ingest(handle, NowaitPayload::Batch(batch));
             complete(result, res, ())
         } else {
             // Nothing to queue, but report a closed mux like the blocking batch.
-            let res = unsafe { lock_for_nowait(mux) }.map(drop);
+            let res = lock_for_nowait(handle).map(drop);
             complete(result, res, ())
         }
     })
@@ -730,6 +823,7 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
         };
         let res = RUNTIME.block_on(async {
             handle
+                .stream
                 .read()
                 .await
                 .wait_for_message_id(MessageId::from_raw(message_id))
@@ -741,9 +835,11 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
 
 /// Wait until every record queued on every sub-stream is acknowledged.
 ///
-/// Covers blocking ingests that have returned and `_nowait` records already
-/// queued by their background task; close also covers every accepted
-/// `_nowait` record.
+/// Covers blocking ingests that have returned and every `_nowait` record
+/// accepted before this call: it first waits for their background tasks to
+/// queue them (up to 30 seconds each when a sub-stream is at capacity), then
+/// for their acknowledgments. `_nowait` records submitted during the flush
+/// are left for the next flush or close.
 ///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via
@@ -761,7 +857,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
                 return false;
             }
         };
-        let res = RUNTIME.block_on(async { handle.read().await.flush().await });
+        let res = RUNTIME.block_on(async {
+            handle.nowait.wait_for_accepted().await;
+            handle.stream.read().await.flush().await
+        });
         complete(result, res.map(|()| true), false)
     })
 }
@@ -770,7 +869,8 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 ///
 /// Waits for in-progress ingest, flush, and wait calls on this mux to return,
 /// and for every accepted `_nowait` record to be queued, then flushes those
-/// too. `_nowait` calls made after close starts report an error. On error, recover unacknowledged records with
+/// too. `_nowait` calls made after close starts report an error. On error,
+/// recover unacknowledged records with
 /// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
 /// released with `zerobus_multiplexed_stream_free`.
 #[no_mangle]
@@ -786,7 +886,7 @@ pub extern "C" fn zerobus_multiplexed_stream_close(
                 return false;
             }
         };
-        let res = RUNTIME.block_on(async { handle.write().await.close().await });
+        let res = RUNTIME.block_on(async { handle.stream.write().await.close().await });
         complete(result, res.map(|()| true), false)
     })
 }
@@ -800,7 +900,7 @@ pub extern "C" fn zerobus_multiplexed_stream_is_closed(
     mux: *mut CZerobusMultiplexedStream,
 ) -> bool {
     ffi_guard(ptr::null_mut(), true, move || match validate_mux_ptr(mux) {
-        Ok(handle) => handle.try_read().map_or(true, |mux| mux.is_closed()),
+        Ok(handle) => handle.stream.try_read().map_or(true, |mux| mux.is_closed()),
         Err(_) => true,
     })
 }
@@ -827,7 +927,7 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
             }
         };
         let res = RUNTIME.block_on(async {
-            let mut mux = handle.write().await;
+            let mut mux = handle.stream.write().await;
             Ok(mux.get_unacked_records().await?.collect::<Vec<_>>())
         });
         complete(result, res.and_then(encoded_records_to_c_array), empty())
