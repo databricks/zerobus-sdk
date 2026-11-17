@@ -545,22 +545,48 @@ stream.close()
 - `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned
   `MultiplexedStreamBuilder` captures the configuration as it is at that point and only has
   `ack_callback()`, `validate()`, and `build()`. `max_inflight_requests` is a budget for the
-  whole stream, divided evenly across sub-streams, so it must be at least `n`.
+  whole stream; each sub-stream gets `max_inflight_requests // n`, so it must be at least `n`.
 - `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
   identifies the sub-stream and the record's position in it. Message IDs are not ordered and
   may be negative. Pass one to `wait_for_message_id()` on the same stream; use `flush()` to
   confirm everything.
 - A batch from `ingest_records()` lands on one sub-stream, and one message ID covers it.
+- When the chosen sub-stream is at capacity, an ingest call waits for it to drain, for at most
+  30 seconds. Then it raises a retriable `ZerobusException` and the record is not queued, so
+  ingest it again.
+- As with ordinary streams, a sync multiplexed stream is for one thread at a time; an async
+  one is safe to share across tasks.
 - Register an `AckCallback` with `multiplexed(n).ack_callback(callback)`. It is shared by
   every sub-stream; its `offset` argument receives the message ID, and sub-streams may call
   it concurrently. `ack_callback()` on the stream builder itself is for ordinary streams and
   is rejected for multiplexed streams.
 - Opening is atomic: with more than one sub-stream, each opens after a random delay of up to
   one second, and if any fails, the others are closed and `build()` raises.
-- After a sub-stream fails, the stream rejects new records. `get_unacked_records()` and
-  `get_unacked_batches()` close the stream if needed and return the records that were never
-  acknowledged, across every sub-stream, so you can ingest them into a new stream. There is no
-  `recreate_stream()` for multiplexed streams.
+- After a sub-stream fails, `is_closed` is `True` and every call raises that sub-stream's
+  error again, which may be a retriable `ZerobusException`; retrying on the same stream does
+  not help. `get_unacked_records()` and `get_unacked_batches()` close the stream if needed and
+  return the records that were never acknowledged, across every sub-stream, as bytes. Ingest
+  them into a new stream; in JSON mode, decode them first (see **Decoding unacked records**
+  under [Handling Stream Failures](#handling-stream-failures)). There is no
+  `recreate_stream()` for multiplexed streams; call `build()` again instead:
+
+  ```python
+  mux_builder = sdk.stream_builder().table(table).oauth(client_id, client_secret).json().multiplexed(4)
+  stream = mux_builder.build()
+  try:
+      for record in records:
+          stream.ingest_record(record)
+      stream.flush()
+  except ZerobusException:
+      if not stream.is_closed:
+          raise
+      unacked = stream.get_unacked_records()
+      stream = mux_builder.build()  # a new stream with the same configuration
+      for record in unacked:
+          stream.ingest_record(record.decode())  # JSON comes back as bytes
+      stream.flush()
+  stream.close()
+  ```
 
 See `examples/sync_example_multiplexed.py` and `examples/async_example_multiplexed.py`.
 
