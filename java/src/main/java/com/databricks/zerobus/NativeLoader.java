@@ -50,6 +50,10 @@ public final class NativeLoader {
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;
 
+  // Only native code uses this class, but the library fails to load without it, so reference it
+  // from Java to keep jar minimizers (minimizeJar, ProGuard) from stripping it.
+  private static final Class<?> NATIVE_CALLBACK_LOGGER = CallbackExceptionLogger.class;
+
   static {
     try {
       loadNativeLibrary();
