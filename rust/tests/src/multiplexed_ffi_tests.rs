@@ -1002,6 +1002,15 @@ fn sub_stream_failure_closes_mux_and_keeps_records_recoverable() {
     let id = zerobus_multiplexed_stream_ingest_json_record(mux, later.as_ptr(), &mut result);
     assert_eq!(id, -1);
     expect_failure(&mut result, "ingest_json_record after a sub-stream failure");
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, later.as_ptr(), &mut result);
+    let message = expect_permanent_failure(
+        &mut result,
+        "ingest_json_record_nowait after a sub-stream failure",
+    );
+    assert!(
+        message.contains("MultiplexedStream is closed"),
+        "unexpected error: {message}"
+    );
 
     assert!(!zerobus_multiplexed_stream_close(mux, &mut result));
     expect_permanent_failure(&mut result, "close after a sub-stream failure");
