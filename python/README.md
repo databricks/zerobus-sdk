@@ -468,7 +468,7 @@ authentication, record format, and stream settings, then call `build()`:
 ```python
 from zerobus.sdk.sync import ZerobusSdk
 
-sdk = ZerobusSdk(host, unity_catalog_url)
+sdk = ZerobusSdk(server_endpoint, workspace_url)
 stream = (
     sdk.stream_builder()
     .table("catalog.schema.events")
