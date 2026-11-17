@@ -8,6 +8,7 @@ resume round trip against a server is covered by the Rust core tests.
 import asyncio
 import inspect
 import json
+import re
 
 import pytest
 
@@ -48,6 +49,13 @@ class TestBuilderValidation:
     def test_build_requires_auth(self, sdk, mode):
         builder = sdk.persistent_stream_builder().table("c.s.t").json()
         with pytest.raises(ValueError, match="authentication is required"):
+            _open(mode, builder.build)
+
+    def test_build_requires_auth_names_its_own_setters(self, sdk, mode):
+        # The persistent builder has no federated_auth(), so its message must not offer it.
+        builder = sdk.persistent_stream_builder().table("c.s.t").json()
+        message = "authentication is required: call exactly one of oauth(...) or headers_provider(...)"
+        with pytest.raises(ValueError, match=re.escape(message) + "$"):
             _open(mode, builder.build)
 
     def test_last_auth_setter_wins(self, sdk):
