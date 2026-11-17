@@ -2137,6 +2137,77 @@ fn close_reports_unreported_nowait_failure() {
     zerobus_sdk_free(sdk);
 }
 
+/// A flush or close that fails on its own reports its own error first. The
+/// stored background failure is kept and reported by the next flush.
+#[test]
+fn own_flush_error_wins_over_stored_nowait_failure() {
+    const TABLE: &str = "ffi.mux.nowait.precedence";
+    let gated_mux = |table: &str| {
+        let (runtime, server, url) = start_server();
+        let gate = Arc::new(MockResponseGate::new());
+        runtime.block_on(server.inject_responses(
+            table,
+            vec![
+                MockResponse::CreateStream {
+                    stream_id: "lane-0".into(),
+                    delay_ms: 0,
+                },
+                MockResponse::GatedRecordAck {
+                    ack_up_to_offset: 0,
+                    gate: Arc::clone(&gate),
+                },
+            ],
+        ));
+        let mut options = json_options();
+        options.flush_timeout_ms = 500;
+        let sdk = create_sdk(&url);
+        let mux = create_mux(sdk, table, None, 1, &options);
+
+        // A stored failure, then r0, whose ack waits on the gate.
+        nowait_wrong_type(mux);
+        let r0 = CString::new(r#"{"id": 0}"#).unwrap();
+        let mut result = new_result();
+        let r0_id = zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+        expect_success(&mut result, "ingest_json_record (r0)");
+        (runtime, server, sdk, mux, gate, r0_id)
+    };
+
+    let (_runtime, _server, sdk, mux, gate, r0_id) = gated_mux(TABLE);
+    let flush = zerobus_multiplexed_stream_flush;
+    let (returned, _, message) = call_within_2s(mux, flush, "flush");
+    assert!(!returned, "the flush times out on r0");
+    assert!(
+        !message.contains(RECORD_TYPE_MISMATCH),
+        "the flush's own timeout must win: {message}"
+    );
+
+    gate.release();
+    let mut result = new_result();
+    assert!(zerobus_multiplexed_stream_wait_for_message_id(
+        mux,
+        r0_id,
+        &mut result
+    ));
+    expect_success(&mut result, "wait_for_message_id (r0)");
+    expect_record_type_failure(call_within_2s(mux, flush, "flush"), "second flush");
+    expect_returned_true(call_within_2s(mux, flush, "flush"), "third flush");
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+
+    // Close: its own timeout wins, and it still closes.
+    let (_runtime, _server, sdk, mux, gate, _) = gated_mux(&format!("{TABLE}.close"));
+    let (returned, _, message) = call_within_2s(mux, zerobus_multiplexed_stream_close, "close");
+    assert!(!returned, "close times out on r0");
+    assert!(
+        !message.contains(RECORD_TYPE_MISMATCH),
+        "close's own timeout must win: {message}"
+    );
+    assert!(zerobus_multiplexed_stream_is_closed(mux));
+    gate.release();
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
 /// Two flushes racing after one background failure: exactly one reports it.
 #[test]
 fn concurrent_flushes_report_nowait_failure_once() {
@@ -3195,18 +3266,21 @@ fn async_calls_while_closing_report_via_callback() {
             if queued {
                 std::thread::sleep(Duration::from_millis(100));
             }
+            // Returns the payloads get_unacked_records recovered (none for close).
             let writer_thread = std::thread::spawn(move || {
                 let mut result = new_result();
                 let mux = mux_addr as *mut CZerobusMultiplexedStream;
-                if writer == "close" {
+                let recovered = if writer == "close" {
                     zerobus_multiplexed_stream_close(mux, &mut result);
+                    Vec::new()
                 } else {
-                    zerobus_free_record_array(zerobus_multiplexed_stream_get_unacked_records(
+                    take_json_payloads(zerobus_multiplexed_stream_get_unacked_records(
                         mux,
                         &mut result,
-                    ));
-                }
+                    ))
+                };
                 take_message(&mut result);
+                recovered
             });
             wait_until("the writer takes or queues for the lock", || {
                 zerobus_multiplexed_stream_is_closed(gated.mux)
@@ -3237,10 +3311,19 @@ fn async_calls_while_closing_report_via_callback() {
             }
 
             gated.gate.release();
-            writer_thread.join().unwrap();
+            let recovered = writer_thread.join().unwrap();
             if let Some(flusher) = flusher {
                 flusher.join().unwrap();
             }
+            // Only r0 was ever sent (and acked); no rejected record is
+            // recoverable.
+            assert!(recovered.is_empty(), "{what}: {recovered:?}");
+            assert!(unacked_json_payloads(gated.mux).is_empty(), "{what}");
+            assert_eq!(
+                gated.runtime.block_on(gated.server.get_write_count()),
+                1,
+                "{what}: a rejected record reached the server"
+            );
             zerobus_multiplexed_stream_free(gated.mux);
             zerobus_sdk_free(gated.sdk);
         }
@@ -3770,4 +3853,159 @@ fn oauth_create_async(
         &mut result,
     );
     sync_part(returned, &mut result)
+}
+
+type BlockingCall = Box<dyn Fn() -> (bool, bool, String)>;
+
+/// The blocking counterparts of `async_readers`, in the same order; each
+/// returns `(success, retryable, message)`.
+fn blocking_readers(mux: *mut CZerobusMultiplexedStream, message_id: i64) -> Vec<BlockingCall> {
+    let mux_addr = mux as usize;
+    let mux = move || mux_addr as *mut CZerobusMultiplexedStream;
+    let outcome = |result: &mut CResult| {
+        let (success, retryable) = (result.success, result.is_retryable);
+        (success, retryable, take_message(result))
+    };
+    let json = Arc::new(CString::new(r#"{"id": "async"}"#).unwrap());
+    let proto: &'static [u8] = b"proto";
+    let (json1, json2) = (Arc::clone(&json), Arc::clone(&json));
+    vec![
+        Box::new(move || {
+            let mut result = new_result();
+            zerobus_multiplexed_stream_ingest_proto_record(
+                mux(),
+                proto.as_ptr(),
+                proto.len(),
+                &mut result,
+            );
+            outcome(&mut result)
+        }),
+        Box::new(move || {
+            let mut result = new_result();
+            zerobus_multiplexed_stream_ingest_json_record(mux(), json1.as_ptr(), &mut result);
+            outcome(&mut result)
+        }),
+        Box::new(move || {
+            let (ptrs, lens) = ([proto.as_ptr()], [proto.len()]);
+            let mut result = new_result();
+            zerobus_multiplexed_stream_ingest_proto_records(
+                mux(),
+                ptrs.as_ptr(),
+                lens.as_ptr(),
+                1,
+                &mut result,
+            );
+            outcome(&mut result)
+        }),
+        Box::new(move || {
+            let ptrs = [json2.as_ptr()];
+            let mut result = new_result();
+            zerobus_multiplexed_stream_ingest_json_records(mux(), ptrs.as_ptr(), 1, &mut result);
+            outcome(&mut result)
+        }),
+        Box::new(move || {
+            let mut result = new_result();
+            zerobus_multiplexed_stream_wait_for_message_id(mux(), message_id, &mut result);
+            outcome(&mut result)
+        }),
+        Box::new(move || {
+            let mut result = new_result();
+            zerobus_multiplexed_stream_flush(mux(), &mut result);
+            outcome(&mut result)
+        }),
+    ]
+}
+
+/// On a closed mux (closed explicitly, or by a retryable lane failure) each
+/// async reader returns true and calls back once with the error its blocking
+/// counterpart returns. Nothing it carried is sent or recoverable.
+#[test]
+fn async_calls_on_closed_mux_report_like_blocking_calls() {
+    for lane_failure in [false, true] {
+        let what = if lane_failure {
+            "lane-failure close"
+        } else {
+            "plain close"
+        };
+        let table = if lane_failure {
+            "ffi.mux.async.closed.failure"
+        } else {
+            "ffi.mux.async.closed"
+        };
+        let (runtime, server, url) = start_server();
+        if lane_failure {
+            runtime.block_on(server.inject_responses(
+                table,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "lane-0".into(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: Status::unavailable("lane down"),
+                        delay_ms: 0,
+                    },
+                ],
+            ));
+        }
+        let mut options = json_options();
+        options.flush_timeout_ms = 500;
+        let sdk = create_sdk(&url);
+        let mux = create_mux(sdk, table, None, 1, &options);
+        let mut result = new_result();
+
+        let r0 = CString::new(r#"{"id": 0}"#).unwrap();
+        let r0_id = if lane_failure {
+            let id = zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+            expect_success(&mut result, "ingest_json_record (r0)");
+            assert!(!zerobus_multiplexed_stream_flush(mux, &mut result));
+            let (retryable, message) = expect_failure(&mut result, "flush after the lane failure");
+            assert!(
+                retryable,
+                "an Unavailable lane failure is retryable: {message}"
+            );
+            id
+        } else {
+            assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+            expect_success(&mut result, "close");
+            0
+        };
+        assert!(zerobus_multiplexed_stream_is_closed(mux));
+        let writes_before = runtime.block_on(server.get_write_count());
+
+        for ((call_name, call), blocking) in async_readers(mux, r0_id)
+            .into_iter()
+            .zip(blocking_readers(mux, r0_id))
+        {
+            let sink = AsyncSink::leaked();
+            let (returned, _, message) = call(sink);
+            assert!(returned, "{what}: {call_name} must return true: {message}");
+            let done = sink.one(&format!("{what}: {call_name}"));
+            let (success, retryable, expected) = blocking();
+            assert!(
+                !success,
+                "{what}: blocking {call_name} succeeded on a closed mux"
+            );
+            assert!(!done.success, "{what}: {call_name}: {}", done.message);
+            assert_eq!(
+                (done.retryable, done.message.as_str()),
+                (retryable, expected.as_str()),
+                "{what}: {call_name} must report what its blocking counterpart returns"
+            );
+        }
+
+        assert_eq!(
+            runtime.block_on(server.get_write_count()),
+            writes_before,
+            "{what}: a rejected record reached the server"
+        );
+        let expected = if lane_failure {
+            sorted_strings([&r0])
+        } else {
+            Vec::new()
+        };
+        assert_eq!(unacked_json_payloads(mux), expected, "{what}");
+        zerobus_multiplexed_stream_free(mux);
+        zerobus_sdk_free(sdk);
+    }
 }
