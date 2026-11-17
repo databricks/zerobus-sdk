@@ -767,7 +767,6 @@ enum IngestPayload {
     Batch(Vec<EncodedRecord>),
     /// Panics in `ingest`, so tests can reach the panic paths.
     #[cfg(test)]
-    #[allow(dead_code)] // Constructed only by the panic-path tests.
     PanicForTest,
 }
 
@@ -3361,6 +3360,157 @@ mod multiplexed_tests {
             message.starts_with("Rust panic caught at FFI boundary"),
             "unexpected error: {message}"
         );
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn take_error_keeps_errors_from_later_epochs() {
+        let tracker = Arc::new(PendingIngests::default());
+        let fail = |message: &str| {
+            let mut ticket = tracker.begin();
+            ticket.error = Some(ZerobusError::InvalidArgument(message.into()));
+        };
+
+        fail("before");
+        let target = tracker.start_flush();
+        // Accepted after this flush began, so it belongs to the next one.
+        fail("after");
+
+        assert!(matches!(
+            tracker.take_error(Some(target)),
+            Some(ZerobusError::InvalidArgument(m)) if m == "before"
+        ));
+        assert!(
+            tracker.take_error(Some(target)).is_none(),
+            "a later epoch's error must wait for a later flush"
+        );
+        let next = tracker.start_flush();
+        assert!(matches!(
+            tracker.take_error(Some(next)),
+            Some(ZerobusError::InvalidArgument(m)) if m == "after"
+        ));
+    }
+
+    #[test]
+    fn panic_in_async_work_is_reported_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ok_tx = tx.clone();
+        spawn_with_panic_report(async {}, move |result| {
+            let _ = ok_tx.send(("normal work", result.success));
+        });
+        spawn_with_panic_report(async { panic!("boom") }, move |result| {
+            let mut result = result;
+            let retryable = result.is_retryable;
+            let (success, message) = take_result(&mut result);
+            assert!(!success && !retryable, "{message}");
+            assert_eq!(message, "Rust panic caught at FFI boundary: boom");
+            let _ = tx.send(("panicking work", success));
+        });
+
+        let (which, _) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the panic is reported");
+        assert_eq!(which, "panicking work");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "on_panic runs only for a panic, and once"
+        );
+    }
+
+    /// A live 1-lane JSON mux on the mock server, for the panic-path tests.
+    fn live_mux() -> (
+        tokio::runtime::Runtime,
+        *mut CZerobusSdk,
+        *mut CZerobusMultiplexedStream,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (_server, url) = runtime
+            .block_on(zerobus_test_support::mock_grpc::start_mock_server())
+            .unwrap();
+        let endpoint = CString::new(url).unwrap();
+        let builder = crate::zerobus_sdk_builder_new();
+        crate::zerobus_sdk_builder_endpoint(builder, endpoint.as_ptr());
+        crate::zerobus_sdk_builder_unity_catalog_url(builder, endpoint.as_ptr());
+        crate::zerobus_sdk_builder_disable_tls(builder);
+        let mut result = unwritten_result();
+        let sdk = crate::zerobus_sdk_builder_build(builder, &mut result);
+        assert!(result.success && !sdk.is_null());
+
+        let table = CString::new("ffi.mux.panic").unwrap();
+        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            ptr::null_mut(),
+            None,
+            1,
+            &json_options(),
+            None,
+            None,
+            ptr::null_mut(),
+            None,
+            &mut result,
+        );
+        let (success, message) = take_result(&mut result);
+        assert!(success && !mux.is_null(), "{message}");
+        (runtime, sdk, mux)
+    }
+
+    #[test]
+    fn nowait_ingest_panic_is_reported_by_next_flush() {
+        let (_runtime, sdk, mux) = live_mux();
+        let handle = validate_mux_ptr(mux).unwrap();
+        spawn_ingest(handle, IngestPayload::PanicForTest).unwrap();
+
+        let mut result = unwritten_result();
+        assert!(!zerobus_multiplexed_stream_flush(mux, &mut result));
+        let retryable = result.is_retryable;
+        let (_, message) = take_result(&mut result);
+        assert!(!retryable, "{message}");
+        assert!(
+            message.contains("a background _nowait ingest panicked"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            zerobus_multiplexed_stream_flush(mux, &mut result),
+            "reported once"
+        );
+        take_result(&mut result);
+
+        zerobus_multiplexed_stream_free(mux);
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn async_ingest_panic_reaches_its_callback_once() {
+        let (_runtime, sdk, mux) = live_mux();
+        let handle = validate_mux_ptr(mux).unwrap();
+        let sink = AsyncSink::leaked();
+        spawn_ingest_async(
+            handle,
+            IngestPayload::PanicForTest,
+            sink_offset,
+            sink.user_data(),
+        )
+        .unwrap();
+
+        let (id, success, retryable, message, _) = sink.one("panicking async ingest");
+        assert!(id == INGEST_ERROR && !success && !retryable, "{message}");
+        assert!(
+            message.starts_with("Rust panic caught at FFI boundary"),
+            "unexpected error: {message}"
+        );
+        // The panic released the ticket and the read guard: flush and close
+        // don't hang.
+        let mut result = unwritten_result();
+        assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
+        take_result(&mut result);
+        assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+        take_result(&mut result);
+
+        zerobus_multiplexed_stream_free(mux);
         crate::zerobus_sdk_free(sdk);
     }
 }

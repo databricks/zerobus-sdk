@@ -50,6 +50,10 @@ use zerobus_ffi::{
     zerobus_sdk_create_multiplexed_stream_async,
     zerobus_sdk_create_multiplexed_stream_with_headers_provider_async,
 };
+use zerobus_ffi::{
+    zerobus_sdk_create_stream_with_headers_provider, zerobus_stream_close, zerobus_stream_flush,
+    zerobus_stream_free, zerobus_stream_ingest_json_record,
+};
 use zerobus_test_support::mock_grpc::{
     start_mock_server, MockResponse, MockResponseGate, MockZerobusServer,
 };
@@ -3350,7 +3354,14 @@ fn async_calls_while_closing_report_via_callback() {
 fn async_calls_return_promptly_while_flush_holds_lock() {
     let mut options = json_options();
     options.flush_timeout_ms = 500;
-    let gated = GatedMux::new("ffi.mux.async.reader", &options, MuxAck::none(), vec![]);
+    // The two JSON ingests get offsets 1 and 2 (the proto ones are rejected).
+    let acks = (1..=2)
+        .map(|offset| MockResponse::RecordAck {
+            ack_up_to_offset: offset,
+            delay_ms: 0,
+        })
+        .collect();
+    let gated = GatedMux::new("ffi.mux.async.reader", &options, MuxAck::none(), acks);
     let mux_addr = gated.mux as usize;
     let flusher = std::thread::spawn(move || {
         let mut result = new_result();
@@ -3375,12 +3386,33 @@ fn async_calls_return_promptly_while_flush_holds_lock() {
 
     gated.gate.release();
     flusher.join().unwrap();
+    let mut ids = HashSet::new();
     for (call_name, sink) in sinks {
-        sink.one(call_name);
+        let done = sink.one(call_name);
+        match call_name {
+            // A protobuf record on the JSON mux, rejected in the task.
+            "proto_record_async" | "proto_records_async" => {
+                assert!(done.value == -1 && !done.success, "{call_name}: {done:?}");
+                assert!(
+                    done.message.contains(RECORD_TYPE_MISMATCH),
+                    "{call_name}: {done:?}"
+                );
+            }
+            "json_record_async" | "json_records_async" => {
+                assert!(done.success, "{call_name}: {done:?}");
+                assert!(
+                    ids.insert(done.value),
+                    "{call_name}: duplicate ID {}",
+                    done.value
+                );
+            }
+            // r0 and both JSON ingests are acked.
+            _ => assert!(done.success && done.value == 1, "{call_name}: {done:?}"),
+        }
     }
     let mut result = new_result();
-    zerobus_multiplexed_stream_close(gated.mux, &mut result);
-    take_message(&mut result);
+    assert!(zerobus_multiplexed_stream_close(gated.mux, &mut result));
+    expect_success(&mut result, "close");
     zerobus_multiplexed_stream_free(gated.mux);
     zerobus_sdk_free(gated.sdk);
 }
@@ -4041,4 +4073,233 @@ fn async_calls_on_closed_mux_report_like_blocking_calls() {
         zerobus_multiplexed_stream_free(mux);
         zerobus_sdk_free(sdk);
     }
+}
+
+/// An ordinary (non-multiplexed) stream still delivers acks to the C
+/// callbacks set in `options`; the bindings' ordinary ack path depends on it.
+#[test]
+fn ordinary_stream_delivers_acks_to_options_callbacks() {
+    const TABLE: &str = "ffi.ordinary.acks";
+    let (runtime, server, url) = start_server();
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "s".into(),
+                delay_ms: 0,
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 1,
+                delay_ms: 0,
+            },
+        ],
+    ));
+    let ack_log = Box::new(AckLog::default());
+    let mut options = json_options();
+    options.ack_on_ack = Some(record_ack);
+    options.ack_on_error = Some(record_error);
+    options.ack_user_data = &*ack_log as *const AckLog as *mut c_void;
+
+    let sdk = create_sdk(&url);
+    let table = CString::new(TABLE).unwrap();
+    let mut result = new_result();
+    let stream = zerobus_sdk_create_stream_with_headers_provider(
+        sdk,
+        table.as_ptr(),
+        ptr::null(),
+        0,
+        empty_headers,
+        ptr::null_mut(),
+        None,
+        &options,
+        &mut result,
+    );
+    expect_success(
+        &mut result,
+        "zerobus_sdk_create_stream_with_headers_provider",
+    );
+    assert!(!stream.is_null());
+
+    let mut offsets: Vec<i64> = json_records(0..2)
+        .iter()
+        .map(|json| {
+            let offset = zerobus_stream_ingest_json_record(stream, json.as_ptr(), &mut result);
+            expect_success(&mut result, "zerobus_stream_ingest_json_record");
+            offset
+        })
+        .collect();
+    assert!(zerobus_stream_flush(stream, &mut result));
+    expect_success(&mut result, "zerobus_stream_flush");
+    assert!(zerobus_stream_close(stream, &mut result));
+    expect_success(&mut result, "zerobus_stream_close");
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+
+    // Close drains the callback worker, so every ack has been delivered.
+    offsets.sort();
+    assert_eq!(ack_log.sorted_acks(), offsets);
+    assert!(ack_log.errors.lock().unwrap().is_empty());
+}
+
+/// flush_async covers a `_nowait` or `_async` ingest accepted before it,
+/// even one still waiting for in-flight capacity.
+#[test]
+fn flush_async_waits_for_ingest_blocked_on_capacity() {
+    for kind in ["_nowait", "_async"] {
+        let (runtime, server, url) = start_server();
+        let (gate_r0, gate_r1) = (
+            Arc::new(MockResponseGate::new()),
+            Arc::new(MockResponseGate::new()),
+        );
+        runtime.block_on(server.inject_responses(
+            "ffi.mux.flush.async.capacity",
+            vec![
+                MockResponse::CreateStream {
+                    stream_id: "lane-0".into(),
+                    delay_ms: 0,
+                },
+                MockResponse::GatedRecordAck {
+                    ack_up_to_offset: 0,
+                    gate: Arc::clone(&gate_r0),
+                },
+                MockResponse::GatedRecordAck {
+                    ack_up_to_offset: 1,
+                    gate: Arc::clone(&gate_r1),
+                },
+            ],
+        ));
+        let mut options = json_options();
+        options.max_inflight_requests = 1;
+        let sdk = create_sdk(&url);
+        let mux = create_mux(sdk, "ffi.mux.flush.async.capacity", None, 1, &options);
+        let mut result = new_result();
+        let [r0, r1]: [CString; 2] = json_records(0..2).try_into().unwrap();
+        zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+        expect_success(&mut result, "ingest_json_record (r0)");
+        wait_for_writes(&runtime, &server, 1);
+
+        // r1 waits for the only in-flight slot.
+        let ingest_sink = AsyncSink::leaked();
+        if kind == "_nowait" {
+            zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+            expect_success(&mut result, "ingest_json_record_nowait (r1)");
+        } else {
+            assert!(json_record_async(mux, &r1, ingest_sink).0);
+        }
+        let flush_sink = AsyncSink::leaked();
+        assert!(flush_async(mux, flush_sink).0, "{kind}");
+
+        // r0's ack lets r1 be sent; r1's ack is still held.
+        gate_r0.release();
+        wait_for_writes(&runtime, &server, 2);
+        flush_sink.assert_never_called(&format!("{kind}: flush_async before r1 is acked"));
+
+        gate_r1.release();
+        let done = flush_sink.one(&format!("{kind}: flush_async"));
+        assert!(done.success && done.value == 1, "{kind}: {done:?}");
+        if kind == "_async" {
+            assert!(ingest_sink.one("r1 async ingest").success);
+        }
+        assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+        expect_success(&mut result, "close");
+        zerobus_multiplexed_stream_free(mux);
+        zerobus_sdk_free(sdk);
+    }
+}
+
+/// An async ingest releases its flush ticket and read guard before its
+/// callback runs: a flush and a close called while the callback is still
+/// running don't wait for it.
+///
+/// The ingest is rejected in its task (a protobuf record on a JSON mux), so
+/// nothing is queued. A queued record would wake the lane's sender on the
+/// worker the blocked callback occupies, and that send would stall until
+/// the callback returns, which is a separate issue from the one tested here.
+#[test]
+fn async_ingest_releases_ticket_and_guard_before_callback() {
+    const TABLE: &str = "ffi.mux.async.release";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 0);
+
+    let sink = AsyncSink::leaked();
+    sink.block.store(true, Ordering::SeqCst);
+    let proto = b"proto";
+    let mut result = new_result();
+    assert!(zerobus_multiplexed_stream_ingest_proto_record_async(
+        mux,
+        proto.as_ptr(),
+        proto.len(),
+        sink_offset,
+        sink.user_data(),
+        &mut result,
+    ));
+    expect_success(&mut result, "ingest_proto_record_async");
+    wait_until("the ingest callback is running", || {
+        sink.entered.load(Ordering::SeqCst)
+    });
+
+    let flush = zerobus_multiplexed_stream_flush;
+    let (flushed, _, message) = call_within_1s(mux, flush, "flush during the callback");
+    assert!(flushed, "{message}");
+    let close = zerobus_multiplexed_stream_close;
+    let (closed, _, message) = call_within_1s(mux, close, "close during the callback");
+    assert!(closed, "{message}");
+
+    sink.release.store(true, Ordering::SeqCst);
+    let done = sink.one("ingest callback");
+    assert!(
+        done.value == -1 && done.message.contains(RECORD_TYPE_MISMATCH),
+        "{done:?}"
+    );
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// A mux created with only `ack_on_error` reports a failed record to it.
+#[test]
+fn error_only_ack_callback_receives_failed_records() {
+    const TABLE: &str = "ffi.mux.ack.error.only";
+    let (runtime, server, url) = start_server();
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::Error {
+                status: Status::permission_denied("denied"),
+                delay_ms: 0,
+            },
+        ],
+    ));
+    let ack_log: &'static AckLog = Box::leak(Box::default());
+    let ack = MuxAck {
+        on_ack: None,
+        ..MuxAck::log(ack_log)
+    };
+    let sdk = create_sdk(&url);
+    let (mux, mut result) =
+        create_mux_raw_with_mux_ack(sdk, TABLE, None, 1, &json_options_terminal(), None, ack);
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+
+    let record = CString::new(r#"{"id": 0}"#).unwrap();
+    let id = zerobus_multiplexed_stream_ingest_json_record(mux, record.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record");
+    assert!(!zerobus_multiplexed_stream_flush(mux, &mut result));
+    take_message(&mut result);
+    zerobus_multiplexed_stream_close(mux, &mut result);
+    take_message(&mut result);
+
+    wait_until("on_error receives the failed record", || {
+        !ack_log.errors.lock().unwrap().is_empty()
+    });
+    assert_eq!(*ack_log.errors.lock().unwrap(), [id]);
+    assert!(ack_log.acks.lock().unwrap().is_empty());
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
 }
