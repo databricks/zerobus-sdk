@@ -16,9 +16,7 @@
 //! thread that is inside one: the call would fail or deadlock.
 
 use crate::common::*;
-use crate::stream::{
-    c_ack_callback, configure_stream_builder, encoded_records_to_c_array, StreamCreateAuth,
-};
+use crate::stream::{configure_stream_builder, encoded_records_to_c_array, StreamCreateAuth};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
     AckCallback, EncodedRecord, HeadersProvider, MessageId, MultiplexedStream, ZerobusError,
@@ -27,6 +25,7 @@ use databricks_zerobus_ingest_sdk::{
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, OwnedRwLockReadGuard, RwLock};
@@ -217,17 +216,68 @@ unsafe fn copy_json_records(
         .collect()
 }
 
+/// C callback receiving an acknowledged message ID.
+type MuxAckOnAck = extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void);
+/// C callback receiving a failed message ID and the error text.
+type MuxAckOnError =
+    extern "C" fn(message_id: i64, error_message: *const c_char, user_data: *mut std::ffi::c_void);
+/// C callback releasing the ack callbacks' `user_data`.
+type MuxAckFree = extern "C" fn(user_data: *mut std::ffi::c_void);
+
 /// Bridges the C ack callbacks to the mux's `AckCallback<MessageId>`; the C
 /// callback's `i64` argument receives `MessageId::raw()`.
-struct MultiplexedCallbackAckCallback(CallbackAckCallback);
+///
+/// Owns `user_data` when `free_user_data` is set: `Drop` releases it once,
+/// after the last sub-stream and background task holding the callback is
+/// gone. The C caller cannot observe that moment otherwise, since `_nowait`
+/// tasks can outlive `zerobus_multiplexed_stream_free`.
+struct MultiplexedCallbackAckCallback {
+    inner: CallbackAckCallback,
+    has_callback: bool,
+    user_data: *mut std::ffi::c_void,
+    free_user_data: Option<MuxAckFree>,
+}
+
+impl MultiplexedCallbackAckCallback {
+    fn new(
+        on_ack: Option<MuxAckOnAck>,
+        on_error: Option<MuxAckOnError>,
+        user_data: *mut std::ffi::c_void,
+        free_user_data: Option<MuxAckFree>,
+    ) -> Self {
+        Self {
+            inner: CallbackAckCallback::new(on_ack, on_error, user_data),
+            has_callback: on_ack.is_some() || on_error.is_some(),
+            user_data,
+            free_user_data,
+        }
+    }
+}
+
+impl Drop for MultiplexedCallbackAckCallback {
+    fn drop(&mut self) {
+        if let Some(free) = self.free_user_data {
+            let user_data = self.user_data;
+            // Contain panics: unwinding across the FFI boundary is UB.
+            if catch_unwind(AssertUnwindSafe(|| free(user_data))).is_err() {
+                tracing::error!("mux ack free callback panicked; contained at FFI boundary");
+            }
+        }
+    }
+}
+
+// Safety: `user_data` is only handed back to the caller's callbacks, whose
+// thread safety is the caller's contract (documented on the create functions).
+unsafe impl Send for MultiplexedCallbackAckCallback {}
+unsafe impl Sync for MultiplexedCallbackAckCallback {}
 
 impl AckCallback<MessageId> for MultiplexedCallbackAckCallback {
     fn on_ack(&self, message_id: MessageId) {
-        self.0.on_ack(message_id.raw());
+        self.inner.on_ack(message_id.raw());
     }
 
     fn on_error(&self, message_id: MessageId, error_message: &str) {
-        self.0.on_error(message_id.raw(), error_message);
+        self.inner.on_error(message_id.raw(), error_message);
     }
 }
 
@@ -266,7 +316,18 @@ async fn build_mux_from_parts(
     auth: StreamCreateAuth,
     stream_count: usize,
     options: Option<CStreamConfigurationOptions>,
+    ack_callback: MultiplexedCallbackAckCallback,
 ) -> ZerobusResult<*mut CZerobusMultiplexedStream> {
+    if options
+        .as_ref()
+        .is_some_and(|c| c.ack_on_ack.is_some() || c.ack_on_error.is_some())
+    {
+        return Err(ZerobusError::InvalidArgument(
+            "options->ack_on_ack and options->ack_on_error are not supported for multiplexed \
+             streams; pass the create function's ack_on_ack and ack_on_error instead"
+                .to_string(),
+        ));
+    }
     let mut builder = configure_stream_builder(
         sdk_ref,
         table_name,
@@ -274,9 +335,9 @@ async fn build_mux_from_parts(
         auth,
         options.as_ref(),
     )?;
-    if let Some(callback) = options.as_ref().and_then(c_ack_callback) {
-        builder =
-            builder.multiplexed_ack_callback(Arc::new(MultiplexedCallbackAckCallback(callback)));
+    // Without callbacks, `ack_callback` drops here and frees its `user_data`.
+    if ack_callback.has_callback {
+        builder = builder.multiplexed_ack_callback(Arc::new(ack_callback));
     }
     let mux = builder.multiplexed(stream_count).build().await?;
     let handle = MuxHandle {
@@ -303,10 +364,19 @@ async fn build_mux_from_parts(
 /// mux: each sub-stream gets `max_inflight_requests / stream_count` (any
 /// remainder is unused), so it must be at least `stream_count`.
 ///
-/// Ack callbacks in `options` receive message IDs rather than offsets. Each
-/// sub-stream delivers its callbacks on its own background task, so callbacks
-/// from different sub-streams may run concurrently and in no global order;
-/// `ack_user_data` must tolerate concurrent access.
+/// `ack_on_ack` and `ack_on_error` (either may be NULL) receive message IDs.
+/// Each sub-stream delivers its callbacks on its own background task, so
+/// callbacks from different sub-streams may run concurrently and in no global
+/// order; `ack_user_data` must tolerate concurrent access. `error_message` is
+/// valid only during the call. `options->ack_on_ack` and
+/// `options->ack_on_error` must be NULL: they carry ordered offsets for
+/// ordinary streams and are rejected here.
+///
+/// Once this function is called, the FFI owns `ack_user_data` and invokes
+/// `free_ack_user_data` (when set) exactly once, from any thread: before
+/// returning on failure or when both callbacks are NULL; otherwise after the
+/// last sub-stream and background task releases the callbacks, which can be
+/// after `zerobus_multiplexed_stream_free` returns.
 ///
 /// Returns NULL on error; see `result` for details. Free the handle with
 /// `zerobus_multiplexed_stream_free`.
@@ -320,9 +390,29 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
     client_secret: *const c_char,
     stream_count: usize,
     options: *const CStreamConfigurationOptions,
+    // Written inline (not via type aliases) so cbindgen emits nullable C
+    // function pointers instead of opaque structs.
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     result: *mut CResult,
 ) -> *mut CZerobusMultiplexedStream {
     ffi_guard(result, ptr::null_mut(), move || {
+        // Take ownership of `ack_user_data` before any fallible work, so an
+        // early return frees it exactly once.
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
         let sdk_ref = match validate_sdk_ptr(sdk) {
             Ok(s) => s,
             Err(msg) => {
@@ -343,6 +433,7 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
                 auth,
                 stream_count,
                 (!options.is_null()).then(|| unsafe { *options }),
+                ack_callback,
             )
             .await
         });
@@ -364,7 +455,8 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
 /// `zerobus_sdk_create_stream_with_headers_provider`: once this function is
 /// called, the FFI owns it and invokes `free_user_data` (when set) exactly
 /// once, on failure before returning, or on success after the last sub-stream
-/// releases the provider.
+/// releases the provider. The ack parameters, and ownership of
+/// `ack_user_data`, follow `zerobus_sdk_create_multiplexed_stream`.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
@@ -378,14 +470,31 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
     free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     stream_count: usize,
     options: *const CStreamConfigurationOptions,
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     result: *mut CResult,
 ) -> *mut CZerobusMultiplexedStream {
     ffi_guard(result, ptr::null_mut(), move || {
-        // Construct the provider before any fallible work: it owns `user_data`,
-        // so dropping it on an early return frees `user_data` exactly once.
+        // Construct the provider and the ack callback before any fallible
+        // work: they own `user_data` and `ack_user_data`, so dropping them on
+        // an early return frees each exactly once.
         let headers_provider: Arc<dyn HeadersProvider> = Arc::new(SerializedHeadersProvider::new(
             CallbackHeadersProvider::new(headers_callback, user_data, free_user_data),
         ));
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
 
         let sdk_ref = match validate_sdk_ptr(sdk) {
             Ok(s) => s,
@@ -403,6 +512,7 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
                 StreamCreateAuth::HeadersProvider { headers_provider },
                 stream_count,
                 (!options.is_null()).then(|| unsafe { *options }),
+                ack_callback,
             )
             .await
         });
@@ -999,6 +1109,18 @@ mod multiplexed_tests {
         stream_count: usize,
         options: &CStreamConfigurationOptions,
     ) -> (*mut CZerobusMultiplexedStream, CResult) {
+        create_oauth_raw_with_ack(sdk, table, stream_count, options, None, ptr::null_mut())
+    }
+
+    /// Like `create_oauth_raw`, with a mux ack callback.
+    fn create_oauth_raw_with_ack(
+        sdk: *mut CZerobusSdk,
+        table: &str,
+        stream_count: usize,
+        options: &CStreamConfigurationOptions,
+        ack_on_ack: Option<MuxAckOnAck>,
+        ack_user_data: *mut std::ffi::c_void,
+    ) -> (*mut CZerobusMultiplexedStream, CResult) {
         let table = CString::new(table).unwrap();
         let client_id = CString::new("client-id").unwrap();
         let client_secret = CString::new("client-secret").unwrap();
@@ -1012,6 +1134,10 @@ mod multiplexed_tests {
             client_secret.as_ptr(),
             stream_count,
             options,
+            ack_on_ack,
+            None,
+            ack_user_data,
+            None,
             &mut result,
         );
         (mux, result)
@@ -1252,14 +1378,14 @@ mod multiplexed_tests {
         let _guard = crate::tests::ACK_DROP_TEST_LOCK.lock().unwrap();
 
         let sdk = test_sdk();
-        let mut options = json_options();
-        options.ack_on_ack = Some(noop_ack);
-        options.ack_user_data =
-            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
+        let options = json_options();
+        let sentinel = (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
 
         let before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-        // An empty table name fails validation after the callback is registered.
-        let (mux, success, _) = create_oauth(sdk, "", 2, &options);
+        // An empty table name fails validation after the callback is taken over.
+        let (mux, mut result) =
+            create_oauth_raw_with_ack(sdk, "", 2, &options, Some(noop_ack), sentinel);
+        let (success, _) = take_result(&mut result);
         let after = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
 
         assert!(mux.is_null() && !success);
@@ -1296,6 +1422,10 @@ mod multiplexed_tests {
             Some(free_user_data),
             2,
             &options,
+            None,
+            None,
+            ptr::null_mut(),
+            None,
             &mut result,
         );
         assert!(mux.is_null());
@@ -1378,6 +1508,10 @@ mod multiplexed_tests {
                 secret_arg,
                 2,
                 &options,
+                None,
+                None,
+                ptr::null_mut(),
+                None,
                 &mut result,
             );
             assert!(mux.is_null(), "OAuth {case}");
@@ -1404,6 +1538,10 @@ mod multiplexed_tests {
                 Some(free_user_data),
                 2,
                 &options,
+                None,
+                None,
+                ptr::null_mut(),
+                None,
                 &mut result,
             );
             assert!(mux.is_null(), "headers {case}");
@@ -1427,6 +1565,10 @@ mod multiplexed_tests {
             client_secret.as_ptr(),
             0,
             &options,
+            None,
+            None,
+            ptr::null_mut(),
+            None,
             ptr::null_mut(),
         );
         assert!(mux.is_null());
@@ -1450,12 +1592,17 @@ mod multiplexed_tests {
         let mut options = json_options();
         // Fail on the first connect error instead of retrying it.
         options.recovery = false;
-        options.ack_on_ack = Some(noop_ack);
-        options.ack_user_data =
-            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
+        let sentinel = (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
 
         let drops_before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-        let (mux, mut result) = create_oauth_raw(sdk, "main.default.events", 2, &options);
+        let (mux, mut result) = create_oauth_raw_with_ack(
+            sdk,
+            "main.default.events",
+            2,
+            &options,
+            Some(noop_ack),
+            sentinel,
+        );
         assert!(mux.is_null());
         let retryable = result.is_retryable;
         let (success, message) = take_result(&mut result);
@@ -1484,6 +1631,10 @@ mod multiplexed_tests {
             Some(free_user_data),
             2,
             &options,
+            Some(noop_ack),
+            None,
+            sentinel,
+            None,
             &mut result,
         );
         assert!(mux.is_null());
@@ -1515,11 +1666,12 @@ mod multiplexed_tests {
             LAST_ERROR.store(id, Ordering::SeqCst);
         }
 
-        let callback = MultiplexedCallbackAckCallback(CallbackAckCallback::new(
+        let callback = MultiplexedCallbackAckCallback::new(
             Some(on_ack),
             Some(on_error),
             ptr::null_mut(),
-        ));
+            None,
+        );
         // Lane 63 sets the sign bit, so this raw ID is negative.
         let acked = MessageId::from_raw(((63u64 << 58) | 7) as i64);
         let failed = MessageId::from_raw((1i64 << 58) | 9);

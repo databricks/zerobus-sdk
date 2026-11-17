@@ -40,7 +40,7 @@ fn apply_c_stream_tuning<'a>(
 }
 
 /// Returns the C ack callback bridge, or `None` when neither function pointer is set.
-pub(crate) fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<CallbackAckCallback> {
+fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<CallbackAckCallback> {
     if c.ack_on_ack.is_some() || c.ack_on_error.is_some() {
         Some(CallbackAckCallback::new(
             c.ack_on_ack,

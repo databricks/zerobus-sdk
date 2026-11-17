@@ -178,6 +178,27 @@ fn create_mux_raw(
     options: *const CStreamConfigurationOptions,
     provider: Option<&'static ProviderLog>,
 ) -> (*mut CZerobusMultiplexedStream, CResult) {
+    create_mux_raw_with_ack(
+        sdk,
+        table,
+        descriptor,
+        stream_count,
+        options,
+        provider,
+        None,
+    )
+}
+
+/// Like `create_mux_raw`, with the mux ack callbacks recording into `ack_log`.
+fn create_mux_raw_with_ack(
+    sdk: *mut CZerobusSdk,
+    table: &str,
+    descriptor: Option<&[u8]>,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    provider: Option<&'static ProviderLog>,
+    ack_log: Option<&AckLog>,
+) -> (*mut CZerobusMultiplexedStream, CResult) {
     let table = CString::new(table).unwrap();
     let (descriptor_ptr, descriptor_len) =
         descriptor.map_or((ptr::null(), 0), |d| (d.as_ptr(), d.len()));
@@ -201,6 +222,10 @@ fn create_mux_raw(
         free_user_data,
         stream_count,
         options,
+        ack_log.map(|_| record_ack as extern "C" fn(i64, *mut c_void)),
+        ack_log.map(|_| record_error as extern "C" fn(i64, *const c_char, *mut c_void)),
+        ack_log.map_or(ptr::null_mut(), |log| log as *const AckLog as *mut c_void),
+        None,
         &mut result,
     );
     (mux, result)
@@ -214,6 +239,29 @@ fn create_mux(
     options: &CStreamConfigurationOptions,
 ) -> *mut CZerobusMultiplexedStream {
     let (mux, mut result) = create_mux_raw(sdk, table, descriptor, stream_count, options, None);
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+    assert!(!mux.is_null());
+    mux
+}
+
+/// Like `create_mux`, with the mux ack callbacks recording into `ack_log`.
+fn create_mux_with_ack(
+    sdk: *mut CZerobusSdk,
+    table: &str,
+    descriptor: Option<&[u8]>,
+    stream_count: usize,
+    options: &CStreamConfigurationOptions,
+    ack_log: &AckLog,
+) -> *mut CZerobusMultiplexedStream {
+    let (mux, mut result) = create_mux_raw_with_ack(
+        sdk,
+        table,
+        descriptor,
+        stream_count,
+        options,
+        None,
+        Some(ack_log),
+    );
     expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
     assert!(!mux.is_null());
     mux
@@ -295,12 +343,6 @@ extern "C" fn record_error(message_id: i64, _message: *const c_char, user_data: 
     log.errors.lock().unwrap().push(message_id);
 }
 
-fn with_ack_log(options: &mut CStreamConfigurationOptions, ack_log: &AckLog) {
-    options.ack_on_ack = Some(record_ack);
-    options.ack_on_error = Some(record_error);
-    options.ack_user_data = ack_log as *const AckLog as *mut c_void;
-}
-
 /// Single, batch, and fire-and-forget ingest on one sub-stream, followed by
 /// one flush; the ack callback receives every returned message ID. Empty
 /// batches return -2 without sending anything.
@@ -321,11 +363,10 @@ fn proto_ingest_flush_and_ack_callback() {
     let ack_log = Box::new(AckLog::default());
     let mut options = zerobus_get_default_config();
     options.recovery = false;
-    with_ack_log(&mut options, &ack_log);
 
     let sdk = create_sdk(&url);
     let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
-    let mux = create_mux(sdk, TABLE, Some(&descriptor), 1, &options);
+    let mux = create_mux_with_ack(sdk, TABLE, Some(&descriptor), 1, &options, &ack_log);
     let mut result = new_result();
 
     let single = b"single";
@@ -533,6 +574,10 @@ fn oauth_create_mints_token_and_opens_mux() {
         client_secret.as_ptr(),
         2,
         &options,
+        None,
+        None,
+        ptr::null_mut(),
+        None,
         &mut result,
     );
     expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
@@ -764,10 +809,9 @@ fn multi_lane_acks_and_waits_use_message_ids() {
     let ack_log = Box::new(AckLog::default());
     let mut options = json_options();
     options.flush_timeout_ms = 500;
-    with_ack_log(&mut options, &ack_log);
 
     let sdk = create_sdk(&url);
-    let mux = create_mux(sdk, TABLE, None, 2, &options);
+    let mux = create_mux_with_ack(sdk, TABLE, None, 2, &options, &ack_log);
     let mut result = new_result();
 
     let ids: Vec<i64> = json_records(0..4)
@@ -909,10 +953,9 @@ fn argument_errors_fail_only_that_call() {
     ));
 
     let ack_log = Box::new(AckLog::default());
-    let mut options = json_options();
-    with_ack_log(&mut options, &ack_log);
+    let options = json_options();
     let sdk = create_sdk(&url);
-    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mux = create_mux_with_ack(sdk, TABLE, None, 1, &options, &ack_log);
     let mut result = new_result();
 
     let rejected = CString::new(r#"{"rejected": true}"#).unwrap();
@@ -1229,10 +1272,9 @@ fn nowait_does_not_wait_for_in_flight_flush() {
     ));
 
     let ack_log = Box::new(AckLog::default());
-    let mut options = json_options();
-    with_ack_log(&mut options, &ack_log);
+    let options = json_options();
     let sdk = create_sdk(&url);
-    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mux = create_mux_with_ack(sdk, TABLE, None, 1, &options, &ack_log);
     let mux_addr = mux as usize;
     let mut result = new_result();
 

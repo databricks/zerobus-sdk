@@ -115,7 +115,9 @@ CStreamConfigurationOptions opts = zerobus_get_default_config();
    at least stream_count, or create fails. */
 CZerobusMultiplexedStream *mux = zerobus_sdk_create_multiplexed_stream(
     sdk, "catalog.schema.table", descriptor, descriptor_len,
-    client_id, client_secret, /* stream_count */ 4, &opts, &r);
+    client_id, client_secret, /* stream_count */ 4, &opts,
+    /* ack_on_ack, ack_on_error, ack_user_data, free_ack_user_data */
+    NULL, NULL, NULL, NULL, &r);
 if (mux == NULL) {
     zerobus_free_error_message(r.error_message);
     return;
@@ -166,9 +168,13 @@ zerobus_multiplexed_stream_free(mux);
   options select protobuf.
 - Every `zerobus_multiplexed_stream_*` call except `_free` may run
   concurrently on one handle. `_free` must not overlap any other call.
-- Ack callbacks in `CStreamConfigurationOptions` receive message IDs, and
+- Ack callbacks are create parameters (`ack_on_ack`, `ack_on_error`,
+  `ack_user_data`, `free_ack_user_data`); the `ack_on_*` fields of
+  `CStreamConfigurationOptions` must stay NULL. They receive message IDs, and
   callbacks from different sub-streams may run concurrently, so
-  `ack_user_data` must be thread-safe. Callbacks must not call
+  `ack_user_data` must be thread-safe. The FFI owns `ack_user_data` and calls
+  `free_ack_user_data` once, after the last callback, which can be after
+  `zerobus_multiplexed_stream_free` returns. Callbacks must not call
   `zerobus_multiplexed_stream_*` functions or block on a thread that does.
 - With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one
   headers callback serves every sub-stream. The FFI serializes calls into it,

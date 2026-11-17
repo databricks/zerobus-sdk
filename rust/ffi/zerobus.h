@@ -160,8 +160,8 @@ typedef struct CStreamConfigurationOptions {
    * callback object is destroyed, not merely until close() returns.
    * error_message is valid only during the call (copy to keep). Callbacks must
    * not unwind across the C boundary (panics are contained and logged).
-   * Multiplexed streams pass message IDs instead of offsets and may invoke the
-   * callbacks concurrently; see `zerobus_sdk_create_multiplexed_stream`.
+   * Multiplexed streams reject these fields; pass the mux create function's
+   * own `ack_on_ack` / `ack_on_error` parameters instead.
    */
   void (*ack_on_ack)(int64_t offset_id, void *user_data);
   void (*ack_on_error)(int64_t offset_id, const char *error_message, void *user_data);
@@ -873,10 +873,19 @@ struct CStreamConfigurationOptions zerobus_get_default_config(void);
  * mux: each sub-stream gets `max_inflight_requests / stream_count` (any
  * remainder is unused), so it must be at least `stream_count`.
  *
- * Ack callbacks in `options` receive message IDs rather than offsets. Each
- * sub-stream delivers its callbacks on its own background task, so callbacks
- * from different sub-streams may run concurrently and in no global order;
- * `ack_user_data` must tolerate concurrent access.
+ * `ack_on_ack` and `ack_on_error` (either may be NULL) receive message IDs.
+ * Each sub-stream delivers its callbacks on its own background task, so
+ * callbacks from different sub-streams may run concurrently and in no global
+ * order; `ack_user_data` must tolerate concurrent access. `error_message` is
+ * valid only during the call. `options->ack_on_ack` and
+ * `options->ack_on_error` must be NULL: they carry ordered offsets for
+ * ordinary streams and are rejected here.
+ *
+ * Once this function is called, the FFI owns `ack_user_data` and invokes
+ * `free_ack_user_data` (when set) exactly once, from any thread: before
+ * returning on failure or when both callbacks are NULL; otherwise after the
+ * last sub-stream and background task releases the callbacks, which can be
+ * after `zerobus_multiplexed_stream_free` returns.
  *
  * Returns NULL on error; see `result` for details. Free the handle with
  * `zerobus_multiplexed_stream_free`.
@@ -889,6 +898,13 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream(struct C
                                                                         const char *client_secret,
                                                                         uintptr_t stream_count,
                                                                         const struct CStreamConfigurationOptions *options,
+                                                                        void (*ack_on_ack)(int64_t message_id,
+                                                                                           void *user_data),
+                                                                        void (*ack_on_error)(int64_t message_id,
+                                                                                             const char *error_message,
+                                                                                             void *user_data),
+                                                                        void *ack_user_data,
+                                                                        void (*free_ack_user_data)(void *user_data),
                                                                         struct CResult *result);
 
 /**
@@ -906,7 +922,8 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream(struct C
  * `zerobus_sdk_create_stream_with_headers_provider`: once this function is
  * called, the FFI owns it and invokes `free_user_data` (when set) exactly
  * once, on failure before returning, or on success after the last sub-stream
- * releases the provider.
+ * releases the provider. The ack parameters, and ownership of
+ * `ack_user_data`, follow `zerobus_sdk_create_multiplexed_stream`.
  */
 struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_headers_provider(struct CZerobusSdk *sdk,
                                                                                               const char *table_name,
@@ -917,6 +934,13 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_hea
                                                                                               void (*free_user_data)(void *user_data),
                                                                                               uintptr_t stream_count,
                                                                                               const struct CStreamConfigurationOptions *options,
+                                                                                              void (*ack_on_ack)(int64_t message_id,
+                                                                                                                 void *user_data),
+                                                                                              void (*ack_on_error)(int64_t message_id,
+                                                                                                                   const char *error_message,
+                                                                                                                   void *user_data),
+                                                                                              void *ack_user_data,
+                                                                                              void (*free_ack_user_data)(void *user_data),
                                                                                               struct CResult *result);
 
 /**

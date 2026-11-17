@@ -151,8 +151,8 @@ pub struct CStreamConfigurationOptions {
     /// callback object is destroyed, not merely until close() returns.
     /// error_message is valid only during the call (copy to keep). Callbacks must
     /// not unwind across the C boundary (panics are contained and logged).
-    /// Multiplexed streams pass message IDs instead of offsets and may invoke the
-    /// callbacks concurrently; see `zerobus_sdk_create_multiplexed_stream`.
+    /// Multiplexed streams reject these fields; pass the mux create function's
+    /// own `ack_on_ack` / `ack_on_error` parameters instead.
     // Signatures are written inline rather than via the AckOn*Callback aliases
     // so cbindgen emits nullable C function pointers instead of an opaque struct.
     pub ack_on_ack: Option<extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void)>,
