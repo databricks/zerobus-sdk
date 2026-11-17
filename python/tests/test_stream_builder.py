@@ -12,6 +12,7 @@ import gc
 import inspect
 import json
 import re
+import time
 import weakref
 
 import pytest
@@ -304,6 +305,22 @@ class TestValidConfiguration:
         with pytest.raises(core.ZerobusException) as info:
             _open(mode, mux.build)
         assert not isinstance(info.value, core.NonRetriableException), info.value
+
+    def test_recovery_retries_and_backoff_reach_the_core(self, mode):
+        # With recovery on, a failed open is retried recovery_retries times, recovery_backoff_ms
+        # apart. The core's defaults (several retries, 2 s apart) would take seconds.
+        def open_and_time(retries, backoff_ms):
+            builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+            builder.recovery(True).recovery_retries(retries).recovery_backoff_ms(backoff_ms)
+            started = time.monotonic()
+            with pytest.raises(core.ZerobusException):
+                _open(mode, builder.build)
+            return time.monotonic() - started
+
+        # No retry, so no backoff wait.
+        assert open_and_time(0, 1000) < 0.5
+        # One retry after one backoff.
+        assert 0.45 <= open_and_time(1, 500) < 1.5
 
     def test_stream_count_and_inflight_budget_reach_the_core(self, mode):
         # The Rust core divides max_inflight_requests across sub-streams and rejects a budget
