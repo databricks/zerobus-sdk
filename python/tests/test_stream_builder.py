@@ -209,6 +209,12 @@ class TestMultiplexedStep:
         with pytest.raises(ValueError, match=r"use multiplexed\(n\)\.ack_callback"):
             _open(mode, mux.build)
 
+    def test_accepts_an_unset_ordinary_ack_callback(self, sdk):
+        # ack_callback(None) sets no callback, so it doesn't make a multiplexed build invalid.
+        mux = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().ack_callback(None).multiplexed(2)
+        _, _, stream_count, ack_callback = mux._native_args()
+        assert stream_count == 2 and ack_callback is None
+
 
 class TestAckCallbackType:
     """A callback that is not an ``AckCallback`` is rejected before anything is opened."""
