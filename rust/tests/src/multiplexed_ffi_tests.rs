@@ -1248,6 +1248,9 @@ fn nowait_does_not_wait_for_in_flight_flush() {
         expect_success(&mut result, "flush");
         flushed
     });
+    // No hook shows when the flush holds the lock; give it time to, so the
+    // `_nowait` call below runs against a held lock in nearly every run.
+    std::thread::sleep(Duration::from_millis(100));
 
     // Releases the gate when told to, or after 5 s, so a `_nowait` call that
     // blocks on the flush fails the test instead of hanging it.
