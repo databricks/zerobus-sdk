@@ -330,14 +330,18 @@ class TestValidate:
     @pytest.mark.parametrize("auth", ["oauth", "headers_provider"])
     def test_complete_configuration_validates_without_opening(self, mode, kind, auth):
         headers = _CountingHeaders()
-        builder = _unreachable_builder(mode).table("c.s.t").json()
+        builder = _unreachable_builder(mode).table("c.s.t").json().recovery(False)
         builder = builder.oauth("id", "secret") if auth == "oauth" else builder.headers_provider(headers)
         target = _terminal(builder, kind)
         # A plain method in the async SDK too: the call returns None, not an awaitable.
         assert not inspect.iscoroutinefunction(target.validate)
         assert target.validate() is None
-        # Authentication is not resolved.
-        assert headers.calls == 0
+        if auth == "headers_provider":
+            # Authentication is not resolved, while build() does ask for the headers.
+            assert headers.calls == 0
+            with pytest.raises(core.ZerobusException):
+                _open(mode, target.build)
+            assert headers.calls >= 1
 
     @pytest.mark.parametrize(
         "configure, message",
@@ -474,13 +478,6 @@ class TestPublicSurface:
             assert name in module.__all__
         # Both modes wrap the native class, which handles Avro encoding in Python.
         assert module.MultiplexedStream is not (core.sync if mode == "sync" else core.aio).MultiplexedStream
-
-    def test_builders_expose_validate(self, mode):
-        module = sync if mode == "sync" else aio
-        for builder in (module.StreamBuilder, module.MultiplexedStreamBuilder):
-            assert callable(getattr(builder, "validate", None)), builder
-            # A plain method in the async SDK too, as in Rust.
-            assert not inspect.iscoroutinefunction(builder.validate), builder
 
     def test_async_methods_are_coroutine_functions(self):
         for name in (
