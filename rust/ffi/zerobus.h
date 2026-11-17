@@ -994,10 +994,16 @@ int64_t zerobus_multiplexed_stream_ingest_json_records(struct CZerobusMultiplexe
 /**
  * Ingest a protobuf record without waiting for it to be queued (fire-and-forget).
  *
- * Copies the record and returns immediately. `result` reports only argument
- * validation errors; ingestion errors are discarded, but a sub-stream failure
- * still surfaces from the next flush or close. Records submitted this way have
- * no ordering guarantee relative to each other.
+ * Copies the record and returns immediately. `result` reports argument
+ * validation errors and a closed or closing mux (non-retryable; re-send the
+ * record on a new stream). Later ingestion errors are discarded, but a
+ * sub-stream failure still surfaces from the next flush or close. Records
+ * submitted this way have no ordering guarantee relative to each other.
+ *
+ * A record accepted here is covered by `zerobus_multiplexed_stream_close` and
+ * `zerobus_multiplexed_stream_get_unacked_records`, which wait for it to be
+ * queued. `zerobus_multiplexed_stream_flush` covers only records already
+ * queued, so it may miss one submitted just before it.
  */
 void zerobus_multiplexed_stream_ingest_proto_record_nowait(struct CZerobusMultiplexedStream *mux,
                                                            const uint8_t *data,
@@ -1055,6 +1061,10 @@ bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedSt
 /**
  * Wait until every record queued on every sub-stream is acknowledged.
  *
+ * Covers blocking ingests that have returned and `_nowait` records already
+ * queued by their background task; close also covers every accepted
+ * `_nowait` record.
+ *
  * A terminal sub-stream failure closes the mux for further ingestion; its
  * unacknowledged records remain available via
  * `zerobus_multiplexed_stream_get_unacked_records`.
@@ -1065,8 +1075,9 @@ bool zerobus_multiplexed_stream_flush(struct CZerobusMultiplexedStream *mux,
 /**
  * Flush and close every sub-stream.
  *
- * Waits for in-progress ingest, flush, and wait calls on this mux to return
- * first. On error, recover unacknowledged records with
+ * Waits for in-progress ingest, flush, and wait calls on this mux to return,
+ * and for every accepted `_nowait` record to be queued, then flushes those
+ * too. `_nowait` calls made after close starts report an error. On error, recover unacknowledged records with
  * `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
  * released with `zerobus_multiplexed_stream_free`.
  */

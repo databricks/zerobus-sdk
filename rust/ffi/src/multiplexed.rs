@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 
 /// Returned by ingest calls on failure; `result` carries the error.
 const INGEST_ERROR: i64 = -1;
@@ -518,27 +518,59 @@ enum NowaitPayload {
     Batch(Vec<EncodedRecord>),
 }
 
-/// Queues an ingest on a background task that holds its own reference to the mux.
+/// Takes a shared lock on the mux for a `_nowait` call without blocking.
+///
+/// The guard is taken before the call returns to C, so a later close or
+/// `get_unacked_records` waits until the spawned task has queued its payload.
+/// `try_read_owned` fails only while one of those holds or waits for the write
+/// lock; both close the mux, so the call reports it as closing.
 ///
 /// # Safety
 /// `mux` must be a valid, non-freed handle.
-unsafe fn spawn_ingest(mux: *mut CZerobusMultiplexedStream, payload: NowaitPayload) {
-    let handle = clone_mux_arc(mux);
+unsafe fn lock_for_nowait(
+    mux: *mut CZerobusMultiplexedStream,
+) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
+    let guard = clone_mux_arc(mux)
+        .try_read_owned()
+        .map_err(|_| ZerobusError::InvalidStateError("MultiplexedStream is closing".to_string()))?;
+    if guard.is_closed() {
+        return Err(ZerobusError::InvalidStateError(
+            "MultiplexedStream is closed".to_string(),
+        ));
+    }
+    Ok(guard)
+}
+
+/// Queues an ingest on a background task that holds the mux's read lock.
+///
+/// # Safety
+/// `mux` must be a valid, non-freed handle.
+unsafe fn spawn_ingest(
+    mux: *mut CZerobusMultiplexedStream,
+    payload: NowaitPayload,
+) -> ZerobusResult<()> {
+    let guard = lock_for_nowait(mux)?;
     RUNTIME.spawn(async move {
-        let mux = handle.read().await;
         let _ = match payload {
-            NowaitPayload::Record(record) => mux.ingest_record(record).await.map(Some),
-            NowaitPayload::Batch(batch) => mux.ingest_records(batch).await,
+            NowaitPayload::Record(record) => guard.ingest_record(record).await.map(Some),
+            NowaitPayload::Batch(batch) => guard.ingest_records(batch).await,
         };
     });
+    Ok(())
 }
 
 /// Ingest a protobuf record without waiting for it to be queued (fire-and-forget).
 ///
-/// Copies the record and returns immediately. `result` reports only argument
-/// validation errors; ingestion errors are discarded, but a sub-stream failure
-/// still surfaces from the next flush or close. Records submitted this way have
-/// no ordering guarantee relative to each other.
+/// Copies the record and returns immediately. `result` reports argument
+/// validation errors and a closed or closing mux (non-retryable; re-send the
+/// record on a new stream). Later ingestion errors are discarded, but a
+/// sub-stream failure still surfaces from the next flush or close. Records
+/// submitted this way have no ordering guarantee relative to each other.
+///
+/// A record accepted here is covered by `zerobus_multiplexed_stream_close` and
+/// `zerobus_multiplexed_stream_get_unacked_records`, which wait for it to be
+/// queued. `zerobus_multiplexed_stream_flush` covers only records already
+/// queued, so it may miss one submitted just before it.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
     mux: *mut CZerobusMultiplexedStream,
@@ -563,8 +595,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
                 return;
             }
         };
-        unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
-        write_success_result(result);
+        let res = unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
+        complete(result, res, ())
     })
 }
 
@@ -590,8 +622,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record_nowait(
             }
         };
 
-        unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
-        write_success_result(result);
+        let res = unsafe { spawn_ingest(mux, NowaitPayload::Record(record)) };
+        complete(result, res, ())
     })
 }
 
@@ -625,9 +657,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_nowait(
                     return;
                 }
             };
-            unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            let res = unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            complete(result, res, ())
+        } else {
+            // Nothing to queue, but report a closed mux like the blocking batch.
+            let res = unsafe { lock_for_nowait(mux) }.map(drop);
+            complete(result, res, ())
         }
-        write_success_result(result);
     })
 }
 
@@ -658,9 +694,13 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_nowait(
                     return;
                 }
             };
-            unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            let res = unsafe { spawn_ingest(mux, NowaitPayload::Batch(batch)) };
+            complete(result, res, ())
+        } else {
+            // Nothing to queue, but report a closed mux like the blocking batch.
+            let res = unsafe { lock_for_nowait(mux) }.map(drop);
+            complete(result, res, ())
         }
-        write_success_result(result);
     })
 }
 
@@ -701,6 +741,10 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
 
 /// Wait until every record queued on every sub-stream is acknowledged.
 ///
+/// Covers blocking ingests that have returned and `_nowait` records already
+/// queued by their background task; close also covers every accepted
+/// `_nowait` record.
+///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via
 /// `zerobus_multiplexed_stream_get_unacked_records`.
@@ -724,8 +768,9 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 
 /// Flush and close every sub-stream.
 ///
-/// Waits for in-progress ingest, flush, and wait calls on this mux to return
-/// first. On error, recover unacknowledged records with
+/// Waits for in-progress ingest, flush, and wait calls on this mux to return,
+/// and for every accepted `_nowait` record to be queued, then flushes those
+/// too. `_nowait` calls made after close starts report an error. On error, recover unacknowledged records with
 /// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
 /// released with `zerobus_multiplexed_stream_free`.
 #[no_mangle]
