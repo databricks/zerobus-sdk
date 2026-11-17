@@ -22,7 +22,6 @@ from zerobus import (
     ZerobusSdk,
 )
 from zerobus import _zerobus_core as core
-from zerobus.sdk import aio, sync
 from zerobus.sdk.aio import ZerobusSdk as AsyncZerobusSdk
 
 TOKEN = "dapi-test-secret"

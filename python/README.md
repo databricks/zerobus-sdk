@@ -390,6 +390,10 @@ recovers a stream. It does not exchange, cache, or refresh the token. Once the t
 expires or is revoked, creating or recovering a stream fails with
 `NonRetriableException`.
 
+PAT authentication works with `create_stream()` only: Arrow Flight streams
+(`create_arrow_stream()`) and persistent streams do not support it yet. `ZerobusSdk`
+still needs the workspace URL, but PAT authentication does not use it.
+
 ```python
 import os
 
@@ -678,10 +682,10 @@ multiplexing is recommended there to reduce connection overhead.
 
 ```python
 # Sync
-stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
 # Async
 async def create_async_stream(sdk):
-    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
 ```
 
 ### `ZerobusStream`
