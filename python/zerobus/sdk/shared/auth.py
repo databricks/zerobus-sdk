@@ -80,9 +80,10 @@ class PersonalAccessToken:
     it: once it expires or is revoked, creating or recovering a stream fails with an
     authentication error.
 
-    Works with ``create_stream`` only: Arrow Flight streams and persistent streams do
-    not support it yet. ``ZerobusSdk`` still needs the workspace URL, but PAT
-    authentication does not use it.
+    Works with ``create_stream`` only; persistent streams take the token through
+    ``PersistentStreamBuilder.personal_access_token`` instead, and Arrow Flight streams
+    do not support PAT authentication yet. ``ZerobusSdk`` still needs the workspace URL,
+    but PAT authentication does not use it.
 
     The token is left out of ``repr()``, so printing or logging the object does not
     reveal it.

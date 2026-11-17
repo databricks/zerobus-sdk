@@ -390,9 +390,10 @@ recovers a stream. It does not exchange, cache, or refresh the token. Once the t
 expires or is revoked, creating or recovering a stream fails with
 `NonRetriableException`.
 
-PAT authentication works with `create_stream()` only: Arrow Flight streams
-(`create_arrow_stream()`) and persistent streams do not support it yet. `ZerobusSdk`
-still needs the workspace URL, but PAT authentication does not use it.
+PAT authentication works with `create_stream()` and, through `personal_access_token()`,
+with the persistent stream builder. Arrow Flight streams (`create_arrow_stream()`) do not
+support it yet. `ZerobusSdk` still needs the workspace URL, but PAT authentication does
+not use it.
 
 ```python
 import os
@@ -425,7 +426,7 @@ restart, you resume the same stream by its `stream_id`, and delivery into Delta 
 exactly-once.
 
 Persistent streams support JSON and protobuf records. They authenticate with OAuth, a
-personal access token (beta, private preview), or a custom headers provider. They do not
+personal access token (Private Preview), or a custom headers provider. They do not
 support Avro or external-IdP federation.
 
 > **Experimental.** The persistent stream API in the Rust core is in development. It can
