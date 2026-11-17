@@ -199,6 +199,57 @@ fn create_mux_raw_with_ack(
     provider: Option<&'static ProviderLog>,
     ack_log: Option<&AckLog>,
 ) -> (*mut CZerobusMultiplexedStream, CResult) {
+    let ack = ack_log.map_or_else(MuxAck::none, MuxAck::log);
+    create_mux_raw_with_mux_ack(sdk, table, descriptor, stream_count, options, provider, ack)
+}
+
+/// The four mux ack parameters of a create call.
+struct MuxAck {
+    on_ack: Option<extern "C" fn(i64, *mut c_void)>,
+    on_error: Option<extern "C" fn(i64, *const c_char, *mut c_void)>,
+    user_data: *mut c_void,
+    free_user_data: Option<extern "C" fn(*mut c_void)>,
+}
+
+impl MuxAck {
+    fn none() -> Self {
+        Self {
+            on_ack: None,
+            on_error: None,
+            user_data: ptr::null_mut(),
+            free_user_data: None,
+        }
+    }
+
+    fn log(log: &AckLog) -> Self {
+        Self {
+            on_ack: Some(record_ack),
+            on_error: Some(record_error),
+            user_data: log as *const AckLog as *mut c_void,
+            free_user_data: None,
+        }
+    }
+
+    /// Hands `owner` to the FFI, with or without callbacks.
+    fn owned(owner: &'static AckOwner, with_callbacks: bool) -> Self {
+        Self {
+            on_ack: with_callbacks.then_some(owner_on_ack as _),
+            on_error: with_callbacks.then_some(owner_on_error as _),
+            user_data: owner as *const AckOwner as *mut c_void,
+            free_user_data: Some(owner_free),
+        }
+    }
+}
+
+fn create_mux_raw_with_mux_ack(
+    sdk: *mut CZerobusSdk,
+    table: &str,
+    descriptor: Option<&[u8]>,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    provider: Option<&'static ProviderLog>,
+    ack: MuxAck,
+) -> (*mut CZerobusMultiplexedStream, CResult) {
     let table = CString::new(table).unwrap();
     let (descriptor_ptr, descriptor_len) =
         descriptor.map_or((ptr::null(), 0), |d| (d.as_ptr(), d.len()));
@@ -222,10 +273,10 @@ fn create_mux_raw_with_ack(
         free_user_data,
         stream_count,
         options,
-        ack_log.map(|_| record_ack as extern "C" fn(i64, *mut c_void)),
-        ack_log.map(|_| record_error as extern "C" fn(i64, *const c_char, *mut c_void)),
-        ack_log.map_or(ptr::null_mut(), |log| log as *const AckLog as *mut c_void),
-        None,
+        ack.on_ack,
+        ack.on_error,
+        ack.user_data,
+        ack.free_user_data,
         &mut result,
     );
     (mux, result)
@@ -343,6 +394,83 @@ extern "C" fn record_error(message_id: i64, _message: *const c_char, user_data: 
     log.errors.lock().unwrap().push(message_id);
 }
 
+/// Mux ack `user_data` handed to the FFI: counts callbacks and frees, flags a
+/// callback that runs after the free, and can hold a callback until released.
+#[derive(Default)]
+struct AckOwner {
+    acks: AtomicUsize,
+    errors: AtomicUsize,
+    frees: AtomicUsize,
+    callback_after_free: AtomicBool,
+    block_callbacks: AtomicBool,
+    callback_entered: AtomicBool,
+    release_callbacks: AtomicBool,
+}
+
+impl AckOwner {
+    /// Leaked: the FFI may call back into it until it frees it.
+    fn leaked() -> &'static AckOwner {
+        Box::leak(Box::default())
+    }
+
+    fn frees(&self) -> usize {
+        self.frees.load(Ordering::SeqCst)
+    }
+
+    fn acks(&self) -> usize {
+        self.acks.load(Ordering::SeqCst)
+    }
+
+    fn on_callback(&self) {
+        if self.frees() > 0 {
+            self.callback_after_free.store(true, Ordering::SeqCst);
+        }
+        if self.block_callbacks.load(Ordering::SeqCst) {
+            self.callback_entered.store(true, Ordering::SeqCst);
+            // Bounded, so a missing release fails the test instead of hanging it.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.release_callbacks.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Asserts `user_data` was freed exactly once, with no callback after it.
+    fn assert_freed_once(&self) {
+        wait_until("ack user_data is freed", || self.frees() >= 1);
+        // Let a late second release land before asserting exactly once.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(self.frees(), 1, "ack user_data must be freed exactly once");
+        assert!(
+            !self.callback_after_free.load(Ordering::SeqCst),
+            "a callback ran after ack user_data was freed"
+        );
+    }
+
+    /// Asserts `user_data` is still owned after a teardown step has settled.
+    fn assert_not_freed(&self, after: &str) {
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(self.frees(), 0, "ack user_data freed early, after {after}");
+    }
+}
+
+extern "C" fn owner_on_ack(_message_id: i64, user_data: *mut c_void) {
+    let owner = unsafe { &*(user_data as *const AckOwner) };
+    owner.acks.fetch_add(1, Ordering::SeqCst);
+    owner.on_callback();
+}
+
+extern "C" fn owner_on_error(_message_id: i64, _message: *const c_char, user_data: *mut c_void) {
+    let owner = unsafe { &*(user_data as *const AckOwner) };
+    owner.errors.fetch_add(1, Ordering::SeqCst);
+    owner.on_callback();
+}
+
+extern "C" fn owner_free(user_data: *mut c_void) {
+    let owner = unsafe { &*(user_data as *const AckOwner) };
+    owner.frees.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Single, batch, and fire-and-forget ingest on one sub-stream, followed by
 /// one flush; the ack callback receives every returned message ID. Empty
 /// batches return -2 without sending anything.
@@ -432,6 +560,11 @@ fn proto_ingest_flush_and_ack_callback() {
 
     assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
     expect_success(&mut result, "flush");
+    assert_eq!(
+        runtime.block_on(server.get_write_count()),
+        6,
+        "flush returns only after the _nowait records are sent"
+    );
     assert!(!zerobus_multiplexed_stream_is_closed(mux));
 
     assert!(zerobus_multiplexed_stream_close(mux, &mut result));
@@ -621,8 +754,9 @@ fn headers_user_data_freed_once_after_last_lane_releases_it() {
     zerobus_sdk_free(sdk);
 }
 
-/// One lane opens and shares the provider, the other is rejected: the create
-/// fails, and the shared provider's `user_data` is still freed exactly once.
+/// One lane opens and shares the provider and the ack callbacks, the other
+/// is rejected: the create fails, and both `user_data`s are still freed
+/// exactly once.
 #[test]
 fn partial_open_failure_frees_shared_headers_provider_once() {
     const TABLE: &str = "ffi.mux.headers.partial";
@@ -641,10 +775,19 @@ fn partial_open_failure_frees_shared_headers_provider_once() {
         ],
     ));
     let provider = ProviderLog::leaked();
+    let ack = AckOwner::leaked();
 
     let sdk = create_sdk(&url);
     let options = json_options();
-    let (mux, mut result) = create_mux_raw(sdk, TABLE, None, 2, &options, Some(provider));
+    let (mux, mut result) = create_mux_raw_with_mux_ack(
+        sdk,
+        TABLE,
+        None,
+        2,
+        &options,
+        Some(provider),
+        MuxAck::owned(ack, true),
+    );
     assert!(mux.is_null(), "a partially opened mux must not be returned");
     expect_permanent_failure(&mut result, "zerobus_sdk_create_multiplexed_stream");
 
@@ -652,6 +795,7 @@ fn partial_open_failure_frees_shared_headers_provider_once() {
     // Let a late second release land before asserting exactly once.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
+    ack.assert_freed_once();
     zerobus_sdk_free(sdk);
 }
 
@@ -1424,6 +1568,9 @@ fn flush_waits_for_nowait_blocked_on_capacity() {
             expect_success(&mut result, "flush");
             (flushed, runtime.block_on(server.get_write_count()))
         });
+        // No hook shows when the flush has started; give it time to, so r1 is
+        // still waiting for capacity when it does.
+        std::thread::sleep(Duration::from_millis(200));
         gate.release();
         flusher.join().unwrap()
     });
@@ -1506,6 +1653,296 @@ fn flush_returns_under_concurrent_nowait_producer() {
     accepted.sort();
     assert!(!accepted.is_empty());
     assert_eq!(unacked_json_payloads(mux), accepted);
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// The FFI owns the mux ack `user_data`: it frees it exactly once, only after
+/// the handle is freed, and never calls back after that.
+#[test]
+fn ack_user_data_freed_once_after_last_callback() {
+    const TABLE: &str = "ffi.mux.ack.free";
+    let (runtime, server, url) = start_server();
+    // No CreateStream entry: the mock opens every lane and each lane acks its
+    // offset 0.
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![MockResponse::RecordAck {
+            ack_up_to_offset: 0,
+            delay_ms: 0,
+        }],
+    ));
+    let ack = AckOwner::leaked();
+
+    let sdk = create_sdk(&url);
+    let (mux, mut result) = create_mux_raw_with_mux_ack(
+        sdk,
+        TABLE,
+        None,
+        2,
+        &json_options(),
+        None,
+        MuxAck::owned(ack, true),
+    );
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+    assert_eq!(ack.frees(), 0, "an open mux owns ack user_data");
+
+    for json in json_records(0..2) {
+        zerobus_multiplexed_stream_ingest_json_record(mux, json.as_ptr(), &mut result);
+        expect_success(&mut result, "ingest_json_record");
+    }
+    assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
+    expect_success(&mut result, "flush");
+    wait_until("both lanes ack", || ack.acks() >= 2);
+    assert_eq!(ack.frees(), 0, "an open mux owns ack user_data");
+
+    assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+    expect_success(&mut result, "close");
+    ack.assert_not_freed("close");
+
+    zerobus_multiplexed_stream_free(mux);
+    ack.assert_freed_once();
+    assert_eq!(ack.acks(), 2);
+    zerobus_sdk_free(sdk);
+}
+
+/// With both callbacks NULL, `free_ack_user_data` is still called exactly
+/// once: the FFI owns `ack_user_data` from the call on.
+#[test]
+fn ack_user_data_without_callbacks_is_still_freed_once() {
+    const TABLE: &str = "ffi.mux.ack.none";
+    let (_runtime, _server, url) = start_server();
+    let ack = AckOwner::leaked();
+
+    let sdk = create_sdk(&url);
+    let (mux, mut result) = create_mux_raw_with_mux_ack(
+        sdk,
+        TABLE,
+        None,
+        1,
+        &json_options(),
+        None,
+        MuxAck::owned(ack, false),
+    );
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+    ack.assert_freed_once();
+
+    assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+    expect_success(&mut result, "close");
+    zerobus_multiplexed_stream_free(mux);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(ack.frees(), 1, "ack user_data must be freed exactly once");
+    zerobus_sdk_free(sdk);
+}
+
+/// A `_nowait` task still waiting for capacity holds the ack callbacks, so
+/// freeing the handle doesn't free the ack `user_data` until the task ends.
+#[test]
+fn free_with_pending_nowait_defers_ack_user_data_free() {
+    const TABLE: &str = "ffi.mux.ack.pending";
+    let (runtime, server, url) = start_server();
+    let gate = Arc::new(MockResponseGate::new());
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::GatedRecordAck {
+                ack_up_to_offset: 0,
+                gate: Arc::clone(&gate),
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 1,
+                delay_ms: 0,
+            },
+        ],
+    ));
+    let ack = AckOwner::leaked();
+
+    let sdk = create_sdk(&url);
+    let mut options = json_options();
+    options.max_inflight_requests = 1;
+    let (mux, mut result) = create_mux_raw_with_mux_ack(
+        sdk,
+        TABLE,
+        None,
+        1,
+        &options,
+        None,
+        MuxAck::owned(ack, true),
+    );
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+
+    let [r0, r1]: [CString; 2] = json_records(0..2).try_into().unwrap();
+    zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record");
+    wait_for_writes(&runtime, &server, 1);
+
+    // r0's ack is gated, so with one in-flight slot r1 waits for capacity.
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record_nowait");
+    zerobus_multiplexed_stream_free(mux);
+    ack.assert_not_freed("free with a pending _nowait");
+
+    gate.release();
+    ack.assert_freed_once();
+    zerobus_sdk_free(sdk);
+}
+
+/// A callback still running after close gave up waiting for it keeps the ack
+/// `user_data` alive: it is freed only once that callback returns.
+#[test]
+fn ack_user_data_free_waits_for_running_callback() {
+    const TABLE: &str = "ffi.mux.ack.running";
+    let (runtime, server, url) = start_server();
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            },
+        ],
+    ));
+    let ack = AckOwner::leaked();
+    ack.block_callbacks.store(true, Ordering::SeqCst);
+
+    let sdk = create_sdk(&url);
+    let mut options = json_options();
+    // Close stops waiting for callbacks after 50 ms.
+    options.callback_max_wait_time_ms = 50;
+    options.has_callback_max_wait_time_ms = true;
+    let (mux, mut result) = create_mux_raw_with_mux_ack(
+        sdk,
+        TABLE,
+        None,
+        1,
+        &options,
+        None,
+        MuxAck::owned(ack, true),
+    );
+    expect_success(&mut result, "zerobus_sdk_create_multiplexed_stream");
+
+    let record = CString::new(r#"{"id": 0}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record(mux, record.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record");
+    wait_until("the ack callback is running", || {
+        ack.callback_entered.load(Ordering::SeqCst)
+    });
+
+    zerobus_multiplexed_stream_close(mux, &mut result);
+    take_message(&mut result);
+    zerobus_multiplexed_stream_free(mux);
+    ack.assert_not_freed("close and free with a callback still running");
+
+    ack.release_callbacks.store(true, Ordering::SeqCst);
+    ack.assert_freed_once();
+    zerobus_sdk_free(sdk);
+}
+
+/// A flush waits for `_nowait` records accepted before it, but not for one
+/// accepted while it is already running; the next flush covers that one.
+#[test]
+fn flush_does_not_wait_for_nowait_accepted_after_it_began() {
+    const TABLE: &str = "ffi.mux.nowait.epoch";
+    let (runtime, server, url) = start_server();
+    let (gate_a, gate_b) = (
+        Arc::new(MockResponseGate::new()),
+        Arc::new(MockResponseGate::new()),
+    );
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::GatedRecordAck {
+                ack_up_to_offset: 0,
+                gate: Arc::clone(&gate_a),
+            },
+            MockResponse::GatedRecordAck {
+                ack_up_to_offset: 1,
+                gate: Arc::clone(&gate_b),
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 2,
+                delay_ms: 0,
+            },
+        ],
+    ));
+
+    let sdk = create_sdk(&url);
+    let mut options = json_options();
+    options.max_inflight_requests = 1;
+    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mux_addr = mux as usize;
+    let mut result = new_result();
+
+    // r0 fills the only in-flight slot; its ack waits on gate A.
+    let r0 = CString::new(r#"{"id": 0}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record (r0)");
+    wait_for_writes(&runtime, &server, 1);
+
+    // rw is a blocking ingest waiting for capacity, ahead of r1 below.
+    let waiter = std::thread::spawn(move || {
+        let rw = CString::new(r#"{"id": "w"}"#).unwrap();
+        let mut result = new_result();
+        zerobus_multiplexed_stream_ingest_json_record(mux_addr as *mut _, rw.as_ptr(), &mut result);
+        expect_success(&mut result, "ingest_json_record (rw)");
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let (flushed_tx, flushed_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut result = new_result();
+        let flushed = zerobus_multiplexed_stream_flush(mux_addr as *mut _, &mut result);
+        take_message(&mut result);
+        let _ = flushed_tx.send(flushed);
+    });
+    // No hook shows that the flush has taken its snapshot of accepted
+    // records. If r1 were accepted before it, a correct flush would wait for
+    // r1 and the 2 s bound below would fail the test.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let r1 = CString::new(r#"{"id": 1}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record_nowait (r1)");
+
+    // rw takes the freed slot and its ack waits on gate B, so r1 stays pending.
+    gate_a.release();
+    let flushed = flushed_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("flush waited for a _nowait accepted after it began");
+    assert!(flushed);
+    // The flush waits only for r0, so rw may or may not be sent yet; r1 can't
+    // be, since rw holds the only slot until gate B.
+    assert!(
+        runtime.block_on(server.get_write_count()) <= 2,
+        "r1 must still be pending when the first flush returns"
+    );
+    waiter.join().unwrap();
+    wait_for_writes(&runtime, &server, 2);
+    assert_eq!(runtime.block_on(server.get_write_count()), 2);
+
+    gate_b.release();
+    assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
+    expect_success(&mut result, "second flush");
+    assert_eq!(
+        runtime.block_on(server.get_write_count()),
+        3,
+        "the second flush covers r1"
+    );
+
+    assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+    expect_success(&mut result, "close");
     zerobus_multiplexed_stream_free(mux);
     zerobus_sdk_free(sdk);
 }

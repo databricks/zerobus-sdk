@@ -1712,4 +1712,312 @@ mod multiplexed_tests {
         });
         assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1);
     }
+
+    /// Counts frees of the `user_data` it is passed as.
+    #[derive(Default)]
+    struct FreeCount(AtomicUsize);
+
+    impl FreeCount {
+        /// Leaked: the FFI may hold it until it calls the free callback.
+        fn leaked() -> &'static FreeCount {
+            Box::leak(Box::default())
+        }
+
+        fn user_data(&'static self) -> *mut std::ffi::c_void {
+            self as *const FreeCount as *mut std::ffi::c_void
+        }
+
+        fn assert_freed_once(&self, what: &str) {
+            wait_until(what, || self.0.load(Ordering::SeqCst) >= 1);
+            // Let a late second release land before asserting exactly once.
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                self.0.load(Ordering::SeqCst),
+                1,
+                "{what}: freed more than once"
+            );
+        }
+    }
+
+    extern "C" fn count_free(user_data: *mut std::ffi::c_void) {
+        let count = unsafe { &*(user_data as *const FreeCount) };
+        count.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn noop_mux_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
+
+    extern "C" fn noop_mux_error(_id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
+    }
+
+    /// One sync create call; `None` strings are passed as NULL.
+    struct CreateCall {
+        sdk: *mut CZerobusSdk,
+        table: Option<CString>,
+        descriptor: Vec<u8>,
+        client_id: Option<CString>,
+        client_secret: Option<CString>,
+        stream_count: usize,
+        options: CStreamConfigurationOptions,
+    }
+
+    impl CreateCall {
+        /// Valid arguments for a JSON mux on `sdk`.
+        fn valid(sdk: *mut CZerobusSdk) -> Self {
+            let mut options = json_options();
+            // Fail on the first connect error instead of retrying it.
+            options.recovery = false;
+            Self {
+                sdk,
+                table: Some(CString::new("main.default.events").unwrap()),
+                descriptor: Vec::new(),
+                client_id: Some(CString::new("client-id").unwrap()),
+                client_secret: Some(CString::new("client-secret").unwrap()),
+                stream_count: 2,
+                options,
+            }
+        }
+
+        fn c_str(value: &Option<CString>) -> *const c_char {
+            value.as_ref().map_or(ptr::null(), |s| s.as_ptr())
+        }
+
+        /// Runs the OAuth create, expecting failure; returns `(retryable, message)`.
+        fn oauth(
+            &self,
+            ack_free: Option<MuxAckFree>,
+            ack_user_data: *mut std::ffi::c_void,
+        ) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream(
+                self.sdk,
+                Self::c_str(&self.table),
+                self.descriptor.as_ptr(),
+                self.descriptor.len(),
+                Self::c_str(&self.client_id),
+                Self::c_str(&self.client_secret),
+                self.stream_count,
+                &self.options,
+                Some(noop_mux_ack),
+                Some(noop_mux_error),
+                ack_user_data,
+                ack_free,
+                &mut result,
+            );
+            Self::failure(mux, &mut result)
+        }
+
+        /// Runs the headers create, expecting failure; returns `(retryable, message)`.
+        fn headers(&self, headers: &'static FreeCount, ack: &'static FreeCount) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+                self.sdk,
+                Self::c_str(&self.table),
+                self.descriptor.as_ptr(),
+                self.descriptor.len(),
+                empty_headers,
+                headers.user_data(),
+                Some(count_free),
+                self.stream_count,
+                &self.options,
+                Some(noop_mux_ack),
+                Some(noop_mux_error),
+                ack.user_data(),
+                Some(count_free),
+                &mut result,
+            );
+            Self::failure(mux, &mut result)
+        }
+
+        fn failure(mux: *mut CZerobusMultiplexedStream, result: &mut CResult) -> (bool, String) {
+            assert!(mux.is_null(), "create unexpectedly returned a handle");
+            let retryable = result.is_retryable;
+            let (success, message) = take_result(result);
+            assert!(!success, "create reported success");
+            (retryable, message)
+        }
+    }
+
+    #[test]
+    fn create_rejects_ack_callbacks_in_options() {
+        let sdk = test_sdk();
+        for field in ["ack_on_ack", "ack_on_error"] {
+            let mut call = CreateCall::valid(sdk);
+            match field {
+                "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
+                _ => call.options.ack_on_error = Some(noop_mux_error),
+            }
+
+            let ack = FreeCount::leaked();
+            let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
+            assert!(!retryable, "OAuth options->{field}: {message}");
+            assert!(
+                message.contains("are not supported for multiplexed streams"),
+                "OAuth options->{field}: {message}"
+            );
+            ack.assert_freed_once(&format!("OAuth options->{field} ack user_data"));
+
+            let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
+            let (retryable, message) = call.headers(headers, ack);
+            assert!(!retryable, "headers options->{field}: {message}");
+            assert!(
+                message.contains("are not supported for multiplexed streams"),
+                "headers options->{field}: {message}"
+            );
+            headers.assert_freed_once(&format!("headers options->{field} user_data"));
+            ack.assert_freed_once(&format!("headers options->{field} ack user_data"));
+        }
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn ack_bridge_accepts_one_sided_callbacks() {
+        static ACKED: AtomicI64 = AtomicI64::new(0);
+        static FAILED: AtomicI64 = AtomicI64::new(0);
+        extern "C" fn on_ack(id: i64, _user_data: *mut std::ffi::c_void) {
+            ACKED.store(id, Ordering::SeqCst);
+        }
+        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
+            FAILED.store(id, Ordering::SeqCst);
+        }
+        let id = MessageId::from_raw((1i64 << 58) | 3);
+
+        // The NULL side is a no-op; the set side gets the raw message ID.
+        let ack_only =
+            MultiplexedCallbackAckCallback::new(Some(on_ack), None, ptr::null_mut(), None);
+        ack_only.on_ack(id);
+        ack_only.on_error(id, "ignored");
+        assert_eq!(ACKED.load(Ordering::SeqCst), id.raw());
+        assert_eq!(FAILED.load(Ordering::SeqCst), 0);
+
+        let error_only =
+            MultiplexedCallbackAckCallback::new(None, Some(on_error), ptr::null_mut(), None);
+        error_only.on_ack(MessageId::from_raw(0));
+        error_only.on_error(id, "boom");
+        assert_eq!(
+            ACKED.load(Ordering::SeqCst),
+            id.raw(),
+            "on_ack must not run"
+        );
+        assert_eq!(FAILED.load(Ordering::SeqCst), id.raw());
+    }
+
+    #[test]
+    fn every_create_failure_frees_ack_user_data_once() {
+        let sdk = test_sdk();
+        let valid = || CreateCall::valid(sdk);
+        // (case, call, OAuth only)
+        let cases: Vec<(&str, CreateCall, bool)> = vec![
+            (
+                "sdk=NULL",
+                CreateCall {
+                    sdk: ptr::null_mut(),
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "table_name=NULL",
+                CreateCall {
+                    table: None,
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "empty table",
+                CreateCall {
+                    table: Some(CString::new("").unwrap()),
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "client_id=NULL",
+                CreateCall {
+                    client_id: None,
+                    ..valid()
+                },
+                true,
+            ),
+            (
+                "client_secret=NULL",
+                CreateCall {
+                    client_secret: None,
+                    ..valid()
+                },
+                true,
+            ),
+            (
+                "stream_count=0",
+                CreateCall {
+                    stream_count: 0,
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "stream_count=65",
+                CreateCall {
+                    stream_count: 65,
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "malformed descriptor",
+                CreateCall {
+                    descriptor: vec![0xff, 0xff, 0xff],
+                    ..valid()
+                },
+                false,
+            ),
+            (
+                "max_inflight_requests < stream_count",
+                {
+                    let mut call = CreateCall {
+                        stream_count: 3,
+                        ..valid()
+                    };
+                    call.options.max_inflight_requests = 2;
+                    call
+                },
+                false,
+            ),
+        ];
+
+        for (case, call, oauth_only) in &cases {
+            let ack = FreeCount::leaked();
+            let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
+            assert!(!retryable, "OAuth {case}: {message}");
+            ack.assert_freed_once(&format!("OAuth {case} ack user_data"));
+
+            if !oauth_only {
+                let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
+                let (retryable, message) = call.headers(headers, ack);
+                assert!(!retryable, "headers {case}: {message}");
+                headers.assert_freed_once(&format!("headers {case} user_data"));
+                ack.assert_freed_once(&format!("headers {case} ack user_data"));
+            }
+        }
+
+        // `test_sdk()` points at 127.0.0.1:1, so the connect fails (retryable).
+        let call = valid();
+        let ack = FreeCount::leaked();
+        let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
+        assert!(retryable, "OAuth connect failure: {message}");
+        ack.assert_freed_once("OAuth connect failure ack user_data");
+        let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
+        let (retryable, message) = call.headers(headers, ack);
+        assert!(retryable, "headers connect failure: {message}");
+        headers.assert_freed_once("headers connect failure user_data");
+        ack.assert_freed_once("headers connect failure ack user_data");
+
+        // A NULL `free_ack_user_data` is allowed.
+        let call = CreateCall {
+            table: None,
+            ..valid()
+        };
+        call.oauth(None, ptr::null_mut());
+        crate::zerobus_sdk_free(sdk);
+    }
 }
