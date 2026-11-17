@@ -8,12 +8,15 @@ acknowledgments, and recovery against a server are covered by the Rust core test
 """
 
 import asyncio
+import gc
 import inspect
 import json
 import re
+import weakref
 
 import pytest
 
+from zerobus import FederatedToken
 from zerobus import _zerobus_core as core
 from zerobus.sdk import aio, sync
 
@@ -69,9 +72,13 @@ def kind(request):
     return request.param
 
 
-def _terminal(builder, kind):
-    """The builder whose build() opens the stream: the stream builder, or its multiplexed step."""
-    return builder if kind == "ordinary" else builder.multiplexed(2)
+def _terminal(builder, kind, stream_count=2):
+    """The builder whose build() opens the stream: the stream builder, or its multiplexed step.
+
+    Use one sub-stream where build() reaches the network: it opens without the jittered start
+    delay.
+    """
+    return builder if kind == "ordinary" else builder.multiplexed(stream_count)
 
 
 class TestBuilderValidation:
@@ -88,6 +95,14 @@ class TestBuilderValidation:
     def test_build_requires_both_oauth_credentials(self, sdk, mode, kind):
         builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", None).json(), kind)
         with pytest.raises(ValueError, match="oauth requires both client_id and client_secret"):
+            _open(mode, builder.build)
+
+    def test_build_requires_auth_names_every_auth_setter(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().table("c.s.t").json(), kind)
+        message = (
+            "authentication is required: call exactly one of oauth(...), headers_provider(...), or federated_auth(...)"
+        )
+        with pytest.raises(ValueError, match=re.escape(message) + "$"):
             _open(mode, builder.build)
 
     def test_build_requires_format(self, sdk, mode, kind):
@@ -173,6 +188,7 @@ class TestBuilderValidation:
             .ack_callback(_Ack())
             .callback_max_wait_time_ms(None)
             .stream_paused_max_wait_time_ms(None)
+            .federated_auth(FederatedToken(lambda: "tok"))
         )
         assert chained is builder
 
@@ -308,18 +324,48 @@ class _CountingHeaders(core.HeadersProvider):
 
 
 class _RecordingNativeSdk:
-    """Stands in for the native SDK and records the validate_stream calls it receives."""
+    """Stands in for the native SDK and records each open and validate call it receives.
 
-    def __init__(self):
-        self.validate_calls = []
+    In async mode the open calls return awaitables, as the native async SDK does.
+    """
 
-    def validate_stream(self, *args):
-        self.validate_calls.append(args)
+    def __init__(self, asynchronous):
+        self._asynchronous = asynchronous
+        self.calls = []
+
+    def _record(self, method, args, kwargs):
+        self.calls.append((method, args, kwargs))
+        if method == "validate_stream":
+            return None
+        if not self._asynchronous:
+            return object()
+
+        async def opened():
+            return object()
+
+        return opened()
+
+    def validate_stream(self, *args, **kwargs):
+        return self._record("validate_stream", args, kwargs)
+
+    def open_stream(self, *args, **kwargs):
+        return self._record("open_stream", args, kwargs)
+
+    def open_multiplexed_stream(self, *args, **kwargs):
+        return self._record("open_multiplexed_stream", args, kwargs)
+
+    @property
+    def validate_calls(self):
+        return [call for call in self.calls if call[0] == "validate_stream"]
+
+    @property
+    def last_kwargs(self):
+        return self.calls[-1][2]
 
 
 def _sdk_with_recording_native(mode):
     sdk = (sync if mode == "sync" else aio).ZerobusSdk(*SDK_ARGS)
-    native = _RecordingNativeSdk()
+    native = _RecordingNativeSdk(asynchronous=mode == "aio")
     sdk._inner = native
     return sdk, native
 
@@ -332,7 +378,7 @@ class TestValidate:
         headers = _CountingHeaders()
         builder = _unreachable_builder(mode).table("c.s.t").json().recovery(False)
         builder = builder.oauth("id", "secret") if auth == "oauth" else builder.headers_provider(headers)
-        target = _terminal(builder, kind)
+        target = _terminal(builder, kind, stream_count=1)
         # A plain method in the async SDK too: the call returns None, not an awaitable.
         assert not inspect.iscoroutinefunction(target.validate)
         assert target.validate() is None
@@ -427,6 +473,273 @@ class TestValidate:
         assert not isinstance(info.value, core.NonRetriableException), info.value
 
 
+class _SupplierSpy:
+    """Records each native IdpSupplier the builder creates, and the StreamSettings arguments.
+
+    Both forward to the real classes. StreamSettings has no getters, so its arguments are read
+    from this record, never from the object.
+    """
+
+    def __init__(self, monkeypatch):
+        # Saved before patching: isinstance() against the patched name would raise TypeError.
+        self.real_supplier = core.IdpSupplier
+        real_settings = core.StreamSettings
+        self.suppliers = []
+        self.settings = []
+
+        def supplier(callback, allow_async, cache_identity):
+            handle = self.real_supplier(callback, allow_async, cache_identity)
+            self.suppliers.append((callback, allow_async, cache_identity, handle))
+            return handle
+
+        def settings(**kwargs):
+            self.settings.append(kwargs)
+            return real_settings(**kwargs)
+
+        monkeypatch.setattr(core, "IdpSupplier", supplier)
+        monkeypatch.setattr(core, "StreamSettings", settings)
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    return _SupplierSpy(monkeypatch)
+
+
+def _token(databricks_client_id=None):
+    return FederatedToken(lambda: "idp-token", databricks_client_id=databricks_client_id)
+
+
+class TestFederatedAuth:
+    """``federated_auth()`` on ``stream_builder()``, as ``create_stream(auth=...)`` takes it."""
+
+    def test_build_passes_a_fresh_supplier_per_call(self, spy, mode, kind):
+        sdk, native = _sdk_with_recording_native(mode)
+        token = _token()
+        target = _terminal(sdk.stream_builder().table("c.s.t").json().federated_auth(token), kind)
+
+        _open(mode, target.build)
+        _open(mode, target.build)
+
+        assert len(spy.suppliers) == 2
+        first, second = (handle for *_, handle in spy.suppliers)
+        for callback, allow_async, cache_identity, handle in spy.suppliers:
+            assert callback is token.idp_token_supplier
+            # Only the async SDK lets the callback be async.
+            assert allow_async is (mode == "aio")
+            assert cache_identity == token._cache_identity
+            assert isinstance(handle, spy.real_supplier)
+        assert first is not second
+        assert [call[2]["idp_supplier"] for call in native.calls] == [first, second]
+
+    def test_sync_build_inside_an_event_loop_keeps_the_sync_policy(self, spy, kind):
+        sdk, _ = _sdk_with_recording_native("sync")
+        target = _terminal(sdk.stream_builder().table("c.s.t").json().federated_auth(_token()), kind)
+
+        async def build_in_loop():
+            target.build()
+
+        asyncio.run(build_in_loop())
+        assert [allow_async for _, allow_async, _, _ in spy.suppliers] == [False]
+
+    def test_validate_passes_its_own_supplier(self, spy, mode, kind):
+        sdk, native = _sdk_with_recording_native(mode)
+        token = _token()
+        target = _terminal(sdk.stream_builder().table("c.s.t").json().federated_auth(token), kind)
+
+        assert target.validate() is None
+        _open(mode, target.build)
+
+        assert [(c, a, i) for c, a, i, _ in spy.suppliers] == [
+            (token.idp_token_supplier, mode == "aio", token._cache_identity)
+        ] * 2
+        validated, built = (handle for *_, handle in spy.suppliers)
+        assert validated is not built
+        assert native.calls[0][0] == "validate_stream" and native.calls[0][2]["idp_supplier"] is validated
+
+    def test_async_validate_outside_an_event_loop(self, spy, kind):
+        # The async supplier captures the running loop only when there is one, so validate()
+        # works from synchronous code, and a later build() gets its own supplier.
+        target = _terminal(
+            _unreachable_builder("aio").table("c.s.t").json().recovery(False).federated_auth(_token()),
+            kind,
+            stream_count=1,
+        )
+        assert target.validate() is None
+        with pytest.raises(core.ZerobusException):
+            asyncio.run(target.build())
+        assert len(spy.suppliers) == 2
+        assert spy.suppliers[0][3] is not spy.suppliers[1][3]
+
+    @pytest.mark.parametrize("databricks_client_id", [None, "sp"], ids=["account", "workload"])
+    @pytest.mark.parametrize("call", ["build", "validate"])
+    def test_passes_the_databricks_client_id(self, mode, kind, databricks_client_id, call):
+        # None selects account-level federation; a client ID selects workload identity federation.
+        sdk, native = _sdk_with_recording_native(mode)
+        target = _terminal(
+            sdk.stream_builder().table("c.s.t").json().federated_auth(_token(databricks_client_id)), kind
+        )
+        if call == "build":
+            _open(mode, target.build)
+        else:
+            target.validate()
+        assert native.last_kwargs["databricks_client_id"] == databricks_client_id
+
+    @pytest.mark.parametrize(
+        "earlier",
+        [lambda b: b.oauth("id", "secret"), lambda b: b.headers_provider(_Headers())],
+        ids=["oauth", "headers"],
+    )
+    def test_replaces_an_earlier_auth_setter(self, spy, mode, earlier):
+        sdk, native = _sdk_with_recording_native(mode)
+        builder = earlier(sdk.stream_builder().table("c.s.t").json()).federated_auth(_token())
+        _open(mode, builder.build)
+
+        assert native.last_kwargs["idp_supplier"] is spy.suppliers[-1][3]
+        settings = spy.settings[-1]
+        assert settings["client_id"] is None and settings["client_secret"] is None
+        assert settings["headers_provider"] is None
+
+    @pytest.mark.parametrize(
+        "later", [lambda b: b.oauth("id", "secret"), lambda b: b.headers_provider(_Headers())], ids=["oauth", "headers"]
+    )
+    def test_is_replaced_by_a_later_auth_setter(self, spy, mode, later):
+        sdk, native = _sdk_with_recording_native(mode)
+        builder = later(sdk.stream_builder().table("c.s.t").json().federated_auth(_token("sp")))
+        _open(mode, builder.build)
+
+        assert native.last_kwargs["idp_supplier"] is None
+        assert native.last_kwargs["databricks_client_id"] is None
+        assert spy.suppliers == []
+
+    @pytest.mark.parametrize(
+        "change", [lambda b: b.federated_auth(_token("other")), lambda b: b.oauth("id", "secret")], ids=["fed", "oauth"]
+    )
+    def test_multiplexed_keeps_the_auth_set_when_it_was_called(self, spy, change):
+        sdk, native = _sdk_with_recording_native("sync")
+        token = _token("sp")
+        builder = sdk.stream_builder().table("c.s.t").json().federated_auth(token)
+        mux = builder.multiplexed(2)
+        change(builder)
+        mux.build()
+
+        callback, _, cache_identity, handle = spy.suppliers[-1]
+        assert callback is token.idp_token_supplier and cache_identity == token._cache_identity
+        assert native.last_kwargs["idp_supplier"] is handle
+        assert native.last_kwargs["databricks_client_id"] == "sp"
+
+    def test_multiplexed_keeps_non_federated_auth(self, spy):
+        sdk, native = _sdk_with_recording_native("sync")
+        builder = sdk.stream_builder().table("c.s.t").json().oauth("id", "secret")
+        mux = builder.multiplexed(2)
+        builder.federated_auth(_token())
+        mux.build()
+        assert native.last_kwargs["idp_supplier"] is None
+        assert spy.suppliers == []
+
+    @pytest.mark.parametrize("token", ["tok", None, lambda: "tok"])
+    def test_rejects_anything_but_a_federated_token(self, sdk, token):
+        with pytest.raises(ValueError, match="token must be a FederatedToken instance"):
+            sdk.stream_builder().federated_auth(token)
+
+    def test_native_settings_allow_only_one_auth_method(self, mode):
+        # One entry point per mode: open_stream, open_multiplexed_stream, and validate_stream
+        # share this check.
+        native = (core.sync if mode == "sync" else core.aio).ZerobusSdk(*SDK_ARGS)
+        props = core.TableProperties("c.s.t")
+
+        async def run():
+            supplier = core.IdpSupplier(lambda: "tok", mode == "aio", "cache-id")
+            for settings in (
+                core.StreamSettings(headers_provider=_Headers()),
+                core.StreamSettings(client_id="id", client_secret="s"),
+                core.StreamSettings(client_id="id"),
+                core.StreamSettings(client_secret="s"),
+            ):
+                # The async call raises before it returns an awaitable.
+                with pytest.raises(ValueError, match="exactly one authentication method"):
+                    native.open_stream(props, settings, idp_supplier=supplier)
+
+        asyncio.run(run())
+
+    def test_federated_configuration_reaches_the_network(self, mode, kind):
+        calls = []
+
+        def idp_token():
+            calls.append(1)
+            return "idp-token"
+
+        builder = _unreachable_builder(mode).table("c.s.t").json().recovery(False)
+        target = builder.federated_auth(FederatedToken(idp_token))
+        target = target if kind == "ordinary" else target.multiplexed(1)
+
+        assert target.validate() is None
+        assert calls == []
+        # A ValueError, TypeError, or RuntimeError would escape this: the configuration crossed
+        # the bridge, and the token exchange failed to connect.
+        with pytest.raises(core.ZerobusException) as info:
+            _open(mode, target.build)
+        assert not isinstance(info.value, core.NonRetriableException), info.value
+        # build() reaches the Python callback once, for the token exchange.
+        assert len(calls) == 1
+
+    def test_failed_build_does_not_keep_the_callback_owner_alive(self, mode, kind):
+        class Owner:
+            def get_token(self):
+                return "idp-token"
+
+        def fail(owner):
+            builder = _unreachable_builder(mode).table("c.s.t").json().recovery(False)
+            target = _terminal(builder.federated_auth(FederatedToken(owner.get_token)), kind, stream_count=1)
+            try:
+                _open(mode, target.build)
+            except core.ZerobusException as exc:
+                # The traceback keeps the frame that built the native supplier.
+                owner.err = exc
+
+        owner = Owner()
+        fail(owner)
+        assert isinstance(owner.err, core.ZerobusException)
+        ref = weakref.ref(owner)
+        del owner
+        gc.collect()
+        assert ref() is None
+
+    def test_failed_validate_does_not_keep_the_callback_owner_alive(self, mode):
+        class Owner:
+            def get_token(self):
+                return "idp-token"
+
+        def fail(owner):
+            builder = _unreachable_builder(mode).table("c.s.t").json().max_inflight_requests(2)
+            mux = builder.federated_auth(FederatedToken(owner.get_token)).multiplexed(4)
+            try:
+                mux.validate()
+            except core.NonRetriableException as exc:
+                owner.err = exc
+
+        owner = Owner()
+        fail(owner)
+        assert "max_inflight_requests (2)" in str(owner.err)
+        ref = weakref.ref(owner)
+        del owner
+        gc.collect()
+        assert ref() is None
+
+    def test_token_owner_cycle_through_the_builder_is_collectable(self, mode, kind):
+        class Owner:
+            def get_token(self):
+                return "idp-token"
+
+        owner = Owner()
+        owner.auth = FederatedToken(owner.get_token)
+        owner.builder = _terminal(_unreachable_builder(mode).table("c.s.t").json().federated_auth(owner.auth), kind)
+        owner.builder.validate()
+        ref = weakref.ref(owner)
+        del owner
+        gc.collect()
+        assert ref() is None
+
+
 class TestNativeValidation:
     """Checks the native layer enforces the same rules if called directly."""
 
@@ -478,6 +791,11 @@ class TestPublicSurface:
             assert name in module.__all__
         # Both modes wrap the native class, which handles Avro encoding in Python.
         assert module.MultiplexedStream is not (core.sync if mode == "sync" else core.aio).MultiplexedStream
+
+    def test_federated_auth_only_on_the_stream_builder(self, sdk):
+        assert callable(sdk.stream_builder().federated_auth)
+        # As in Rust, the persistent builder has no federated authentication.
+        assert not hasattr(sdk.persistent_stream_builder(), "federated_auth")
 
     def test_async_methods_are_coroutine_functions(self):
         for name in (
