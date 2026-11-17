@@ -1946,3 +1946,292 @@ fn flush_does_not_wait_for_nowait_accepted_after_it_began() {
     zerobus_multiplexed_stream_free(mux);
     zerobus_sdk_free(sdk);
 }
+
+/// Core message for a record whose type doesn't match the stream.
+const RECORD_TYPE_MISMATCH: &str = "Record type does not match stream configuration";
+
+/// Runs a flush or close on a thread; returns `(returned, retryable,
+/// message)`. Fails the test if the call doesn't return within 2 s.
+fn call_within_2s(
+    mux: *mut CZerobusMultiplexedStream,
+    call: extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool,
+    what: &str,
+) -> (bool, bool, String) {
+    let mux_addr = mux as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut result = new_result();
+        let returned = call(mux_addr as *mut _, &mut result);
+        let retryable = result.is_retryable;
+        let _ = tx.send((returned, retryable, take_message(&mut result)));
+    });
+    rx.recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| panic!("{what} did not return within 2 s"))
+}
+
+/// Asserts a flush or close reported the stored record-type failure.
+fn expect_record_type_failure(outcome: (bool, bool, String), what: &str) {
+    let (returned, retryable, message) = outcome;
+    assert!(!returned, "{what} must report the stored _nowait failure");
+    assert!(!retryable, "{what}: {message}");
+    assert!(message.contains(RECORD_TYPE_MISMATCH), "{what}: {message}");
+}
+
+fn expect_returned_true(outcome: (bool, bool, String), what: &str) {
+    let (returned, _, message) = outcome;
+    assert!(returned, "{what} failed: {message}");
+}
+
+/// A JSON mux whose server acks offsets `0..acks`.
+fn json_mux_with_acks(
+    runtime: &Runtime,
+    server: &MockZerobusServer,
+    url: &str,
+    table: &str,
+    acks: i64,
+) -> (*mut CZerobusSdk, *mut CZerobusMultiplexedStream) {
+    let mut responses = vec![MockResponse::CreateStream {
+        stream_id: "lane-0".into(),
+        delay_ms: 0,
+    }];
+    responses.extend((0..acks).map(|offset| MockResponse::RecordAck {
+        ack_up_to_offset: offset,
+        delay_ms: 0,
+    }));
+    runtime.block_on(server.inject_responses(table, responses));
+    let sdk = create_sdk(url);
+    let mux = create_mux(sdk, table, None, 1, &json_options());
+    (sdk, mux)
+}
+
+/// Queues a protobuf record on a JSON mux: accepted, then rejected by the
+/// core inside the background task.
+fn nowait_wrong_type(mux: *mut CZerobusMultiplexedStream) {
+    let proto = b"proto";
+    let mut result = new_result();
+    zerobus_multiplexed_stream_ingest_proto_record_nowait(
+        mux,
+        proto.as_ptr(),
+        proto.len(),
+        &mut result,
+    );
+    expect_success(&mut result, "ingest_proto_record_nowait (wrong type)");
+}
+
+/// A background `_nowait` failure is reported once by the next flush, isn't
+/// cleared by a later success, and a new failure is reported again.
+#[test]
+fn flush_reports_background_nowait_failure_once() {
+    const TABLE: &str = "ffi.mux.nowait.error";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 2);
+    let mut result = new_result();
+
+    nowait_wrong_type(mux);
+    let r0 = CString::new(r#"{"id": 0}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r0.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record_nowait");
+
+    let flush = zerobus_multiplexed_stream_flush;
+    expect_record_type_failure(call_within_2s(mux, flush, "flush"), "first flush");
+    expect_returned_true(call_within_2s(mux, flush, "flush"), "second flush");
+    assert!(!zerobus_multiplexed_stream_is_closed(mux));
+
+    nowait_wrong_type(mux);
+    expect_record_type_failure(
+        call_within_2s(mux, flush, "flush"),
+        "flush after a new failure",
+    );
+
+    let r1 = CString::new(r#"{"id": 1}"#).unwrap();
+    zerobus_multiplexed_stream_ingest_json_record(mux, r1.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record");
+    expect_returned_true(
+        call_within_2s(mux, flush, "flush"),
+        "flush after a valid ingest",
+    );
+
+    assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+    expect_success(&mut result, "close");
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// Several background failures before a flush are reported as one.
+#[test]
+fn flush_reports_several_nowait_failures_once() {
+    const TABLE: &str = "ffi.mux.nowait.errors";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 0);
+
+    nowait_wrong_type(mux);
+    nowait_wrong_type(mux);
+    let flush = zerobus_multiplexed_stream_flush;
+    expect_record_type_failure(call_within_2s(mux, flush, "flush"), "first flush");
+    expect_returned_true(call_within_2s(mux, flush, "flush"), "second flush");
+
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// A batch `_nowait` that fails in the background is reported too.
+#[test]
+fn flush_reports_background_nowait_batch_failure() {
+    const TABLE: &str = "ffi.mux.nowait.batch.error";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 0);
+
+    let batch: [&[u8]; 2] = [b"proto-0", b"proto-1"];
+    let ptrs: Vec<*const u8> = batch.iter().map(|r| r.as_ptr()).collect();
+    let lens: Vec<usize> = batch.iter().map(|r| r.len()).collect();
+    let mut result = new_result();
+    zerobus_multiplexed_stream_ingest_proto_records_nowait(
+        mux,
+        ptrs.as_ptr(),
+        lens.as_ptr(),
+        2,
+        &mut result,
+    );
+    expect_success(&mut result, "ingest_proto_records_nowait (wrong type)");
+    expect_record_type_failure(
+        call_within_2s(mux, zerobus_multiplexed_stream_flush, "flush"),
+        "flush",
+    );
+
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// Close reports a background failure no flush has reported, and still
+/// closes the mux.
+#[test]
+fn close_reports_unreported_nowait_failure() {
+    const TABLE: &str = "ffi.mux.nowait.close.error";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 0);
+
+    nowait_wrong_type(mux);
+    expect_record_type_failure(
+        call_within_2s(mux, zerobus_multiplexed_stream_close, "close"),
+        "close",
+    );
+    assert!(zerobus_multiplexed_stream_is_closed(mux));
+    let mut result = new_result();
+    let records = zerobus_multiplexed_stream_get_unacked_records(mux, &mut result);
+    expect_success(&mut result, "get_unacked_records");
+    assert_eq!(records.len, 0, "the rejected record is not recoverable");
+    zerobus_free_record_array(records);
+
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// Two flushes racing after one background failure: exactly one reports it.
+#[test]
+fn concurrent_flushes_report_nowait_failure_once() {
+    const TABLE: &str = "ffi.mux.nowait.race";
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, TABLE, 0);
+    let mux_addr = mux as usize;
+
+    nowait_wrong_type(mux);
+    let barrier = Arc::new(Barrier::new(2));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..2 {
+        let (barrier, tx) = (Arc::clone(&barrier), tx.clone());
+        std::thread::spawn(move || {
+            let mut result = new_result();
+            barrier.wait();
+            let flushed = zerobus_multiplexed_stream_flush(mux_addr as *mut _, &mut result);
+            let _ = tx.send((flushed, take_message(&mut result)));
+        });
+    }
+    let outcomes: Vec<(bool, String)> = (0..2)
+        .map(|_| {
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("a flush did not return within 2 s")
+        })
+        .collect();
+    let failures: Vec<&String> = outcomes
+        .iter()
+        .filter(|(flushed, _)| !flushed)
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "exactly one flush reports it: {outcomes:?}"
+    );
+    assert!(
+        failures[0].contains(RECORD_TYPE_MISMATCH),
+        "{}",
+        failures[0]
+    );
+
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}
+
+/// A lane failure that also fails a waiting `_nowait` keeps the lane's typed
+/// cause: flush reports it as retryable, and the queued record stays
+/// recoverable.
+#[test]
+fn lane_failure_cause_survives_failed_nowait() {
+    const TABLE: &str = "ffi.mux.nowait.lane.down";
+    let (runtime, server, url) = start_server();
+    let gate = Arc::new(MockResponseGate::new());
+    let sent = Arc::new(tokio::sync::Notify::new());
+    runtime.block_on(server.inject_responses(
+        TABLE,
+        vec![
+            MockResponse::CreateStream {
+                stream_id: "lane-0".into(),
+                delay_ms: 0,
+            },
+            MockResponse::GatedError {
+                status: Status::unavailable("lane down"),
+                gate: Arc::clone(&gate),
+                sent: Arc::clone(&sent),
+            },
+        ],
+    ));
+
+    let sdk = create_sdk(&url);
+    let mut options = json_options();
+    options.max_inflight_requests = 1;
+    let mux = create_mux(sdk, TABLE, None, 1, &options);
+    let mut result = new_result();
+
+    let [r0, r1]: [CString; 2] = json_records(0..2).try_into().unwrap();
+    zerobus_multiplexed_stream_ingest_json_record(mux, r0.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record (r0)");
+    wait_for_writes(&runtime, &server, 1);
+    // r1 waits for the only in-flight slot.
+    zerobus_multiplexed_stream_ingest_json_record_nowait(mux, r1.as_ptr(), &mut result);
+    expect_success(&mut result, "ingest_json_record_nowait (r1)");
+
+    // `sent` is signalled with notify_waiters, which keeps no permit, so
+    // register before releasing the gate.
+    runtime.block_on(async {
+        let notified = sent.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), notified)
+            .await
+            .expect("the mock did not send the lane error");
+    });
+
+    let (flushed, retryable, message) =
+        call_within_2s(mux, zerobus_multiplexed_stream_flush, "flush");
+    assert!(!flushed);
+    assert!(
+        retryable,
+        "an Unavailable lane failure is retryable: {message}"
+    );
+    assert!(message.contains("lane down"), "{message}");
+
+    assert_eq!(unacked_json_payloads(mux), sorted_strings([&r0]));
+    zerobus_multiplexed_stream_free(mux);
+    zerobus_sdk_free(sdk);
+}

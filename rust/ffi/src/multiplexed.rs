@@ -2766,4 +2766,40 @@ mod multiplexed_tests {
         call.oauth(None, ptr::null_mut());
         crate::zerobus_sdk_free(sdk);
     }
+
+    #[test]
+    fn pending_ingests_keep_first_error_until_taken() {
+        use databricks_zerobus_ingest_sdk::{GrpcCode, GrpcStatus};
+        let tracker = Arc::new(PendingIngests::default());
+
+        // A retryable typed cause comes back unchanged.
+        let mut ticket = tracker.begin();
+        ticket.error = Some(ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::Unavailable,
+            "x",
+        )));
+        drop(ticket);
+        let error = tracker.take_error(None).expect("the failure is stored");
+        assert!(error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), GrpcCode::Unavailable);
+                assert_eq!(status.message(), "x");
+            }
+            other => panic!("stored error changed variant: {other:?}"),
+        }
+        assert!(tracker.take_error(None).is_none(), "taken once");
+
+        // The first failure wins; the later one is dropped.
+        let (mut first, mut second) = (tracker.begin(), tracker.begin());
+        first.error = Some(ZerobusError::InvalidArgument("A".into()));
+        second.error = Some(ZerobusError::InvalidArgument("B".into()));
+        drop(first);
+        drop(second);
+        assert!(matches!(
+            tracker.take_error(None),
+            Some(ZerobusError::InvalidArgument(message)) if message == "A"
+        ));
+        assert!(tracker.take_error(None).is_none());
+    }
 }
