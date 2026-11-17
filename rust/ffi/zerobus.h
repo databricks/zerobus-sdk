@@ -261,6 +261,9 @@ typedef struct CZerobusMultiplexedStream {
  * `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
  * The callback must not be NULL, and the `user_data` passed with it must
  * stay valid until it runs.
+ * Callbacks run on a runtime worker thread: one that blocks holds that
+ * thread, delaying other stream work scheduled on it, so return quickly and
+ * hand slow work to your own thread.
  */
 typedef void (*CreateMultiplexedStreamAsyncCallback)(struct CZerobusMultiplexedStream *mux,
                                                      const struct CResult *result,

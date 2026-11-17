@@ -1205,6 +1205,9 @@ where
 /// `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
 /// The callback must not be NULL, and the `user_data` passed with it must
 /// stay valid until it runs.
+/// Callbacks run on a runtime worker thread: one that blocks holds that
+/// thread, delaying other stream work scheduled on it, so return quickly and
+/// hand slow work to your own thread.
 pub type CreateMultiplexedStreamAsyncCallback = extern "C" fn(
     mux: *mut CZerobusMultiplexedStream,
     result: *const CResult,
@@ -1472,6 +1475,9 @@ fn spawn_ingest_async(
             let res = payload.ingest(&guard).await;
             drop(ticket);
             drop(guard);
+            // Let the work this task just woke (such as the sub-stream's sender,
+            // parked in this worker's LIFO slot) run before user code, which may block.
+            tokio::task::yield_now().await;
             let (id, result) = match res {
                 Ok(id) => (id, CResult::success()),
                 Err(err) => (INGEST_ERROR, CResult::error(err)),
@@ -1689,6 +1695,9 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
                     .wait_for_message_id(MessageId::from_raw(message_id))
                     .await;
                 drop(guard);
+                // Let the work this task just woke (such as the sub-stream's sender,
+                // parked in this worker's LIFO slot) run before user code, which may block.
+                tokio::task::yield_now().await;
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
                     Err(err) => (false, CResult::error(err)),
@@ -1746,6 +1755,9 @@ pub extern "C" fn zerobus_multiplexed_stream_flush_async(
                 // stored `_nowait` failure for the next flush or close.
                 let res =
                     flushed.and_then(|()| pending.take_error(Some(target)).map_or(Ok(()), Err));
+                // Let the work this task just woke (such as the sub-stream's sender,
+                // parked in this worker's LIFO slot) run before user code, which may block.
+                tokio::task::yield_now().await;
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
                     Err(err) => (false, CResult::error(err)),
@@ -1792,6 +1804,9 @@ pub extern "C" fn zerobus_multiplexed_stream_close_async(
             async move {
                 let closed = stream.write_owned().await.close().await;
                 let res = closed.and_then(|()| pending.take_error(None).map_or(Ok(()), Err));
+                // Let the work this task just woke (such as the sub-stream's sender,
+                // parked in this worker's LIFO slot) run before user code, which may block.
+                tokio::task::yield_now().await;
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
                     Err(err) => (false, CResult::error(err)),
