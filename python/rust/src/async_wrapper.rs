@@ -8,6 +8,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
+    MessageId, MultiplexedStream as RustMultiplexedStream,
     PersistentStream as RustPersistentStream, StreamBuilder, ZerobusSdk as RustSdk,
     ZerobusStream as RustStream,
 };
@@ -17,7 +18,8 @@ use crate::arrow::{ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
 use crate::auth::{HeadersProviderWrapper, IdpCallbackHolder, IdpSupplier};
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    map_error, AckCallback, RecordFormat, StreamConfigurationOptions, TableProperties,
+    SDK_IDENTIFIER_PREFIX,
 };
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
 use crate::stream_settings::{StreamConfig, StreamSettings};
@@ -415,6 +417,150 @@ impl PersistentStream {
 }
 
 // =============================================================================
+// MULTIPLEXED STREAM (ASYNC)
+// =============================================================================
+
+/// Ingest, flush, and wait need only `&MultiplexedStream` and share the read lock;
+/// `close` and the unacked getters need `&mut` and take the write lock, so they wait
+/// for in-progress calls.
+#[pyclass(name = "MultiplexedStream")]
+pub struct MultiplexedStream {
+    inner: Arc<RwLock<RustMultiplexedStream>>,
+    format: RecordFormat,
+}
+
+#[pymethods]
+impl MultiplexedStream {
+    /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
+    /// `close` or `get_unacked_*` call that is in progress counts as closed.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        match self.inner.try_read() {
+            Ok(guard) => guard.is_closed(),
+            Err(_) => true,
+        }
+    }
+
+    /// Ingest a single record into the next sub-stream and return its message ID once
+    /// queued (async)
+    fn ingest_record<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payload = extract_record_payload(payload, self.format)?;
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            let message_id = guard
+                .ingest_record(record_payload)
+                .await
+                .map_err(map_error)?;
+            Ok(message_id.raw())
+        })
+    }
+
+    /// Ingest a batch of records into one sub-stream and return one message ID for the
+    /// whole batch (async). Returns `None` for an empty batch on an open stream; an empty
+    /// batch on a closed or failed stream raises, as the Rust core does.
+    fn ingest_records<'py>(
+        &self,
+        py: Python<'py>,
+        payloads: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            let message_id = guard
+                .ingest_records(record_payloads)
+                .await
+                .map_err(map_error)?;
+            Ok(message_id.map(|id| id.raw()))
+        })
+    }
+
+    /// Wait for the record or batch behind a message ID to be acknowledged (async)
+    fn wait_for_message_id<'py>(
+        &self,
+        py: Python<'py>,
+        message_id: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            guard
+                .wait_for_message_id(MessageId::from_raw(message_id))
+                .await
+                .map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Flush every sub-stream (async)
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let guard = stream.read().await;
+            guard.flush().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Flush and close every sub-stream (async)
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        future_into_py(py, async move {
+            let mut guard = stream.write().await;
+            guard.close().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Get unacknowledged records from every sub-stream. Closes the stream first (async).
+    fn get_unacked_records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            let mut guard = stream.write().await;
+            let records = guard.get_unacked_records().await.map_err(map_error)?;
+
+            Python::attach(|py| {
+                let out: Vec<Py<PyAny>> = records
+                    .map(|r| encoded_record_to_pybytes(py, r))
+                    .collect::<PyResult<_>>()?;
+                Ok(out)
+            })
+        })
+    }
+
+    /// Get unacknowledged batches from every sub-stream. Closes the stream first (async).
+    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+
+        future_into_py(py, async move {
+            let mut guard = stream.write().await;
+            let batches = guard.get_unacked_batches().await.map_err(map_error)?;
+
+            Python::attach(|py| {
+                let out: Vec<Vec<Py<PyAny>>> = batches
+                    .into_iter()
+                    .map(|batch| {
+                        batch
+                            .into_iter()
+                            .map(|r| encoded_record_to_pybytes(py, r))
+                            .collect::<PyResult<_>>()
+                    })
+                    .collect::<PyResult<_>>()?;
+                Ok(out)
+            })
+        })
+    }
+}
+
+// =============================================================================
 // ZEROBUS SDK (ASYNC)
 // =============================================================================
 
@@ -619,6 +765,34 @@ impl ZerobusSdk {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
                 idp_holder: None,
+            })
+        })
+    }
+
+    /// Open every sub-stream of a multiplexed stream configured by `stream_builder()`
+    /// (Beta, async)
+    #[pyo3(signature = (table_properties, settings, stream_count, ack_callback = None))]
+    fn open_multiplexed_stream<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: &TableProperties,
+        settings: &StreamSettings,
+        stream_count: usize,
+        ack_callback: Option<Py<AckCallback>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let sdk = self.inner.clone();
+        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let format = config.format();
+
+        future_into_py(py, async move {
+            let sdk_guard = sdk.read().await;
+            let stream = config
+                .open_multiplexed(&sdk_guard, stream_count, ack_callback)
+                .await
+                .map_err(map_error)?;
+            Ok(MultiplexedStream {
+                inner: Arc::new(RwLock::new(stream)),
+                format,
             })
         })
     }

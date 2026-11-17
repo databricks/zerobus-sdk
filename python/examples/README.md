@@ -45,6 +45,7 @@ python examples/sync_example_json.py      # JSON
 python examples/sync_example_avro.py      # Avro
 python examples/sync_example_arrow.py     # Arrow Flight
 python examples/sync_example_persistent.py # Persistent stream (set ZEROBUS_PERSISTENT_STREAM_ID to resume)
+python examples/sync_example_multiplexed.py # Multiplexed stream (Beta), protobuf
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
@@ -52,6 +53,7 @@ python examples/async_example_json.py     # JSON
 python examples/async_example_avro.py     # Avro
 python examples/async_example_arrow.py    # Arrow Flight
 python examples/async_example_persistent.py # Persistent stream (set ZEROBUS_PERSISTENT_STREAM_ID to resume)
+python examples/async_example_multiplexed.py # Multiplexed stream (Beta), protobuf
 ```
 
 ## Examples Overview
@@ -101,6 +103,14 @@ Creates a persistent (Eos) stream, or resumes one, and ingests JSON records. On 
 run, leave `ZEROBUS_PERSISTENT_STREAM_ID` unset. The example prints the new `stream_id`. Save
 it, then set `ZEROBUS_PERSISTENT_STREAM_ID` to that value on a later run to resume the same
 stream. Delivery into Delta stays exactly-once.
+
+#### Multiplexed stream (Beta)
+**Files:** `sync_example_multiplexed.py`, `async_example_multiplexed.py`
+
+Opens a multiplexed stream of 4 sub-streams and ingests protobuf records round-robin across
+them, one at a time and in batches, then calls `flush()` once per phase. Each ingest call
+returns an opaque message ID instead of an offset; message IDs are not ordered, so the
+examples confirm durability with `flush()`.
 
 #### JSON
 **Files:** `sync_example_json.py`, `async_example_json.py`

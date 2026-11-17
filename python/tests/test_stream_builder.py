@@ -1,13 +1,16 @@
 """
-Tests for ``ZerobusSdk.stream_builder()``.
+Tests for ``ZerobusSdk.stream_builder()``: ordinary streams and, after ``multiplexed(n)``,
+multiplexed streams (Beta).
 
-These tests need only the built extension (no network, no credentials). Ingestion against a
-server is covered by the Rust core tests.
+These tests need only the built extension (no network, no credentials). Ingestion,
+acknowledgments, and recovery against a server are covered by the Rust core tests and by
+``test_multiplexed_integration.py``.
 """
 
 import asyncio
 import inspect
 import json
+import re
 
 import pytest
 
@@ -61,20 +64,37 @@ def _select_format(builder, record_format):
     return builder.avro(AVRO_SCHEMA)
 
 
+@pytest.fixture(params=["ordinary", "multiplexed"])
+def kind(request):
+    return request.param
+
+
+def _terminal(builder, kind):
+    """The builder whose build() opens the stream: the stream builder, or its multiplexed step."""
+    return builder if kind == "ordinary" else builder.multiplexed(2)
+
+
 class TestBuilderValidation:
-    def test_build_requires_table(self, sdk, mode):
-        builder = sdk.stream_builder().oauth("id", "secret").json()
+    def test_build_requires_table(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().oauth("id", "secret").json(), kind)
         with pytest.raises(ValueError, match=r"table is required: call table\(...\) before build\(\)"):
             _open(mode, builder.build)
 
-    def test_build_requires_auth(self, sdk, mode):
-        builder = sdk.stream_builder().table("c.s.t").json()
+    def test_build_requires_auth(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().table("c.s.t").json(), kind)
         with pytest.raises(ValueError, match="authentication is required"):
             _open(mode, builder.build)
 
-    def test_build_requires_format(self, sdk, mode):
-        builder = sdk.stream_builder().table("c.s.t").oauth("id", "secret")
-        with pytest.raises(ValueError, match=r"record format is required: call json\(\), compiled_proto"):
+    def test_build_requires_both_oauth_credentials(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", None).json(), kind)
+        with pytest.raises(ValueError, match="oauth requires both client_id and client_secret"):
+            _open(mode, builder.build)
+
+    def test_build_requires_format(self, sdk, mode, kind):
+        builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", "secret"), kind)
+        with pytest.raises(
+            ValueError, match=re.escape("record format is required: call json(), compiled_proto(...), or avro(...)")
+        ):
             _open(mode, builder.build)
 
     def test_last_auth_setter_wins(self, sdk):
@@ -104,7 +124,7 @@ class TestBuilderValidation:
 
     @pytest.mark.parametrize("schema", ["", "   ", None, 7])
     def test_avro_rejects_empty_schema(self, sdk, schema):
-        with pytest.raises(ValueError, match="schema_json"):
+        with pytest.raises(ValueError, match=re.escape("schema_json must be a non-empty string")):
             sdk.stream_builder().avro(schema)
 
     @pytest.mark.parametrize(
@@ -124,6 +144,11 @@ class TestBuilderValidation:
     def test_numeric_setters_reject_negative(self, sdk, setter):
         with pytest.raises(ValueError, match=setter):
             getattr(sdk.stream_builder(), setter)(-1)
+
+    def test_stream_paused_max_wait_time_rejects_values_beyond_native_range(self, sdk):
+        # The other numeric setters are shared with the persistent builder and tested there.
+        with pytest.raises(ValueError, match="stream_paused_max_wait_time_ms"):
+            sdk.stream_builder().stream_paused_max_wait_time_ms(2**70)
 
     @pytest.mark.parametrize("setter", ["callback_max_wait_time_ms", "stream_paused_max_wait_time_ms"])
     def test_optional_waits_accept_none(self, sdk, setter):
@@ -150,6 +175,62 @@ class TestBuilderValidation:
             .stream_paused_max_wait_time_ms(None)
         )
         assert chained is builder
+
+
+class TestMultiplexedStep:
+    @pytest.mark.parametrize("count", [0, -1, 65, True, "4", 2.0])
+    def test_rejects_out_of_range_stream_count(self, sdk, count):
+        with pytest.raises(ValueError, match=re.escape("stream_count must be an integer between 1 and 64")):
+            sdk.stream_builder().multiplexed(count)
+
+    @pytest.mark.parametrize("count", [1, 64])
+    def test_accepts_bounds(self, sdk, count):
+        assert sdk.stream_builder().multiplexed(count)._stream_count == count
+
+    def test_returns_a_builder_with_only_ack_callback_and_build(self, sdk, mode):
+        mux = sdk.stream_builder().multiplexed(2)
+        assert isinstance(mux, (sync if mode == "sync" else aio).MultiplexedStreamBuilder)
+        public = {name for name in dir(mux) if not name.startswith("_")}
+        assert public == {"ack_callback", "build"}
+        assert mux.ack_callback(_Ack()) is mux
+
+    def test_captures_the_configuration_when_called(self, sdk):
+        # Like the Rust builder, which multiplexed(n) consumes: later changes to the stream
+        # builder do not reach a multiplexed step that was already selected.
+        builder = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().recovery_retries(1)
+        mux = builder.multiplexed(2)
+        builder.table("other.s.t").recovery_retries(9).headers_provider(_Headers())
+        assert mux._base._table_name == "c.s.t"
+        assert mux._base._settings["recovery_retries"] == 1
+        assert mux._base._client_id == "id"
+
+    def test_rejects_the_ordinary_ack_callback(self, sdk, mode):
+        mux = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().ack_callback(_Ack()).multiplexed(2)
+        with pytest.raises(ValueError, match=r"use multiplexed\(n\)\.ack_callback"):
+            _open(mode, mux.build)
+
+    def test_accepts_an_unset_ordinary_ack_callback(self, sdk):
+        # ack_callback(None) sets no callback, so it doesn't make a multiplexed build invalid.
+        mux = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().ack_callback(None).multiplexed(2)
+        _, _, stream_count, ack_callback = mux._native_args()
+        assert stream_count == 2 and ack_callback is None
+
+
+class TestAckCallbackType:
+    """A callback that is not an ``AckCallback`` is rejected before anything is opened."""
+
+    def test_ordinary_stream_rejects_a_plain_function(self, mode):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+        builder.ack_callback(lambda offset: None)
+        # A TypeError, not the ZerobusException of a failed connection.
+        with pytest.raises(TypeError):
+            _open(mode, builder.build)
+
+    def test_multiplexed_stream_rejects_a_plain_function(self, mode):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+        mux = builder.multiplexed(2).ack_callback(lambda message_id: None)
+        with pytest.raises(TypeError):
+            _open(mode, mux.build)
 
 
 class TestValidConfiguration:
@@ -184,6 +265,30 @@ class TestValidConfiguration:
         # A rejected setting fails as a non-retriable configuration error instead.
         assert not isinstance(info.value, core.NonRetriableException), info.value
 
+    @pytest.mark.parametrize("record_format", ["json", "proto", "avro"])
+    def test_multiplexed_stream_reaches_network(self, mode, record_format):
+        # One sub-stream opens without the jittered start delay.
+        builder = _select_format(self._configured(_unreachable_builder(mode)), record_format)
+        mux = builder.multiplexed(1).ack_callback(_Ack())
+        with pytest.raises(core.ZerobusException) as info:
+            _open(mode, mux.build)
+        assert not isinstance(info.value, core.NonRetriableException), info.value
+
+    def test_stream_count_and_inflight_budget_reach_the_core(self, mode):
+        # The Rust core divides max_inflight_requests across sub-streams and rejects a budget
+        # below the stream count before opening anything, so its message shows both values
+        # arrived intact.
+        mux = (
+            _unreachable_builder(mode)
+            .table("c.s.t")
+            .headers_provider(_Headers())
+            .json()
+            .max_inflight_requests(2)
+            .multiplexed(4)
+        )
+        with pytest.raises(core.NonRetriableException, match=r"max_inflight_requests \(2\) .* stream_count \(4\)"):
+            _open(mode, mux.build)
+
 
 class TestNativeValidation:
     """Checks the native layer enforces the same rules if called directly."""
@@ -198,13 +303,75 @@ class TestNativeValidation:
         ):
             with pytest.raises(ValueError, match="exactly one authentication method"):
                 native.open_stream(props, settings)
+            with pytest.raises(ValueError, match="exactly one authentication method"):
+                native.open_multiplexed_stream(props, settings, 2)
+
+    def test_async_requires_exactly_one_auth_method(self):
+        # The async open calls check the settings before they return an awaitable.
+        props = core.TableProperties("c.s.t")
+
+        async def run():
+            native = core.aio.ZerobusSdk(*SDK_ARGS)
+            for settings in (
+                core.StreamSettings(),
+                core.StreamSettings(client_id="id"),
+                core.StreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
+            ):
+                with pytest.raises(ValueError, match="exactly one authentication method"):
+                    native.open_stream(props, settings)
+                with pytest.raises(ValueError, match="exactly one authentication method"):
+                    native.open_multiplexed_stream(props, settings, 2)
+
+        asyncio.run(run())
+
+    def test_rejects_the_ordinary_ack_callback_on_a_multiplexed_stream(self):
+        # The Python builder catches this first; the core rejects it too.
+        props = core.TableProperties("c.s.t")
+        native = core.sync.ZerobusSdk(*UNREACHABLE)
+        settings = core.StreamSettings(headers_provider=_Headers(), ack_callback=_Ack())
+        with pytest.raises(core.NonRetriableException, match="ack_callback is only valid for ordinary streams"):
+            native.open_multiplexed_stream(props, settings, 2)
 
 
 class TestPublicSurface:
     def test_exports(self, mode):
         module = sync if mode == "sync" else aio
-        assert module.StreamBuilder.__name__ == "StreamBuilder"
-        assert "StreamBuilder" in module.__all__
+        for name in ("StreamBuilder", "MultiplexedStreamBuilder", "MultiplexedStream"):
+            assert getattr(module, name).__name__ == name
+            assert name in module.__all__
+        # Both modes wrap the native class, which handles Avro encoding in Python.
+        assert module.MultiplexedStream is not (core.sync if mode == "sync" else core.aio).MultiplexedStream
 
-    def test_async_build_is_a_coroutine_function(self):
+    def test_async_methods_are_coroutine_functions(self):
+        for name in (
+            "ingest_record",
+            "ingest_records",
+            "wait_for_message_id",
+            "flush",
+            "close",
+            "get_unacked_records",
+            "get_unacked_batches",
+        ):
+            assert inspect.iscoroutinefunction(getattr(aio.MultiplexedStream, name)), name
         assert inspect.iscoroutinefunction(aio.StreamBuilder.build)
+        assert inspect.iscoroutinefunction(aio.MultiplexedStreamBuilder.build)
+
+    def test_multiplexed_stream_exposes_its_api(self, mode):
+        cls = (sync if mode == "sync" else aio).MultiplexedStream
+        for name in (
+            "is_closed",
+            "ingest_record",
+            "ingest_records",
+            "wait_for_message_id",
+            "flush",
+            "close",
+            "get_unacked_records",
+            "get_unacked_batches",
+        ):
+            assert hasattr(cls, name), name
+
+    def test_multiplexed_stream_has_no_offset_methods(self, mode):
+        # Message IDs are not offsets; the offset-named methods would suggest ordering.
+        cls = (sync if mode == "sync" else aio).MultiplexedStream
+        for name in ("ingest_record_offset", "ingest_records_offset", "wait_for_offset", "ingest_record_nowait"):
+            assert not hasattr(cls, name), name
