@@ -292,9 +292,10 @@ class MultiplexedStream:
     ``wait_for_message_id()`` on this stream; do not compare them or use them with another
     stream.
 
-    Once a sub-stream fails, ``is_closed`` is ``True`` and every call raises that
-    sub-stream's error again, which may be a retriable ``ZerobusException``. Retrying on this
-    stream does not help: recover the unacknowledged records with ``get_unacked_records()`` or
+    Once a call reports a sub-stream failure, ``is_closed`` is ``True`` and every later
+    ingest, ``flush()``, and ``close()`` raises that error again, which may be a retriable
+    ``ZerobusException``; ``wait_for_message_id()`` still reports only its own sub-stream.
+    Retrying on this stream does not help: recover the unacknowledged records with ``get_unacked_records()`` or
     ``get_unacked_batches()`` and ingest them into a new stream. Handles Avro encoding
     transparently on an Avro stream.
     """
@@ -335,7 +336,8 @@ class MultiplexedStream:
         """Queue a batch on one sub-stream and return one message ID for it.
 
         Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
-        raises like any other.
+        raises like any other. Waits for a full sub-stream as ``ingest_record()`` does, for at
+        most 30 seconds.
         """
         return self._inner.ingest_records(self._encode_payloads(payloads))
 

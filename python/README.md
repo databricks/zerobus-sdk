@@ -562,9 +562,10 @@ stream.close()
   is rejected for multiplexed streams.
 - Opening is atomic: with more than one sub-stream, each opens after a random delay of up to
   one second, and if any fails, the others are closed and `build()` raises.
-- After a sub-stream fails, `is_closed` is `True` and every call raises that sub-stream's
-  error again, which may be a retriable `ZerobusException`; retrying on the same stream does
-  not help. `get_unacked_records()` and `get_unacked_batches()` close the stream if needed and
+- Once a call reports a sub-stream failure, `is_closed` is `True` and every later ingest,
+  `flush()`, and `close()` raises that error again, which may be a retriable
+  `ZerobusException`; retrying on the same stream does not help. `wait_for_message_id()`
+  still reports only its own sub-stream. `get_unacked_records()` and `get_unacked_batches()` close the stream if needed and
   return the records that were never acknowledged, across every sub-stream, as bytes. Ingest
   them into a new stream; in JSON mode, decode them first (see **Decoding unacked records**
   under [Handling Stream Failures](#handling-stream-failures)). There is no
