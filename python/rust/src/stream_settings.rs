@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
     AckCallback as RustAckCallback, HeadersProvider as RustHeadersProvider, MessageId,
@@ -20,8 +21,6 @@ use databricks_zerobus_ingest_sdk::{
 };
 
 use crate::auth::HeadersProviderWrapper;
-use tokio::sync::RwLock;
-
 use crate::common::{map_error, AckCallback, AckCallbackWrapper, RecordFormat, TableProperties};
 
 /// Settings collected by the Python stream builder.
