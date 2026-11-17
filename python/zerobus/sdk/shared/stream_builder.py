@@ -141,7 +141,7 @@ class _MultiplexedStreamBuilderBase:
 
     def _native_args(self):
         """Validate the settings and return the arguments of the native open call."""
-        if "ack_callback" in self._base._settings:
+        if self._base._settings.get("ack_callback") is not None:
             raise ValueError(
                 "ack_callback() on stream_builder() is only valid for ordinary streams; "
                 "use multiplexed(n).ack_callback(...) for multiplexed streams"
