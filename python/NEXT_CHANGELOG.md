@@ -7,8 +7,8 @@
 ### New Features and Improvements
 
 - Added `ZerobusSdk.stream_builder()` to the sync and async SDKs, mirroring the Rust SDK's
-  `stream_builder()`. Set the table, authentication (OAuth or a custom headers provider),
-  record format (`json()`, `compiled_proto(...)`, or `avro(...)`), and stream settings, then
+  `stream_builder()`. Set the table, authentication (OAuth, a custom headers provider, or
+  external-IdP federation with `federated_auth(token)`), record format (`json()`, `compiled_proto(...)`, or `avro(...)`), and stream settings, then
   call `build()` for a `ZerobusStream`. `create_stream()` is unchanged.
 - Added multiplexed streams (Beta). Call `multiplexed(n)` (1 to 64) on the stream builder,
   optionally `ack_callback(...)`, then `build()`. A multiplexed stream opens `n` sub-streams

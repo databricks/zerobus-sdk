@@ -522,8 +522,8 @@ and distributes records round-robin across them. Records keep their order within
 sub-stream, but there is no order across sub-streams.
 
 Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
-Multiplexed streams support JSON, protobuf, and Avro records, with OAuth or a custom headers
-provider. For JSON, first migrate to protobuf and measure again before multiplexing.
+Multiplexed streams support JSON, protobuf, and Avro records, with OAuth, a custom headers
+provider, or external-IdP federation (`federated_auth(token)`). For JSON, first migrate to protobuf and measure again before multiplexing.
 
 ```python
 stream = (
