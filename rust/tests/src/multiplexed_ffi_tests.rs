@@ -172,10 +172,18 @@ fn create_sdk_with_uc(server_url: &str, uc_url: &str) -> *mut CZerobusSdk {
     sdk
 }
 
-/// JSON records, no recovery, so an injected failure stays terminal.
+/// JSON records with recovery on. Without recovery, the core can report the
+/// server's end-of-stream during close as close's own error, so tests that
+/// expect a clean close keep recovery on.
 fn json_options() -> CStreamConfigurationOptions {
     let mut options = zerobus_get_default_config();
     options.record_type = 2;
+    options
+}
+
+/// JSON records without recovery, so an injected lane failure stays terminal.
+fn json_options_terminal() -> CStreamConfigurationOptions {
+    let mut options = json_options();
     options.recovery = false;
     options
 }
@@ -500,8 +508,7 @@ fn proto_ingest_flush_and_ack_callback() {
     runtime.block_on(server.inject_responses(TABLE, responses));
 
     let ack_log = Box::new(AckLog::default());
-    let mut options = zerobus_get_default_config();
-    options.recovery = false;
+    let options = zerobus_get_default_config();
 
     let sdk = create_sdk(&url);
     let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
@@ -789,7 +796,7 @@ fn partial_open_failure_frees_shared_headers_provider_once() {
     let ack = AckOwner::leaked();
 
     let sdk = create_sdk(&url);
-    let options = json_options();
+    let options = json_options_terminal();
     let (mux, mut result) = create_mux_raw_with_mux_ack(
         sdk,
         TABLE,
@@ -1181,7 +1188,7 @@ fn sub_stream_failure_closes_mux_and_keeps_records_recoverable() {
     ));
 
     let sdk = create_sdk(&url);
-    let mux = create_mux(sdk, TABLE, None, 1, &json_options());
+    let mux = create_mux(sdk, TABLE, None, 1, &json_options_terminal());
     let mut result = new_result();
 
     let record = CString::new(r#"{"id": 0}"#).unwrap();
@@ -2287,7 +2294,7 @@ fn lane_failure_cause_survives_failed_nowait() {
     ));
 
     let sdk = create_sdk(&url);
-    let mut options = json_options();
+    let mut options = json_options_terminal();
     options.max_inflight_requests = 1;
     let mux = create_mux(sdk, TABLE, None, 1, &options);
     let mut result = new_result();
@@ -3184,7 +3191,7 @@ fn async_flush_close_and_unacked_report_lane_failure() {
         ],
     ));
     let sdk = create_sdk(&url);
-    let mux = create_mux(sdk, TABLE, None, 1, &json_options());
+    let mux = create_mux(sdk, TABLE, None, 1, &json_options_terminal());
     let record = CString::new(r#"{"id": 0}"#).unwrap();
     let mut result = new_result();
     zerobus_multiplexed_stream_ingest_json_record(mux, record.as_ptr(), &mut result);
@@ -3729,7 +3736,18 @@ fn async_creates_own_headers_and_ack_user_data() {
         AckOwner::leaked(),
         AsyncSink::leaked(),
     );
-    assert!(headers_create_async(sdk, "ffi.mux.async.own", 2, provider, ack, sink).0);
+    assert!(
+        headers_create_async(
+            sdk,
+            "ffi.mux.async.own",
+            2,
+            &json_options(),
+            provider,
+            ack,
+            sink
+        )
+        .0
+    );
     let created = sink.one("create callback");
     assert!(created.success && created.mux != 0, "{}", created.message);
     let mux = created.mux as *mut CZerobusMultiplexedStream;
@@ -3775,9 +3793,9 @@ fn async_creates_own_headers_and_ack_user_data() {
             AsyncSink::leaked(),
         );
         let returned = if use_oauth {
-            oauth_create_async(sdk, table, 2, ack, sink).0
+            oauth_create_async(sdk, table, 2, &json_options_terminal(), ack, sink).0
         } else {
-            headers_create_async(sdk, table, 2, provider, ack, sink).0
+            headers_create_async(sdk, table, 2, &json_options_terminal(), provider, ack, sink).0
         };
         assert!(returned, "{table}");
         let created = sink.one(&format!("{table} create callback"));
@@ -3804,6 +3822,7 @@ fn headers_create_async(
     sdk: *mut CZerobusSdk,
     table: &str,
     stream_count: usize,
+    options: &CStreamConfigurationOptions,
     provider: &'static ProviderLog,
     ack: &'static AckOwner,
     sink: &'static AsyncSink,
@@ -3820,7 +3839,7 @@ fn headers_create_async(
         provider.user_data(),
         Some(count_free),
         stream_count,
-        &json_options(),
+        options,
         ack.on_ack,
         ack.on_error,
         ack.user_data,
@@ -3836,6 +3855,7 @@ fn oauth_create_async(
     sdk: *mut CZerobusSdk,
     table: &str,
     stream_count: usize,
+    options: &CStreamConfigurationOptions,
     ack: &'static AckOwner,
     sink: &'static AsyncSink,
 ) -> (bool, bool, String) {
@@ -3851,7 +3871,7 @@ fn oauth_create_async(
         id.as_ptr(),
         secret.as_ptr(),
         stream_count,
-        &json_options(),
+        options,
         ack.on_ack,
         ack.on_error,
         ack.user_data,
@@ -3956,7 +3976,12 @@ fn async_calls_on_closed_mux_report_like_blocking_calls() {
                 ],
             ));
         }
-        let mut options = json_options();
+        // The lane failure must stay terminal; the plain close needs recovery on.
+        let mut options = if lane_failure {
+            json_options_terminal()
+        } else {
+            json_options()
+        };
         options.flush_timeout_ms = 500;
         let sdk = create_sdk(&url);
         let mux = create_mux(sdk, table, None, 1, &options);
