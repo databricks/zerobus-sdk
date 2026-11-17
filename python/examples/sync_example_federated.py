@@ -16,6 +16,11 @@ Two federation modes, selected by `databricks_client_id`:
 
 Record Type Mode: JSON (omitting a descriptor from TableProperties selects JSON).
 
+The same FederatedToken works with `create_stream(auth=...)` and with
+`stream_builder().federated_auth(...)`. This example uses both: an ordinary stream
+through create_stream, then a multiplexed stream (Beta) through the stream builder.
+Reusing one FederatedToken shares its cached Databricks token.
+
 Note: the existing client_id/client_secret and headers_provider authentication
 paths are unchanged; `auth=FederatedToken(...)` is a new, opt-in argument.
 """
@@ -51,6 +56,7 @@ ENTRA_SCOPE = os.getenv("ENTRA_SCOPE", "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.de
 DATABRICKS_SP_CLIENT_ID = os.getenv("DATABRICKS_SP_CLIENT_ID") or None
 
 NUM_RECORDS = 100
+STREAM_COUNT = 4
 
 
 def get_entra_token():
@@ -115,6 +121,22 @@ def main():
             stream.ingest_record_offset(json.dumps(create_sample_json_record(i)))
         stream.flush()
         logger.info("Ingested and acknowledged %d records", NUM_RECORDS)
+    finally:
+        stream.close()
+
+    ingest_with_stream_builder(sdk, auth)
+
+
+def ingest_with_stream_builder(sdk, auth):
+    """Federate through stream_builder(), here for a multiplexed stream (Beta)."""
+    logger.info("Opening a multiplexed stream of %d sub-streams with the same token", STREAM_COUNT)
+    stream = sdk.stream_builder().table(TABLE_NAME).federated_auth(auth).json().multiplexed(STREAM_COUNT).build()
+    try:
+        # Records go round-robin across sub-streams. Queue them in a loop, then flush once.
+        for i in range(NUM_RECORDS):
+            stream.ingest_record(json.dumps(create_sample_json_record(i)))
+        stream.flush()
+        logger.info("Ingested and acknowledged %d records across %d sub-streams", NUM_RECORDS, STREAM_COUNT)
     finally:
         stream.close()
 

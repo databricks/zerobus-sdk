@@ -470,10 +470,30 @@ pub struct MultiplexedStream {
     inner: Arc<RwLock<RustMultiplexedStream>>,
     runtime: Arc<Runtime>,
     format: RecordFormat,
+    /// For a federated stream, a strong reference to the IdP callback holder (the
+    /// native supplier holds only a weak one). Exposed to the cyclic GC via
+    /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
+    /// owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    idp_holder: Option<Py<IdpCallbackHolder>>,
 }
 
 #[pymethods]
 impl MultiplexedStream {
+    /// Let the cyclic GC see the strong reference to the IdP callback holder, so a
+    /// self-referential owner/stream/callback cycle can be collected.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(holder) = &self.idp_holder {
+            visit.call(holder)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference when the GC breaks a cycle (the native supplier's
+    /// weak reference then resolves to `None`; the stream is being torn down).
+    fn __clear__(&mut self) {
+        self.idp_holder = None;
+    }
+
     /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
     /// `close` or `get_unacked_*` call that is in progress counts as closed.
     #[getter]
@@ -705,14 +725,27 @@ impl ZerobusSdk {
         })
     }
 
-    /// Open an ordinary stream configured by `stream_builder()`
+    /// Open an ordinary stream configured by `stream_builder()`. `idp_supplier` and
+    /// `databricks_client_id` carry `federated_auth()`, as in `create_stream_federated`;
+    /// the stream keeps the supplier's callback holder.
+    #[pyo3(signature = (table_properties, settings, idp_supplier = None, databricks_client_id = None))]
     fn open_stream(
         &self,
         py: Python,
         table_properties: &TableProperties,
         settings: &StreamSettings,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<ZerobusStream> {
-        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let idp_supplier = idp_supplier.as_deref();
+        let config = StreamConfig::resolve(
+            py,
+            settings,
+            table_properties,
+            idp_supplier,
+            databricks_client_id,
+        )?;
+        let idp_holder = stream_settings::idp_holder(py, idp_supplier)?;
         let format = config.format();
         let sdk = self.inner.clone();
         let runtime = self.runtime.clone();
@@ -728,12 +761,21 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(stream)),
             runtime: self.runtime.clone(),
             format,
-            idp_holder: None,
+            idp_holder,
         })
     }
 
-    /// Open every sub-stream of a multiplexed stream configured by `stream_builder()` (Beta)
-    #[pyo3(signature = (table_properties, settings, stream_count, ack_callback = None))]
+    /// Open every sub-stream of a multiplexed stream configured by `stream_builder()`
+    /// (Beta). The federated arguments are as in `open_stream`.
+    #[pyo3(signature = (
+        table_properties,
+        settings,
+        stream_count,
+        ack_callback = None,
+        idp_supplier = None,
+        databricks_client_id = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn open_multiplexed_stream(
         &self,
         py: Python,
@@ -741,8 +783,18 @@ impl ZerobusSdk {
         settings: &StreamSettings,
         stream_count: usize,
         ack_callback: Option<Py<AckCallback>>,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<MultiplexedStream> {
-        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let idp_supplier = idp_supplier.as_deref();
+        let config = StreamConfig::resolve(
+            py,
+            settings,
+            table_properties,
+            idp_supplier,
+            databricks_client_id,
+        )?;
+        let idp_holder = stream_settings::idp_holder(py, idp_supplier)?;
         let format = config.format();
         let sdk = self.inner.clone();
         let runtime = self.runtime.clone();
@@ -761,12 +813,22 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(stream)),
             runtime: self.runtime.clone(),
             format,
+            idp_holder,
         })
     }
 
     /// Check a `stream_builder()` configuration without opening anything. With
-    /// `stream_count`, checks it as a multiplexed stream (Beta).
-    #[pyo3(signature = (table_properties, settings, stream_count = None, ack_callback = None))]
+    /// `stream_count`, checks it as a multiplexed stream (Beta). The federated arguments
+    /// are as in `open_stream`; the core never calls the supplier here.
+    #[pyo3(signature = (
+        table_properties,
+        settings,
+        stream_count = None,
+        ack_callback = None,
+        idp_supplier = None,
+        databricks_client_id = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn validate_stream(
         &self,
         py: Python,
@@ -774,6 +836,8 @@ impl ZerobusSdk {
         settings: &StreamSettings,
         stream_count: Option<usize>,
         ack_callback: Option<Py<AckCallback>>,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<()> {
         stream_settings::validate_stream(
             py,
@@ -782,6 +846,8 @@ impl ZerobusSdk {
             settings,
             stream_count,
             ack_callback,
+            idp_supplier.as_deref(),
+            databricks_client_id,
         )
     }
 

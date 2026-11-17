@@ -378,7 +378,9 @@ cached IdP token rather than doing a blocking network call on each invocation.
 > (the SDK awaits it without holding the GIL), or keep a sync callback fast by
 > returning an already-cached token.
 
-See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
+The stream builder takes the same token through `federated_auth(token)`; see
+[Stream Builder](#stream-builder). See
+[`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
 
 ### Custom headers provider
 
@@ -488,8 +490,23 @@ is a coroutine. The builder has these setters: `table`, `oauth`, `headers_provid
 `compiled_proto`, `avro`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
 `recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
 `max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
-`callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`. Unset values use the SDK
-defaults. For external-IdP federation, use `create_stream(auth=...)`.
+`callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`, plus `federated_auth`
+(below). Unset values use the SDK defaults.
+
+For external-IdP federation, pass the same `FederatedToken` that `create_stream(auth=...)`
+takes to `federated_auth(token)`, in place of `oauth()` or `headers_provider()`. It works for
+ordinary and multiplexed streams; see
+[External-IdP federation](#external-idp-federation-eg-entra-id) for the token itself:
+
+```python
+stream = (
+    sdk.stream_builder()
+    .table("catalog.schema.events")
+    .federated_auth(FederatedToken(idp_token_supplier=get_idp_token))
+    .json()
+    .build()
+)
+```
 
 `validate()` checks the configuration without opening a stream, as in the Rust SDK. It raises
 the same errors `build()` raises before connecting, including the core's own checks, and is

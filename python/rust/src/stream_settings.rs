@@ -16,11 +16,12 @@ use pyo3::prelude::*;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, HeadersProvider as RustHeadersProvider, MessageId,
-    MultiplexedStream, StreamBuilder, ZerobusResult, ZerobusSdk as RustSdk, ZerobusStream,
+    AckCallback as RustAckCallback, HeadersProvider as RustHeadersProvider, IdpTokenSupplier,
+    MessageId, MultiplexedStream, StreamBuilder, ZerobusResult, ZerobusSdk as RustSdk,
+    ZerobusStream,
 };
 
-use crate::auth::HeadersProviderWrapper;
+use crate::auth::{HeadersProviderWrapper, IdpCallbackHolder, IdpSupplier};
 use crate::common::{map_error, AckCallback, AckCallbackWrapper, RecordFormat, TableProperties};
 
 /// Settings collected by the Python stream builder.
@@ -129,6 +130,12 @@ enum StreamAuth {
         client_secret: String,
     },
     Headers(Arc<dyn RustHeadersProvider>),
+    /// External-IdP federation. `databricks_client_id` is `Some` for workload identity
+    /// federation and `None` for account-level federation.
+    Federated {
+        supplier: IdpTokenSupplier,
+        databricks_client_id: Option<String>,
+    },
 }
 
 /// `StreamSettings` resolved into owned Rust values, so the async work does not need the GIL
@@ -152,29 +159,45 @@ pub(crate) struct StreamConfig {
 
 impl StreamConfig {
     /// Validate the settings and the table properties and resolve them for use off the GIL.
+    ///
+    /// `idp_supplier` and `databricks_client_id` carry `federated_auth()`. They are separate
+    /// arguments rather than `StreamSettings` fields, as in `create_stream_federated`, so the
+    /// supplier handle stays a short-lived local of the Python call that built it.
     pub(crate) fn resolve(
         py: Python<'_>,
         settings: &StreamSettings,
         table_properties: &TableProperties,
+        idp_supplier: Option<&IdpSupplier>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<Self> {
         let format = table_properties.resolve_format(Default::default())?;
 
+        if idp_supplier.is_none() && databricks_client_id.is_some() {
+            return Err(PyValueError::new_err(
+                "databricks_client_id is only valid with idp_supplier",
+            ));
+        }
         let auth = match (
             &settings.client_id,
             &settings.client_secret,
             &settings.headers_provider,
+            idp_supplier,
         ) {
-            (Some(client_id), Some(client_secret), None) => StreamAuth::OAuth {
+            (Some(client_id), Some(client_secret), None, None) => StreamAuth::OAuth {
                 client_id: client_id.clone(),
                 client_secret: client_secret.clone(),
             },
-            (None, None, Some(provider)) => StreamAuth::Headers(Arc::new(
+            (None, None, Some(provider), None) => StreamAuth::Headers(Arc::new(
                 HeadersProviderWrapper::new(provider.clone_ref(py)),
             )),
+            (None, None, None, Some(supplier)) => StreamAuth::Federated {
+                supplier: supplier.supplier.clone(),
+                databricks_client_id,
+            },
             _ => {
                 return Err(PyValueError::new_err(
-                    "set exactly one authentication method: oauth(client_id, client_secret) \
-                     or headers_provider(provider)",
+                    "set exactly one authentication method: oauth(client_id, client_secret), \
+                     headers_provider(provider), or federated_auth(token)",
                 ))
             }
         };
@@ -217,6 +240,10 @@ impl StreamConfig {
                 client_secret,
             } => b.oauth(client_id, client_secret),
             StreamAuth::Headers(provider) => b.headers_provider(provider),
+            StreamAuth::Federated {
+                supplier,
+                databricks_client_id,
+            } => b.federated_auth(supplier, databricks_client_id),
         };
         b = match (
             self.table_properties.descriptor_proto.clone(),
@@ -321,6 +348,7 @@ impl StreamConfig {
 /// `validate_stream` for the sync and async SDKs: resolve the settings, then run the Rust
 /// core's checks. Synchronous in both, as Rust's `validate()` is, so it never needs a
 /// runtime. Nothing takes the SDK's write lock, so `try_read` does not fail in practice.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_stream(
     py: Python<'_>,
     sdk: &RwLock<RustSdk>,
@@ -328,12 +356,42 @@ pub(crate) fn validate_stream(
     settings: &StreamSettings,
     stream_count: Option<usize>,
     ack_callback: Option<Py<AckCallback>>,
+    idp_supplier: Option<&IdpSupplier>,
+    databricks_client_id: Option<String>,
 ) -> PyResult<()> {
-    let config = StreamConfig::resolve(py, settings, table_properties)?;
+    let config = StreamConfig::resolve(
+        py,
+        settings,
+        table_properties,
+        idp_supplier,
+        databricks_client_id,
+    )?;
     let sdk = sdk
         .try_read()
         .map_err(|_| PyRuntimeError::new_err("the SDK is in use; try again"))?;
     config
         .validate(&sdk, stream_count, ack_callback)
         .map_err(map_error)
+}
+
+/// The strong reference to a `federated_auth()` supplier's callback holder, for the
+/// returned stream to keep (the native supplier holds only a weak one), as
+/// `create_stream_federated` does. `None` without federation.
+pub(crate) fn idp_holder(
+    py: Python<'_>,
+    idp_supplier: Option<&IdpSupplier>,
+) -> PyResult<Option<Py<IdpCallbackHolder>>> {
+    idp_supplier
+        .map(|supplier| {
+            supplier
+                .holder
+                .as_ref()
+                .map(|holder| holder.clone_ref(py))
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "federated IdP supplier handle has already been cleared",
+                    )
+                })
+        })
+        .transpose()
 }

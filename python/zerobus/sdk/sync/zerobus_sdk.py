@@ -411,7 +411,9 @@ class MultiplexedStreamBuilder(_MultiplexedStreamBuilderBase):
 
         table_properties, settings, stream_count, ack_callback = self._native_args()
         avro_encoder = make_encoder(table_properties.avro_schema)
-        native = self._base._sdk.open_multiplexed_stream(table_properties, settings, stream_count, ack_callback)
+        native = self._base._sdk.open_multiplexed_stream(
+            table_properties, settings, stream_count, ack_callback, **self._base._idp_kwargs()
+        )
         return MultiplexedStream(native, avro_encoder)
 
 
@@ -448,7 +450,8 @@ class StreamBuilder(_GrpcStreamBuilderBase):
 
         table_properties, settings = self._native_args()
         avro_encoder = make_encoder(table_properties.avro_schema)
-        return ZerobusStream(self._sdk.open_stream(table_properties, settings), avro_encoder=avro_encoder)
+        native = self._sdk.open_stream(table_properties, settings, **self._idp_kwargs())
+        return ZerobusStream(native, avro_encoder=avro_encoder)
 
 
 class ZerobusSdk:
@@ -614,10 +617,10 @@ class ZerobusSdk:
         """
         Start building a stream, mirroring the Rust SDK's ``stream_builder()``.
 
-        Set the table, authentication (OAuth or a custom headers provider), and record format
-        (JSON, protobuf, or Avro), then call ``build()`` for an ordinary stream, or
-        ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta). For
-        external-IdP federation, use ``create_stream(auth=...)``.
+        Set the table, authentication (OAuth, a custom headers provider, or external-IdP
+        federation), and record format (JSON, protobuf, or Avro), then call ``build()`` for an
+        ordinary stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream
+        (Beta).
         """
         return StreamBuilder(self._inner)
 
