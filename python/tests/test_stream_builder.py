@@ -187,11 +187,11 @@ class TestMultiplexedStep:
     def test_accepts_bounds(self, sdk, count):
         assert sdk.stream_builder().multiplexed(count)._stream_count == count
 
-    def test_returns_a_builder_with_only_ack_callback_and_build(self, sdk, mode):
+    def test_returns_a_builder_with_only_ack_callback_validate_and_build(self, sdk, mode):
         mux = sdk.stream_builder().multiplexed(2)
         assert isinstance(mux, (sync if mode == "sync" else aio).MultiplexedStreamBuilder)
         public = {name for name in dir(mux) if not name.startswith("_")}
-        assert public == {"ack_callback", "build"}
+        assert public == {"ack_callback", "validate", "build"}
         assert mux.ack_callback(_Ack()) is mux
 
     def test_captures_the_configuration_when_called(self, sdk):
@@ -209,11 +209,18 @@ class TestMultiplexedStep:
         with pytest.raises(ValueError, match=r"use multiplexed\(n\)\.ack_callback"):
             _open(mode, mux.build)
 
-    def test_accepts_an_unset_ordinary_ack_callback(self, sdk):
-        # ack_callback(None) sets no callback, so it doesn't make a multiplexed build invalid.
-        mux = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json().ack_callback(None).multiplexed(2)
-        _, _, stream_count, ack_callback = mux._native_args()
-        assert stream_count == 2 and ack_callback is None
+    def test_accepts_an_unset_ordinary_ack_callback(self, mode):
+        # ack_callback(None) sets no callback, so it doesn't make a multiplexed stream invalid.
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json().ack_callback(None)
+        # Without recovery the failed connection is reported at once; one sub-stream opens
+        # without the jittered start delay.
+        builder.recovery(False)
+        mux = builder.multiplexed(1)
+        assert mux.validate() is None
+        with pytest.raises(core.ZerobusException) as info:
+            _open(mode, mux.build)
+        # It reaches the network instead of failing as a configuration error.
+        assert not isinstance(info.value, core.NonRetriableException), info.value
 
 
 class TestAckCallbackType:
@@ -290,6 +297,132 @@ class TestValidConfiguration:
             _open(mode, mux.build)
 
 
+class _CountingHeaders(core.HeadersProvider):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def get_headers(self):
+        self.calls += 1
+        return [("authorization", "Bearer token")]
+
+
+class _RecordingNativeSdk:
+    """Stands in for the native SDK and records the validate_stream calls it receives."""
+
+    def __init__(self):
+        self.validate_calls = []
+
+    def validate_stream(self, *args):
+        self.validate_calls.append(args)
+
+
+def _sdk_with_recording_native(mode):
+    sdk = (sync if mode == "sync" else aio).ZerobusSdk(*SDK_ARGS)
+    native = _RecordingNativeSdk()
+    sdk._inner = native
+    return sdk, native
+
+
+class TestValidate:
+    """``validate()`` runs the checks of ``build()`` without opening anything, as in Rust."""
+
+    @pytest.mark.parametrize("auth", ["oauth", "headers_provider"])
+    def test_complete_configuration_validates_without_opening(self, mode, kind, auth):
+        headers = _CountingHeaders()
+        builder = _unreachable_builder(mode).table("c.s.t").json()
+        builder = builder.oauth("id", "secret") if auth == "oauth" else builder.headers_provider(headers)
+        target = _terminal(builder, kind)
+        # A plain method in the async SDK too: the call returns None, not an awaitable.
+        assert not inspect.iscoroutinefunction(target.validate)
+        assert target.validate() is None
+        # Authentication is not resolved.
+        assert headers.calls == 0
+
+    @pytest.mark.parametrize(
+        "configure, message",
+        [
+            (lambda b: b.oauth("id", "secret").json(), r"table is required: call table\(...\) before build\(\)"),
+            (lambda b: b.table("c.s.t").json(), "authentication is required"),
+            (lambda b: b.table("c.s.t").oauth("id", "secret"), r"record format is required: call json\(\)"),
+            (lambda b: b.table("c.s.t").oauth("id", None).json(), "oauth requires both client_id and client_secret"),
+        ],
+        ids=["table", "auth", "format", "half_oauth"],
+    )
+    def test_python_checks_run_before_the_native_check(self, mode, kind, configure, message):
+        sdk, native = _sdk_with_recording_native(mode)
+        target = _terminal(configure(sdk.stream_builder()), kind)
+        with pytest.raises(ValueError, match=message):
+            target.validate()
+        assert native.validate_calls == []
+
+    def test_rejects_the_ordinary_ack_callback_before_the_native_check(self, mode):
+        sdk, native = _sdk_with_recording_native(mode)
+        builder = sdk.stream_builder().table("c.s.t").oauth("id", "secret").json()
+        with pytest.raises(ValueError, match=r"use multiplexed\(n\)\.ack_callback"):
+            builder.ack_callback(_Ack()).multiplexed(2).validate()
+        assert native.validate_calls == []
+
+        # A complete configuration does reach the native check.
+        builder.ack_callback(None).multiplexed(2).validate()
+        assert len(native.validate_calls) == 1
+
+    def test_core_checks_reach_python(self, mode):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+        with pytest.raises(core.NonRetriableException, match=r"max_inflight_requests \(2\) .* stream_count \(4\)"):
+            builder.max_inflight_requests(2).multiplexed(4).validate()
+        # The core's default budget allows the largest stream count.
+        assert (
+            _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json().multiplexed(64).validate()
+            is None
+        )
+
+    def test_native_validate_runs_the_core_checks(self, mode):
+        # Every invalid ordinary configuration stops in Python first, so the native call is
+        # tested directly to show it runs the core's ordinary StreamBuilder::validate().
+        native = (core.sync if mode == "sync" else core.aio).ZerobusSdk(*UNREACHABLE)
+        with pytest.raises(core.NonRetriableException, match="table name is required"):
+            native.validate_stream(core.TableProperties(""), core.StreamSettings(headers_provider=_Headers()))
+        settings = core.StreamSettings(headers_provider=_Headers(), ack_callback=_Ack())
+        with pytest.raises(core.NonRetriableException, match="ack_callback is only valid for ordinary streams"):
+            native.validate_stream(core.TableProperties("c.s.t"), settings, 2)
+
+    def test_rejects_an_invalid_descriptor(self, mode, kind):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).compiled_proto(b"\xff")
+        with pytest.raises(ValueError, match="Invalid FileDescriptorProto bytes"):
+            _terminal(builder, kind).validate()
+
+    def test_does_not_parse_the_avro_schema(self, mode, kind):
+        # As in Rust, validate() leaves the schema to build().
+        target = _terminal(
+            _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).avro("not-json"), kind
+        )
+        assert target.validate() is None
+        with pytest.raises(core.NonRetriableException, match="Avro schema parse failed"):
+            _open(mode, target.build)
+
+    def test_rejects_an_ack_callback_that_is_not_an_ack_callback(self, mode, kind):
+        def target(callback):
+            builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
+            if kind == "ordinary":
+                return builder.ack_callback(callback)
+            return builder.multiplexed(2).ack_callback(callback)
+
+        with pytest.raises(TypeError):
+            target(lambda offset: None).validate()
+        assert target(_Ack()).validate() is None
+
+    def test_consumes_nothing(self, mode, kind):
+        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json().recovery(False)
+        # One sub-stream opens without the jittered start delay.
+        target = builder if kind == "ordinary" else builder.multiplexed(1)
+        assert target.validate() is None
+        assert target.validate() is None
+        with pytest.raises(core.ZerobusException) as info:
+            _open(mode, target.build)
+        assert not isinstance(info.value, core.NonRetriableException), info.value
+
+
 class TestNativeValidation:
     """Checks the native layer enforces the same rules if called directly."""
 
@@ -328,6 +461,13 @@ class TestPublicSurface:
             assert name in module.__all__
         # Both modes wrap the native class, which handles Avro encoding in Python.
         assert module.MultiplexedStream is not (core.sync if mode == "sync" else core.aio).MultiplexedStream
+
+    def test_builders_expose_validate(self, mode):
+        module = sync if mode == "sync" else aio
+        for builder in (module.StreamBuilder, module.MultiplexedStreamBuilder):
+            assert callable(getattr(builder, "validate", None)), builder
+            # A plain method in the async SDK too, as in Rust.
+            assert not inspect.iscoroutinefunction(builder.validate), builder
 
     def test_async_methods_are_coroutine_functions(self):
         for name in (
