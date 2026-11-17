@@ -531,8 +531,8 @@ stream.close()
   every sub-stream; its `offset` argument receives the message ID, and sub-streams may call
   it concurrently. `ack_callback()` on the stream builder itself is for ordinary streams and
   is rejected for multiplexed streams.
-- Opening is atomic: each sub-stream opens after a random delay of up to one second, and if
-  any fails, the others are closed and `build()` raises.
+- Opening is atomic: with more than one sub-stream, each opens after a random delay of up to
+  one second, and if any fails, the others are closed and `build()` raises.
 - After a sub-stream fails, the stream rejects new records. `get_unacked_records()` and
   `get_unacked_batches()` close the stream if needed and return the records that were never
   acknowledged, across every sub-stream, so you can ingest them into a new stream. There is no

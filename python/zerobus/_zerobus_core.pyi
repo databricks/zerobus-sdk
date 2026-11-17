@@ -448,7 +448,10 @@ class sync:
 
         @property
         def is_closed(self) -> bool:
-            """Whether the stream is closed, by ``close`` or by a sub-stream failure."""
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+
+            A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
+            """
             ...
 
         def ingest_record(self, payload: Any) -> int:
@@ -755,7 +758,10 @@ class aio:
 
         @property
         def is_closed(self) -> bool:
-            """Whether the stream is closed, by ``close`` or by a sub-stream failure."""
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+
+            A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
+            """
             ...
 
         async def ingest_record(self, payload: Any) -> int:

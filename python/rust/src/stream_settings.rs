@@ -268,9 +268,10 @@ impl StreamConfig {
 
     /// Open every sub-stream of a multiplexed stream (Beta).
     ///
-    /// `ack_callback` is the multiplexed callback, which receives message IDs. The stream
-    /// count, the in-flight budget, and a misplaced ordinary callback are validated by the
-    /// Rust core, so its error is the single source of truth for their limits.
+    /// `ack_callback` is the multiplexed callback, which receives message IDs. The core
+    /// validates the stream count, the in-flight budget, and a misplaced ordinary callback;
+    /// the Python builder checks the first and last before this call, so the core's check
+    /// is the only one for the budget.
     pub(crate) async fn open_multiplexed(
         self,
         sdk: &RustSdk,

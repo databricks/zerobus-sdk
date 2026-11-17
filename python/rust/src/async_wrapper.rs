@@ -432,7 +432,7 @@ pub struct MultiplexedStream {
 #[pymethods]
 impl MultiplexedStream {
     /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
-    /// close that is in progress counts as closed.
+    /// `close` or `get_unacked_*` call that is in progress counts as closed.
     #[getter]
     fn is_closed(&self) -> bool {
         match self.inner.try_read() {

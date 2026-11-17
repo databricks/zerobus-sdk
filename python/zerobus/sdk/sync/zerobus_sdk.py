@@ -311,7 +311,10 @@ class MultiplexedStream:
 
     @property
     def is_closed(self) -> bool:
-        """Whether the stream is closed, by ``close()`` or by a sub-stream failure."""
+        """Whether the stream is closed, by ``close()`` or by a sub-stream failure.
+
+        A ``close()`` or ``get_unacked_*()`` call that is in progress counts as closed.
+        """
         return self._inner.is_closed
 
     def ingest_record(self, payload) -> int:
@@ -385,7 +388,7 @@ class MultiplexedStreamBuilder(_MultiplexedStreamBuilderBase):
         ...     sdk.stream_builder()
         ...     .table("catalog.schema.events")
         ...     .oauth("client-id", "client-secret")
-        ...     .compiled_proto(record_pb2.DESCRIPTOR.serialized_pb)
+        ...     .compiled_proto(record_pb2.AirQuality.DESCRIPTOR.file.serialized_pb)
         ...     .multiplexed(4)
         ...     .build()
         ... )
@@ -400,6 +403,9 @@ class MultiplexedStreamBuilder(_MultiplexedStreamBuilderBase):
         Raises:
             ValueError: If the table, authentication, or record format is not set, or if
                 ``ack_callback()`` was set on the stream builder instead of here.
+            NonRetriableException: If ``max_inflight_requests`` is below the stream count, or
+                another setting is invalid.
+            ZerobusException: If a sub-stream fails to open.
         """
         from zerobus.sdk.shared.avro import make_encoder
 
