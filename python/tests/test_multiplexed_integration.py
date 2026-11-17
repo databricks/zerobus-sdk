@@ -4,8 +4,8 @@ workspace.
 
 Skipped unless these environment variables are set:
 
-- ``ZEROBUS_SERVER_ENDPOINT``: the Zerobus endpoint, for example
-  ``https://<workspace-id>.zerobus.<region>.cloud.databricks.com``.
+- ``ZEROBUS_SERVER_ENDPOINT``: the Zerobus endpoint; see "Connection URLs and Workspace ID" in
+  the top-level ``README.md``.
 - ``DATABRICKS_WORKSPACE_URL``: the workspace URL, used for OAuth.
 - ``ZEROBUS_TABLE_NAME``: the target table (``catalog.schema.table``) with the columns
   ``device_name STRING, temp INT, humidity BIGINT``.
