@@ -526,7 +526,7 @@ stream.close()
 
 - `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned
   `MultiplexedStreamBuilder` captures the configuration as it is at that point and only has
-  `ack_callback()` and `build()`. `max_inflight_requests` is a budget for the whole stream,
+  `ack_callback()`, `validate()`, and `build()`. `max_inflight_requests` is a budget for the whole stream,
   divided evenly across sub-streams, so it must be at least `n`.
 - `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
   identifies the sub-stream and the record's position in it. Message IDs are not ordered and

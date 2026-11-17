@@ -92,7 +92,7 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
 
         This is a terminal step: configure the table, authentication, format, and stream
         settings first. The returned builder captures them as they are now and only offers
-        ``ack_callback()`` and ``build()``.
+        ``ack_callback()``, ``validate()``, and ``build()``.
 
         Use multiplexing when one stream is the throughput bottleneck and global ordering is
         not required. The ``max_inflight_requests`` budget is divided evenly across
