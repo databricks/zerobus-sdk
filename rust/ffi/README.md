@@ -179,15 +179,22 @@ zerobus_multiplexed_stream_free(mux);
   `zerobus_multiplexed_stream_*` functions or block on a thread that does.
 - With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one
   headers callback serves every sub-stream. The FFI serializes calls into it,
-  so a slow callback delays every sub-stream's open; keep it fast.
+  so a slow callback delays every sub-stream's open; keep it fast. Like ack
+  callbacks, it must not call `zerobus_multiplexed_stream_*` functions.
 - If a sub-stream fails, the mux stops accepting records once a call observes
   the failure. Recover anything unacknowledged with
-  `zerobus_multiplexed_stream_get_unacked_records`.
-- Every call except `is_closed` and `free` has an `_async` variant that
+  `zerobus_multiplexed_stream_get_unacked_records`. That set covers blocking
+  and `_async` ingests; a `_nowait` record whose background ingest failed is
+  dropped, and after a sub-stream failure it can be missing with no separate
+  error. Use blocking or `_async` ingests when every record must be
+  recoverable.
+- Every blocking call except `is_closed` and `free` has an `_async` variant that
   returns at once and reports through a completion callback on a runtime
   thread (`zerobus_sdk_create_multiplexed_stream_async`,
   `zerobus_multiplexed_stream_ingest_proto_record_async`, ...). Flush and
-  close cover every `_nowait` and `_async` ingest accepted before them.
+  close wait for every `_nowait` and `_async` ingest accepted before them to
+  be queued. A flush that reports a background `_nowait` failure means a
+  record was dropped; retrying the flush does not bring it back.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.
 
 ### Dynamic protobuf from a Unity Catalog schema (pure C)
