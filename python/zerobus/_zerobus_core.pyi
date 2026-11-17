@@ -191,6 +191,29 @@ class PersistentStreamSettings:
         callback_max_wait_time_ms: Optional[int] = None,
     ) -> None: ...
 
+class StreamSettings:
+    """Settings collected by ``StreamBuilder``. Internal; not for direct use."""
+
+    def __init__(
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        headers_provider: Optional[Any] = None,
+        recovery: Optional[bool] = None,
+        recovery_timeout_ms: Optional[int] = None,
+        recovery_backoff_ms: Optional[int] = None,
+        recovery_retries: Optional[int] = None,
+        server_lack_of_ack_timeout_ms: Optional[int] = None,
+        flush_timeout_ms: Optional[int] = None,
+        max_inflight_requests: Optional[int] = None,
+        max_ingest_payload_bytes: Optional[int] = None,
+        ack_callback: Optional[AckCallback] = None,
+        callback_max_wait_time_ms_set: bool = False,
+        callback_max_wait_time_ms: Optional[int] = None,
+        stream_paused_max_wait_time_ms_set: bool = False,
+        stream_paused_max_wait_time_ms: Optional[int] = None,
+    ) -> None: ...
+
 # =============================================================================
 # EXCEPTIONS
 # =============================================================================
@@ -425,6 +448,14 @@ class sync:
             resume_stream_id: Optional[str] = None,
         ) -> "PersistentStream":
             """Open a new persistent stream, or resume one when ``resume_stream_id`` is set."""
+            ...
+
+        def open_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+        ) -> "ZerobusStream":
+            """Open an ordinary stream configured by ``stream_builder()``."""
             ...
 
         def __init__(
@@ -666,6 +697,14 @@ class aio:
             resume_stream_id: Optional[str] = None,
         ) -> "PersistentStream":
             """Open a new persistent stream, or resume one when ``resume_stream_id`` is set."""
+            ...
+
+        async def open_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+        ) -> "ZerobusStream":
+            """Open an ordinary stream configured by ``stream_builder()``."""
             ...
 
         def __init__(

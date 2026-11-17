@@ -47,6 +47,7 @@ from typing import Any, Optional
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
+from zerobus.sdk.shared.stream_builder import _GrpcStreamBuilderBase
 
 # Import base Rust stream class
 _RustZerobusStream = _core.aio.ZerobusStream
@@ -360,6 +361,38 @@ class PersistentStreamBuilder(_PersistentStreamBuilderBase):
         )
 
 
+class StreamBuilder(_GrpcStreamBuilderBase):
+    """Fluent builder for a stream, mirroring the Rust SDK's ``stream_builder()``.
+
+    Obtain one from ``ZerobusSdk.stream_builder()``, set the table, authentication, and
+    record format, then ``await build()``.
+
+    Example:
+        >>> stream = await (
+        ...     sdk.stream_builder()
+        ...     .table("catalog.schema.events")
+        ...     .oauth("client-id", "client-secret")
+        ...     .json()
+        ...     .build()
+        ... )
+        >>> for record in records:
+        ...     await stream.ingest_record_offset(record)
+        >>> await stream.flush()
+    """
+
+    async def build(self) -> ZerobusStream:
+        """Open an ordinary stream.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set.
+        """
+        from zerobus.sdk.shared.avro import make_encoder
+
+        table_properties, settings = self._native_args()
+        avro_encoder = make_encoder(table_properties.avro_schema)
+        return ZerobusStream(await self._sdk.open_stream(table_properties, settings), avro_encoder=avro_encoder)
+
+
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that returns wrapped streams."""
 
@@ -514,6 +547,16 @@ class ZerobusSdk:
         """
         return PersistentStreamBuilder(self._inner)
 
+    def stream_builder(self) -> StreamBuilder:
+        """
+        Start building a stream, mirroring the Rust SDK's ``stream_builder()``.
+
+        Set the table, authentication (OAuth or a custom headers provider), and record format
+        (JSON, protobuf, or Avro), then call ``build()``. For external-IdP federation, use
+        ``create_stream(auth=...)``.
+        """
+        return StreamBuilder(self._inner)
+
     async def recreate_stream(self, old_stream: ZerobusStream):
         """Recreate a stream from an old stream, preserving the Avro encoder if set."""
         rust_stream = await self._inner.recreate_stream(old_stream._inner)
@@ -534,6 +577,7 @@ __all__ = [
     "ZerobusStream",
     "PersistentStream",
     "PersistentStreamBuilder",
+    "StreamBuilder",
     "ZerobusArrowStream",
     "TableProperties",
     "StreamConfigurationOptions",

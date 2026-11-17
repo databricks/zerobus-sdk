@@ -16,6 +16,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
   - [Protocol Buffers](#option-2-protocol-buffers)
   - [Acknowledgments and throughput](#acknowledgments-and-throughput)
 - [Persistent Streams](#persistent-streams)
+- [Stream Builder](#stream-builder)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -456,6 +457,37 @@ The builder has these setters: `table`, `oauth`, `headers_provider`, `json`,
 no `*_nowait()` methods, and no `get_unacked_*()` methods.
 
 See `examples/sync_example_persistent.py` and `examples/async_example_persistent.py`. Both examples read the optional `ZEROBUS_PERSISTENT_STREAM_ID` environment variable.
+
+## Stream Builder
+
+`ZerobusSdk.stream_builder()` mirrors the Rust SDK's `stream_builder()`. Set the table,
+authentication, record format, and stream settings, then call `build()`:
+
+```python
+from zerobus.sdk.sync import ZerobusSdk
+
+sdk = ZerobusSdk(host, unity_catalog_url)
+stream = (
+    sdk.stream_builder()
+    .table("catalog.schema.events")
+    .oauth(client_id, client_secret)  # or .headers_provider(provider)
+    .json()  # or .compiled_proto(descriptor) / .avro(schema_json)
+    .build()
+)
+
+for record in records:
+    stream.ingest_record_offset(record)
+stream.flush()
+stream.close()
+```
+
+`build()` returns the same `ZerobusStream` as `create_stream()`. In the async SDK, `build()`
+is a coroutine. The builder has these setters: `table`, `oauth`, `headers_provider`, `json`,
+`compiled_proto`, `avro`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
+`recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
+`max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
+`callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`. Unset values use the SDK
+defaults. For external-IdP federation, use `create_stream(auth=...)`.
 
 ## Configuration
 
