@@ -43,7 +43,10 @@ pub struct CZerobusMultiplexedStream {
     _private: [u8; 0],
 }
 
-/// Concrete type behind `*mut CZerobusMultiplexedStream`, held in an `Arc`.
+/// Concrete type behind `*mut CZerobusMultiplexedStream`, owned by a `Box`.
+///
+/// Background tasks clone `stream` and `nowait`, never the handle, so they
+/// keep working after `zerobus_multiplexed_stream_free` drops it.
 struct MuxHandle {
     /// `close` and `get_unacked_records` need `&mut MultiplexedStream`, while
     /// ingest, flush, and wait need only `&`, possibly from `_nowait` tasks
@@ -71,6 +74,9 @@ struct NowaitEpochs {
     current: u64,
     /// Submissions not yet queued, by epoch; empty epochs are removed.
     pending: BTreeMap<u64, usize>,
+    /// First background `_nowait` ingest failure, by epoch, until a flush or
+    /// close reports it.
+    errors: BTreeMap<u64, ZerobusError>,
 }
 
 impl NowaitTracker {
@@ -87,17 +93,33 @@ impl NowaitTracker {
         NowaitTicket {
             tracker: Arc::clone(self),
             epoch,
+            error: None,
         }
     }
 
-    /// Waits until every submission registered before this call is queued.
-    async fn wait_for_accepted(&self) {
-        let target = {
-            let mut epochs = self.epochs();
-            let target = epochs.current;
-            epochs.current += 1;
-            target
+    /// Removes and returns the first recorded failure from epoch `up_to` or
+    /// earlier (every epoch when `None`).
+    fn take_error(&self, up_to: Option<u64>) -> Option<ZerobusError> {
+        let mut epochs = self.epochs();
+        let later = match up_to {
+            Some(target) => epochs.errors.split_off(&(target + 1)),
+            None => BTreeMap::new(),
         };
+        std::mem::replace(&mut epochs.errors, later)
+            .into_values()
+            .next()
+    }
+
+    /// Closes the current epoch for a flush and returns it.
+    fn start_flush(&self) -> u64 {
+        let mut epochs = self.epochs();
+        let target = epochs.current;
+        epochs.current += 1;
+        target
+    }
+
+    /// Waits until every submission from epoch `target` or earlier is queued.
+    async fn wait_drained(&self, target: u64) {
         loop {
             let mut notified = std::pin::pin!(self.drained.notified());
             // Register before checking, so a drain in between is not missed.
@@ -114,12 +136,19 @@ impl NowaitTracker {
 struct NowaitTicket {
     tracker: Arc<NowaitTracker>,
     epoch: u64,
+    /// Set when the background ingest failed; recorded for the next flush.
+    error: Option<ZerobusError>,
 }
 
 impl Drop for NowaitTicket {
     fn drop(&mut self) {
         let drained = {
             let mut epochs = self.tracker.epochs();
+            // Record before the epoch can drain, so the flush waiting on it
+            // sees the error.
+            if let Some(error) = self.error.take() {
+                epochs.errors.entry(self.epoch).or_insert(error);
+            }
             match epochs.pending.get_mut(&self.epoch) {
                 Some(count) if *count > 1 => {
                     *count -= 1;
@@ -335,16 +364,18 @@ async fn build_mux_from_parts(
         auth,
         options.as_ref(),
     )?;
-    // Without callbacks, `ack_callback` drops here and frees its `user_data`.
     if ack_callback.has_callback {
         builder = builder.multiplexed_ack_callback(Arc::new(ack_callback));
+    } else {
+        // Nothing will call it: free its `user_data` now.
+        drop(ack_callback);
     }
     let mux = builder.multiplexed(stream_count).build().await?;
     let handle = MuxHandle {
         stream: Arc::new(RwLock::new(mux)),
         nowait: Arc::default(),
     };
-    Ok(Arc::into_raw(Arc::new(handle)) as *mut CZerobusMultiplexedStream)
+    Ok(Box::into_raw(Box::new(handle)) as *mut CZerobusMultiplexedStream)
 }
 
 /// Create a multiplexed stream with OAuth authentication (Beta).
@@ -373,10 +404,12 @@ async fn build_mux_from_parts(
 /// ordinary streams and are rejected here.
 ///
 /// Once this function is called, the FFI owns `ack_user_data` and invokes
-/// `free_ack_user_data` (when set) exactly once, from any thread: before
-/// returning on failure or when both callbacks are NULL; otherwise after the
-/// last sub-stream and background task releases the callbacks, which can be
-/// after `zerobus_multiplexed_stream_free` returns.
+/// `free_ack_user_data` (when set) exactly once, from any thread, after the
+/// last sub-stream and background task releases the callbacks. That can be
+/// after this function returns, even when it fails (a sub-stream that
+/// started to open is torn down in the background), and after
+/// `zerobus_multiplexed_stream_free` returns. Never free `ack_user_data`
+/// yourself.
 ///
 /// Returns NULL on error; see `result` for details. Free the handle with
 /// `zerobus_multiplexed_stream_free`.
@@ -454,8 +487,9 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
 /// Ownership of `user_data` follows
 /// `zerobus_sdk_create_stream_with_headers_provider`: once this function is
 /// called, the FFI owns it and invokes `free_user_data` (when set) exactly
-/// once, on failure before returning, or on success after the last sub-stream
-/// releases the provider. The ack parameters, and ownership of
+/// once, from any thread, after the last sub-stream releases the provider,
+/// which can be after this function returns even when it fails. The ack
+/// parameters, and ownership of
 /// `ack_user_data`, follow `zerobus_sdk_create_multiplexed_stream`.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
@@ -532,7 +566,7 @@ pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedS
     ffi_guard(ptr::null_mut(), (), move || {
         if !mux.is_null() {
             unsafe {
-                drop(Arc::from_raw(mux as *const MuxHandle));
+                drop(Box::from_raw(mux as *mut MuxHandle));
             }
         }
     })
@@ -736,11 +770,14 @@ fn spawn_ingest(handle: &MuxHandle, payload: NowaitPayload) -> ZerobusResult<()>
     let guard = lock_for_nowait(handle)?;
     let ticket = handle.nowait.begin();
     RUNTIME.spawn(async move {
-        let _ticket = ticket;
-        let _ = match payload {
+        let mut ticket = ticket;
+        let res = match payload {
             NowaitPayload::Record(record) => guard.ingest_record(record).await.map(Some),
             NowaitPayload::Batch(batch) => guard.ingest_records(batch).await,
         };
+        ticket.error = res.err();
+        // The ticket drops before the guard, so close sees the error too.
+        drop(ticket);
     });
     Ok(())
 }
@@ -758,10 +795,12 @@ fn spawn_ingest(handle: &MuxHandle, payload: NowaitPayload) -> ZerobusResult<()>
 /// record accepted before they were called to be queued, so they cover it
 /// like a blocking ingest. If the background ingest itself fails (for example,
 /// the chosen sub-stream stays at capacity for 30 seconds, or fails while the
-/// task waits), the record is dropped: it is not returned by
-/// `zerobus_multiplexed_stream_get_unacked_records`, and only a sub-stream
-/// failure surfaces from the next flush or close. Use the blocking ingest
-/// calls when every record must be accounted for.
+/// task waits), the record is dropped and is not returned by
+/// `zerobus_multiplexed_stream_get_unacked_records`. The next flush or close
+/// that covers it reports that error (the first one, with its
+/// `is_retryable`) unless it fails itself, and clears it either way, so one
+/// call reports it. Use the blocking ingest calls when you must know which
+/// record failed.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
     mux: *mut CZerobusMultiplexedStream,
@@ -947,9 +986,13 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
 ///
 /// Covers blocking ingests that have returned and every `_nowait` record
 /// accepted before this call: it first waits for their background tasks to
-/// queue them (up to 30 seconds each when a sub-stream is at capacity), then
-/// for their acknowledgments. `_nowait` records submitted during the flush
-/// are left for the next flush or close.
+/// queue them, then for their acknowledgments. The tasks wait concurrently,
+/// so with a sub-stream at capacity this phase can take up to 30 seconds after
+/// the last accepted call, on top of `flush_timeout_ms`. `_nowait` records
+/// submitted during the flush are left for the next flush or close. If the
+/// flush itself fails, that error is returned; otherwise, if a covered
+/// `_nowait` ingest failed in the background, the first such failure is
+/// returned. Either way the stored failure is cleared, so it is reported once.
 ///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via
@@ -968,8 +1011,13 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
             }
         };
         let res = RUNTIME.block_on(async {
-            handle.nowait.wait_for_accepted().await;
-            handle.stream.read().await.flush().await
+            let target = handle.nowait.start_flush();
+            handle.nowait.wait_drained(target).await;
+            let flushed = handle.stream.read().await.flush().await;
+            // The flush's own error wins; a stored `_nowait` failure is
+            // cleared either way, so exactly one flush or close reports it.
+            let stored = handle.nowait.take_error(Some(target));
+            flushed.and(stored.map_or(Ok(()), Err))
         });
         complete(result, res.map(|()| true), false)
     })
@@ -979,7 +1027,9 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 ///
 /// Waits for in-progress ingest, flush, and wait calls on this mux to return,
 /// and for every accepted `_nowait` record to be queued, then flushes those
-/// too. `_nowait` calls made after close starts report an error. On error,
+/// too. `_nowait` calls made after close starts report an error. If close
+/// itself succeeds, a background `_nowait` failure that no flush has reported
+/// yet is returned instead. On error,
 /// recover unacknowledged records with
 /// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
 /// released with `zerobus_multiplexed_stream_free`.
@@ -996,7 +1046,11 @@ pub extern "C" fn zerobus_multiplexed_stream_close(
                 return false;
             }
         };
-        let res = RUNTIME.block_on(async { handle.stream.write().await.close().await });
+        let res = RUNTIME.block_on(async {
+            let closed = handle.stream.write().await.close().await;
+            let stored = handle.nowait.take_error(None);
+            closed.and(stored.map_or(Ok(()), Err))
+        });
         complete(result, res.map(|()| true), false)
     })
 }

@@ -173,7 +173,8 @@ zerobus_multiplexed_stream_free(mux);
   `CStreamConfigurationOptions` must stay NULL. They receive message IDs, and
   callbacks from different sub-streams may run concurrently, so
   `ack_user_data` must be thread-safe. The FFI owns `ack_user_data` and calls
-  `free_ack_user_data` once, after the last callback, which can be after
+  `free_ack_user_data` once, from any thread, after the last callback. That
+  can be after the create returns, even a failed one, and after
   `zerobus_multiplexed_stream_free` returns. Callbacks must not call
   `zerobus_multiplexed_stream_*` functions or block on a thread that does.
 - With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one

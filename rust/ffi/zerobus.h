@@ -882,10 +882,12 @@ struct CStreamConfigurationOptions zerobus_get_default_config(void);
  * ordinary streams and are rejected here.
  *
  * Once this function is called, the FFI owns `ack_user_data` and invokes
- * `free_ack_user_data` (when set) exactly once, from any thread: before
- * returning on failure or when both callbacks are NULL; otherwise after the
- * last sub-stream and background task releases the callbacks, which can be
- * after `zerobus_multiplexed_stream_free` returns.
+ * `free_ack_user_data` (when set) exactly once, from any thread, after the
+ * last sub-stream and background task releases the callbacks. That can be
+ * after this function returns, even when it fails (a sub-stream that
+ * started to open is torn down in the background), and after
+ * `zerobus_multiplexed_stream_free` returns. Never free `ack_user_data`
+ * yourself.
  *
  * Returns NULL on error; see `result` for details. Free the handle with
  * `zerobus_multiplexed_stream_free`.
@@ -921,8 +923,9 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream(struct C
  * Ownership of `user_data` follows
  * `zerobus_sdk_create_stream_with_headers_provider`: once this function is
  * called, the FFI owns it and invokes `free_user_data` (when set) exactly
- * once, on failure before returning, or on success after the last sub-stream
- * releases the provider. The ack parameters, and ownership of
+ * once, from any thread, after the last sub-stream releases the provider,
+ * which can be after this function returns even when it fails. The ack
+ * parameters, and ownership of
  * `ack_user_data`, follow `zerobus_sdk_create_multiplexed_stream`.
  */
 struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_headers_provider(struct CZerobusSdk *sdk,
@@ -1029,10 +1032,12 @@ int64_t zerobus_multiplexed_stream_ingest_json_records(struct CZerobusMultiplexe
  * record accepted before they were called to be queued, so they cover it
  * like a blocking ingest. If the background ingest itself fails (for example,
  * the chosen sub-stream stays at capacity for 30 seconds, or fails while the
- * task waits), the record is dropped: it is not returned by
- * `zerobus_multiplexed_stream_get_unacked_records`, and only a sub-stream
- * failure surfaces from the next flush or close. Use the blocking ingest
- * calls when every record must be accounted for.
+ * task waits), the record is dropped and is not returned by
+ * `zerobus_multiplexed_stream_get_unacked_records`. The next flush or close
+ * that covers it reports that error (the first one, with its
+ * `is_retryable`) unless it fails itself, and clears it either way, so one
+ * call reports it. Use the blocking ingest calls when you must know which
+ * record failed.
  */
 void zerobus_multiplexed_stream_ingest_proto_record_nowait(struct CZerobusMultiplexedStream *mux,
                                                            const uint8_t *data,
@@ -1092,9 +1097,13 @@ bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedSt
  *
  * Covers blocking ingests that have returned and every `_nowait` record
  * accepted before this call: it first waits for their background tasks to
- * queue them (up to 30 seconds each when a sub-stream is at capacity), then
- * for their acknowledgments. `_nowait` records submitted during the flush
- * are left for the next flush or close.
+ * queue them, then for their acknowledgments. The tasks wait concurrently,
+ * so with a sub-stream at capacity this phase can take up to 30 seconds after
+ * the last accepted call, on top of `flush_timeout_ms`. `_nowait` records
+ * submitted during the flush are left for the next flush or close. If the
+ * flush itself fails, that error is returned; otherwise, if a covered
+ * `_nowait` ingest failed in the background, the first such failure is
+ * returned. Either way the stored failure is cleared, so it is reported once.
  *
  * A terminal sub-stream failure closes the mux for further ingestion; its
  * unacknowledged records remain available via
@@ -1108,7 +1117,9 @@ bool zerobus_multiplexed_stream_flush(struct CZerobusMultiplexedStream *mux,
  *
  * Waits for in-progress ingest, flush, and wait calls on this mux to return,
  * and for every accepted `_nowait` record to be queued, then flushes those
- * too. `_nowait` calls made after close starts report an error. On error,
+ * too. `_nowait` calls made after close starts report an error. If close
+ * itself succeeds, a background `_nowait` failure that no flush has reported
+ * yet is returned instead. On error,
  * recover unacknowledged records with
  * `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
  * released with `zerobus_multiplexed_stream_free`.
