@@ -3305,9 +3305,13 @@ mod multiplexed_tests {
         headers.assert_freed_once("headers async connect failure user_data");
         ack.assert_freed_once("headers async connect failure ack user_data");
 
-        // Rejected in the task: stream_count and options->ack_on_* (A1 async).
-        let mut ack_in_options = CreateCall::valid(sdk);
-        ack_in_options.options.ack_on_ack = Some(noop_mux_ack);
+        // Config errors are found in the task: true, then one callback with
+        // a NULL mux, and both user_data freed once.
+        let mut low_inflight = CreateCall {
+            stream_count: 3,
+            ..CreateCall::valid(sdk)
+        };
+        low_inflight.options.max_inflight_requests = 2;
         let rejected = [
             (
                 "stream_count=0",
@@ -3318,27 +3322,94 @@ mod multiplexed_tests {
                 "stream_count must be between 1 and 64",
             ),
             (
-                "options->ack_on_ack",
-                ack_in_options,
-                "are not supported for multiplexed streams",
+                "stream_count=65",
+                CreateCall {
+                    stream_count: 65,
+                    ..CreateCall::valid(sdk)
+                },
+                "stream_count must be between 1 and 64",
+            ),
+            (
+                "max_inflight_requests < stream_count",
+                low_inflight,
+                "must be at least stream_count",
             ),
         ];
         for (case, call, expected) in &rejected {
             let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-            let (returned, success, retryable, message) = call.oauth_async(ack, sink);
-            let (success, retryable, message) = if returned {
-                assert!(success, "OAuth async {case}: {message}");
-                let (_, success, retryable, message, mux) =
-                    sink.one(&format!("OAuth async {case}"));
-                assert_eq!(mux, 0, "OAuth async {case}");
-                (success, retryable, message)
-            } else {
-                sink.assert_never_called(&format!("OAuth async {case}"));
-                (success, retryable, message)
-            };
-            assert!(!success && !retryable, "OAuth async {case}: {message}");
+            let (returned, success, _, message) = call.oauth_async(ack, sink);
+            assert!(returned && success, "OAuth async {case}: {message}");
+            let (_, success, retryable, message, mux) = sink.one(&format!("OAuth async {case}"));
+            assert!(
+                mux == 0 && !success && !retryable,
+                "OAuth async {case}: {message}"
+            );
             assert!(message.contains(expected), "OAuth async {case}: {message}");
             ack.assert_freed_once(&format!("OAuth async {case} ack user_data"));
+
+            let (headers, ack, sink) = (
+                FreeCount::leaked(),
+                FreeCount::leaked(),
+                AsyncSink::leaked(),
+            );
+            let (returned, success, _, message) = call.headers_async(headers, ack, sink);
+            assert!(returned && success, "headers async {case}: {message}");
+            let (_, success, retryable, message, mux) = sink.one(&format!("headers async {case}"));
+            assert!(
+                mux == 0 && !success && !retryable,
+                "headers async {case}: {message}"
+            );
+            assert!(
+                message.contains(expected),
+                "headers async {case}: {message}"
+            );
+            headers.assert_freed_once(&format!("headers async {case} user_data"));
+            ack.assert_freed_once(&format!("headers async {case} ack user_data"));
+        }
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn async_creates_reject_ack_callbacks_in_options_synchronously() {
+        let sdk = test_sdk();
+        for field in ["ack_on_ack", "ack_on_error"] {
+            let mut call = CreateCall::valid(sdk);
+            match field {
+                "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
+                _ => call.options.ack_on_error = Some(noop_mux_error),
+            }
+            let expected = "are not supported for multiplexed streams";
+
+            let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
+            let (returned, success, retryable, message) = call.oauth_async(ack, sink);
+            assert!(
+                !returned && !success && !retryable,
+                "OAuth async options->{field}: {message}"
+            );
+            assert!(
+                message.contains(expected),
+                "OAuth async options->{field}: {message}"
+            );
+            ack.assert_freed_once(&format!("OAuth async options->{field} ack user_data"));
+            sink.assert_never_called(&format!("OAuth async options->{field}"));
+
+            let (headers, ack, sink) = (
+                FreeCount::leaked(),
+                FreeCount::leaked(),
+                AsyncSink::leaked(),
+            );
+            let (returned, success, retryable, message) = call.headers_async(headers, ack, sink);
+            assert!(
+                !returned && !success && !retryable,
+                "headers async options->{field}: {message}"
+            );
+            assert!(
+                message.contains(expected),
+                "headers async options->{field}: {message}"
+            );
+            headers.assert_freed_once(&format!("headers async options->{field} user_data"));
+            ack.assert_freed_once(&format!("headers async options->{field} ack user_data"));
+            sink.assert_never_called(&format!("headers async options->{field}"));
         }
         crate::zerobus_sdk_free(sdk);
     }
@@ -3423,10 +3494,17 @@ mod multiplexed_tests {
         *mut CZerobusSdk,
         *mut CZerobusMultiplexedStream,
     ) {
+        use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (_server, url) = runtime
-            .block_on(zerobus_test_support::mock_grpc::start_mock_server())
-            .unwrap();
+        let (server, url) = runtime.block_on(start_mock_server()).unwrap();
+        // The mock opens the lane itself; offset 0 is acked.
+        runtime.block_on(server.inject_responses(
+            "ffi.mux.panic",
+            vec![MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            }],
+        ));
         let endpoint = CString::new(url).unwrap();
         let builder = crate::zerobus_sdk_builder_new();
         crate::zerobus_sdk_builder_endpoint(builder, endpoint.as_ptr());
@@ -3458,26 +3536,68 @@ mod multiplexed_tests {
         (runtime, sdk, mux)
     }
 
+    /// Runs a flush or close on a thread; fails if it doesn't return in 2 s.
+    fn call_within_2s(
+        mux: *mut CZerobusMultiplexedStream,
+        call: extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool,
+        what: &str,
+    ) -> (bool, bool, String) {
+        let mux_addr = mux as usize;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut result = unwritten_result();
+            let returned = call(mux_addr as *mut _, &mut result);
+            let retryable = result.is_retryable;
+            let (_, message) = take_result(&mut result);
+            let _ = tx.send((returned, retryable, message));
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{what} did not return within 2 s"))
+    }
+
+    const NOWAIT_PANIC: &str = "a background _nowait ingest panicked; its record was dropped";
+
     #[test]
     fn nowait_ingest_panic_is_reported_by_next_flush() {
         let (_runtime, sdk, mux) = live_mux();
-        let handle = validate_mux_ptr(mux).unwrap();
-        spawn_ingest(handle, IngestPayload::PanicForTest).unwrap();
+        spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
 
-        let mut result = unwritten_result();
-        assert!(!zerobus_multiplexed_stream_flush(mux, &mut result));
-        let retryable = result.is_retryable;
-        let (_, message) = take_result(&mut result);
-        assert!(!retryable, "{message}");
+        let flush = zerobus_multiplexed_stream_flush;
+        let (flushed, retryable, message) = call_within_2s(mux, flush, "flush after the panic");
+        assert!(!flushed && !retryable, "{message}");
         assert!(
-            message.contains("a background _nowait ingest panicked"),
+            message.contains(NOWAIT_PANIC),
             "unexpected error: {message}"
         );
+
+        // Reported once; the mux keeps working.
+        let json = CString::new(r#"{"id": 0}"#).unwrap();
+        let mut result = unwritten_result();
+        zerobus_multiplexed_stream_ingest_json_record_nowait(mux, json.as_ptr(), &mut result);
         assert!(
-            zerobus_multiplexed_stream_flush(mux, &mut result),
-            "reported once"
+            take_result(&mut result).0,
+            "a valid _nowait after the panic"
         );
-        take_result(&mut result);
+        let (flushed, _, message) = call_within_2s(mux, flush, "flush after a valid _nowait");
+        assert!(flushed, "{message}");
+
+        zerobus_multiplexed_stream_free(mux);
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn nowait_ingest_panic_is_reported_by_close() {
+        let (_runtime, sdk, mux) = live_mux();
+        spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
+
+        let close = zerobus_multiplexed_stream_close;
+        let (closed, retryable, message) = call_within_2s(mux, close, "close after the panic");
+        assert!(!closed && !retryable, "{message}");
+        assert!(
+            message.contains(NOWAIT_PANIC),
+            "unexpected error: {message}"
+        );
+        assert!(zerobus_multiplexed_stream_is_closed(mux));
 
         zerobus_multiplexed_stream_free(mux);
         crate::zerobus_sdk_free(sdk);
