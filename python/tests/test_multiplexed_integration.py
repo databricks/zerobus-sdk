@@ -649,7 +649,12 @@ def test_ordinary_stream_ack_callback_receives_every_offset(module):
     EXPECTED_ROWS[prefix] = EXPECTED_ROWS.get(prefix, 0) + 20
 
 
-def test_threads_share_one_sync_stream():
+def test_concurrent_threads_on_one_sync_stream_neither_deadlock_nor_lose_ids():
+    """Robustness check, not a thread-safety guarantee: sync streams are meant for one thread.
+
+    If threads do call one sync multiplexed stream at once, the calls must not deadlock and
+    every ingest must still get its own acknowledged message ID.
+    """
     threads = 8
     records_per_thread = 50
     prefix = RUN_PREFIX + "threads-"
