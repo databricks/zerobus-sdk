@@ -54,9 +54,9 @@ pub struct CZerobusMultiplexedStream {
 struct MuxHandle {
     /// `close` and `get_unacked_records` need `&mut MultiplexedStream`, while
     /// ingest, flush, and wait need only `&`, possibly from `_nowait` and
-    /// `_async` tasks that hold their own owned read guard. The lock lets those share the mux
-    /// and makes a close wait for them instead of aliasing a `&mut` with live
-    /// `&` borrows.
+    /// `_async` tasks that hold their own owned read guard. The lock lets those
+    /// share the mux and makes a close wait for them instead of aliasing a
+    /// `&mut` with live `&` borrows.
     stream: Arc<RwLock<MultiplexedStream>>,
     /// `_nowait` and `_async` ingests not yet queued into the core, so flush
     /// can wait for them.
@@ -213,7 +213,8 @@ unsafe fn decode_descriptor(
         .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))
 }
 
-/// Copies a borrowed byte buffer; a null pointer is accepted only when `len` is 0.
+/// Copies a borrowed byte buffer; a null pointer is accepted only when `len` is
+/// 0.
 unsafe fn copy_bytes(data: *const u8, len: usize) -> Result<Vec<u8>, &'static str> {
     if len == 0 {
         Ok(Vec::new())
@@ -238,7 +239,8 @@ unsafe fn copy_proto_records(
         .collect()
 }
 
-/// Copies a C array of NUL-terminated JSON strings so the caller may free them on return.
+/// Copies a C array of NUL-terminated JSON strings so the caller may free them
+/// on return.
 unsafe fn copy_json_records(
     json_records: *const *const c_char,
     num_records: usize,
@@ -802,7 +804,8 @@ fn spawn_ingest(handle: &MuxHandle, payload: IngestPayload) -> ZerobusResult<()>
     Ok(())
 }
 
-/// Ingest a protobuf record without waiting for it to be queued (fire-and-forget).
+/// Ingest a protobuf record without waiting for it to be queued
+/// (fire-and-forget).
 ///
 /// Copies the record and returns immediately. `result` reports argument
 /// validation errors and a closed or closing mux (non-retryable; re-send the
@@ -816,10 +819,10 @@ fn spawn_ingest(handle: &MuxHandle, payload: IngestPayload) -> ZerobusResult<()>
 /// like a blocking ingest. If the background ingest itself fails (for example,
 /// the chosen sub-stream stays at capacity for 30 seconds, or fails while the
 /// task waits), the record is dropped and is not returned by
-/// `zerobus_multiplexed_stream_get_unacked_records`. The next flush or close
-/// that covers it reports that error (the first one, with its
-/// `is_retryable`) unless it fails itself, and clears it either way, so one
-/// call reports it. Use the blocking ingest calls when you must know which
+/// `zerobus_multiplexed_stream_get_unacked_records`. Instead, the first such
+/// error (with its `is_retryable`) is returned by the next flush or close that
+/// covers it and has no error of its own; that call clears it, so it is
+/// reported once. Use the blocking ingest calls when you must know which
 /// record failed.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_nowait(
@@ -1004,15 +1007,16 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
 
 /// Wait until every record queued on every sub-stream is acknowledged.
 ///
-/// Covers blocking ingests that have returned and every `_nowait` and
-/// `_async` ingest accepted before this call: it first waits for their
-/// background tasks to queue them, then for their acknowledgments. The tasks wait concurrently,
+/// Covers blocking ingests that have returned and every `_nowait` and `_async`
+/// ingest accepted before this call: it first waits for their background tasks
+/// to queue them, then for their acknowledgments. The tasks wait concurrently,
 /// so with a sub-stream at capacity this phase can take up to 30 seconds after
 /// the last accepted call, on top of `flush_timeout_ms`. `_nowait` records
 /// submitted during the flush are left for the next flush or close. If the
-/// flush itself fails, that error is returned; otherwise, if a covered
-/// `_nowait` ingest failed in the background, the first such failure is
-/// returned. Either way the stored failure is cleared, so it is reported once.
+/// flush itself fails, that error is returned and a stored `_nowait` failure is
+/// kept for the next flush or close; otherwise, if a covered `_nowait` ingest
+/// failed in the background, the first such failure is returned and cleared, so
+/// it is reported once.
 ///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via
@@ -1034,10 +1038,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
             let target = handle.pending.start_flush();
             handle.pending.wait_drained(target).await;
             let flushed = handle.stream.read().await.flush().await;
-            // The flush's own error wins; a stored `_nowait` failure is
-            // cleared either way, so exactly one flush or close reports it.
-            let stored = handle.pending.take_error(Some(target));
-            flushed.and(stored.map_or(Ok(()), Err))
+            // The flush's own error wins and leaves a stored `_nowait` failure
+            // for the next flush or close; only the call that returns it
+            // clears it.
+            flushed.and_then(|()| handle.pending.take_error(Some(target)).map_or(Ok(()), Err))
         });
         complete(result, res.map(|()| true), false)
     })
@@ -1047,9 +1051,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 ///
 /// Waits for in-progress ingest, flush, and wait calls on this mux to return,
 /// and for every accepted `_nowait` and `_async` ingest to be queued, then
-/// flushes those too. `_nowait` calls made after close starts report an error. If close
-/// itself succeeds, a background `_nowait` failure that no flush has reported
-/// yet is returned instead. On error, recover unacknowledged records with
+/// flushes those too. `_nowait` calls made after close starts report an error.
+/// If close itself succeeds, a background `_nowait` failure that no flush has
+/// reported yet is returned instead (and cleared). On error, recover
+/// unacknowledged records with
 /// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
 /// released with `zerobus_multiplexed_stream_free`.
 #[no_mangle]
@@ -1067,8 +1072,7 @@ pub extern "C" fn zerobus_multiplexed_stream_close(
         };
         let res = RUNTIME.block_on(async {
             let closed = handle.stream.write().await.close().await;
-            let stored = handle.pending.take_error(None);
-            closed.and(stored.map_or(Ok(()), Err))
+            closed.and_then(|()| handle.pending.take_error(None).map_or(Ok(()), Err))
         });
         complete(result, res.map(|()| true), false)
     })
@@ -1119,6 +1123,18 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
 
 // Async variants of the multiplexed stream functions.
 
+/// Reports `err` through a bool completion callback on a runtime thread.
+fn report_bool_async(
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    err: ZerobusError,
+) {
+    let user_data = SendPtr::new(user_data);
+    RUNTIME.spawn(async move {
+        invoke_bool_async_callback(callback, false, CResult::error(err), user_data.get());
+    });
+}
+
 /// Spawns `work`, which ends by invoking a C completion callback. If `work`
 /// panics first, `on_panic` reports the panic instead, so the callback still
 /// runs exactly once and the caller is not left waiting. Guards and tickets
@@ -1151,9 +1167,10 @@ where
 /// failure. `result` is valid only for the duration of the call.
 ///
 /// Every multiplexed `_async` function follows the same contract. It
-/// validates its arguments and returns at once: false with `result` set on an
-/// invalid argument or while a close is in progress, in which case its
-/// callback never runs; true once the work is queued on the FFI runtime. The
+/// validates its arguments and returns at once: false with `result` set only
+/// on an invalid argument, in which case its callback never runs; otherwise
+/// true, and every other error, including a closed or closing mux, reaches
+/// the callback. The
 /// callback then runs exactly once, on a runtime thread. It must be
 /// thread-safe, must not unwind, and must not call the blocking
 /// `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
@@ -1395,9 +1412,22 @@ fn spawn_ingest_async(
     callback: OffsetAsyncCallback,
     user_data: *mut std::ffi::c_void,
 ) -> ZerobusResult<()> {
-    let guard = read_now(handle)?;
-    let ticket = handle.pending.begin();
     let user_data = SendPtr::new(user_data);
+    let guard = match read_now(handle) {
+        Ok(guard) => guard,
+        Err(err) => {
+            RUNTIME.spawn(async move {
+                invoke_offset_async_callback(
+                    callback,
+                    INGEST_ERROR,
+                    CResult::error(err),
+                    user_data.get(),
+                );
+            });
+            return Ok(());
+        }
+    };
+    let ticket = handle.pending.begin();
     spawn_with_panic_report(
         async move {
             let res = payload.ingest(&guard).await;
@@ -1421,8 +1451,8 @@ fn spawn_ingest_async(
 /// -1 with the error, exactly as `zerobus_multiplexed_stream_ingest_proto_record`
 /// would return it; a failed ingest queued nothing. Records accepted before a
 /// call to flush, close or `get_unacked_records` (blocking or async) are
-/// queued before it proceeds, so it covers them. Returns false with `result`
-/// set on an invalid argument or while a close is in progress.
+/// queued before it proceeds, so it covers them. A closed or closing mux is
+/// reported through `callback`.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1583,8 +1613,7 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_async(
 /// `callback` (Beta).
 ///
 /// `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
-/// would return. Returns false with `result` set on a null handle or while a
-/// close is in progress.
+/// would return, or the closing error while a close is in progress.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1606,7 +1635,11 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
         };
         let guard = match read_now(handle) {
             Ok(guard) => guard,
-            Err(err) => return complete(result, Err(err), false),
+            Err(err) => {
+                report_bool_async(callback, user_data, err);
+                write_success_result(result);
+                return true;
+            }
         };
         let user_data = SendPtr::new(user_data);
         spawn_with_panic_report(
@@ -1631,9 +1664,8 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
 /// Flush on a background task and report completion via `callback` (Beta).
 ///
 /// Covers the same records as `zerobus_multiplexed_stream_flush`: every
-/// blocking, `_nowait` and `_async` ingest accepted before this call.
-/// Returns false with `result` set on a null handle or while a close is in
-/// progress.
+/// blocking, `_nowait` and `_async` ingest accepted before this call. A
+/// close in progress is reported through `callback`.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1654,7 +1686,11 @@ pub extern "C" fn zerobus_multiplexed_stream_flush_async(
         };
         let guard = match read_now(handle) {
             Ok(guard) => guard,
-            Err(err) => return complete(result, Err(err), false),
+            Err(err) => {
+                report_bool_async(callback, user_data, err);
+                write_success_result(result);
+                return true;
+            }
         };
         // Fix the epoch now, so submissions accepted later are not waited for.
         let target = handle.pending.start_flush();
@@ -1665,9 +1701,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush_async(
                 pending.wait_drained(target).await;
                 let flushed = guard.flush().await;
                 drop(guard);
-                // As in the blocking flush: its own error wins, and a stored
-                // `_nowait` failure is reported once.
-                let res = flushed.and(pending.take_error(Some(target)).map_or(Ok(()), Err));
+                // As in the blocking flush: its own error wins and leaves a
+                // stored `_nowait` failure for the next flush or close.
+                let res =
+                    flushed.and_then(|()| pending.take_error(Some(target)).map_or(Ok(()), Err));
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
                     Err(err) => (false, CResult::error(err)),
@@ -1684,12 +1721,11 @@ pub extern "C" fn zerobus_multiplexed_stream_flush_async(
 /// Flush and close every sub-stream on a background task and report
 /// completion via `callback` (Beta).
 ///
-/// Behaves like `zerobus_multiplexed_stream_close`, waiting for in-flight
-/// calls and accepted `_nowait` and `_async` ingests first. Calls made after
-/// this returns but before its background task takes the write lock are still
-/// accepted, and covered by the close. The handle must
-/// still be released with `zerobus_multiplexed_stream_free`, which may happen
-/// before `callback` runs.
+/// Behaves like `zerobus_multiplexed_stream_close`, waiting for in-flight calls
+/// and accepted `_nowait` and `_async` ingests first. Calls made after this
+/// returns but before its background task takes the write lock are still
+/// accepted, and covered by the close. The handle must still be released with
+/// `zerobus_multiplexed_stream_free`, which may happen before `callback` runs.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1714,7 +1750,7 @@ pub extern "C" fn zerobus_multiplexed_stream_close_async(
         spawn_with_panic_report(
             async move {
                 let closed = stream.write_owned().await.close().await;
-                let res = closed.and(pending.take_error(None).map_or(Ok(()), Err));
+                let res = closed.and_then(|()| pending.take_error(None).map_or(Ok(()), Err));
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
                     Err(err) => (false, CResult::error(err)),

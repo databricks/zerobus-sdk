@@ -3168,9 +3168,10 @@ fn async_ingests_accepted_before_close_are_never_lost() {
 }
 
 /// While close or get_unacked_records holds or waits for the write lock, the
-/// async readers fail at once with a closing error and never call back.
+/// async readers return true at once and report a closing error through
+/// exactly one callback, before the writer finishes.
 #[test]
-fn async_calls_while_closing_fail_without_callback() {
+fn async_calls_while_closing_report_via_callback() {
     for writer in ["close", "get_unacked_records"] {
         for queued in [true, false] {
             let what = format!("{writer}, {}", if queued { "queued" } else { "held" });
@@ -3214,18 +3215,25 @@ fn async_calls_while_closing_fail_without_callback() {
             for (call_name, call) in async_readers(gated.mux, gated.r0_id) {
                 let sink = AsyncSink::leaked();
                 let started = Instant::now();
-                let (returned, retryable, message) = call(sink);
+                let (returned, _, message) = call(sink);
                 assert!(
                     started.elapsed() < Duration::from_secs(1),
                     "{what}: {call_name} blocked"
                 );
-                assert!(!returned, "{what}: {call_name} must return false");
-                assert!(!retryable, "{what}: {call_name}: {message}");
+                assert!(returned, "{what}: {call_name} must return true: {message}");
+                // The gate is still closed, so the writer has not finished.
+                let completions = sink.wait_for(1, call_name);
+                let completion = &completions[0];
                 assert!(
-                    message.contains("MultiplexedStream is closing"),
-                    "{what}: {call_name}: {message}"
+                    !completion.success && !completion.retryable,
+                    "{what}: {call_name}: {}",
+                    completion.message
                 );
-                sink.assert_never_called(call_name);
+                assert!(
+                    completion.message.contains("MultiplexedStream is closing"),
+                    "{what}: {call_name}: {}",
+                    completion.message
+                );
             }
 
             gated.gate.release();
