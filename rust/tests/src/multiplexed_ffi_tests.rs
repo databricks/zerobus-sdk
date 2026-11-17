@@ -4303,3 +4303,69 @@ fn error_only_ack_callback_receives_failed_records() {
     zerobus_multiplexed_stream_free(mux);
     zerobus_sdk_free(sdk);
 }
+
+/// A blocking `_async` ingest callback doesn't hold up its own record: the
+/// record still reaches the server, and a flush still completes, while the
+/// callback runs.
+#[test]
+fn blocking_async_callback_does_not_hold_its_own_send() {
+    for batch in [false, true] {
+        let what = if batch {
+            "json_records_async"
+        } else {
+            "json_record_async"
+        };
+        let (runtime, server, url) = start_server();
+        let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, "ffi.mux.async.blocking", 1);
+        let sink = AsyncSink::leaked();
+        // The sink holds the callback for at most 5 s.
+        sink.block.store(true, Ordering::SeqCst);
+
+        let records = json_records(0..if batch { 2 } else { 1 });
+        let mut result = new_result();
+        let returned = if batch {
+            let ptrs: Vec<*const c_char> = records.iter().map(|r| r.as_ptr()).collect();
+            zerobus_multiplexed_stream_ingest_json_records_async(
+                mux,
+                ptrs.as_ptr(),
+                ptrs.len(),
+                sink_offset,
+                sink.user_data(),
+                &mut result,
+            )
+        } else {
+            zerobus_multiplexed_stream_ingest_json_record_async(
+                mux,
+                records[0].as_ptr(),
+                sink_offset,
+                sink.user_data(),
+                &mut result,
+            )
+        };
+        expect_success(&mut result, what);
+        assert!(returned, "{what}");
+        wait_until("the ingest callback is running", || {
+            sink.entered.load(Ordering::SeqCst)
+        });
+
+        let expected = records.len() as u64;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.block_on(server.get_write_count()) < expected {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: the record wasn't sent while its callback ran"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let flush = zerobus_multiplexed_stream_flush;
+        let (flushed, _, message) = call_within_1s(mux, flush, "flush during the callback");
+        assert!(flushed, "{what}: {message}");
+
+        sink.release.store(true, Ordering::SeqCst);
+        assert!(sink.one(what).success, "{what}");
+        assert!(zerobus_multiplexed_stream_close(mux, &mut result));
+        expect_success(&mut result, "close");
+        zerobus_multiplexed_stream_free(mux);
+        zerobus_sdk_free(sdk);
+    }
+}
