@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use databricks_zerobus_ingest_sdk::{
@@ -20,7 +20,9 @@ use databricks_zerobus_ingest_sdk::{
 };
 
 use crate::auth::HeadersProviderWrapper;
-use crate::common::{AckCallback, AckCallbackWrapper, RecordFormat, TableProperties};
+use tokio::sync::RwLock;
+
+use crate::common::{map_error, AckCallback, AckCallbackWrapper, RecordFormat, TableProperties};
 
 /// Settings collected by the Python stream builder.
 ///
@@ -278,12 +280,61 @@ impl StreamConfig {
         stream_count: usize,
         ack_callback: Option<Py<AckCallback>>,
     ) -> ZerobusResult<MultiplexedStream> {
-        let mut b = self.apply(sdk);
-        if let Some(cb) = ack_callback {
-            b = b.multiplexed_ack_callback(Arc::new(MultiplexedAckCallbackWrapper(
-                AckCallbackWrapper::new(cb),
-            )));
-        }
-        b.multiplexed(stream_count).build().await
+        self.apply_multiplexed_callback(sdk, ack_callback)
+            .multiplexed(stream_count)
+            .build()
+            .await
     }
+
+    /// Run the Rust core's configuration checks without opening anything.
+    ///
+    /// With `stream_count`, this is `MultiplexedStreamBuilder::validate()`; without it,
+    /// `StreamBuilder::validate()`, which rejects a multiplexed `ack_callback`. Like the
+    /// core, it neither resolves authentication nor parses the Avro writer schema.
+    pub(crate) fn validate(
+        self,
+        sdk: &RustSdk,
+        stream_count: Option<usize>,
+        ack_callback: Option<Py<AckCallback>>,
+    ) -> ZerobusResult<()> {
+        let b = self.apply_multiplexed_callback(sdk, ack_callback);
+        match stream_count {
+            Some(n) => b.multiplexed(n).validate(),
+            None => b.validate(),
+        }
+    }
+
+    fn apply_multiplexed_callback(
+        self,
+        sdk: &RustSdk,
+        ack_callback: Option<Py<AckCallback>>,
+    ) -> StreamBuilder<'_> {
+        let b = self.apply(sdk);
+        match ack_callback {
+            Some(cb) => b.multiplexed_ack_callback(Arc::new(MultiplexedAckCallbackWrapper(
+                AckCallbackWrapper::new(cb),
+            ))),
+            None => b,
+        }
+    }
+}
+
+/// `validate_stream` for the sync and async SDKs: resolve the settings, then run the Rust
+/// core's checks. Synchronous in both, as Rust's `validate()` is, so it never needs a
+/// runtime. Nothing takes the SDK's write lock, so `try_read` does not fail in practice.
+pub(crate) fn validate_stream(
+    py: Python<'_>,
+    sdk: &RwLock<RustSdk>,
+    table_properties: &TableProperties,
+    settings: &StreamSettings,
+    stream_count: Option<usize>,
+    ack_callback: Option<Py<AckCallback>>,
+) -> PyResult<()> {
+    let config = StreamConfig::resolve(py, settings, table_properties)?;
+    let sdk = sdk
+        .try_read()
+        .map_err(|_| PyRuntimeError::new_err("the SDK is in use; try again"))?;
+    config
+        .validate(&sdk, stream_count, ack_callback)
+        .map_err(map_error)
 }

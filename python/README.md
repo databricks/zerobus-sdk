@@ -491,6 +491,12 @@ is a coroutine. The builder has these setters: `table`, `oauth`, `headers_provid
 `callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`. Unset values use the SDK
 defaults. For external-IdP federation, use `create_stream(auth=...)`.
 
+`validate()` checks the configuration without opening a stream, as in the Rust SDK. It raises
+the same errors `build()` raises before connecting, including the core's own checks, and is
+available after `multiplexed(n)` too. It does not resolve authentication or parse the Avro
+writer schema, so `build()` can still fail. In the async SDK, `validate()` is a plain method,
+not a coroutine.
+
 ## Multiplexed Streams (Beta)
 
 A single stream is ordered, which caps its throughput. When one stream is the bottleneck and

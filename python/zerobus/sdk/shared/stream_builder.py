@@ -3,9 +3,9 @@ Builders for ordinary and multiplexed streams, shared by the sync and async SDKs
 
 ``ZerobusSdk.stream_builder()`` mirrors the Rust SDK's ``stream_builder()``: set the table,
 authentication, record format, and stream settings, then call ``build()`` for an ordinary
-stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta). The sync
-and async builders in ``zerobus.sdk.sync`` and ``zerobus.sdk.aio`` add the ``build()``
-methods.
+stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta).
+``validate()`` checks a configuration without opening anything. The sync and async builders
+in ``zerobus.sdk.sync`` and ``zerobus.sdk.aio`` add the ``build()`` methods.
 
 A multiplexed stream opens several sub-streams to one table and distributes records
 round-robin across them, to raise throughput when one stream is the bottleneck. Records keep
@@ -106,6 +106,21 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
         snapshot._settings = dict(self._settings)
         return self._MULTIPLEXED_BUILDER(snapshot, stream_count)
 
+    def validate(self) -> None:
+        """Check the configuration of an ordinary stream without opening it.
+
+        Runs the checks ``build()`` makes before connecting: the required settings, the
+        descriptor, and the Rust core's own checks. As in the Rust SDK, it does not resolve
+        authentication or parse the Avro writer schema, so ``build()`` can still fail. A plain
+        method in the sync and async SDKs.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set.
+            NonRetriableException: If a setting is invalid.
+        """
+        table_properties, settings = self._native_args()
+        self._sdk.validate_stream(table_properties, settings)
+
     def _format_selected(self) -> bool:
         return super()._format_selected() or self._avro_schema is not None
 
@@ -138,6 +153,23 @@ class _MultiplexedStreamBuilderBase:
         """
         self._ack_callback = callback
         return self
+
+    def validate(self) -> None:
+        """Check the configuration of the multiplexed stream without opening any sub-stream.
+
+        Runs the checks ``build()`` makes before connecting, including the Rust core's check
+        that ``max_inflight_requests`` is at least the stream count. As in the Rust SDK, it
+        does not resolve authentication or parse the Avro writer schema, so ``build()`` can
+        still fail. A plain method in the sync and async SDKs.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set, or if
+                ``ack_callback()`` was set on the stream builder instead of here.
+            NonRetriableException: If ``max_inflight_requests`` is below the stream count, or
+                another setting is invalid.
+        """
+        table_properties, settings, stream_count, ack_callback = self._native_args()
+        self._base._sdk.validate_stream(table_properties, settings, stream_count, ack_callback)
 
     def _native_args(self):
         """Validate the settings and return the arguments of the native open call."""
