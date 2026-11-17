@@ -554,7 +554,7 @@ stream.close()
 - When the chosen sub-stream is at capacity, an ingest call waits for it to drain, for at most
   30 seconds. Then it raises a retriable `ZerobusException` and the record is not queued, so
   ingest it again.
-- As with ordinary streams, a sync multiplexed stream is for one thread at a time; an async
+- A sync multiplexed stream, like an ordinary one, is for one thread per instance; an async
   one is safe to share across tasks.
 - Register an `AckCallback` with `multiplexed(n).ack_callback(callback)`. It is shared by
   every sub-stream; its `offset` argument receives the message ID, and sub-streams may call
@@ -575,17 +575,20 @@ stream.close()
   ```python
   mux_builder = sdk.stream_builder().table(table).oauth(client_id, client_secret).json().multiplexed(4)
   stream = mux_builder.build()
+  queued = 0
   try:
-      for record in records:
+      for record in records:  # records: a list of JSON strings or dicts
           stream.ingest_record(record)
+          queued += 1
       stream.flush()
   except ZerobusException:
       if not stream.is_closed:
           raise
-      unacked = stream.get_unacked_records()
+      retry = [r.decode() for r in stream.get_unacked_records()]  # JSON comes back as bytes
+      retry += records[queued:]  # the failing call and the rest were never queued
       stream = mux_builder.build()  # a new stream with the same configuration
-      for record in unacked:
-          stream.ingest_record(record.decode())  # JSON comes back as bytes
+      for record in retry:
+          stream.ingest_record(record)
       stream.flush()
   stream.close()
   ```
