@@ -1053,10 +1053,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 /// and for every accepted `_nowait` and `_async` ingest to be queued, then
 /// flushes those too. `_nowait` calls made after close starts report an error.
 /// If close itself succeeds, a background `_nowait` failure that no flush has
-/// reported yet is returned instead (and cleared). On error, recover
-/// unacknowledged records with
-/// `zerobus_multiplexed_stream_get_unacked_records`. The handle must still be
-/// released with `zerobus_multiplexed_stream_free`.
+/// reported yet is returned instead (and cleared). On error, call
+/// `zerobus_multiplexed_stream_get_unacked_records` to recover unacknowledged
+/// records. The handle must still be released with
+/// `zerobus_multiplexed_stream_free`.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_close(
     mux: *mut CZerobusMultiplexedStream,
@@ -1166,12 +1166,11 @@ where
 /// `mux` is non-null on success, and the caller then owns it; it is null on
 /// failure. `result` is valid only for the duration of the call.
 ///
-/// Every multiplexed `_async` function follows the same contract. It
-/// validates its arguments and returns at once: false with `result` set only
-/// on an invalid argument, in which case its callback never runs; otherwise
-/// true, and every other error, including a closed or closing mux, reaches
-/// the callback. The
-/// callback then runs exactly once, on a runtime thread. It must be
+/// Every multiplexed `_async` function follows the same contract. It validates
+/// its arguments and returns at once: false with `result` set only on an
+/// invalid argument, in which case its callback never runs; otherwise true, and
+/// every other error, including a closed or closing mux, reaches the callback.
+/// The callback then runs exactly once, on a runtime thread. It must be
 /// thread-safe, must not unwind, and must not call the blocking
 /// `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
 /// The `user_data` passed with the callback must stay valid until it runs.
