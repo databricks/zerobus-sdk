@@ -503,13 +503,10 @@ impl MultiplexedStream {
     }
 
     /// Ingest multiple records into one sub-stream and return one message ID for the
-    /// whole batch. Returns `None` for an empty batch.
+    /// whole batch. Returns `None` for an empty batch on an open stream; an empty batch on
+    /// a closed or failed stream raises, as the Rust core does.
     fn ingest_records(&self, py: Python, payloads: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
         let record_payloads = extract_record_payloads(payloads, self.format)?;
-        if record_payloads.is_empty() {
-            return Ok(None);
-        }
-
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 

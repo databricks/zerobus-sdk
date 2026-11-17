@@ -409,7 +409,11 @@ class MultiplexedStream:
         return await self._inner.ingest_record(self._encode_payload(payload))
 
     async def ingest_records(self, payloads) -> Optional[int]:
-        """Queue a batch on one sub-stream and return one message ID for it, or ``None`` for an empty batch."""
+        """Queue a batch on one sub-stream and return one message ID for it.
+
+        Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+        raises like any other.
+        """
         return await self._inner.ingest_records(self._encode_payloads(payloads))
 
     async def wait_for_message_id(self, message_id: int) -> None:

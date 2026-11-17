@@ -462,7 +462,8 @@ impl MultiplexedStream {
     }
 
     /// Ingest a batch of records into one sub-stream and return one message ID for the
-    /// whole batch (async). Returns `None` for an empty batch.
+    /// whole batch (async). Returns `None` for an empty batch on an open stream; an empty
+    /// batch on a closed or failed stream raises, as the Rust core does.
     fn ingest_records<'py>(
         &self,
         py: Python<'py>,
@@ -472,9 +473,6 @@ impl MultiplexedStream {
         let stream = self.inner.clone();
 
         future_into_py(py, async move {
-            if record_payloads.is_empty() {
-                return Ok(None);
-            }
             let guard = stream.read().await;
             let message_id = guard
                 .ingest_records(record_payloads)

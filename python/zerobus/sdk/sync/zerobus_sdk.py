@@ -327,7 +327,8 @@ class MultiplexedStream:
     def ingest_records(self, payloads) -> Optional[int]:
         """Queue a batch on one sub-stream and return one message ID for it.
 
-        Returns ``None`` for an empty batch.
+        Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+        raises like any other.
         """
         return self._inner.ingest_records(self._encode_payloads(payloads))
 

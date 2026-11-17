@@ -456,7 +456,11 @@ class sync:
             ...
 
         def ingest_records(self, payloads: Any) -> Optional[int]:
-            """Queue a batch on one sub-stream and return its message ID, or ``None`` for an empty batch."""
+            """Queue a batch on one sub-stream and return its message ID.
+
+            Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+            raises like any other.
+            """
             ...
 
         def wait_for_message_id(self, message_id: int) -> None:
@@ -759,7 +763,11 @@ class aio:
             ...
 
         async def ingest_records(self, payloads: Any) -> Optional[int]:
-            """Queue a batch on one sub-stream and return its message ID, or ``None`` for an empty batch."""
+            """Queue a batch on one sub-stream and return its message ID.
+
+            Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+            raises like any other.
+            """
             ...
 
         async def wait_for_message_id(self, message_id: int) -> None:
