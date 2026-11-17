@@ -2180,6 +2180,10 @@ fn own_flush_error_wins_over_stored_nowait_failure() {
         !message.contains(RECORD_TYPE_MISMATCH),
         "the flush's own timeout must win: {message}"
     );
+    assert!(
+        message.contains("timed out"),
+        "the flush must fail on its own timeout: {message}"
+    );
 
     gate.release();
     let mut result = new_result();
@@ -2201,6 +2205,10 @@ fn own_flush_error_wins_over_stored_nowait_failure() {
     assert!(
         !message.contains(RECORD_TYPE_MISMATCH),
         "close's own timeout must win: {message}"
+    );
+    assert!(
+        message.contains("timed out"),
+        "close must fail on its own timeout: {message}"
     );
     assert!(zerobus_multiplexed_stream_is_closed(mux));
     gate.release();
