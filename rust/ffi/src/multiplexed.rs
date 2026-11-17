@@ -7,13 +7,7 @@
 //! `zerobus_multiplexed_stream_wait_for_message_id`; do not compare or order
 //! message IDs, and only use them with the stream that produced them.
 //!
-//! Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
-//! run concurrently on the same handle from any thread. `_free` must not
-//! overlap any other call on that handle.
-//!
-//! Ack and headers callbacks run on the FFI's runtime threads. They must not
-//! call `zerobus_multiplexed_stream_*` functions, and must not block on a
-//! thread that is inside one: the call would fail or deadlock.
+//! Thread-safety and callback rules are on `CZerobusMultiplexedStream`.
 
 use crate::common::*;
 use crate::stream::{
@@ -771,6 +765,10 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records(
 enum IngestPayload {
     Record(EncodedRecord),
     Batch(Vec<EncodedRecord>),
+    /// Panics in `ingest`, so tests can reach the panic paths.
+    #[cfg(test)]
+    #[allow(dead_code)] // Constructed only by the panic-path tests.
+    PanicForTest,
 }
 
 impl IngestPayload {
@@ -782,6 +780,8 @@ impl IngestPayload {
                 .ingest_records(batch)
                 .await
                 .map(|id| id.map_or(EMPTY_BATCH, |id| id.raw())),
+            #[cfg(test)]
+            IngestPayload::PanicForTest => panic!("IngestPayload::PanicForTest"),
         }
     }
 }
@@ -1042,12 +1042,11 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
 /// so with a sub-stream at capacity this phase can take up to 30 seconds after
 /// the last accepted call, on top of `flush_timeout_ms`. `_nowait` records
 /// submitted during the flush may not be covered; the next flush or close
-/// covers them. If the
-/// flush itself fails, that error is returned and a stored `_nowait` failure is
-/// kept for the next flush or close; otherwise, if a covered `_nowait` ingest
-/// failed in the background, the first such failure is returned and cleared, so
-/// it is reported once. That error means a record was dropped, and retrying
-/// the flush does not bring it back.
+/// covers them. If the flush itself fails, that error is returned and a stored
+/// `_nowait` failure is kept for the next flush or close; otherwise, if a
+/// covered `_nowait` ingest failed in the background, the first such failure is
+/// returned and cleared, so it is reported once. That error means a record was
+/// dropped, and retrying the flush does not bring it back.
 ///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via

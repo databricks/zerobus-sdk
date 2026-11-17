@@ -1140,12 +1140,11 @@ bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedSt
  * so with a sub-stream at capacity this phase can take up to 30 seconds after
  * the last accepted call, on top of `flush_timeout_ms`. `_nowait` records
  * submitted during the flush may not be covered; the next flush or close
- * covers them. If the
- * flush itself fails, that error is returned and a stored `_nowait` failure is
- * kept for the next flush or close; otherwise, if a covered `_nowait` ingest
- * failed in the background, the first such failure is returned and cleared, so
- * it is reported once. That error means a record was dropped, and retrying
- * the flush does not bring it back.
+ * covers them. If the flush itself fails, that error is returned and a stored
+ * `_nowait` failure is kept for the next flush or close; otherwise, if a
+ * covered `_nowait` ingest failed in the background, the first such failure is
+ * returned and cleared, so it is reported once. That error means a record was
+ * dropped, and retrying the flush does not bring it back.
  *
  * A terminal sub-stream failure closes the mux for further ingestion; its
  * unacknowledged records remain available via
