@@ -519,6 +519,20 @@ class sync:
             """
             ...
 
+        def validate_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+            stream_count: Optional[int] = None,
+            ack_callback: Optional[AckCallback] = None,
+        ) -> None:
+            """Check a ``stream_builder()`` configuration without opening anything.
+
+            With ``stream_count``, checks it as a multiplexed stream (Beta). A plain method in
+            both SDKs.
+            """
+            ...
+
         def __init__(
             self,
             host: str,
@@ -826,6 +840,20 @@ class aio:
             """Open every sub-stream of a multiplexed stream configured by ``stream_builder()`` (Beta).
 
             ``ack_callback`` receives message IDs.
+            """
+            ...
+
+        def validate_stream(
+            self,
+            table_properties: TableProperties,
+            settings: StreamSettings,
+            stream_count: Optional[int] = None,
+            ack_callback: Optional[AckCallback] = None,
+        ) -> None:
+            """Check a ``stream_builder()`` configuration without opening anything.
+
+            With ``stream_count``, checks it as a multiplexed stream (Beta). A plain method in
+            both SDKs.
             """
             ...
 

@@ -22,7 +22,7 @@ use crate::common::{
     SDK_IDENTIFIER_PREFIX,
 };
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
-use crate::stream_settings::{StreamConfig, StreamSettings};
+use crate::stream_settings::{self, StreamConfig, StreamSettings};
 
 // =============================================================================
 // STREAM-BUILDER HELPERS
@@ -795,6 +795,27 @@ impl ZerobusSdk {
                 format,
             })
         })
+    }
+
+    /// Check a `stream_builder()` configuration without opening anything. With
+    /// `stream_count`, checks it as a multiplexed stream (Beta).
+    #[pyo3(signature = (table_properties, settings, stream_count = None, ack_callback = None))]
+    fn validate_stream(
+        &self,
+        py: Python,
+        table_properties: &TableProperties,
+        settings: &StreamSettings,
+        stream_count: Option<usize>,
+        ack_callback: Option<Py<AckCallback>>,
+    ) -> PyResult<()> {
+        stream_settings::validate_stream(
+            py,
+            &self.inner,
+            table_properties,
+            settings,
+            stream_count,
+            ack_callback,
+        )
     }
 
     /// Create a new Arrow Flight stream with OAuth authentication (async).

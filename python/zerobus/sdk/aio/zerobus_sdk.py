@@ -499,7 +499,8 @@ class StreamBuilder(_GrpcStreamBuilderBase):
 
     Obtain one from ``ZerobusSdk.stream_builder()``, set the table, authentication, and
     record format, then ``await build()`` for an ordinary stream, or call ``multiplexed(n)``
-    and then ``await build()`` for a multiplexed stream (Beta).
+    and then ``await build()`` for a multiplexed stream (Beta). ``validate()`` is a plain
+    method that checks the configuration without opening anything.
 
     Example:
         >>> stream = await (

@@ -20,6 +20,10 @@
   budget is divided across sub-streams and must be at least `n`. The `AckCallback` set with
   `multiplexed(n).ack_callback(...)` receives message IDs; `ack_callback()` on the stream
   builder itself is rejected for multiplexed streams.
+- Added `validate()` to the stream builder and the multiplexed stream builder, mirroring the
+  Rust SDK's `validate()`. It runs the checks `build()` makes before connecting, including the
+  in-flight budget of a multiplexed stream, without opening anything. It is a plain method in
+  the async SDK too.
 
 ### Bug Fixes
 
