@@ -474,7 +474,7 @@ sdk = ZerobusSdk(server_endpoint, workspace_url)
 stream = (
     sdk.stream_builder()
     .table("catalog.schema.events")
-    .oauth(client_id, client_secret)  # or .headers_provider(provider)
+    .oauth(client_id, client_secret)  # or .headers_provider(provider) / .federated_auth(token)
     .json()  # or .compiled_proto(descriptor) / .avro(schema_json)
     .build()
 )
@@ -523,7 +523,8 @@ sub-stream, but there is no order across sub-streams.
 
 Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
 Multiplexed streams support JSON, protobuf, and Avro records, with OAuth, a custom headers
-provider, or external-IdP federation (`federated_auth(token)`). For JSON, first migrate to protobuf and measure again before multiplexing.
+provider, or external-IdP federation (`federated_auth(token)`). For JSON, first migrate to
+protobuf and measure again before multiplexing.
 
 ```python
 stream = (
@@ -543,8 +544,8 @@ stream.close()
 
 - `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned
   `MultiplexedStreamBuilder` captures the configuration as it is at that point and only has
-  `ack_callback()`, `validate()`, and `build()`. `max_inflight_requests` is a budget for the whole stream,
-  divided evenly across sub-streams, so it must be at least `n`.
+  `ack_callback()`, `validate()`, and `build()`. `max_inflight_requests` is a budget for the
+  whole stream, divided evenly across sub-streams, so it must be at least `n`.
 - `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
   identifies the sub-stream and the record's position in it. Message IDs are not ordered and
   may be negative. Pass one to `wait_for_message_id()` on the same stream; use `flush()` to

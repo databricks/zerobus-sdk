@@ -8,8 +8,9 @@
 
 - Added `ZerobusSdk.stream_builder()` to the sync and async SDKs, mirroring the Rust SDK's
   `stream_builder()`. Set the table, authentication (OAuth, a custom headers provider, or
-  external-IdP federation with `federated_auth(token)`), record format (`json()`, `compiled_proto(...)`, or `avro(...)`), and stream settings, then
-  call `build()` for a `ZerobusStream`. `create_stream()` is unchanged.
+  external-IdP federation with `federated_auth(token)`), record format (`json()`,
+  `compiled_proto(...)`, or `avro(...)`), and stream settings, then call `build()` for a
+  `ZerobusStream`. `create_stream()` is unchanged.
 - Added multiplexed streams (Beta). Call `multiplexed(n)` (1 to 64) on the stream builder,
   optionally `ack_callback(...)`, then `build()`. A multiplexed stream opens `n` sub-streams
   to one table and distributes records round-robin across them, to raise throughput when one
@@ -56,3 +57,5 @@
   `StreamBuilder.multiplexed(n)` returns a `MultiplexedStreamBuilder`. `MultiplexedStream` has
   `ingest_record()`, `ingest_records()`, `wait_for_message_id()`, `flush()`, `close()`,
   `get_unacked_records()`, `get_unacked_batches()`, and the property `is_closed`.
+  `StreamBuilder` has `federated_auth()`, `validate()`, `multiplexed(n)`, and `build()` besides
+  its setters; `MultiplexedStreamBuilder` has `ack_callback()`, `validate()`, and `build()`.
