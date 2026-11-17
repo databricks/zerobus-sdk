@@ -193,7 +193,7 @@ def mode(request):
 
 @pytest.fixture
 def persistent_builder(mode):
-    sdk = (sync if mode == "sync" else aio).ZerobusSdk(LOCAL_REFUSED, LOCAL_REFUSED)
+    sdk = (ZerobusSdk if mode == "sync" else AsyncZerobusSdk)(LOCAL_REFUSED, LOCAL_REFUSED)
     return sdk.persistent_stream_builder().table("c.s.t").json()
 
 
