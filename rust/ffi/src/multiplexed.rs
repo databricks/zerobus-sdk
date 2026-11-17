@@ -1363,6 +1363,7 @@ mod multiplexed_tests {
         wait_until("OAuth create drops the ack callback", || {
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
         });
+        // Let a late second release land before asserting exactly once.
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
@@ -1393,6 +1394,7 @@ mod multiplexed_tests {
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
                 && FREES.load(Ordering::SeqCst) - frees_before >= 1
         });
+        // Let a late second release land before asserting exactly once.
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,

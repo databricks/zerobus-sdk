@@ -574,6 +574,7 @@ fn headers_user_data_freed_once_after_last_lane_releases_it() {
 
     zerobus_multiplexed_stream_free(mux);
     wait_until("user_data is freed", || provider.frees() >= 1);
+    // Let a late second release land before asserting exactly once.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
     zerobus_sdk_free(sdk);
@@ -607,6 +608,7 @@ fn partial_open_failure_frees_shared_headers_provider_once() {
     expect_permanent_failure(&mut result, "zerobus_sdk_create_multiplexed_stream");
 
     wait_until("user_data is freed", || provider.frees() >= 1);
+    // Let a late second release land before asserting exactly once.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
     zerobus_sdk_free(sdk);
@@ -664,6 +666,7 @@ fn free_with_pending_nowait_keeps_mux_alive_until_task_ends() {
     wait_until("the task's reference releases the provider", || {
         provider.frees() >= 1
     });
+    // Let a late second release land before asserting exactly once.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(provider.frees(), 1, "user_data must be freed exactly once");
     zerobus_sdk_free(sdk);
