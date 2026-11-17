@@ -502,8 +502,13 @@ class sync:
             self,
             table_properties: TableProperties,
             settings: StreamSettings,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> "ZerobusStream":
-            """Open an ordinary stream configured by ``stream_builder()``."""
+            """Open an ordinary stream configured by ``stream_builder()``.
+
+            ``idp_supplier`` and ``databricks_client_id`` carry ``federated_auth()``.
+            """
             ...
 
         def open_multiplexed_stream(
@@ -512,6 +517,8 @@ class sync:
             settings: StreamSettings,
             stream_count: int,
             ack_callback: Optional[AckCallback] = None,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> "MultiplexedStream":
             """Open every sub-stream of a multiplexed stream configured by ``stream_builder()`` (Beta).
 
@@ -525,6 +532,8 @@ class sync:
             settings: StreamSettings,
             stream_count: Optional[int] = None,
             ack_callback: Optional[AckCallback] = None,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> None:
             """Check a ``stream_builder()`` configuration without opening anything.
 
@@ -826,8 +835,13 @@ class aio:
             self,
             table_properties: TableProperties,
             settings: StreamSettings,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> "ZerobusStream":
-            """Open an ordinary stream configured by ``stream_builder()``."""
+            """Open an ordinary stream configured by ``stream_builder()``.
+
+            ``idp_supplier`` and ``databricks_client_id`` carry ``federated_auth()``.
+            """
             ...
 
         async def open_multiplexed_stream(
@@ -836,6 +850,8 @@ class aio:
             settings: StreamSettings,
             stream_count: int,
             ack_callback: Optional[AckCallback] = None,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> "MultiplexedStream":
             """Open every sub-stream of a multiplexed stream configured by ``stream_builder()`` (Beta).
 
@@ -849,6 +865,8 @@ class aio:
             settings: StreamSettings,
             stream_count: Optional[int] = None,
             ack_callback: Optional[AckCallback] = None,
+            idp_supplier: Optional[IdpSupplier] = None,
+            databricks_client_id: Optional[str] = None,
         ) -> None:
             """Check a ``stream_builder()`` configuration without opening anything.
 
