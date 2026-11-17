@@ -1729,6 +1729,17 @@ Implementations must be thread-safe and lightweight (callbacks run on internal
 processing threads). `close()` waits at most five seconds for in-flight
 callbacks; remaining callbacks may still be pending when it returns.
 
+**What a callback may do.** Keep callbacks to quick, non-blocking work such as logging,
+updating metrics, or incrementing counters, and hand anything else (I/O, retries,
+re-ingesting records) to another thread or executor. A callback must not call stream or
+SDK methods that block on native work: `ingestRecordOffset`, `ingestRecordsOffset`,
+`ingestBatch` (Arrow), `waitForOffset`, `flush`, `close`, `isClosed`,
+`getUnackedRecords`, `getUnackedBatches`, `ZerobusSdk.recreateStream`, and
+`recreateArrowStream`. Called from a callback, these throw `IllegalStateException`.
+Methods that only return a `CompletableFuture`, such as the deprecated `ingestRecord`,
+are not affected. A callback should not throw; if it does, the exception is logged at
+ERROR level through SLF4J and later callbacks are still delivered.
+
 ## Best Practices
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
