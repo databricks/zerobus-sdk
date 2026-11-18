@@ -99,6 +99,11 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 **When using the fat JAR** (standalone scripts or CLI tools without a build system):
 - No additional dependencies required - all dependencies are bundled
 
+**When shrinking or obfuscating with ProGuard or R8**: keep `com.databricks.zerobus.**`
+(for example `-keep class com.databricks.zerobus.** { *; }`). The native library binds the SDK's
+native methods and the classes it calls back by name, so renamed or removed members make it fail
+to load.
+
 **When using the regular JAR as a file on the classpath** (without Maven or Gradle):
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)
 - [`slf4j-api` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-api/2.0.17)
