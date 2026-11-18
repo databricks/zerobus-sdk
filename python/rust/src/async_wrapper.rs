@@ -519,6 +519,35 @@ impl ZerobusSdk {
         })
     }
 
+    /// Create stream authenticated with a Databricks personal access token (async)
+    #[pyo3(signature = (table_properties, token, options = None))]
+    fn create_stream_pat<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: &TableProperties,
+        token: String,
+        options: Option<StreamConfigurationOptions>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let sdk = self.inner.clone();
+        let table_properties = table_properties.clone();
+        let opts = options.unwrap_or_default();
+        opts.validate()?;
+        let format = table_properties.resolve_format(opts.record_type)?;
+
+        future_into_py(py, async move {
+            let sdk_guard = sdk.read().await;
+            let builder = sdk_guard.stream_builder().personal_access_token(token);
+            let builder = apply_table_and_format(builder, &table_properties);
+            let builder = apply_grpc_options(builder, &opts)?;
+            let stream = builder.build().await.map_err(map_error)?;
+            Ok(ZerobusStream {
+                inner: Arc::new(RwLock::new(stream)),
+                format,
+                idp_holder: None,
+            })
+        })
+    }
+
     /// Create a stream with external-IdP federation (RFC 8693 token exchange)
     /// (async). `idp_supplier` is a fresh handle built per `create_stream`; its
     /// stable cache identity (not its `Arc`) partitions the account-level token
