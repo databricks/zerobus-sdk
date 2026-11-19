@@ -9,11 +9,12 @@
 - Added personal access token (PAT) authentication (Private Preview) behind the new
   opt-in `pat-auth` feature. PAT authentication for Zerobus requires server-side
   enablement and is not available for Arrow Flight streams yet. Call
-  `.personal_access_token(token)` on `StreamBuilder` or `PersistentStreamBuilder` to
-  authenticate with a Databricks PAT created with the `zerobus` API scope. The SDK
-  sends the token as given and never refreshes it, and never includes it in `Debug`
-  output. An authentication rejection while creating the stream fails immediately
-  instead of spending the one-shot credential-refresh retry.
+  `.personal_access_token(token)` on `StreamBuilder`, `PersistentStreamBuilder`, or
+  `UnaryClientBuilder` to authenticate with a Databricks PAT created with the `zerobus`
+  API scope. The SDK sends the token as given and never refreshes it, and never
+  includes it in `Debug` output. An authentication rejection while creating the stream,
+  or on a unary call, fails immediately instead of spending the one-shot
+  credential-refresh retry.
 - Added a unary ingestion client for sparse traffic. Each
   `UnaryClient::ingest_records()` call sends one batch in one `InsertRecords`
   request and returns once the batch is durable, without opening a stream.
