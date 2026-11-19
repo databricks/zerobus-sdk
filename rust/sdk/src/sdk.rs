@@ -51,7 +51,7 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
     /// Created on first use, from the field values at that time.
-    shared_channel: OnceLock<Arc<GrpcChannelSource>>,
+    shared_stream_channel: OnceLock<Arc<GrpcChannelSource>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -197,7 +197,7 @@ impl ZerobusSdk {
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
-            shared_channel: OnceLock::new(),
+            shared_stream_channel: OnceLock::new(),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -246,7 +246,7 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let channel = self.grpc_channel_source();
+        let channel = self.stream_channel_source();
         let new_stream = ZerobusStream::new_stream(
             channel,
             stream.table_properties.clone(),
@@ -371,12 +371,12 @@ impl ZerobusSdk {
     ///
     /// The stream's supervisor opens the channel inside its retry loop, so a
     /// retryable setup error on the first open is retried like any other attempt.
-    pub(crate) fn grpc_channel_source(&self) -> Arc<GrpcChannelSource> {
+    pub(crate) fn stream_channel_source(&self) -> Arc<GrpcChannelSource> {
         if self.connection_per_stream {
             Arc::new(self.new_grpc_channel_source())
         } else {
             Arc::clone(
-                self.shared_channel
+                self.shared_stream_channel
                     .get_or_init(|| Arc::new(self.new_grpc_channel_source())),
             )
         }
