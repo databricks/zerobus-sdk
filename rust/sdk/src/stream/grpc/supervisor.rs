@@ -364,6 +364,24 @@ impl ZerobusStream {
                     }
                     _ => error,
                 };
+                // A clean end-of-stream (status OK) that arrives after
+                // shutdown was requested is not a failure: the sender
+                // half-closed on close and the server ended the RPC with
+                // status OK. Without this, a `recovery(false)` stream
+                // reports close() as failed with "closed by server without
+                // errors" whenever the supervisor's unbiased `select!`
+                // resolves the receiver arm before the sender arm.
+                // Clear the error the receiver already published so a
+                // later terminal-cause read does not promote this clean
+                // shutdown to a failure.
+                if Self::is_clean_shutdown_error(&error, &cancellation_token) {
+                    let _ = server_error_tx.send(None);
+                    info!(
+                        stream_id = %stream_id,
+                        "Stream ended cleanly during shutdown"
+                    );
+                    return Ok(());
+                }
                 if !error.is_retryable() || !options.recovery {
                     Self::fail_stream(
                         sync_mutex.as_ref(),
@@ -389,6 +407,20 @@ impl ZerobusStream {
                 let _ = server_error_tx.send(Some(error));
             }
         }
+    }
+
+    /// Whether `error` is a clean end-of-stream that arrived after shutdown
+    /// was requested: the sender half-closed on close and the server ended
+    /// the RPC with status OK. Only the combination counts — an OK close
+    /// mid-stream (cancellation not started) is still a stream failure the
+    /// supervisor must handle, and a non-OK error during shutdown is still
+    /// a real failure.
+    fn is_clean_shutdown_error(
+        error: &ZerobusError,
+        cancellation_token: &CancellationToken,
+    ) -> bool {
+        matches!(error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Ok)
+            && cancellation_token.is_cancelled()
     }
 
     /// Reconciles the retained landing-zone tail with the server's durable
@@ -622,5 +654,28 @@ mod tests {
         let records = landing_zone.remove_all();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].payload, batch);
+    }
+
+    #[test]
+    fn clean_shutdown_error_requires_ok_status_and_cancelled_token() {
+        use crate::grpc_status::GrpcStatus;
+        use tokio_util::sync::CancellationToken;
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let live = CancellationToken::new();
+        let ok = ZerobusError::StreamClosedError(GrpcStatus::ok(
+            "Stream closed by server without errors.",
+        ));
+        let internal = ZerobusError::StreamClosedError(GrpcStatus::internal("boom"));
+        // Only the clean end-of-stream during shutdown counts.
+        assert!(ZerobusStream::is_clean_shutdown_error(&ok, &cancelled));
+        // Same error mid-stream (shutdown not started) is still a failure.
+        assert!(!ZerobusStream::is_clean_shutdown_error(&ok, &live));
+        // A real error during shutdown is still a failure.
+        assert!(!ZerobusStream::is_clean_shutdown_error(
+            &internal, &cancelled
+        ));
+        assert!(!ZerobusStream::is_clean_shutdown_error(&internal, &live));
     }
 }
