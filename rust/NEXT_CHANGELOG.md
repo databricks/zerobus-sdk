@@ -58,6 +58,8 @@
   call wins (Private Preview).
 - Added `PatHeadersProvider` (behind `pat-auth`), a `HeadersProvider` that sends a
   personal access token (Private Preview).
+- Added `UnaryClientBuilder::personal_access_token` (behind `pat-auth`). A rejected token
+  fails the call without a retry (Private Preview).
 - Added `HeadersProvider::can_refresh`, a defaulted method returning `true`. A provider
   with a fixed credential returns `false` to skip the one-shot auth retry during stream
   creation or a unary call; `PatHeadersProvider` does. Existing implementations are

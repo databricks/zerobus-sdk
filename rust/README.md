@@ -735,6 +735,9 @@ last call wins. The token never appears in `Debug` output. `PersistentStreamBuil
 the same method (with the `eos` feature too), and `PatHeadersProvider` is available for use
 with `.headers_provider(...)`.
 
+`UnaryClientBuilder` has the same method too. A unary call whose token is rejected fails at
+once, without the one-shot credential-refresh retry.
+
 ### 4. Create a Stream
 
 Use the `stream_builder()` API to create a stream:
@@ -1793,7 +1796,7 @@ Flush and end the connection, or check whether the stream is closed. A closed st
 
 ### `UnaryClientBuilder`
 
-Returned by `ZerobusSdk::unary_client_builder()`. Its setters have the same names and defaults as the matching `StreamBuilder` setters: `table()`, `oauth()`, `federated_auth()`, `headers_provider()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`. The format setter is `json()`.
+Returned by `ZerobusSdk::unary_client_builder()`. Its setters have the same names and defaults as the matching `StreamBuilder` setters: `table()`, `oauth()`, `federated_auth()`, `headers_provider()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, plus `personal_access_token()` with the `pat-auth` feature (Private Preview). The format setter is `json()`.
 
 ```rust
 pub fn validate(&self) -> ZerobusResult<()>

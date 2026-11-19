@@ -22,7 +22,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::client_builder_core::{missing_auth_error_without_pat, ClientBuilderCore, FormatConfig};
+use super::client_builder_core::{ClientBuilderCore, FormatConfig};
 use crate::grpc_channel::base_endpoint;
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
 use crate::unary_client::UnaryOptions;
@@ -90,6 +90,28 @@ impl<'a> UnaryClientBuilder<'a> {
     ) -> Self {
         self.core
             .set_federated_auth(idp_token_supplier, client_id.into());
+        self
+    }
+
+    /// Authenticate with a Databricks personal access token (PAT).
+    ///
+    /// **Private Preview:** PAT authentication for Zerobus requires server-side
+    /// enablement. Available behind the `pat-auth` feature.
+    ///
+    /// The PAT must be created with the `zerobus` API scope in the workspace that
+    /// the Zerobus endpoint belongs to. The SDK sends it as a bearer token and
+    /// cannot refresh it: once it expires or is revoked, every call fails with an
+    /// authentication error. An empty token is rejected by
+    /// [`validate`](Self::validate) and [`build`](Self::build).
+    ///
+    /// Because the token cannot be refreshed, an authentication rejection is not
+    /// retried, unlike the one-shot refresh retry OAuth credentials get.
+    ///
+    /// Of this, [`oauth`](Self::oauth), [`federated_auth`](Self::federated_auth),
+    /// and [`headers_provider`](Self::headers_provider), the last call wins.
+    #[cfg(feature = "pat-auth")]
+    pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
+        self.core.set_personal_access_token(token.into());
         self
     }
 
@@ -167,9 +189,7 @@ impl<'a> UnaryClientBuilder<'a> {
     /// that order, like [`StreamBuilder::validate`](crate::StreamBuilder::validate).
     /// Performs no network I/O.
     pub fn validate(&self) -> ZerobusResult<()> {
-        // This builder has no `.personal_access_token()`, so the error doesn't list it.
-        self.core
-            .validate_target_with(missing_auth_error_without_pat)?;
+        self.core.validate_target()?;
         if self.core.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
                 "record format is required: call .json()".into(),
@@ -256,16 +276,16 @@ mod tests {
         let msg = invalid_argument(sdk.unary_client_builder().validate());
         assert!(msg.contains(".table()"), "{msg}");
 
-        // Wrappers surface this text verbatim. A unary builder has no
-        // `.personal_access_token()`, so the text never names it, whatever the features.
+        // Wrappers surface this text verbatim. It is the stream builders' text,
+        // pinned per feature set by the stream builder tests.
         let msg = invalid_argument(sdk.unary_client_builder().table("t").json().validate());
-        let expected = if cfg!(feature = "testing") {
-            "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
-        } else {
-            "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
-        };
-        assert_eq!(msg, expected);
-        assert!(!msg.contains("personal_access_token"), "{msg}");
+        assert_eq!(
+            msg,
+            crate::builder::client_builder_core::missing_auth_error()
+        );
+        if cfg!(feature = "pat-auth") {
+            assert!(msg.contains(".personal_access_token()"), "{msg}");
+        }
 
         let msg = invalid_argument(
             sdk.unary_client_builder()
