@@ -46,8 +46,8 @@
   reconnects, HTTP/2 keepalive through a black-holing proxy, and concurrent
   calls from many tasks and OS threads.
 - Added live tests for the unary client against a real Zerobus server. Like
-  the Java, TypeScript and C++ integration tests, they run only when the
-  connection environment variables are set.
+  the Java and TypeScript integration tests, they run only when the
+  connection environment variables are set, including under `make test`.
 
 ### Breaking Changes
 
@@ -68,6 +68,9 @@
   unaffected.
 - Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, and
   `UnaryClient`.
+- Added `ZerobusSdkBuilder::unary_keepalive()` behind the `testing` feature, for
+  tests that need a dead unary connection detected quickly. Production unary
+  clients always use a 30 s keepalive interval and a 10 s timeout.
 - Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
   `InsertRecords` call fails with a gRPC status. `ZerobusError` is
   `#[non_exhaustive]`, so this is not a breaking change.

@@ -244,7 +244,8 @@ fn invalid_argument(error: ZerobusError) -> String {
 }
 
 fn body(request: &ReceivedInsert) -> &str {
-    std::str::from_utf8(&request.records_json).expect("UTF-8 body")
+    let records_json = request.records_json.as_deref().expect("records_json set");
+    std::str::from_utf8(records_json).expect("UTF-8 body")
 }
 
 fn header<'a>(request: &'a ReceivedInsert, name: &str) -> Option<&'a str> {
@@ -544,9 +545,7 @@ async fn retries_retryable_errors_until_success() {
 
     let requests = requests(&server).await;
     assert_eq!(requests.len(), 4);
-    assert!(requests
-        .iter()
-        .all(|r| r.records_json == requests[0].records_json));
+    assert!(requests.iter().all(|r| body(r) == body(&requests[0])));
 }
 
 #[tokio::test]
