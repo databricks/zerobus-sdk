@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use arrow_array::{Int64Array, RecordBatch};
-use databricks_zerobus_ingest_sdk::{MessageId, NoTlsConfig, ZerobusError, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    channel_exporter, ArrowCompression, MessageId, NoTlsConfig, StreamStat, ZerobusError,
+    ZerobusSdk,
+};
 
 use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
 use crate::utils::{
@@ -34,6 +37,63 @@ fn builder(sdk: &ZerobusSdk) -> databricks_zerobus_ingest_sdk::StreamBuilder<'_>
         .headers_provider(Arc::new(TestHeadersProvider::default()))
         .arrow(create_test_arrow_schema())
         .flush_timeout_ms(2_000)
+}
+
+#[tokio::test]
+async fn stats_preserve_batch_identity_across_lanes_and_compression_modes() {
+    use std::collections::{HashMap, HashSet};
+    use std::num::NonZeroUsize;
+
+    for compression in [ArrowCompression::IpcZstd, ArrowCompression::GrpcZstd] {
+        let (server, endpoint) = start_mock_flight_server().await.unwrap();
+        let sdk = sdk(endpoint);
+        let (exporter, mut rx) = channel_exporter(NonZeroUsize::new(128).unwrap());
+        let mut mux = builder(&sdk)
+            .compression(compression)
+            .stats_exporter(exporter)
+            .multiplexed(4)
+            .build_arrow()
+            .await
+            .unwrap();
+        let mut expected = HashMap::new();
+        for rows in 1..=8 {
+            let id = mux
+                .ingest_batch(batch(&vec![rows; rows as usize]))
+                .await
+                .unwrap();
+            expected.insert(id.raw(), rows as u64);
+        }
+        mux.flush().await.unwrap();
+        mux.close().await.unwrap();
+        let mut sent = HashSet::new();
+        let mut acked = HashSet::new();
+        while let Ok(stat) = rx.try_recv() {
+            match stat {
+                StreamStat::BatchSent {
+                    offset,
+                    attempt,
+                    stats,
+                } => {
+                    assert_eq!(attempt, 0);
+                    assert_eq!(Some(&stats.records), expected.get(&offset));
+                    assert!(stats.approximate_wire_bytes > 0);
+                    assert!(stats.uncompressed_bytes > 0);
+                    assert!(sent.insert(offset), "duplicate send for {offset}");
+                }
+                StreamStat::BatchAcked { offset } => {
+                    assert!(expected.contains_key(&offset));
+                    assert!(
+                        acked.insert(offset),
+                        "duplicate acknowledgment for {offset}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(sent.len(), expected.len());
+        assert_eq!(sent, acked);
+        assert_eq!(server.connection_count(), 4);
+    }
 }
 
 #[tokio::test]

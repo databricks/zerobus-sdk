@@ -25,6 +25,8 @@ mod arrow;
 mod core;
 pub(crate) mod lane;
 #[cfg(feature = "arrow-flight")]
+pub(crate) use arrow::multiplexed_stats_exporter;
+#[cfg(feature = "arrow-flight")]
 pub use arrow::MultiplexedArrowStream;
 use core::MuxCore;
 

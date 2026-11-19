@@ -17,6 +17,10 @@
 
 ### Bug Fixes
 
+- Support Arrow Flight stats exporters on multiplexed streams. Batch event offsets
+  use packed message IDs so byte statistics and acknowledgments from different
+  lanes cannot collide.
+
 ### Documentation
 
 ### Internal Changes

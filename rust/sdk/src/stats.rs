@@ -59,7 +59,10 @@ impl BatchStats {
 ///
 /// An *offset* identifies one ingest call (one batch), not one row — a batch of
 /// 1000 rows has a single offset. Offsets and attempts are scoped to one stream
-/// instance; events carry no stream identifier. Exporters may drop events, so a
+/// instance. For multiplexed Arrow streams, offsets are packed
+/// [`MessageId::raw`](crate::MessageId::raw) values, which identify both the lane
+/// and its local offset; decode with [`MessageId::from_raw`](crate::MessageId::from_raw).
+/// Reconnect events do not identify the lane. Exporters may drop events, so a
 /// consumer may observe a `BatchAcked` without a corresponding `BatchSent`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
