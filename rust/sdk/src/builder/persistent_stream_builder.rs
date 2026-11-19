@@ -76,6 +76,21 @@ impl<'a> PersistentStreamBuilder<'a> {
         self
     }
 
+    /// Authenticate with a Databricks personal access token (PAT).
+    ///
+    /// **Private Preview:** PAT authentication for Zerobus requires server-side
+    /// enablement. Available behind the `eos` and `pat-auth` features.
+    ///
+    /// Same as [`StreamBuilder::personal_access_token`]: the PAT needs the
+    /// `zerobus` API scope, an empty token is rejected, and of this,
+    /// [`oauth`](Self::oauth), and [`headers_provider`](Self::headers_provider),
+    /// the last call wins.
+    #[cfg(feature = "pat-auth")]
+    pub fn personal_access_token(mut self, token: impl Into<String>) -> Self {
+        self.inner = self.inner.personal_access_token(token);
+        self
+    }
+
     /// Authenticate with a custom headers provider.
     pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
         self.inner = self.inner.headers_provider(provider);
@@ -209,5 +224,26 @@ impl<'a> PersistentStreamBuilder<'a> {
         .await?;
         record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(PersistentStream::new(stream))
+    }
+}
+
+#[cfg(all(test, feature = "pat-auth"))]
+mod tests {
+    use crate::builder::stream_builder::tests::test_sdk;
+    use crate::ZerobusError;
+
+    // The setter only forwards to `StreamBuilder`, whose tests cover validation and
+    // last-call-wins; this pins that the forwarded token still reaches `validate()`.
+    #[tokio::test]
+    async fn empty_personal_access_token_rejected_before_connecting() {
+        let sdk = test_sdk();
+        let result = sdk
+            .persistent_stream_builder()
+            .table("t")
+            .personal_access_token("")
+            .json()
+            .build()
+            .await;
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
     }
 }

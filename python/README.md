@@ -313,11 +313,12 @@ See the [`examples/`](examples/) directory for complete runnable examples.
 
 ## Authentication
 
-`create_stream()` supports three authentication methods: `auth` (external-IdP
-federation), a custom `headers_provider`, and `client_id`/`client_secret` (OAuth).
-`auth` and `client_id`/`client_secret` are mutually exclusive — passing both
-raises `ValueError` rather than silently preferring one. When `auth` is given
-alongside `headers_provider`, `auth` takes precedence.
+`create_stream()` supports four authentication methods: `client_id`/`client_secret`
+(OAuth), `auth=FederatedToken(...)` (external-IdP federation),
+`auth=PersonalAccessToken(...)` (a Databricks personal access token; Private
+Preview), and a custom `headers_provider`. `auth` and `client_id`/`client_secret` are
+mutually exclusive — passing both raises `ValueError` rather than silently preferring
+one. When `auth` is given alongside `headers_provider`, `auth` takes precedence.
 
 ### OAuth client credentials (default)
 
@@ -376,6 +377,40 @@ cached IdP token rather than doing a blocking network call on each invocation.
 > returning an already-cached token.
 
 See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
+
+### Personal access token (Private Preview)
+
+> **Private Preview.** PAT authentication for Zerobus requires server-side
+> enablement. It is compiled into the wheel, so no extra is needed.
+
+Use `auth=PersonalAccessToken(...)` to authenticate with a Databricks personal access
+token (PAT). Create the PAT with the `zerobus` API scope in the workspace that the
+Zerobus endpoint belongs to. The SDK sends it as a bearer token when it creates or
+recovers a stream. It does not exchange, cache, or refresh the token. Once the token
+expires or is revoked, creating or recovering a stream fails with
+`NonRetriableException`.
+
+PAT authentication works with `create_stream()` only: Arrow Flight streams
+(`create_arrow_stream()`) and persistent streams do not support it yet. `ZerobusSdk`
+still needs the workspace URL, but PAT authentication does not use it.
+
+```python
+import os
+
+from zerobus import PersonalAccessToken
+
+auth = PersonalAccessToken(os.environ["DATABRICKS_TOKEN"])
+stream = sdk.create_stream(table_properties=table_properties, auth=auth)
+for record in records:
+    stream.ingest_record_offset(record)  # queue only; do not wait per record
+stream.flush()  # wait once for all pending acknowledgments
+stream.close()
+```
+
+`PersonalAccessToken` raises `ValueError` for an empty token, is immutable, and leaves
+the token out of its `repr()`. The async SDK takes the same `auth=` argument.
+
+See [`examples/sync_example_pat.py`](examples/sync_example_pat.py) for a complete example.
 
 ### Custom headers provider
 
@@ -647,10 +682,10 @@ multiplexing is recommended there to reduce connection overhead.
 
 ```python
 # Sync
-stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
 # Async
 async def create_async_stream(sdk):
-    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
 ```
 
 ### `ZerobusStream`
