@@ -705,13 +705,13 @@ cargo add databricks-zerobus-ingest-sdk --features pat-auth
 To authenticate with a Databricks personal access token (PAT), use the
 `personal_access_token` builder method. Create the PAT with the `zerobus` API scope in
 the workspace that the Zerobus endpoint belongs to. The SDK sends it as a bearer token
-when it creates or recovers a stream. It does not exchange, cache, or refresh the token,
-so this mode does not need `unity_catalog_url`. Once the token expires or is revoked,
-creating or recovering a stream fails with a non-retryable authentication error. That
-failure is immediate: the one-shot credential-refresh retry that OAuth streams get at
-creation is skipped, because a PAT cannot be refreshed. Arrow Flight streams
-(`build_arrow()`) do not support PAT authentication yet; use OAuth or a custom headers
-provider for them.
+when it creates or recovers a stream, or makes a unary call. It does not exchange,
+cache, or refresh the token, so this mode does not need `unity_catalog_url`. Once the
+token expires or is revoked, creating or recovering a stream, or a unary call, fails
+with a non-retryable authentication error. That failure is immediate: the one-shot
+credential-refresh retry that OAuth gets at stream creation or on a unary call is
+skipped, because a PAT cannot be refreshed. Arrow Flight streams (`build_arrow()`) do
+not support PAT authentication yet; use OAuth or a custom headers provider for them.
 
 ```rust,ignore
 let token = std::env::var("DATABRICKS_TOKEN").expect("DATABRICKS_TOKEN must be set");
@@ -1869,13 +1869,13 @@ pub trait HeadersProvider: Send + Sync {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>>;
     // Defaulted: drop cached state the server just rejected.
     async fn invalidate(&self) {}
-    // Defaulted: `false` skips the one-shot auth retry at stream creation.
+    // Defaulted: `false` skips the one-shot auth retry at stream creation or on a unary call.
     fn can_refresh(&self) -> bool { true }
 }
 ```
 
 Implement this trait to provide custom authentication headers. The default implementation (`OAuthHeadersProvider`) handles OAuth 2.0 token management; `PatHeadersProvider` (feature `pat-auth`, Private Preview) sends a personal access token and returns
-`false` from `can_refresh()`, so a rejected token fails stream creation without a retry. Use this for:
+`false` from `can_refresh()`, so a rejected token fails stream creation or the unary call without a retry. Use this for:
 - Custom token caching strategies
 - Alternative authentication mechanisms
 - Integration with centralized credential services
