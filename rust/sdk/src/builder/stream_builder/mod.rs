@@ -615,7 +615,7 @@ impl<'a> StreamBuilder<'a> {
             avro_schema: format.avro_schema,
         };
 
-        let channel = self.core.sdk.grpc_channel_source();
+        let channel = self.core.sdk.stream_channel_source();
         Ok(GrpcStreamParts {
             channel,
             table_properties,
