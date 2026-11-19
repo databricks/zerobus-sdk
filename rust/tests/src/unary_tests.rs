@@ -1021,6 +1021,62 @@ async fn hung_oauth_refresh_gets_half_the_attempt_timeout_and_falls_back_to_the_
 }
 
 #[tokio::test]
+async fn personal_access_token_sends_the_bearer_and_table_headers() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let sdk = sdk(&url);
+    let client = sdk
+        .unary_client_builder()
+        .table(TABLE_NAME)
+        .personal_access_token("dapi-test-token")
+        .json()
+        .recovery(false)
+        .build()
+        .await
+        .unwrap();
+
+    client.ingest_records(records(0..1)).await.unwrap();
+
+    let requests = requests(&server).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        header(&requests[0], "authorization"),
+        Some("Bearer dapi-test-token")
+    );
+    assert_eq!(
+        header(&requests[0], "x-databricks-zerobus-table-name"),
+        Some(TABLE_NAME)
+    );
+}
+
+#[tokio::test]
+async fn rejected_personal_access_token_is_not_retried() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    server
+        .inject_insert_responses(vec![error(Status::unauthenticated("revoked token")); 2])
+        .await;
+    let sdk = sdk(&url);
+    let client = sdk
+        .unary_client_builder()
+        .table(TABLE_NAME)
+        .personal_access_token("dapi-test-token")
+        .json()
+        .recovery(true)
+        .recovery_retries(3)
+        .recovery_backoff_ms(0)
+        .build()
+        .await
+        .unwrap();
+
+    let error = client.ingest_records(records(0..1)).await.unwrap_err();
+
+    assert!(!error.is_retryable());
+    assert_eq!(status_of(error).code(), GrpcCode::Unauthenticated);
+    assert_eq!(requests(&server).await.len(), 1);
+}
+
+#[tokio::test]
 async fn no_auth_sends_no_credentials() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
