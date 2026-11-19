@@ -26,6 +26,7 @@
   share one connection, separate from streams and unaffected by
   `connection_per_stream`. It sends HTTP/2 keepalive pings while a call is in
   flight, so a connection that dropped silently between calls is replaced.
+  Like streams, it picks up rotated TLS certificates on the next call.
   For continuous ingestion, keep using streams.
 
 ### Bug Fixes
@@ -59,7 +60,8 @@
   personal access token (Private Preview).
 - Added `HeadersProvider::can_refresh`, a defaulted method returning `true`. A provider
   with a fixed credential returns `false` to skip the one-shot auth retry during stream
-  creation; `PatHeadersProvider` does. Existing implementations are unaffected.
+  creation or a unary call; `PatHeadersProvider` does. Existing implementations are
+  unaffected.
 - Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, and
   `UnaryClient`.
 - Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an

@@ -1,9 +1,9 @@
 //! gRPC channels that follow changes to the TLS settings.
 //!
-//! A [`GrpcChannelSource`] hands out the channel for gRPC streams. Before it
-//! reuses a channel, it reads the TLS settings again and opens a new channel if
-//! they changed, so rotated certificates reach a shared channel and recovery
-//! attempts, not only new dedicated channels.
+//! A [`GrpcChannelSource`] hands out the channel for gRPC streams and unary
+//! clients. Before it reuses a channel, it reads the TLS settings again and
+//! opens a new channel if they changed, so rotated certificates reach a shared
+//! channel, recovery attempts and unary calls, not only new dedicated channels.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +56,7 @@ impl GrpcChannelSource {
         self
     }
 
-    /// Returns the channel for the next stream or recovery attempt.
+    /// Returns the channel for the next stream, recovery or unary attempt.
     ///
     /// The first call opens the channel and returns any error. Later calls read
     /// the TLS settings again and open a new channel if they changed. If the
