@@ -361,4 +361,74 @@ mod tests {
         assert!(debug.contains("OAuth") && debug.contains("Json"), "{debug}");
         assert!(!debug.contains("super-secret"), "{debug}");
     }
+
+    #[cfg(feature = "pat-auth")]
+    const TEST_PAT: &str = "dapi-test-secret";
+
+    #[cfg(feature = "pat-auth")]
+    #[tokio::test]
+    async fn personal_access_token_resolves_to_pat_provider() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .unary_client_builder()
+            .table("catalog.schema.table")
+            .personal_access_token(TEST_PAT)
+            .json();
+        builder.validate().expect("validation should succeed");
+
+        let headers = builder
+            .core
+            .resolve_headers_provider(Duration::from_secs(1))
+            .unwrap()
+            .get_headers()
+            .await
+            .unwrap();
+
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            &format!("Bearer {TEST_PAT}")
+        );
+        assert_eq!(
+            headers.get("x-databricks-zerobus-table-name").unwrap(),
+            "catalog.schema.table"
+        );
+    }
+
+    #[cfg(feature = "pat-auth")]
+    #[tokio::test]
+    async fn empty_personal_access_token_is_rejected() {
+        let sdk = test_sdk();
+        let builder = || {
+            sdk.unary_client_builder()
+                .table("t")
+                .personal_access_token("")
+                .json()
+        };
+
+        assert!(matches!(
+            builder().validate(),
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            builder().build().await,
+            Err(ZerobusError::InvalidArgument(_))
+        ));
+    }
+
+    #[cfg(feature = "pat-auth")]
+    #[test]
+    fn debug_does_not_expose_personal_access_token() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .unary_client_builder()
+            .table("t")
+            .personal_access_token(TEST_PAT)
+            .json();
+
+        let debug = format!("{builder:?}");
+
+        assert!(debug.contains("PersonalAccessToken"), "{debug}");
+        assert!(!debug.contains(TEST_PAT), "{debug}");
+    }
 }
