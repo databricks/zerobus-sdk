@@ -13,12 +13,11 @@ use std::time::Duration;
 
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
-use tonic::transport::Channel;
 use tracing::{debug, instrument, warn};
 
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::InsertRecordsRequest;
 use crate::errors::should_retry_initial_connection;
+use crate::grpc_channel::GrpcChannelSource;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::{EncodedRecord, HeadersProvider, PreparedInput, ZerobusError, ZerobusResult};
@@ -79,7 +78,7 @@ pub(crate) enum UnaryBody {
 /// # }
 /// ```
 pub struct UnaryClient {
-    channel: ZerobusClient<Channel>,
+    channel_source: Arc<GrpcChannelSource>,
     table_name: String,
     headers_provider: Arc<dyn HeadersProvider>,
     options: UnaryOptions,
@@ -95,13 +94,13 @@ impl fmt::Debug for UnaryClient {
 
 impl UnaryClient {
     pub(crate) fn new(
-        channel: ZerobusClient<Channel>,
+        channel_source: Arc<GrpcChannelSource>,
         table_name: String,
         headers_provider: Arc<dyn HeadersProvider>,
         options: UnaryOptions,
     ) -> Self {
         Self {
-            channel,
+            channel_source,
             table_name,
             headers_provider,
             options,
@@ -204,12 +203,14 @@ impl UnaryClient {
 
     /// Sends the request, retrying retryable errors `recovery_backoff_ms` apart up
     /// to `recovery_retries` times. One auth rejection may spend a retry so the
-    /// invalidated credential is re-minted.
+    /// invalidated credential is re-minted, unless the headers provider cannot
+    /// refresh its credential.
     async fn send_with_retries(&self, request: &InsertRecordsRequest) -> ZerobusResult<()> {
         let options = &self.options;
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
-        let mut auth_retry_available = options.recovery_retries > 0;
+        let mut auth_retry_available =
+            options.recovery_retries > 0 && self.headers_provider.can_refresh();
         let max_attempts = if options.recovery {
             options.recovery_retries.saturating_add(1)
         } else {
@@ -277,8 +278,8 @@ impl UnaryClient {
         let headers = self.headers_provider.get_headers().await?;
         let mut request = tonic::Request::new(request);
         *request.metadata_mut() = grpc_metadata_from_headers(headers, &self.table_name)?;
-        // Generated client methods take `&mut self`; a clone shares the channel.
-        let mut channel = self.channel.clone();
+        // Asking the source on every attempt picks up rotated TLS certificates.
+        let mut channel = self.channel_source.client().await?;
         channel
             .insert_records(request)
             .await

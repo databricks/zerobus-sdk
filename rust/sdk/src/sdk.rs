@@ -8,10 +8,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tonic::transport::Channel;
 use tracing::{error, info, instrument};
 
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::grpc_channel::GrpcChannelSource;
 use crate::proxy::ConnectorFactory;
 use crate::stream::ZerobusStream;
@@ -399,21 +397,13 @@ impl ZerobusSdk {
         }
     }
 
-    /// Returns a clone of the channel shared by every unary client of this SDK,
-    /// creating it on first use.
-    ///
-    /// The channel sends HTTP/2 keepalive PINGs only while a call is in flight,
-    /// so a connection that died silently between sparse calls is detected and
-    /// closed during the next call, and its retry opens a new connection.
-    pub(crate) async fn get_or_create_unary_channel(
-        &self,
-    ) -> ZerobusResult<ZerobusClient<Channel>> {
-        self.unary_channel_source().client().await
-    }
-
     /// Returns the channel source shared by every unary client of this SDK,
     /// creating it on first use.
-    fn unary_channel_source(&self) -> Arc<GrpcChannelSource> {
+    ///
+    /// Its channels send HTTP/2 keepalive PINGs only while a call is in flight,
+    /// so a connection that died silently between sparse calls is detected and
+    /// closed during the next call, and its retry opens a new connection.
+    pub(crate) fn unary_channel_source(&self) -> Arc<GrpcChannelSource> {
         Arc::clone(self.unary_channel.get_or_init(|| {
             Arc::new(
                 self.new_grpc_channel_source()
@@ -454,10 +444,11 @@ mod tests {
     async fn unary_channel_is_created_once_and_never_shared_with_streams() {
         for connection_per_stream in [true, false] {
             let sdk = test_sdk(connection_per_stream);
-            sdk.get_or_create_unary_channel().await.unwrap();
-            sdk.get_or_create_unary_channel().await.unwrap();
+            let first = sdk.unary_channel_source();
+            first.client().await.unwrap();
+            let second = sdk.unary_channel_source();
 
-            assert!(sdk.unary_channel.get().is_some());
+            assert!(Arc::ptr_eq(&first, &second));
             assert!(sdk.shared_stream_channel.get().is_none());
         }
     }

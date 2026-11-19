@@ -622,6 +622,7 @@ The SDK reads the files each time it opens a channel, and before it reuses a gRP
 
 - A gRPC stream gets its channel when it is created and before each recovery attempt. This holds for a dedicated channel per stream (the `connection_per_stream` default) and for a shared channel. A stream that doesn't reconnect keeps its connection, because certificates are only checked when a connection is set up.
 - An Arrow Flight stream opens a channel on every connection and reconnection.
+- A unary client gets its channel before each call attempt, so the next call after a rotation uses the new files.
 
 If the SDK can't read or use the files before it reuses a gRPC channel, it keeps the channel it has and logs a warning.
 
@@ -629,7 +630,7 @@ Replace the certificate and the key together: write both into a new directory, t
 
 A path that is missing, unreadable, not a regular file, or larger than 1 MiB gives a non-retryable `ZerobusError::InvalidArgument` with the path. Content read from a file that the SDK can't use, such as a file with no certificate or a certificate that doesn't match the key, gives a retryable `ZerobusError::ChannelCreationError`, because a rotation may be in progress. When the settings mix files and PEM data and the SDK can't tell which input it can't use, the error is retryable.
 
-For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
+For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream, every recovery attempt, and every unary call attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
 
 A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
@@ -1242,7 +1243,7 @@ let client = sdk
 client.ingest_records(batch).await?;
 ```
 
-Build the client once per table and reuse it. `build()` sends nothing; the connection opens on the first call. The client is `Send + Sync`, so you can share it across tasks with an `Arc`, and concurrent calls run in parallel.
+Build the client once per table and reuse it. `build()` sends nothing; the connection opens on the first call. An endpoint that can't be parsed fails `build()` with `InvalidZerobusEndpointError`. The client is `Send + Sync`, so you can share it across tasks with an `Arc`, and concurrent calls run in parallel.
 
 How a call behaves:
 
@@ -1808,7 +1809,7 @@ Checks that the table, authentication, and format are set, without network I/O.
 ```rust
 pub async fn build(self) -> ZerobusResult<UnaryClient>
 ```
-Validates the configuration and returns the client. Sends nothing; the connection opens on the first call.
+Validates the configuration and returns the client. Sends nothing; the connection opens on the first call. An endpoint that can't be parsed fails here with `ZerobusError::InvalidZerobusEndpointError`.
 
 ### `UnaryClient`
 

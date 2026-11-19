@@ -131,13 +131,22 @@ const PAT_AUTH_HINT: &str = ".personal_access_token(), ";
 const PAT_AUTH_HINT: &str = "";
 
 pub(super) fn missing_auth_error() -> String {
+    missing_auth_text(PAT_AUTH_HINT)
+}
+
+/// The missing-auth error of a builder that has no `.personal_access_token()`.
+pub(super) fn missing_auth_error_without_pat() -> String {
+    missing_auth_text("")
+}
+
+fn missing_auth_text(pat_hint: &str) -> String {
     #[cfg(feature = "testing")]
     {
-        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}.headers_provider(), or .no_auth()")
+        format!("authentication is required: call .oauth(), .federated_auth(), {pat_hint}.headers_provider(), or .no_auth()")
     }
     #[cfg(not(feature = "testing"))]
     {
-        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}or .headers_provider()")
+        format!("authentication is required: call .oauth(), .federated_auth(), {pat_hint}or .headers_provider()")
     }
 }
 
@@ -233,13 +242,19 @@ impl<'a> ClientBuilderCore<'a> {
 
     /// Checks that the table name and authentication are set, in that order.
     pub(super) fn validate_target(&self) -> ZerobusResult<()> {
+        self.validate_target_with(missing_auth_error)
+    }
+
+    /// Like [`validate_target`](Self::validate_target), with `missing_auth`
+    /// giving the error text when no authentication is set.
+    pub(super) fn validate_target_with(&self, missing_auth: fn() -> String) -> ZerobusResult<()> {
         if self.table_name.is_empty() {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
             ));
         }
         if self.auth.is_none() {
-            return Err(ZerobusError::InvalidArgument(missing_auth_error()));
+            return Err(ZerobusError::InvalidArgument(missing_auth()));
         }
         #[cfg(feature = "pat-auth")]
         if matches!(&self.auth, Some(AuthConfig::PersonalAccessToken { token }) if token.is_empty())

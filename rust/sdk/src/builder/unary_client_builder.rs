@@ -22,7 +22,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::client_builder_core::{ClientBuilderCore, FormatConfig};
+use super::client_builder_core::{missing_auth_error_without_pat, ClientBuilderCore, FormatConfig};
+use crate::grpc_channel::base_endpoint;
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
 use crate::unary_client::{UnaryBody, UnaryOptions};
 use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
@@ -179,7 +180,9 @@ impl<'a> UnaryClientBuilder<'a> {
     /// that order, like [`StreamBuilder::validate`](crate::StreamBuilder::validate).
     /// Performs no network I/O.
     pub fn validate(&self) -> ZerobusResult<()> {
-        self.core.validate_target()?;
+        // This builder has no `.personal_access_token()`, so the error doesn't list it.
+        self.core
+            .validate_target_with(missing_auth_error_without_pat)?;
         if self.core.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
                 "record format is required: call .json() or .json_lines()".into(),
@@ -191,10 +194,10 @@ impl<'a> UnaryClientBuilder<'a> {
     /// Build the client.
     ///
     /// Validates the configuration like [`validate`](Self::validate), resolves
-    /// the authentication into a headers provider, and gets the SDK's shared
-    /// unary connection. The connection opens lazily on the first call, so
-    /// `build()` sends nothing; it is async because it may wait for another
-    /// task that is creating the shared connection.
+    /// the authentication into a headers provider, and checks the endpoint. It
+    /// sends nothing: the SDK's shared unary connection opens on the first
+    /// call. An endpoint that can't be parsed fails here with
+    /// `InvalidZerobusEndpointError`.
     pub async fn build(self) -> ZerobusResult<UnaryClient> {
         self.validate()?;
 
@@ -214,10 +217,12 @@ impl<'a> UnaryClientBuilder<'a> {
         // recovery timeout.
         let refresh_timeout = Duration::from_millis(core.server_lack_of_ack_timeout_ms) / 2;
         let headers_provider = core.resolve_headers_provider(refresh_timeout)?;
-        let channel = core.sdk.get_or_create_unary_channel().await?;
+        // The channel itself opens inside the first attempt, so a TLS read that
+        // fails mid-rotation is retried there, as on streams.
+        base_endpoint(&core.sdk.zerobus_endpoint, &core.sdk.sdk_identifier)?;
 
         Ok(UnaryClient::new(
-            channel,
+            core.sdk.unary_channel_source(),
             core.table_name,
             headers_provider,
             UnaryOptions {

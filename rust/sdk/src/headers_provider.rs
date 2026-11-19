@@ -61,20 +61,21 @@ pub trait HeadersProvider: Send + Sync {
     /// Invalidates cached authentication state that the server just rejected.
     ///
     /// The SDK calls this when the server rejects the supplied credentials with an
-    /// authentication error during stream creation. The default is a no-op, which is
-    /// correct for providers that hold no cache. The built-in OAuth provider clears
-    /// the rejected token from its cache, so the next `get_headers` re-mints — unless
-    /// a concurrent refresh already replaced it with a newer token, which is kept and
-    /// served without re-minting.
+    /// authentication error during stream creation or a unary call. The default is
+    /// a no-op, which is correct for providers that hold no cache. The built-in OAuth
+    /// provider clears the rejected token from its cache, so the next `get_headers`
+    /// re-mints — unless a concurrent refresh already replaced it with a newer token,
+    /// which is kept and served without re-minting.
     async fn invalidate(&self) {}
 
     /// Whether a rejected credential can be replaced by a fresh one.
     ///
-    /// When the server rejects the credentials while a stream is being created and
-    /// recovery is on, the SDK calls [`invalidate`](Self::invalidate) and retries once
-    /// so a refreshed credential can be sent. A provider whose credential is fixed,
-    /// such as a personal access token, returns `false` to skip that retry and surface
-    /// the rejection immediately. The default is `true`.
+    /// When the server rejects the credentials while a stream is being created, or
+    /// during a unary call, and recovery is on, the SDK calls
+    /// [`invalidate`](Self::invalidate) and retries once so a refreshed credential
+    /// can be sent. A provider whose credential is fixed, such as a personal access
+    /// token, returns `false` to skip that retry and surface the rejection
+    /// immediately. The default is `true`.
     fn can_refresh(&self) -> bool {
         true
     }
