@@ -529,6 +529,21 @@ mod tests {
     }
 
     #[test]
+    fn size_limit_counts_bytes_not_chars() {
+        // `[{"a":"é"}]` is 11 chars but 12 bytes: `é` is 2 bytes in UTF-8.
+        let records =
+            || -> Vec<PreparedInput> { vec![JsonString(r#"{"a":"é"}"#.to_string()).into()] };
+        assert!(build_request_body(records(), 12, UnaryBody::JsonArray)
+            .unwrap()
+            .is_some());
+        let msg = invalid_argument(build_request_body(records(), 11, UnaryBody::JsonArray));
+        assert!(
+            msg.contains("12 bytes") && msg.contains("limit of 11 bytes"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn client_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<UnaryClient>();
