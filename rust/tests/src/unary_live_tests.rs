@@ -1,16 +1,19 @@
 //! Live tests of the unary `InsertRecords` client against a real Zerobus server.
 //!
-//! Like the Java, TypeScript and C++ integration tests, they run only when these
+//! Like the Java and TypeScript integration tests, they run only when these
 //! environment variables are set, and otherwise pass without doing anything:
 //!
 //! * `ZEROBUS_SERVER_ENDPOINT` - the Zerobus endpoint URL
 //! * `DATABRICKS_WORKSPACE_URL` - the workspace URL
 //! * `ZEROBUS_TABLE_NAME` - the target table, `catalog.schema.table`, with the
 //!   columns `device_name STRING, temp INT, humidity BIGINT`
-//! * `DATABRICKS_CLIENT_ID` - a service principal with MODIFY and SELECT on the table
+//! * `DATABRICKS_CLIENT_ID` - a service principal with `USE CATALOG` on the
+//!   catalog, `USE SCHEMA` on the schema, and `MODIFY` and `SELECT` on the table
 //! * `DATABRICKS_CLIENT_SECRET` - its secret
 //!
-//! Run with `cargo test -p tests --test unary_live_tests -- --nocapture`.
+//! `make test` runs them too whenever these variables are set, so point
+//! `ZEROBUS_TABLE_NAME` at a table with the columns above first. Run only them
+//! with `cargo test -p tests --test unary_live_tests -- --nocapture`.
 
 use databricks_zerobus_ingest_sdk::{
     GrpcCode, JsonString, JsonValue, UnaryClient, UnaryClientBuilder, ZerobusError, ZerobusSdk,

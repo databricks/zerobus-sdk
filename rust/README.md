@@ -1601,7 +1601,7 @@ Run tests with logs:
 cargo test -p tests -- --nocapture
 ```
 
-`tests/src/unary_live_tests.rs` tests the unary client against a real Zerobus server instead. Like the Java, TypeScript and C++ integration tests, it runs only when `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are set, and otherwise passes without doing anything. The table needs the columns `device_name STRING, temp INT, humidity BIGINT`:
+`tests/src/unary_live_tests.rs` tests the unary client against a real Zerobus server instead. Like the Java and TypeScript integration tests, it runs only when `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` are set, and otherwise passes without doing anything. `make test` also runs it whenever these variables are set. The table needs the columns `device_name STRING, temp INT, humidity BIGINT`, and the service principal needs `USE CATALOG` on the catalog, `USE SCHEMA` on the schema, and `MODIFY` and `SELECT` on the table:
 
 ```bash
 cargo test -p tests --test unary_live_tests -- --nocapture

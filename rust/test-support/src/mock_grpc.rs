@@ -140,11 +140,12 @@ pub enum MockInsertResponse {
     Hang,
 }
 
-/// One `InsertRecords` call as the mock received it.
+/// One `InsertRecords` call as the mock received it. The optional proto fields
+/// are kept as received, so a test can tell an unset field from an empty one.
 #[derive(Debug, Clone)]
 pub struct ReceivedInsert {
     pub table_name: Option<String>,
-    pub records_json: Vec<u8>,
+    pub records_json: Option<Vec<u8>>,
     pub metadata: tonic::metadata::MetadataMap,
     pub remote_addr: Option<SocketAddr>,
     /// When the mock received the call.
@@ -904,14 +905,17 @@ impl Zerobus for MockZerobusServer {
         let body = request.into_inner();
         let response = {
             let mut inserts = self.inserts.lock().await;
-            let table_name = body.table_name.unwrap_or_default();
-            let response = match inserts.table_responses.get_mut(&table_name) {
+            let table_script = body
+                .table_name
+                .as_ref()
+                .and_then(|table| inserts.table_responses.get_mut(table));
+            let response = match table_script {
                 Some(script) if !script.is_empty() => script.pop_front(),
                 _ => inserts.responses.pop_front(),
             };
             inserts.received.push(ReceivedInsert {
-                table_name: Some(table_name),
-                records_json: body.records_json.unwrap_or_default(),
+                table_name: body.table_name,
+                records_json: body.records_json,
                 metadata,
                 remote_addr,
                 received_at: std::time::Instant::now(),
