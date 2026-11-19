@@ -15,6 +15,11 @@ use crate::proxy::ConnectorFactory;
 use crate::stream::ZerobusStream;
 use crate::{StreamBuilder, TlsConfig, ZerobusResult, ZerobusSdkBuilder};
 
+#[cfg(feature = "unary")]
+use tonic::transport::Channel;
+
+#[cfg(feature = "unary")]
+use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 #[cfg(feature = "arrow-flight")]
 use crate::stream::ZerobusArrowStream;
 
@@ -22,6 +27,19 @@ use crate::stream::ZerobusArrowStream;
 /// request. Use [`ZerobusSdkBuilder::application_name`] to append an
 /// application suffix.
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
+
+/// How long the unary channel waits without receiving any frame, while a call
+/// is in flight, before it sends an HTTP/2 PING. A third of the default
+/// server acknowledgement timeout.
+#[cfg(feature = "unary")]
+const UNARY_KEEPALIVE_INTERVAL: Duration =
+    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 3);
+
+/// How long the unary channel waits for the PING reply before it closes the
+/// connection. A sixth of the default server acknowledgement timeout.
+#[cfg(feature = "unary")]
+const UNARY_KEEPALIVE_TIMEOUT: Duration =
+    Duration::from_millis(crate::stream_options::defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS / 6);
 
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
@@ -52,6 +70,12 @@ pub struct ZerobusSdk {
     pub unity_catalog_url: String,
     /// Created on first use, from the field values at that time.
     shared_stream_channel: OnceLock<Arc<GrpcChannelSource>>,
+    /// Channel source shared by every unary client of this SDK, created on
+    /// first use. It is separate from `shared_stream_channel`, so unary clients
+    /// never share a connection with streams, whatever `connection_per_stream`
+    /// says.
+    #[cfg(feature = "unary")]
+    unary_channel: OnceLock<Arc<GrpcChannelSource>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -198,6 +222,8 @@ impl ZerobusSdk {
             unity_catalog_url,
             workspace_id,
             shared_stream_channel: OnceLock::new(),
+            #[cfg(feature = "unary")]
+            unary_channel: OnceLock::new(),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -382,6 +408,33 @@ impl ZerobusSdk {
         }
     }
 
+    /// Returns a clone of the channel shared by every unary client of this SDK,
+    /// creating it on first use.
+    ///
+    /// The channel sends HTTP/2 keepalive PINGs only while a call is in flight,
+    /// so a connection that died silently between sparse calls is detected and
+    /// closed during the next call, and its retry opens a new connection.
+    // Used by `UnaryClientBuilder::build()`, which a later commit adds.
+    #[allow(dead_code)]
+    #[cfg(feature = "unary")]
+    pub(crate) async fn get_or_create_unary_channel(
+        &self,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
+        self.unary_channel_source().client().await
+    }
+
+    /// Returns the channel source shared by every unary client of this SDK,
+    /// creating it on first use.
+    #[cfg(feature = "unary")]
+    fn unary_channel_source(&self) -> Arc<GrpcChannelSource> {
+        Arc::clone(self.unary_channel.get_or_init(|| {
+            Arc::new(
+                self.new_grpc_channel_source()
+                    .with_keepalive(UNARY_KEEPALIVE_INTERVAL, UNARY_KEEPALIVE_TIMEOUT),
+            )
+        }))
+    }
+
     fn new_grpc_channel_source(&self) -> GrpcChannelSource {
         GrpcChannelSource::new(
             self.zerobus_endpoint.clone(),
@@ -389,5 +442,42 @@ impl ZerobusSdk {
             Arc::clone(&self.tls_config),
             self.connector_factory.clone(),
         )
+    }
+}
+
+#[cfg(all(test, feature = "unary"))]
+mod tests {
+    use super::*;
+
+    fn test_sdk(connection_per_stream: bool) -> ZerobusSdk {
+        ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            "http://localhost:5678".to_string(),
+            "test-workspace".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            connection_per_stream,
+        )
+    }
+
+    #[test]
+    fn unary_keepalive_is_a_third_and_a_sixth_of_the_default_ack_timeout() {
+        assert_eq!(UNARY_KEEPALIVE_INTERVAL, Duration::from_secs(20));
+        assert_eq!(UNARY_KEEPALIVE_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn unary_channel_is_created_once_and_never_shared_with_streams() {
+        for connection_per_stream in [true, false] {
+            let sdk = test_sdk(connection_per_stream);
+            sdk.get_or_create_unary_channel().await.unwrap();
+            sdk.get_or_create_unary_channel().await.unwrap();
+
+            assert!(sdk.unary_channel.get().is_some());
+            assert!(sdk.shared_stream_channel.get().is_none());
+        }
     }
 }
