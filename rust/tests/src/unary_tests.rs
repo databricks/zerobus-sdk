@@ -33,7 +33,8 @@ const OTHER_TABLE_NAME: &str = "test_catalog.test_schema.other_table";
 
 /// A headers provider whose token changes after every `invalidate()`: it sends
 /// `Bearer token-0` until the first invalidation, then `Bearer token-1`, and so on.
-/// Its first `failed_fetches` calls fail with `TokenFetchError`.
+/// Its first `failed_fetches` calls fail with `TokenFetchError`. It also sends
+/// `extra_headers`, and `can_refresh()` returns the `can_refresh` field.
 struct TestProvider {
     table_name: String,
     failed_fetches: usize,
@@ -41,6 +42,8 @@ struct TestProvider {
     invalidations: AtomicUsize,
     get_headers_delay: Duration,
     hang_on_invalidate: bool,
+    can_refresh: bool,
+    extra_headers: Vec<(&'static str, String)>,
 }
 
 impl TestProvider {
@@ -56,7 +59,17 @@ impl TestProvider {
             invalidations: AtomicUsize::new(0),
             get_headers_delay,
             hang_on_invalidate,
+            can_refresh: true,
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// A provider whose credential can't be refreshed, like a personal access token.
+    fn fixed(table_name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            can_refresh: false,
+            ..Self::with(table_name, Duration::ZERO, false)
+        })
     }
 
     fn failing(table_name: &str, failed_fetches: usize) -> Arc<Self> {
@@ -89,6 +102,7 @@ impl HeadersProvider for TestProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer token-{generation}"));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
+        headers.extend(self.extra_headers.iter().cloned());
         Ok(headers)
     }
 
@@ -97,6 +111,10 @@ impl HeadersProvider for TestProvider {
         if self.hang_on_invalidate {
             std::future::pending::<()>().await;
         }
+    }
+
+    fn can_refresh(&self) -> bool {
+        self.can_refresh
     }
 }
 
@@ -270,6 +288,20 @@ async fn requests(server: &MockZerobusServer) -> Vec<ReceivedInsert> {
     server.get_insert_requests().await
 }
 
+/// Waits until the server has received `count` requests that match `filter`.
+async fn wait_for_requests(
+    server: &MockZerobusServer,
+    count: usize,
+    filter: impl Fn(&ReceivedInsert) -> bool,
+) {
+    bounded(async {
+        while requests(server).await.iter().filter(|r| filter(r)).count() < count {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+}
+
 fn records(ids: std::ops::Range<i32>) -> Vec<String> {
     ids.map(|id| format!(r#"{{"id":{id}}}"#)).collect()
 }
@@ -368,6 +400,25 @@ async fn sends_the_provider_headers_and_the_user_agent() {
         user_agent.starts_with("zerobus-sdk-rs/") && user_agent.contains("unary-test-app"),
         "{user_agent}"
     );
+}
+
+#[tokio::test]
+async fn invalid_provider_header_fails_the_call_without_sending_or_retrying() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let sdk = sdk(&url);
+    let provider = Arc::new(TestProvider {
+        extra_headers: vec![("x-custom", "bad\nvalue".to_string())],
+        ..TestProvider::with(TABLE_NAME, Duration::ZERO, false)
+    });
+    let client = client(&sdk, &provider, |b| b.recovery_retries(3)).await;
+
+    let error = client.ingest_records(records(0..1)).await.unwrap_err();
+
+    assert!(!error.is_retryable());
+    invalid_argument(error);
+    assert!(requests(&server).await.is_empty());
+    assert_eq!(provider.get_headers_calls(), 1);
 }
 
 #[tokio::test]
@@ -536,16 +587,17 @@ async fn retries_retryable_errors_until_success() {
         ])
         .await;
     let sdk = sdk(&url);
-    let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| {
-        b.recovery_retries(4)
-    })
-    .await;
+    let provider = TestProvider::new(TABLE_NAME);
+    let client = client(&sdk, &provider, |b| b.recovery_retries(4)).await;
 
     client.ingest_records(records(0..3)).await.unwrap();
 
     let requests = requests(&server).await;
     assert_eq!(requests.len(), 4);
     assert!(requests.iter().all(|r| body(r) == body(&requests[0])));
+    // A transient error keeps the credential, and every attempt gets fresh headers.
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(provider.get_headers_calls(), 4);
 }
 
 #[tokio::test]
@@ -553,7 +605,12 @@ async fn exhausted_retries_return_the_last_status() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
     server
-        .inject_insert_responses(vec![unavailable(); 10])
+        .inject_insert_responses(vec![
+            unavailable(),
+            unavailable(),
+            unavailable(),
+            error(Status::internal("last")),
+        ])
         .await;
     let sdk = sdk(&url);
     let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| {
@@ -569,8 +626,8 @@ async fn exhausted_retries_return_the_last_status() {
         "{error}"
     );
     let status = status_of(error);
-    assert_eq!(status.code(), GrpcCode::Unavailable);
-    assert_eq!(status.message(), "server busy");
+    assert_eq!(status.code(), GrpcCode::Internal);
+    assert_eq!(status.message(), "last");
     assert_eq!(requests(&server).await.len(), 4);
 }
 
@@ -764,6 +821,45 @@ async fn auth_rejection_is_not_retried_without_retries() {
 }
 
 #[tokio::test]
+async fn auth_rejection_is_not_retried_when_the_provider_cannot_refresh() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    server
+        .inject_insert_responses(vec![error(Status::unauthenticated("revoked")); 2])
+        .await;
+    let sdk = sdk(&url);
+    let provider = TestProvider::fixed(TABLE_NAME);
+    let client = client(&sdk, &provider, |b| {
+        b.recovery_retries(3).recovery_backoff_ms(0)
+    })
+    .await;
+
+    let error = client.ingest_records(records(0..1)).await.unwrap_err();
+
+    assert!(!error.is_retryable());
+    assert_eq!(status_of(error).code(), GrpcCode::Unauthenticated);
+    assert_eq!(requests(&server).await.len(), 1);
+    // Like a stream, the rejected credential is still invalidated.
+    assert_eq!(provider.invalidations(), 1);
+}
+
+#[tokio::test]
+async fn transient_errors_are_retried_when_the_provider_cannot_refresh() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    server.inject_insert_responses(vec![unavailable()]).await;
+    let sdk = sdk(&url);
+    let client = client(&sdk, &TestProvider::fixed(TABLE_NAME), |b| {
+        b.recovery_retries(3)
+    })
+    .await;
+
+    client.ingest_records(records(0..1)).await.unwrap();
+
+    assert_eq!(requests(&server).await.len(), 2);
+}
+
+#[tokio::test]
 async fn failed_header_fetch_is_retried_and_returned_as_is() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
@@ -794,12 +890,15 @@ async fn stalled_invalidation_keeps_the_auth_rejection() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
     server
-        .inject_insert_responses(vec![error(Status::unauthenticated("expired"))])
+        .inject_insert_responses(vec![MockInsertResponse::Error {
+            status: Status::unauthenticated("expired"),
+            delay_ms: 1_000,
+        }])
         .await;
     let sdk = sdk(&url);
     let provider = Arc::new(TestProvider::with(TABLE_NAME, Duration::ZERO, true));
     let client = client(&sdk, &provider, |b| {
-        b.recovery_retries(0).server_lack_of_ack_timeout_ms(500)
+        b.recovery_retries(0).server_lack_of_ack_timeout_ms(2_000)
     })
     .await;
 
@@ -809,8 +908,10 @@ async fn stalled_invalidation_keeps_the_auth_rejection() {
         .unwrap_err();
 
     assert_eq!(status_of(error).code(), GrpcCode::Unauthenticated);
+    // The invalidation gets only the 1 s left of the attempt's 2 s, not a fresh
+    // 2 s (about 3 s in total).
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_millis(2_600),
         "{:?}",
         started.elapsed()
     );
@@ -874,6 +975,52 @@ async fn oauth_client_mints_once_and_remints_after_a_rejection() {
 }
 
 #[tokio::test]
+async fn hung_oauth_refresh_gets_half_the_attempt_timeout_and_falls_back_to_the_cached_token() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let (oauth, uc_url) = start_mock_oauth_server().await;
+    // A 12 s token enters its 6 s refresh window after the 7 s wait below, with
+    // about 5 s of life left; the refresh then hangs.
+    oauth
+        .set_responses(vec![
+            MockTokenResponse::ok("token-1").with_expires_in(Some("12")),
+            MockTokenResponse::Hang,
+        ])
+        .await;
+    let sdk = ZerobusSdk::builder()
+        .endpoint(&url)
+        .unity_catalog_url(uc_url)
+        .no_tls()
+        .build()
+        .unwrap();
+    let client = sdk
+        .unary_client_builder()
+        .table(TABLE_NAME)
+        .oauth("client-id", "client-secret")
+        .json()
+        .recovery(false)
+        .server_lack_of_ack_timeout_ms(2_000)
+        .build()
+        .await
+        .unwrap();
+
+    client.ingest_records(records(0..1)).await.unwrap();
+    assert_eq!(oauth.mint_count(), 1);
+
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    // The refresh is cut off after 1 s, which leaves time to send with the
+    // cached token. A refresh capped at the full 2 s would time out the attempt.
+    bounded(client.ingest_records(records(1..2))).await.unwrap();
+
+    assert_eq!(oauth.mint_count(), 2);
+    let requests = requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|r| header(r, "authorization") == Some("Bearer token-1")));
+}
+
+#[tokio::test]
 async fn no_auth_sends_no_credentials() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
@@ -933,7 +1080,8 @@ async fn timed_out_attempt_is_retried() {
         .inject_insert_responses(vec![MockInsertResponse::Hang])
         .await;
     let sdk = sdk(&url);
-    let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| {
+    let provider = TestProvider::new(TABLE_NAME);
+    let client = client(&sdk, &provider, |b| {
         b.recovery_retries(2).server_lack_of_ack_timeout_ms(300)
     })
     .await;
@@ -941,6 +1089,8 @@ async fn timed_out_attempt_is_retried() {
     bounded(client.ingest_records(records(0..1))).await.unwrap();
 
     assert_eq!(requests(&server).await.len(), 2);
+    assert_eq!(provider.invalidations(), 0);
+    assert_eq!(provider.get_headers_calls(), 2);
 }
 
 #[tokio::test]
@@ -1157,6 +1307,41 @@ async fn keepalive_replaces_a_silently_dropped_connection() {
 }
 
 #[tokio::test]
+async fn keepalive_waits_the_timeout_for_the_ping_reply() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let proxy = FaultProxy::start(&url).await;
+    let sdk = sdk_builder(&proxy.url)
+        .unary_keepalive(Duration::from_millis(200), Duration::from_millis(1_500))
+        .build()
+        .unwrap();
+    let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| {
+        b.recovery_retries(2)
+            .recovery_backoff_ms(100)
+            .server_lack_of_ack_timeout_ms(10_000)
+    })
+    .await;
+
+    bounded(client.ingest_records(records(0..1))).await.unwrap();
+    proxy.black_hole();
+    // Longer than either duration, so the first PING goes out as soon as the
+    // next call starts.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let started = Instant::now();
+    bounded(client.ingest_records(records(1..2))).await.unwrap();
+    let elapsed = started.elapsed();
+
+    // The connection was closed only after the 1.5 s timeout. With interval and
+    // timeout swapped, it would close after 200 ms.
+    assert!(
+        elapsed >= Duration::from_millis(1_200) && elapsed < Duration::from_secs(5),
+        "{elapsed:?}"
+    );
+    assert_eq!(proxy.accepted(), 2);
+    assert_eq!(requests(&server).await.len(), 2);
+}
+
+#[tokio::test]
 async fn recovers_when_the_attempt_timeout_is_shorter_than_the_keepalive() {
     setup_tracing();
     let (server, url) = start_mock_server().await.unwrap();
@@ -1329,6 +1514,8 @@ async fn concurrent_calls_on_a_multi_thread_runtime_arrive_intact() {
         .map(|task| format!("[{}]", records(task * 5..task * 5 + 5).join(",")))
         .collect();
     assert_eq!(received, expected);
+    // The set hides duplicates; the count shows each batch was sent once.
+    assert_eq!(requests(&server).await.len(), 64);
     assert_eq!(server.get_insert_connection_count().await, 1);
 }
 
@@ -1377,8 +1564,64 @@ fn calls_from_many_os_threads_through_one_client() {
             .map(|first| format!("[{}]", records(first..first + 3).join(",")))
             .collect();
         assert_eq!(received, expected);
+        assert_eq!(requests(&server).await.len(), 80);
         assert_eq!(server.get_insert_connection_count().await, 1);
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn calls_on_one_client_run_in_parallel() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    server
+        .inject_insert_responses(vec![MockInsertResponse::Ok { delay_ms: 5_000 }])
+        .await;
+    let sdk = sdk(&url);
+    let client = Arc::new(client(&sdk, &TestProvider::new(TABLE_NAME), |b| b).await);
+
+    let slow = {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.ingest_records(records(0..1)).await })
+    };
+    wait_for_requests(&server, 1, |_| true).await;
+    client.ingest_records(records(1..2)).await.unwrap();
+
+    assert!(
+        !slow.is_finished(),
+        "the second call waited for the first one"
+    );
+    slow.await.unwrap().unwrap();
+    assert_eq!(requests(&server).await.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_calls_on_one_client_have_independent_retry_budgets() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    server.inject_insert_responses(vec![unavailable(); 4]).await;
+    let sdk = sdk(&url);
+    let client = Arc::new(
+        client(&sdk, &TestProvider::new(TABLE_NAME), |b| {
+            b.recovery_retries(2).recovery_backoff_ms(1_500)
+        })
+        .await,
+    );
+    let spawn_call = |ids: std::ops::Range<i32>| {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.ingest_records(records(ids)).await })
+    };
+
+    // The calls overlap, so both draw failures from the shared script. Each call
+    // absorbs 2 of the 4; a budget per client would fail one of them. The second
+    // call has one backoff (1.5 s) to start before the first call's retry.
+    let first = spawn_call(0..1);
+    wait_for_requests(&server, 1, |_| true).await;
+    let second = spawn_call(1..2);
+    wait_for_requests(&server, 2, |_| true).await;
+
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(requests(&server).await.len(), 6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -1436,6 +1679,8 @@ async fn a_retrying_client_does_not_delay_another() {
         retrying.ingest_records(records(0..1)).await.unwrap();
         started.elapsed()
     });
+    // The healthy calls start once the other client is in its first backoff.
+    wait_for_requests(&server, 1, |r| r.table_name.as_deref() == Some(TABLE_NAME)).await;
     for id in 0..10 {
         let call_started = Instant::now();
         healthy.ingest_records(records(id..id + 1)).await.unwrap();

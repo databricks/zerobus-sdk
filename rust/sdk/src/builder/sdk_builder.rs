@@ -397,6 +397,19 @@ mod tests {
     }
 
     #[test]
+    fn test_unary_keepalive_defaults_to_30s_interval_and_10s_timeout() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build");
+
+        assert_eq!(
+            sdk.unary_keepalive,
+            (Duration::from_secs(30), Duration::from_secs(10))
+        );
+    }
+
+    #[test]
     fn test_builder_missing_endpoint() {
         let result = ZerobusSdkBuilder::new()
             .unity_catalog_url("https://workspace.cloud.databricks.com")

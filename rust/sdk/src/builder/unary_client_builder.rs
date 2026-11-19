@@ -242,8 +242,12 @@ mod tests {
     use super::*;
 
     fn test_sdk() -> ZerobusSdk {
+        sdk_for("http://localhost:1234")
+    }
+
+    fn sdk_for(endpoint: &str) -> ZerobusSdk {
         ZerobusSdk::new_with_config(
-            "http://localhost:1234".to_string(),
+            endpoint.to_string(),
             "http://localhost:5678".to_string(),
             "test-workspace".to_string(),
             Arc::new(crate::tls_config::SecureTlsConfig::new()),
@@ -276,8 +280,16 @@ mod tests {
         let msg = invalid_argument(sdk.unary_client_builder().validate());
         assert!(msg.contains(".table()"), "{msg}");
 
+        // Wrappers surface this text verbatim. A unary builder has no
+        // `.personal_access_token()`, so the text never names it, whatever the features.
         let msg = invalid_argument(sdk.unary_client_builder().table("t").json().validate());
-        assert!(msg.contains(".oauth()"), "{msg}");
+        let expected = if cfg!(feature = "testing") {
+            "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
+        } else {
+            "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
+        };
+        assert_eq!(msg, expected);
+        assert!(!msg.contains("personal_access_token"), "{msg}");
 
         let msg = invalid_argument(
             sdk.unary_client_builder()
@@ -332,6 +344,31 @@ mod tests {
             .await
             .unwrap();
         assert!(format!("{client:?}").contains("catalog.schema.table"));
+    }
+
+    #[tokio::test]
+    async fn build_reports_an_unparsable_endpoint_as_not_retryable() {
+        let sdk = sdk_for("https://bad host.example.com");
+        let build = sdk
+            .unary_client_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .build();
+        let error = tokio::time::timeout(Duration::from_secs(10), build)
+            .await
+            .expect("build() must not retry")
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ZerobusError::InvalidZerobusEndpointError(_)),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        assert!(
+            error.to_string().contains("bad host.example.com"),
+            "{error}"
+        );
     }
 
     #[test]
