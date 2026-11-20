@@ -1,0 +1,5 @@
+{
+  "argv": ["{harness_dir}/build/zerobus-testing-harness-cpp"],
+  "artifact": "{harness_dir}/build/zerobus-testing-harness-cpp",
+  "build_hint": "cmake -S conformance/harness/cpp -B conformance/harness/cpp/build -DProtobuf_PROTOC_EXECUTABLE=/usr/bin/protoc && cmake --build conformance/harness/cpp/build"
+}
