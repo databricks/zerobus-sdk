@@ -3258,8 +3258,9 @@ fn async_ingests_accepted_before_close_are_never_lost() {
 }
 
 /// While close or get_unacked_records holds or waits for the write lock, the
-/// async readers return true at once and report a closing error through
-/// exactly one callback, before the writer finishes.
+/// async readers return true at once. The async ingests report a closing
+/// error through exactly one callback, before the writer finishes. The async
+/// wait and flush wait for the writer, then report the real outcome.
 #[test]
 fn async_calls_while_closing_report_via_callback() {
     for writer in ["close", "get_unacked_records"] {
@@ -3305,6 +3306,7 @@ fn async_calls_while_closing_report_via_callback() {
                 zerobus_multiplexed_stream_is_closed(gated.mux)
             });
 
+            let mut waiting = Vec::new();
             for (call_name, call) in async_readers(gated.mux, gated.r0_id) {
                 let sink = AsyncSink::leaked();
                 let started = Instant::now();
@@ -3314,6 +3316,10 @@ fn async_calls_while_closing_report_via_callback() {
                     "{what}: {call_name} blocked"
                 );
                 assert!(returned, "{what}: {call_name} must return true: {message}");
+                if matches!(call_name, "wait_for_message_id_async" | "flush_async") {
+                    waiting.push((call_name, sink));
+                    continue;
+                }
                 // The gate is still closed, so the writer has not finished.
                 let completions = sink.wait_for(1, call_name);
                 let completion = &completions[0];
@@ -3328,11 +3334,37 @@ fn async_calls_while_closing_report_via_callback() {
                     completion.message
                 );
             }
+            // The wait and the flush queue behind the writer.
+            for (call_name, sink) in &waiting {
+                sink.assert_never_called(&format!("{what}: {call_name} before release"));
+            }
 
             gated.gate.release();
             let recovered = writer_thread.join().unwrap();
             if let Some(flusher) = flusher {
                 flusher.join().unwrap();
+            }
+            for (call_name, sink) in waiting {
+                let done = sink.one(call_name);
+                if call_name == "wait_for_message_id_async" {
+                    // The writer's flush acked r0, and the wait checks the
+                    // acked offset first.
+                    assert!(done.success && done.value == 1, "{what}: {done:?}");
+                    continue;
+                }
+                let mut result = new_result();
+                assert!(!zerobus_multiplexed_stream_flush(gated.mux, &mut result));
+                let (retryable, message) = expect_failure(&mut result, "flush");
+                assert!(
+                    done.value == 0 && !done.success,
+                    "{what}: {call_name}: {done:?}"
+                );
+                assert_eq!(
+                    (done.retryable, done.message.as_str()),
+                    (retryable, message.as_str()),
+                    "{what}: {call_name} must match the blocking flush"
+                );
+                assert!(message.contains("MultiplexedStream is closed"), "{message}");
             }
             // Only r0 was ever sent (and acked); no rejected record is
             // recoverable.
@@ -3345,6 +3377,105 @@ fn async_calls_while_closing_report_via_callback() {
             );
             zerobus_multiplexed_stream_free(gated.mux);
             zerobus_sdk_free(gated.sdk);
+        }
+    }
+}
+
+/// An async wait made while close or get_unacked_records holds the write lock
+/// waits for it, then reports success: for r0 (acked before) and for r1 (the
+/// record the writer's flush waits for).
+#[test]
+fn async_wait_during_close_reports_success_after_it() {
+    for writer in ["close", "get_unacked_records"] {
+        for target in ["r0", "r1"] {
+            let what = format!("{writer}, wait on {target}");
+            const TABLE: &str = "ffi.mux.async.wait_closing";
+            let (runtime, server, url) = start_server();
+            let gate = Arc::new(MockResponseGate::new());
+            runtime.block_on(server.inject_responses(
+                TABLE,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "lane-0".into(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedRecordAck {
+                        ack_up_to_offset: 1,
+                        gate: Arc::clone(&gate),
+                    },
+                ],
+            ));
+            let sdk = create_sdk(&url);
+            let mux = create_mux(sdk, TABLE, None, 1, &json_options());
+            let records = json_records(0..2);
+            let mut result = new_result();
+            let r0_id = zerobus_multiplexed_stream_ingest_json_record(
+                mux,
+                records[0].as_ptr(),
+                &mut result,
+            );
+            expect_success(&mut result, "ingest_json_record (r0)");
+            assert!(zerobus_multiplexed_stream_wait_for_message_id(
+                mux,
+                r0_id,
+                &mut result
+            ));
+            expect_success(&mut result, "wait_for_message_id (r0)");
+            let r1_id = zerobus_multiplexed_stream_ingest_json_record(
+                mux,
+                records[1].as_ptr(),
+                &mut result,
+            );
+            expect_success(&mut result, "ingest_json_record (r1)");
+            wait_for_writes(&runtime, &server, 2);
+
+            // The writer holds the lock, blocked in its own flush on r1's ack.
+            let mux_addr = mux as usize;
+            let writer_thread = std::thread::spawn(move || {
+                let mut result = new_result();
+                let mux = mux_addr as *mut CZerobusMultiplexedStream;
+                let (returned, recovered) = if writer == "close" {
+                    (
+                        zerobus_multiplexed_stream_close(mux, &mut result),
+                        Vec::new(),
+                    )
+                } else {
+                    let recovered = take_json_payloads(
+                        zerobus_multiplexed_stream_get_unacked_records(mux, &mut result),
+                    );
+                    (result.success, recovered)
+                };
+                (returned, take_message(&mut result), recovered)
+            });
+            wait_until("the writer takes the lock", || {
+                zerobus_multiplexed_stream_is_closed(mux)
+            });
+            // No hook shows when the writer is inside its flush; give it time to.
+            std::thread::sleep(Duration::from_millis(100));
+
+            let id = if target == "r0" { r0_id } else { r1_id };
+            let sink = AsyncSink::leaked();
+            let started = Instant::now();
+            let (returned, _, message) = wait_async(mux, id, sink);
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{what}: blocked"
+            );
+            assert!(returned, "{what}: {message}");
+            sink.assert_never_called(&format!("{what}: before release"));
+
+            gate.release();
+            let (returned, message, recovered) = writer_thread.join().unwrap();
+            assert!(returned, "{what}: {writer}: {message}");
+            assert!(recovered.is_empty(), "{what}: {recovered:?}");
+            let done = sink.one(&what);
+            assert!(done.success && done.value == 1, "{what}: {done:?}");
+            zerobus_multiplexed_stream_free(mux);
+            zerobus_sdk_free(sdk);
         }
     }
 }
