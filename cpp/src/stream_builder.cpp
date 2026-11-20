@@ -6,6 +6,7 @@
 // on the header.
 #include "zerobus/stream_builder.hpp"
 
+#include <string>
 #include <utility>
 
 #include "zerobus/error.hpp"
@@ -135,6 +136,56 @@ Stream StreamBuilder::build() const {
     return Sdk::open_stream(sdk_, table, client_id_, client_secret_, options_);
   }
   return Sdk::open_stream(sdk_, table, headers_provider_, options_);
+}
+
+MultiplexedStreamBuilder StreamBuilder::multiplexed(
+    std::size_t stream_count) const {
+  return MultiplexedStreamBuilder(*this, stream_count);
+}
+
+MultiplexedStreamBuilder& MultiplexedStreamBuilder::ack_callback(
+    std::shared_ptr<MultiplexedAckCallback> callback) {
+  ack_callback_ = std::move(callback);
+  return *this;
+}
+
+// Same checks, order and wording as the Rust core's multiplexed validate(),
+// with the C++ setter names.
+void MultiplexedStreamBuilder::validate() const {
+  base_.validate();
+  if (stream_count_ < 1 || stream_count_ > 64) {
+    throw ZerobusException("multiplexed stream_count must be between 1 and 64",
+                           false);
+  }
+  const std::size_t max_inflight = base_.options_.max_inflight_requests;
+  if (max_inflight < stream_count_) {
+    throw ZerobusException(
+        "max_inflight_requests (" + std::to_string(max_inflight) +
+            ") must be at least stream_count (" +
+            std::to_string(stream_count_) + ") for multiplexed streams",
+        false);
+  }
+  if (base_.options_.ack_callback != nullptr) {
+    throw ZerobusException(
+        "ack_callback is only valid for ordinary streams; use "
+        "multiplexed(n).ack_callback(...)",
+        false);
+  }
+}
+
+MultiplexedStream MultiplexedStreamBuilder::build() const {
+  validate();
+  TableProperties table;
+  table.table_name = *base_.table_name_;
+  table.descriptor_proto = base_.descriptor_proto_;
+  if (base_.auth_ == StreamBuilder::Auth::OAuth) {
+    return Sdk::open_multiplexed_stream(base_.sdk_, table, base_.client_id_,
+                                        base_.client_secret_, stream_count_,
+                                        base_.options_, ack_callback_);
+  }
+  return Sdk::open_multiplexed_stream(base_.sdk_, table,
+                                      base_.headers_provider_, stream_count_,
+                                      base_.options_, ack_callback_);
 }
 
 }  // namespace zerobus

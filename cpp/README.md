@@ -235,6 +235,50 @@ Setters never throw. `validate()` and `build()` throw a non-retryable
 `max_inflight_requests` is 0. The builder is copyable, is not thread-safe, and
 must not outlive its `Sdk`. See [`examples/json/builder.cpp`](examples/json/builder.cpp).
 
+### Multiplexed streams (Beta)
+
+A multiplexed stream opens several sub-streams to one table behind one handle,
+to raise throughput when a single stream is the bottleneck. Call
+`multiplexed(n)` (1 to 64) on a stream builder, then `build()`:
+
+```cpp
+auto on_ack = zerobus::MultiplexedAckCallback::from(
+    [](zerobus::MessageId id) noexcept { /* record or batch `id` is durable */ });
+
+zerobus::MultiplexedStream stream = sdk.stream_builder()
+                                        .table("main.analytics.events")
+                                        .oauth(client_id, client_secret)
+                                        .json()
+                                        .multiplexed(4)
+                                        .ack_callback(on_ack)
+                                        .build();
+for (const auto& batch : batches) {
+  stream.ingest_json_records(batch);   // one batch goes to one sub-stream
+}
+stream.flush();
+stream.close();
+```
+
+- Each ingest call goes to the next sub-stream, round-robin, and returns a
+  `MessageId`. Records keep their order within a sub-stream, not across them.
+  IDs can be negative; compare them for equality only, and use them only with
+  the stream that returned them. Prefer one `flush()` over
+  `wait_for_message_id()` per record.
+- `max_inflight_requests` is a budget for the whole stream: each sub-stream
+  gets `max_inflight_requests / n`, so it must be at least `n`. `validate()` and
+  `build()` check this, `n`, and the usual builder settings.
+- The ack callback is a `MultiplexedAckCallback`, not an `AckCallback`: it
+  receives message IDs, and sub-streams call it concurrently. Setting the
+  ordinary `ack_callback()` before `multiplexed(n)` is rejected. The SDK keeps
+  the callback until every sub-stream has released it, which can be after the
+  stream is destroyed.
+- All `MultiplexedStream` methods may run concurrently; moving or destroying it
+  must not overlap another call.
+- If a sub-stream fails, the stream stops accepting records once a call observes
+  the failure (`is_closed()`). Send `get_unacked_records()` on a new stream.
+
+See [`examples/json/multiplexed.cpp`](examples/json/multiplexed.cpp).
+
 ### Protobuf ingestion from a Unity Catalog schema (dynamic)
 
 `ProtoSchema::from_uc_json()` builds both the descriptor and a JSON→proto
@@ -352,6 +396,8 @@ canonical version):
 |------|---------|
 | `zerobus::Sdk` / `zerobus::SdkBuilder` | Connection factory; creates streams |
 | `zerobus::StreamBuilder` | Fluent proto/JSON stream configuration (Beta); from `Sdk::stream_builder()` |
+| `zerobus::MultiplexedStreamBuilder` / `zerobus::MultiplexedStream` | Multiplexed stream (Beta); from `StreamBuilder::multiplexed(n)` |
+| `zerobus::MessageId` / `zerobus::MultiplexedAckCallback` | Multiplexed message IDs and their ack callback (Beta) |
 | `zerobus::Stream` | Proto/JSON ingestion stream |
 | `zerobus::ArrowStream` | Arrow Flight ingestion stream |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |

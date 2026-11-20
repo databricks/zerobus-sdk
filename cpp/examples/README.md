@@ -55,6 +55,7 @@ failure in [`json/single.cpp`](json/single.cpp), and Arrow IPC compression in
 | [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `json_single` |
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `json_batch` |
 | [JSON Stream Builder](json/builder.cpp) (Beta) | JSON | Single-record, stream builder | `json_builder` |
+| [JSON Multiplexed](json/multiplexed.cpp) (Beta) | JSON | Batch, multiplexed stream with ack callback | `json_multiplexed` |
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `proto_single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `proto_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `arrow_ingest` |
@@ -152,6 +153,7 @@ The binaries land in `build/examples/`:
 ./build/examples/json_single
 ./build/examples/json_batch
 ./build/examples/json_builder
+./build/examples/json_multiplexed
 ./build/examples/proto_single
 ./build/examples/proto_batch
 ./build/examples/arrow_ingest      # only if Apache Arrow C++ is installed

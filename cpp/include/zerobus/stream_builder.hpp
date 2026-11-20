@@ -6,11 +6,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "zerobus/ack_callback.hpp"
 #include "zerobus/config.hpp"
 #include "zerobus/headers_provider.hpp"
+#include "zerobus/multiplexed_ack_callback.hpp"
+#include "zerobus/multiplexed_stream.hpp"
 #include "zerobus/stream.hpp"
 
 namespace zerobus {
@@ -21,6 +24,8 @@ class Sdk;
 namespace detail {
 struct StreamBuilderAccess;
 }
+
+class MultiplexedStreamBuilder;
 
 /// Fluent builder for a proto/JSON `Stream` (Beta). Obtain one from
 /// `Sdk::stream_builder()`.
@@ -95,8 +100,18 @@ class StreamBuilder {
   /// Validate, then open the stream. Throws `ZerobusException` on failure.
   Stream build() const;
 
+  /// Switch to a multiplexed stream (Beta) of @p stream_count sub-streams
+  /// (1 to 64). Returns a builder holding a copy of the settings so far;
+  /// later changes to this builder do not reach it. `max_inflight_requests` is
+  /// a budget for the whole stream: each sub-stream gets
+  /// `max_inflight_requests / stream_count`, so it must be at least
+  /// `stream_count`. Set the mux ack callback on the returned builder;
+  /// `ack_callback()` here is only valid for ordinary streams.
+  MultiplexedStreamBuilder multiplexed(std::size_t stream_count) const;
+
  private:
   friend class Sdk;
+  friend class MultiplexedStreamBuilder;
   friend struct detail::StreamBuilderAccess;
 
   explicit StreamBuilder(CZerobusSdk* sdk) : sdk_(sdk) {}
@@ -114,6 +129,44 @@ class StreamBuilder {
   // record_type is set by json()/compiled_proto(); every other field keeps the
   // StreamOptions default until its setter runs.
   StreamOptions options_;
+};
+
+/// Builder for a `MultiplexedStream` (Beta). Returned by
+/// `StreamBuilder::multiplexed()`.
+///
+/// Like `StreamBuilder`: setters never throw, `validate()` and `build()` throw
+/// a non-retryable `ZerobusException`, it is copyable and not thread-safe, and
+/// the `Sdk` must outlive every `build()` call. Each sub-stream opens with a
+/// random delay of up to 1 second, so `build()` takes up to that much longer
+/// than for a single stream.
+class MultiplexedStreamBuilder {
+ public:
+  /// Async ack/error callback shared by every sub-stream, receiving message
+  /// IDs (`nullptr` = none). See `MultiplexedAckCallback` for the contract.
+  MultiplexedStreamBuilder& ack_callback(
+      std::shared_ptr<MultiplexedAckCallback> callback);
+
+  /// Check the settings without opening any sub-stream. Throws a
+  /// non-retryable `ZerobusException` naming the first problem: those of
+  /// `StreamBuilder::validate()`, then a `stream_count` outside 1 to 64, a
+  /// `max_inflight_requests` below `stream_count`, and an ordinary
+  /// `ack_callback`.
+  void validate() const;
+
+  /// Validate, then open every sub-stream. If one fails to open, the others
+  /// are closed and this throws `ZerobusException`.
+  MultiplexedStream build() const;
+
+ private:
+  friend class StreamBuilder;
+  friend struct detail::StreamBuilderAccess;
+
+  MultiplexedStreamBuilder(StreamBuilder base, std::size_t stream_count)
+      : base_(std::move(base)), stream_count_(stream_count) {}
+
+  StreamBuilder base_;
+  std::size_t stream_count_;
+  std::shared_ptr<MultiplexedAckCallback> ack_callback_;
 };
 
 }  // namespace zerobus

@@ -1,6 +1,7 @@
 #ifndef ZEROBUS_SDK_HPP
 #define ZEROBUS_SDK_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -9,6 +10,7 @@
 #include "zerobus/arrow_stream.hpp"
 #include "zerobus/config.hpp"
 #include "zerobus/headers_provider.hpp"
+#include "zerobus/multiplexed_stream.hpp"
 #include "zerobus/stream.hpp"
 #include "zerobus/stream_builder.hpp"
 
@@ -125,6 +127,7 @@ class Sdk {
  private:
   friend class SdkBuilder;
   friend class StreamBuilder;
+  friend class MultiplexedStreamBuilder;
   explicit Sdk(CZerobusSdk* handle) : handle_(handle) {}
 
   // The one native create path, shared by create_stream and
@@ -136,6 +139,17 @@ class Sdk {
   static Stream open_stream(CZerobusSdk* sdk, const TableProperties& table,
                             std::shared_ptr<HeadersProvider> headers_provider,
                             const StreamOptions& options);
+  // The native mux create path, used by MultiplexedStreamBuilder::build.
+  static MultiplexedStream open_multiplexed_stream(
+      CZerobusSdk* sdk, const TableProperties& table,
+      const std::string& client_id, const std::string& client_secret,
+      std::size_t stream_count, const StreamOptions& options,
+      std::shared_ptr<MultiplexedAckCallback> ack_callback);
+  static MultiplexedStream open_multiplexed_stream(
+      CZerobusSdk* sdk, const TableProperties& table,
+      std::shared_ptr<HeadersProvider> headers_provider,
+      std::size_t stream_count, const StreamOptions& options,
+      std::shared_ptr<MultiplexedAckCallback> ack_callback);
 
   CZerobusSdk* handle_;
 };

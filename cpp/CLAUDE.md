@@ -12,7 +12,9 @@ cpp/
 │   ├── zerobus.hpp       # Umbrella header — include this
 │   ├── sdk.hpp           # Sdk + SdkBuilder + TableProperties
 │   ├── stream.hpp        # Stream (proto/JSON ingestion)
-│   ├── stream_builder.hpp  # StreamBuilder (Beta), from Sdk::stream_builder()
+│   ├── stream_builder.hpp  # StreamBuilder + MultiplexedStreamBuilder (Beta)
+│   ├── multiplexed_stream.hpp  # MultiplexedStream (Beta)
+│   ├── multiplexed_ack_callback.hpp  # MessageId + MultiplexedAckCallback (Beta)
 │   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight)
 │   ├── proto_schema.hpp  # ProtoSchema (UC JSON → descriptor + encoder)
 │   ├── headers_provider.hpp  # HeadersProvider interface
@@ -22,10 +24,11 @@ cpp/
 │   ├── error.hpp         # ZerobusException
 │   └── version.hpp       # ZEROBUS_CPP_VERSION
 ├── src/                  # Implementation (the only place that includes zerobus.h)
-│   ├── sdk.cpp / stream.cpp / stream_builder.cpp / arrow_stream.cpp / proto_schema.cpp
+│   ├── sdk.cpp / stream.cpp / stream_builder.cpp / multiplexed_stream.cpp / arrow_stream.cpp / proto_schema.cpp
+│   ├── multiplexed_ack_callback.cpp  # MultiplexedAckCallback::from + mux ack trampolines
 │   ├── ack_callback.cpp  # AckCallback::from lambda adapter
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
-│   └── detail/           # Internal: ffi_util, config_convert, headers_callback, ack_callback, stream_builder_access (tests)
+│   └── detail/           # Internal: ffi_util, config_convert, record_util, headers_callback, ack_callback, multiplexed_ack_callback, stream_builder_access (tests)
 ├── tests/                # Dependency-free unit tests (plain executables)
 ├── examples/             # Runnable usage examples (JSON, proto, Arrow)
 ├── cmake/
@@ -138,6 +141,22 @@ When a `StreamOptions::ack_callback` is set:
 `Sdk::create_stream`. Keep it that way: one conversion, one create path. The
 builder's only extra rule is rejecting `max_inflight_requests` 0. Tests read
 its settings through `detail::StreamBuilderAccess`.
+
+## Multiplexed streams
+
+- `MultiplexedStreamBuilder` holds a copy of the `StreamBuilder` taken by
+  `multiplexed(n)`, the count and its own `MultiplexedAckCallback`.
+  `validate()` mirrors the core's checks, order and wording (C++ setter names);
+  an ordinary `ack_callback` is rejected, never dropped.
+- `Sdk::open_multiplexed_stream` is the one native mux create path. The mux ack
+  callback crosses as a heap `std::shared_ptr<MultiplexedAckCallback>*` with
+  `detail::zerobus_cpp_mux_ack_free` as `free_ack_user_data`; a `unique_ptr`
+  owns it until the native call, after which the FFI frees it exactly once on
+  every path (also after a failed create, possibly later, from any thread).
+  The `MultiplexedStream` keeps no reference to it.
+- The native mux is thread-safe, so `MultiplexedStream` never changes its handle
+  outside move and destruction: `close()` keeps it, and the destructor frees
+  it. Success always comes from `CResult`, never from the sign of an ID.
 
 ## Configuration mapping
 
