@@ -5,8 +5,64 @@
 
 use crate::class_cache::{as_jclass, get_class_cache};
 use databricks_zerobus_ingest_sdk::ZerobusError;
-use jni::objects::{GlobalRef, JString, JThrowable, JValue};
+use jni::objects::{GlobalRef, JObject, JString, JThrowable, JValue};
 use jni::JNIEnv;
+
+/// A Java exception taken off the current thread by [`take_java_exception`].
+pub(crate) struct JavaException<'local> {
+    pub(crate) throwable: JThrowable<'local>,
+    pub(crate) message: Option<String>,
+    pub(crate) non_retryable: bool,
+}
+
+/// Takes the pending Java exception off the current thread and describes it.
+///
+/// Call this after any JNI call into Java code fails with
+/// `jni::errors::Error::JavaException`, before making another JNI call.
+/// Every intermediate exception is cleared, so the thread is left with none
+/// pending even if describing the exception fails.
+pub(crate) fn take_java_exception<'local>(
+    env: &mut JNIEnv<'local>,
+) -> Option<JavaException<'local>> {
+    let throwable = match env.exception_occurred() {
+        Ok(throwable) => throwable,
+        Err(_) => {
+            let _ = env.exception_clear();
+            return None;
+        }
+    };
+    let _ = env.exception_clear();
+
+    let explicitly_non_retryable = env
+        .is_instance_of(
+            &throwable,
+            as_jclass(&get_class_cache().non_retriable_exception_class),
+        )
+        .unwrap_or(false);
+    let _ = env.exception_clear();
+    let fatal_error = env
+        .is_instance_of(&throwable, as_jclass(&get_class_cache().error_class))
+        .unwrap_or(false);
+    let _ = env.exception_clear();
+    let message = extract_throwable_string(env, &throwable);
+    let _ = env.exception_clear();
+
+    Some(JavaException {
+        throwable,
+        message,
+        non_retryable: explicitly_non_retryable || fatal_error,
+    })
+}
+
+fn extract_throwable_string(env: &mut JNIEnv<'_>, throwable: &JObject<'_>) -> Option<String> {
+    let message = env
+        .call_method(throwable, "toString", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let message = JString::from(message);
+    env.get_string(&message).ok().map(Into::into)
+}
 
 /// Throw a ZerobusException in Java.
 ///
