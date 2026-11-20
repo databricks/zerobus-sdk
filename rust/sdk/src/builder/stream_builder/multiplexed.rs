@@ -20,6 +20,22 @@ use crate::{
 
 pub(super) const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
 
+/// When the caller doesn't set `recovery_retries`, each lane of a multiplexed
+/// stream retries this many times the default. A single lane that runs out of
+/// retries fails the whole multiplexed stream, so with the per-stream default a
+/// mux would fail far more often than one stream does.
+const MULTIPLEXED_DEFAULT_RECOVERY_RETRY_MULTIPLIER: u32 = 2;
+
+/// The `recovery_retries` each lane of a multiplexed stream runs with: the
+/// caller's value if they set one, otherwise twice the default.
+fn lane_recovery_retries(configured: u32, set_by_caller: bool) -> u32 {
+    if set_by_caller {
+        configured
+    } else {
+        configured.saturating_mul(MULTIPLEXED_DEFAULT_RECOVERY_RETRY_MULTIPLIER)
+    }
+}
+
 impl<'a> StreamBuilder<'a> {
     /// Set the acknowledgment callback for a multiplexed gRPC stream.
     ///
@@ -56,7 +72,11 @@ impl<'a> StreamBuilder<'a> {
     /// `stream_count` must be in `1..=64` and cannot exceed the configured
     /// `max_inflight_requests` (gRPC) or `max_inflight_batches` (Arrow). The
     /// mux-wide in-flight budget is divided evenly
-    /// across sub-streams using integer division. JSON, compiled protobuf,
+    /// across sub-streams using integer division. Unless
+    /// [`recovery_retries`](Self::recovery_retries) is set, each sub-stream
+    /// retries creation and recovery up to twice the default, because one
+    /// sub-stream running out of retries fails the whole multiplexed stream.
+    /// An explicit `recovery_retries` applies to each sub-stream as given. JSON, compiled protobuf,
     /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
     /// Arrow Flight uses `.arrow(schema).multiplexed(n).build_arrow()` with the
     /// `arrow-flight` feature. Arrow batches remain whole; callbacks and stats
@@ -73,7 +93,9 @@ impl<'a> StreamBuilder<'a> {
 /// independently sampled delay of at most one second when more than one stream
 /// is requested. A single stream opens immediately. Construction is atomic: if
 /// any open fails, every successfully opened sub-stream is closed and the error
-/// from the lowest failing stream index is returned.
+/// from the lowest failing stream index is returned. Unless `recovery_retries`
+/// was set, each sub-stream retries its open and later recoveries up to twice
+/// the default.
 ///
 /// Dropping the build future cancels delayed and active opens and tears down
 /// any sub-streams that already opened.
@@ -218,6 +240,10 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .expect("in-flight capacity was validated");
         let mut options = self.inner.grpc_options(format.record_type);
         options.max_inflight_requests = max_inflight_requests_per_stream;
+        options.recovery_retries = lane_recovery_retries(
+            options.recovery_retries,
+            self.inner.settings.recovery_retries_set,
+        );
 
         let opens = delays.into_iter().zip(headers_providers).enumerate().map(
             |(stream_index, (delay, headers_provider))| {
@@ -277,6 +303,10 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         inner.warn_arrow_ignored_options();
         let mut options = inner.arrow_options();
         options.max_inflight_batches = capacity;
+        options.recovery_retries = lane_recovery_retries(
+            options.recovery_retries,
+            inner.settings.recovery_retries_set,
+        );
         let table_properties = super::ArrowTableProperties {
             table_name: inner.core.table_name,
             schema,
@@ -377,6 +407,16 @@ mod construction_tests {
     impl Drop for Opened {
         fn drop(&mut self) {
             self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn lanes_double_only_the_default_recovery_retries() {
+        let default = crate::stream_options::defaults::RECOVERY_RETRIES;
+        assert_eq!(lane_recovery_retries(default, false), 2 * default);
+        assert_eq!(lane_recovery_retries(u32::MAX, false), u32::MAX);
+        for explicit in [0, 1, default, 100] {
+            assert_eq!(lane_recovery_retries(explicit, true), explicit);
         }
     }
 

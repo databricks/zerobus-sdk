@@ -21,6 +21,7 @@ use super::{
     configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem,
     BatchSender, FlightConnectionParameters, OutboundBatch, ZerobusArrowStream,
 };
+use crate::backoff::recovery_backoff_delay;
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
@@ -313,9 +314,14 @@ impl Supervisor {
                         return self.finish(Err(error.clone())).await;
                     }
 
+                    // Exponential and jittered, like initial creation, so lanes and clients
+                    // that lose their connections together don't reconnect together.
+                    let backoff =
+                        recovery_backoff_delay(self.options.recovery_backoff_ms, attempts);
                     info!(target: super::LOG_TARGET,
                         attempt = attempts + 1,
                         max_retries = self.options.recovery_retries,
+                        backoff_ms = backoff.as_millis() as u64,
                         error = %error,
                         "Supervisor: Attempting recovery after retriable error"
                     );
@@ -332,7 +338,7 @@ impl Supervisor {
                     let close_during_backoff = tokio::select! {
                         biased;
                         request = self.close.wait_for_request(&mut close_rx) => request.is_some(),
-                        _ = sleep(Duration::from_millis(self.options.recovery_backoff_ms)) => false,
+                        _ = sleep(backoff) => false,
                     };
                     if close_during_backoff {
                         return self.finish(Err(recovery_error)).await;

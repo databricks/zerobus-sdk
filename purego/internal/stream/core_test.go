@@ -854,6 +854,31 @@ func TestCoreStreamImmediateEOFExhaustsRecovery(t *testing.T) {
 	}
 }
 
+func TestCoreStreamRecoveryBackoffDoubles(t *testing.T) {
+	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()}
+	for _, rpc := range rpcs {
+		rpc.close()
+	}
+	fo := newFakeOpener(rpcs...)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = 20 * time.Millisecond
+	start := time.Now()
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, 5*time.Second)
+	elapsed := time.Since(start)
+	if got := fo.openCount(); got != 4 {
+		t.Fatalf("want 4 Open attempts, got %d", got)
+	}
+	// A fixed 20ms interval waits 60ms in total. Doubling from 20ms waits at
+	// least 20 + 40 + 80 = 140ms; jitter only adds to that.
+	if elapsed < 140*time.Millisecond {
+		t.Fatalf("three retries from a 20ms base must back off exponentially, took %v", elapsed)
+	}
+}
+
 func TestCoreStreamStableIdleConnectionResetsRecovery(t *testing.T) {
 	rpc1 := newFakeRPC()
 	rpc1.close()

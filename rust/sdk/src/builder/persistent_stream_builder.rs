@@ -130,7 +130,10 @@ impl<'a> PersistentStreamBuilder<'a> {
         self
     }
 
-    /// Set the backoff time in milliseconds between recovery retries.
+    /// Set the base backoff time in milliseconds between stream creation and
+    /// recovery retries. The delay doubles after each failed attempt and is
+    /// jittered; see
+    /// [`StreamConfigurationOptions::recovery_backoff_ms`](crate::StreamConfigurationOptions::recovery_backoff_ms).
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
         self.inner = self.inner.recovery_backoff_ms(ms);
         self

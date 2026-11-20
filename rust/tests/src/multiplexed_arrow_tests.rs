@@ -36,6 +36,67 @@ fn builder(sdk: &ZerobusSdk) -> databricks_zerobus_ingest_sdk::StreamBuilder<'_>
         .flush_timeout_ms(2_000)
 }
 
+fn setup_rejections(rejections: usize) -> Vec<MockFlightResponse> {
+    (0..rejections)
+        .map(|_| MockFlightResponse::FailSetup {
+            status: tonic::Status::resource_exhausted("Stream creation rate exceeded"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn lanes_retry_creation_twice_the_default_budget() {
+    // One more rejection than the default 4 retries can absorb.
+    let rejections = 5;
+
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    server
+        .inject_responses(TABLE, setup_rejections(rejections))
+        .await;
+    let single_sdk = sdk(endpoint);
+    let single = builder(&single_sdk)
+        .recovery_backoff_ms(0)
+        .build_arrow()
+        .await;
+    assert!(
+        single.is_err(),
+        "the default 4 retries must not outlast 5 rejections"
+    );
+
+    // A mux lane left at the default gets 8 retries and opens on the sixth attempt.
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    server
+        .inject_responses(TABLE, setup_rejections(rejections))
+        .await;
+    let mux_sdk = sdk(endpoint);
+    let mut mux = builder(&mux_sdk)
+        .recovery_backoff_ms(0)
+        .multiplexed(1)
+        .build_arrow()
+        .await
+        .unwrap();
+    assert_eq!(server.connection_count(), 6);
+    mux.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn lanes_keep_explicit_recovery_retries() {
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    server.inject_responses(TABLE, setup_rejections(2)).await;
+    let mux_sdk = sdk(endpoint);
+    let mux = builder(&mux_sdk)
+        .recovery_retries(1)
+        .recovery_backoff_ms(0)
+        .multiplexed(1)
+        .build_arrow()
+        .await;
+    assert!(
+        mux.is_err(),
+        "an explicit recovery_retries(1) must not be doubled for mux lanes"
+    );
+    assert_eq!(server.connection_count(), 2);
+}
+
 #[tokio::test]
 async fn round_robin_ipc_message_ids() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();

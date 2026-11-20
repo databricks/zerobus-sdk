@@ -173,8 +173,13 @@ func WithRecoveryTimeout(d time.Duration) StreamOption {
 	return func(c *streamConfig) { c.cfg.RecoveryTimeout = d }
 }
 
-// WithRecoveryBackoff sets the delay between consecutive recovery attempts. A
-// non-positive value keeps the default (2 seconds).
+// WithRecoveryBackoff sets the base delay between consecutive recovery
+// attempts. The SDK waits at least this long before retrying. The delay doubles
+// after each consecutive failed attempt, up to 15 seconds (or d, if larger), and
+// a random jitter of up to the same amount is added, which spreads out retries
+// from streams that fail at the same time. With the default, retries wait
+// 2–4s, 4–8s, 8–16s, then 15–30s. A non-positive value keeps the default
+// (2 seconds).
 func WithRecoveryBackoff(d time.Duration) StreamOption {
 	return func(c *streamConfig) { c.cfg.RecoveryBackoff = d }
 }

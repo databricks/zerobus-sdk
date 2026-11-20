@@ -64,6 +64,16 @@
 
 ### Breaking Changes
 
+- Reconnect retries now back off exponentially with jitter instead of waiting a
+  fixed `WithRecoveryBackoff` interval, matching the Rust core and the SDKs built
+  on it. The wait still starts at the configured backoff and is never shorter
+  than it. It doubles after each consecutive failed attempt, up to 15 seconds (or
+  the configured backoff if larger), and a random jitter of up to the same amount
+  is added. With the defaults (2 s, 4 retries), a stream that keeps failing gives
+  up after about 29–58 s of waiting instead of 8 s. Streams rejected at the same
+  time, for example by the server's stream-creation rate limit, no longer all
+  retry at the same moment. No API change.
+
 ### Deprecations
 
 ### API Changes
