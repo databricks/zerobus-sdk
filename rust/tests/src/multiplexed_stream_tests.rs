@@ -782,6 +782,70 @@ mod multi_stream_tests {
 
         Ok(())
     }
+
+    // NOTE: multi_thread flavor is deliberate: the race this guards needs
+    // the supervisor's unbiased `select!` to observe the receiver's clean
+    // end-of-stream error before (or at the same poll as) the sender's
+    // clean completion, which only happens when the supervisor task is not
+    // polled promptly after the sender completes. On an idle runtime the
+    // sender's completion wakes the supervisor first every time, so this
+    // loop is an end-to-end guard of the close path under load rather
+    // than a deterministic reproducer: the race itself is pinned by the
+    // `is_clean_shutdown_error` unit test in supervisor.rs. (Verified
+    // empirically: 200 sequential closes and 3x200 concurrent closes all
+    // pass with the fix reverted on an idle runtime — the 1-in-15 rate in
+    // the issue was observed under load against the real server.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_close_idle_mux_stream_with_recovery_disabled_succeeds(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_close_idle_mux_stream_with_recovery_disabled_succeeds");
+
+        // Regression test for databricks/zerobus-sdk#1125: with
+        // recovery(false), MultiplexedStream::close() sometimes failed with
+        // "closed by server without errors". On close the sender half-closes
+        // and the server ends the RPC with status OK, which the receiver
+        // reports as StreamClosedError(OK); the supervisor's unbiased
+        // `select!` resolves the receiver arm first on some closes, and
+        // the supervisor then failed the stream instead of treating the
+        // clean end-of-stream during shutdown as a clean exit. Each close
+        // is a fresh race, so loop enough closes to hit it.
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            workers.push(tokio::spawn(async move {
+                for _ in 0..25 {
+                    let (mock_server, server_url) =
+                        start_mock_server().await.map_err(|e| e.to_string())?;
+                    mock_server
+                        .inject_responses(
+                            TABLE_A,
+                            vec![MockResponse::CreateStream {
+                                stream_id: "mux_idle".to_string(),
+                                delay_ms: 0,
+                            }],
+                        )
+                        .await;
+
+                    let sdk = create_test_sdk(&server_url)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let s1 = create_test_stream(&sdk, TABLE_A, default_options())
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let mut mux = MultiplexedStream::new(vec![s1]);
+
+                    mux.close().await.map_err(|e| e.to_string())?;
+                    assert!(mux.is_closed());
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        for worker in workers {
+            worker.await??;
+        }
+
+        Ok(())
+    }
 }
 
 mod failure_tests {
