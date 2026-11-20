@@ -308,7 +308,9 @@ class TestValidConfiguration:
 
     def test_recovery_retries_and_backoff_reach_the_core(self, mode):
         # With recovery on, a failed open is retried recovery_retries times, recovery_backoff_ms
-        # apart. The core's defaults (several retries, 2 s apart) would take seconds.
+        # apart. One refused connection takes a different time on each platform (about 2 s on
+        # Windows), so each check compares two opens that differ in one setting. If the setting
+        # did not reach the core, both opens would use the core's default and take as long.
         def open_and_time(retries, backoff_ms):
             builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
             builder.recovery(True).recovery_retries(retries).recovery_backoff_ms(backoff_ms)
@@ -317,10 +319,15 @@ class TestValidConfiguration:
                 _open(mode, builder.build)
             return time.monotonic() - started
 
-        # No retry, so no backoff wait.
-        assert open_and_time(0, 1000) < 0.5
-        # One retry after one backoff.
-        assert 0.45 <= open_and_time(1, 500) < 1.5
+        no_retry = open_and_time(0, 1100)
+        one_retry = open_and_time(1, 1100)
+        short_backoff = open_and_time(1, 100)
+        # One more attempt, after a 1.1 s backoff.
+        assert one_retry - no_retry >= 0.8, f"recovery_retries did not reach the core: {no_retry=}, {one_retry=}"
+        # The same attempts, with a backoff 1 s shorter.
+        assert (
+            one_retry - short_backoff >= 0.6
+        ), f"recovery_backoff_ms did not reach the core: {short_backoff=}, {one_retry=}"
 
     def test_stream_count_and_inflight_budget_reach_the_core(self, mode):
         # The Rust core divides max_inflight_requests across sub-streams and rejects a budget
