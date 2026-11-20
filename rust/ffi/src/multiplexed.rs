@@ -1862,11 +1862,45 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records_async(
 mod multiplexed_tests {
     use super::*;
     use crate::zerobus_free_error_message;
-    use std::ffi::{CStr, CString};
+    use std::ffi::{c_void, CStr, CString};
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
     use std::time::Duration;
 
-    // ---- Shared helpers -------------------------------------------------
+    // Short names for the exports, so each table row fits on one line.
+    use super::{
+        zerobus_multiplexed_stream_close as close,
+        zerobus_multiplexed_stream_close_async as close_a,
+        zerobus_multiplexed_stream_flush as flush,
+        zerobus_multiplexed_stream_flush_async as flush_a,
+        zerobus_multiplexed_stream_get_unacked_records as unacked,
+        zerobus_multiplexed_stream_get_unacked_records_async as unacked_a,
+        zerobus_multiplexed_stream_ingest_json_record as json1,
+        zerobus_multiplexed_stream_ingest_json_record_async as json1_a,
+        zerobus_multiplexed_stream_ingest_json_record_nowait as json1_nw,
+        zerobus_multiplexed_stream_ingest_json_records as jsons,
+        zerobus_multiplexed_stream_ingest_json_records_async as jsons_a,
+        zerobus_multiplexed_stream_ingest_json_records_nowait as jsons_nw,
+        zerobus_multiplexed_stream_ingest_proto_record as proto1,
+        zerobus_multiplexed_stream_ingest_proto_record_async as proto1_a,
+        zerobus_multiplexed_stream_ingest_proto_record_nowait as proto1_nw,
+        zerobus_multiplexed_stream_ingest_proto_records as protos,
+        zerobus_multiplexed_stream_ingest_proto_records_async as protos_a,
+        zerobus_multiplexed_stream_ingest_proto_records_nowait as protos_nw,
+        zerobus_multiplexed_stream_wait_for_message_id as wait,
+        zerobus_multiplexed_stream_wait_for_message_id_async as wait_a,
+    };
+
+    const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
+    const BAD_DATA: &str = "Invalid data pointer";
+    const BAD_RECORDS: &str = "Invalid records pointer";
+    const OPT_ACK: &str =
+        "options->ack_on_ack and options->ack_on_error are not supported for multiplexed streams";
+    const STREAM_COUNT: &str = "stream_count must be between 1 and 64";
+    const INFLIGHT: &str = "must be at least stream_count";
+    /// How long a create may take to report a connect failure to
+    /// `127.0.0.1:1`. On Windows a closed local port is not refused at once
+    /// (each SYN is retried), and the OAuth path connects more than once.
+    const CONNECT_FAILURE_WAIT: Duration = Duration::from_secs(60);
 
     fn unwritten_result() -> CResult {
         CResult {
@@ -1876,26 +1910,17 @@ mod multiplexed_tests {
         }
     }
 
-    /// Returns `(success, message)` and frees the message.
-    fn take_result(result: &mut CResult) -> (bool, String) {
-        let message = if result.error_message.is_null() {
-            String::new()
-        } else {
-            let message = unsafe { CStr::from_ptr(result.error_message) }
+    /// `(success, retryable, message)`, freeing the message.
+    fn take_full(result: &mut CResult) -> (bool, bool, String) {
+        let mut message = String::new();
+        if !result.error_message.is_null() {
+            message = unsafe { CStr::from_ptr(result.error_message) }
                 .to_string_lossy()
                 .into_owned();
             zerobus_free_error_message(result.error_message);
             result.error_message = ptr::null_mut();
-            message
-        };
-        (result.success, message)
-    }
-
-    /// `(success, retryable, message)`, freeing the message.
-    fn take_full(result: &mut CResult) -> (bool, bool, String) {
-        let retryable = result.is_retryable;
-        let (success, message) = take_result(result);
-        (success, retryable, message)
+        }
+        (result.success, result.is_retryable, message)
     }
 
     fn sdk_at(url: &str) -> *mut CZerobusSdk {
@@ -1921,7 +1946,7 @@ mod multiplexed_tests {
         options
     }
 
-    extern "C" fn empty_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
+    extern "C" fn empty_headers(_user_data: *mut c_void) -> CHeaders {
         CHeaders {
             headers: ptr::null_mut(),
             count: 0,
@@ -1929,12 +1954,6 @@ mod multiplexed_tests {
         }
     }
 
-    /// How long a create may take to report a connect failure to
-    /// `127.0.0.1:1`. On Windows a closed local port is not refused at once
-    /// (each SYN is retried), and the OAuth path connects more than once.
-    const CONNECT_FAILURE_WAIT: Duration = Duration::from_secs(60);
-
-    /// Polls `condition` until it holds, failing after `timeout`.
     fn wait_until_within(what: &str, timeout: Duration, condition: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + timeout;
         while !condition() {
@@ -1943,21 +1962,7 @@ mod multiplexed_tests {
         }
     }
 
-    /// Runs `call` on a thread; fails if it doesn't return within `limit`.
-    fn within<T: Send + 'static>(
-        what: &str,
-        limit: Duration,
-        call: impl FnOnce() -> T + Send + 'static,
-    ) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(call());
-        });
-        rx.recv_timeout(limit)
-            .unwrap_or_else(|_| panic!("{what} did not return within {limit:?}"))
-    }
-
-    /// A blocking flush or close on `mux`, bounded to 2 s:
+    /// A blocking flush or close on `mux` on a thread, bounded to 2 s:
     /// `(returned, retryable, message)`.
     fn blocking_within_2s(
         mux: *mut CZerobusMultiplexedStream,
@@ -1965,26 +1970,29 @@ mod multiplexed_tests {
         what: &str,
     ) -> (bool, bool, String) {
         let mux_addr = mux as usize;
-        within(what, Duration::from_secs(2), move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let mut result = unwritten_result();
             let returned = call(mux_addr as *mut _, &mut result);
             let (_, retryable, message) = take_full(&mut result);
-            (returned, retryable, message)
-        })
+            let _ = tx.send((returned, retryable, message));
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{what} did not return within 2 s"))
     }
 
-    /// Counts frees of the `user_data` it is passed as.
+    /// Counts frees of the `user_data` it is passed as. Leaked: the FFI may
+    /// hold it until it calls the free callback.
     #[derive(Default)]
     struct FreeCount(AtomicUsize);
 
     impl FreeCount {
-        /// Leaked: the FFI may hold it until it calls the free callback.
         fn leaked() -> &'static FreeCount {
             Box::leak(Box::default())
         }
 
-        fn user_data(&'static self) -> *mut std::ffi::c_void {
-            self as *const FreeCount as *mut std::ffi::c_void
+        fn user_data(&'static self) -> *mut c_void {
+            self as *const FreeCount as *mut c_void
         }
 
         fn assert_freed_once(&self, what: &str) {
@@ -2001,15 +2009,14 @@ mod multiplexed_tests {
         }
     }
 
-    extern "C" fn count_free(user_data: *mut std::ffi::c_void) {
-        let count = unsafe { &*(user_data as *const FreeCount) };
-        count.0.fetch_add(1, Ordering::SeqCst);
+    extern "C" fn count_free(user_data: *mut c_void) {
+        unsafe { &*(user_data as *const FreeCount) }
+            .0
+            .fetch_add(1, Ordering::SeqCst);
     }
 
-    extern "C" fn noop_mux_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
-
-    extern "C" fn noop_mux_error(_id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
-    }
+    extern "C" fn noop_mux_ack(_id: i64, _user_data: *mut c_void) {}
+    extern "C" fn noop_mux_error(_id: i64, _msg: *const c_char, _user_data: *mut c_void) {}
 
     /// One reported `_async` completion: `(value, success, retryable, message, mux)`.
     type Completion = (i64, bool, bool, String, usize);
@@ -2023,20 +2030,15 @@ mod multiplexed_tests {
             Box::leak(Box::default())
         }
 
-        fn user_data(&'static self) -> *mut std::ffi::c_void {
-            self as *const AsyncSink as *mut std::ffi::c_void
+        fn user_data(&'static self) -> *mut c_void {
+            self as *const AsyncSink as *mut c_void
         }
 
         fn count(&self) -> usize {
             self.0.lock().unwrap().len()
         }
 
-        fn record(
-            user_data: *mut std::ffi::c_void,
-            value: i64,
-            result: *const CResult,
-            mux: usize,
-        ) {
+        fn record(user_data: *mut c_void, value: i64, result: *const CResult, mux: usize) {
             let sink = unsafe { &*(user_data as *const AsyncSink) };
             let result = unsafe { &*result };
             let message = if result.error_message.is_null() {
@@ -2050,8 +2052,7 @@ mod multiplexed_tests {
             sink.0.lock().unwrap().push(completion);
         }
 
-        /// Waits up to `timeout` for the callback, then checks it ran
-        /// exactly once.
+        /// Waits up to `timeout` for the callback, then checks it ran once.
         fn one_within(&self, what: &str, timeout: Duration) -> Completion {
             wait_until_within(what, timeout, || self.count() >= 1);
             // Let a late second callback land before asserting exactly once.
@@ -2075,33 +2076,36 @@ mod multiplexed_tests {
     extern "C" fn sink_create(
         mux: *mut CZerobusMultiplexedStream,
         result: *const CResult,
-        user_data: *mut std::ffi::c_void,
+        user_data: *mut c_void,
     ) {
         AsyncSink::record(user_data, 0, result, mux as usize);
     }
 
-    extern "C" fn sink_offset(id: i64, result: *const CResult, user_data: *mut std::ffi::c_void) {
+    extern "C" fn sink_offset(id: i64, result: *const CResult, user_data: *mut c_void) {
         AsyncSink::record(user_data, id, result, 0);
     }
 
-    extern "C" fn sink_bool(value: bool, result: *const CResult, user_data: *mut std::ffi::c_void) {
+    extern "C" fn sink_bool(value: bool, result: *const CResult, user_data: *mut c_void) {
         AsyncSink::record(user_data, value as i64, result, 0);
     }
 
     extern "C" fn sink_records(
         records: CRecordArray,
         result: *const CResult,
-        user_data: *mut std::ffi::c_void,
+        user_data: *mut c_void,
     ) {
         AsyncSink::record(user_data, records.len as i64, result, 0);
         crate::zerobus_free_record_array(records);
     }
 
-    /// Result of the synchronous part of an `_async` call:
-    /// `(returned, success, retryable, message)`.
+    /// The sync part of an `_async` call: `(returned, success, retryable, message)`.
     fn sync_part(returned: bool, result: &mut CResult) -> (bool, bool, bool, String) {
         let (success, retryable, message) = take_full(result);
         (returned, success, retryable, message)
+    }
+
+    fn c_str(value: &Option<CString>) -> *const c_char {
+        value.as_ref().map_or(ptr::null(), |s| s.as_ptr())
     }
 
     /// One create call; `None` strings are passed as NULL. Every create
@@ -2117,12 +2121,12 @@ mod multiplexed_tests {
     }
 
     impl CreateCall {
-        /// Valid arguments for a JSON mux on `sdk`.
-        fn valid(sdk: *mut CZerobusSdk) -> Self {
+        /// Valid arguments for a 2-lane JSON mux on `sdk`, changed by `edit`.
+        fn with(sdk: *mut CZerobusSdk, edit: impl FnOnce(&mut Self)) -> Self {
             let mut options = json_options();
             // Fail on the first connect error instead of retrying it.
             options.recovery = false;
-            Self {
+            let mut call = Self {
                 sdk,
                 table: Some(CString::new("main.default.events").unwrap()),
                 descriptor: Vec::new(),
@@ -2130,40 +2134,46 @@ mod multiplexed_tests {
                 client_secret: Some(CString::new("client-secret").unwrap()),
                 stream_count: 2,
                 options,
-            }
+            };
+            edit(&mut call);
+            call
         }
 
-        fn c_str(value: &Option<CString>) -> *const c_char {
-            value.as_ref().map_or(ptr::null(), |s| s.as_ptr())
+        fn valid(sdk: *mut CZerobusSdk) -> Self {
+            Self::with(sdk, |_| {})
         }
 
-        /// The sync OAuth create, expecting failure: `(retryable, message)`.
-        fn oauth(&self, ack: Option<&'static FreeCount>) -> (bool, String) {
-            let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream(
+        fn oauth_raw(
+            &self,
+            ack: Option<&'static FreeCount>,
+            result: *mut CResult,
+        ) -> *mut CZerobusMultiplexedStream {
+            zerobus_sdk_create_multiplexed_stream(
                 self.sdk,
-                Self::c_str(&self.table),
+                c_str(&self.table),
                 self.descriptor.as_ptr(),
                 self.descriptor.len(),
-                Self::c_str(&self.client_id),
-                Self::c_str(&self.client_secret),
+                c_str(&self.client_id),
+                c_str(&self.client_secret),
                 self.stream_count,
                 &self.options,
                 Some(noop_mux_ack),
                 Some(noop_mux_error),
                 ack.map_or(ptr::null_mut(), |a| a.user_data()),
                 ack.map(|_| count_free as MuxAckFree),
-                &mut result,
-            );
-            Self::failure(mux, &mut result)
+                result,
+            )
         }
 
-        /// The sync headers create, expecting failure: `(retryable, message)`.
-        fn headers(&self, headers: &'static FreeCount, ack: &'static FreeCount) -> (bool, String) {
-            let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+        fn headers_raw(
+            &self,
+            headers: &'static FreeCount,
+            ack: &'static FreeCount,
+            result: *mut CResult,
+        ) -> *mut CZerobusMultiplexedStream {
+            zerobus_sdk_create_multiplexed_stream_with_headers_provider(
                 self.sdk,
-                Self::c_str(&self.table),
+                c_str(&self.table),
                 self.descriptor.as_ptr(),
                 self.descriptor.len(),
                 empty_headers,
@@ -2175,8 +2185,21 @@ mod multiplexed_tests {
                 Some(noop_mux_error),
                 ack.user_data(),
                 Some(count_free),
-                &mut result,
-            );
+                result,
+            )
+        }
+
+        /// The sync OAuth create, expecting failure: `(retryable, message)`.
+        fn oauth(&self, ack: Option<&'static FreeCount>) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = self.oauth_raw(ack, &mut result);
+            Self::failure(mux, &mut result)
+        }
+
+        /// The sync headers create, expecting failure: `(retryable, message)`.
+        fn headers(&self, headers: &'static FreeCount, ack: &'static FreeCount) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = self.headers_raw(headers, ack, &mut result);
             Self::failure(mux, &mut result)
         }
 
@@ -2195,11 +2218,11 @@ mod multiplexed_tests {
             let mut result = unwritten_result();
             let returned = zerobus_sdk_create_multiplexed_stream_async(
                 self.sdk,
-                Self::c_str(&self.table),
+                c_str(&self.table),
                 self.descriptor.as_ptr(),
                 self.descriptor.len(),
-                Self::c_str(&self.client_id),
-                Self::c_str(&self.client_secret),
+                c_str(&self.client_id),
+                c_str(&self.client_secret),
                 self.stream_count,
                 &self.options,
                 Some(noop_mux_ack),
@@ -2222,7 +2245,7 @@ mod multiplexed_tests {
             let mut result = unwritten_result();
             let returned = zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(
                 self.sdk,
-                Self::c_str(&self.table),
+                c_str(&self.table),
                 self.descriptor.as_ptr(),
                 self.descriptor.len(),
                 empty_headers,
@@ -2242,50 +2265,18 @@ mod multiplexed_tests {
         }
     }
 
-    /// Create-failure rows shared by the sync and async create tests:
-    /// `(case, call, OAuth only)`.
+    /// Argument rows the FFI rejects before any I/O: `(case, call, OAuth only)`.
     fn create_rows(sdk: *mut CZerobusSdk) -> Vec<(&'static str, CreateCall, bool)> {
-        let valid = || CreateCall::valid(sdk);
+        let with = |edit: fn(&mut CreateCall)| CreateCall::with(sdk, edit);
         vec![
+            ("sdk=NULL", with(|c| c.sdk = ptr::null_mut()), false),
+            ("table_name=NULL", with(|c| c.table = None), false),
+            ("client_id=NULL", with(|c| c.client_id = None), true),
+            ("client_secret=NULL", with(|c| c.client_secret = None), true),
+            // A truncated varint: not a decodable DescriptorProto.
             (
-                "sdk=NULL",
-                CreateCall {
-                    sdk: ptr::null_mut(),
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "table_name=NULL",
-                CreateCall {
-                    table: None,
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "client_id=NULL",
-                CreateCall {
-                    client_id: None,
-                    ..valid()
-                },
-                true,
-            ),
-            (
-                "client_secret=NULL",
-                CreateCall {
-                    client_secret: None,
-                    ..valid()
-                },
-                true,
-            ),
-            (
-                // A truncated varint: not a decodable DescriptorProto.
-                "malformed descriptor",
-                CreateCall {
-                    descriptor: vec![0xff, 0xff, 0xff],
-                    ..valid()
-                },
+                "bad descriptor",
+                with(|c| c.descriptor = vec![0xff; 3]),
                 false,
             ),
         ]
@@ -2295,35 +2286,38 @@ mod multiplexed_tests {
     fn create_row_message(case: &str) -> Option<&'static str> {
         match case {
             "sdk=NULL" => Some("SDK pointer is null"),
-            "table_name=NULL" | "client_id=NULL" | "client_secret=NULL" => {
-                Some("Null pointer passed")
-            }
-            _ => None,
+            "bad descriptor" => None,
+            _ => Some("Null pointer passed"),
         }
     }
 
-    const OPTIONS_ACK_REJECTED: &str =
-        "options->ack_on_ack and options->ack_on_error are not supported for multiplexed streams";
-
-    /// `CreateCall::valid(sdk)` with `options->ack_on_ack` or
-    /// `options->ack_on_error` set.
-    fn with_options_ack(sdk: *mut CZerobusSdk, field: &str) -> CreateCall {
-        let mut call = CreateCall::valid(sdk);
-        match field {
-            "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
-            _ => call.options.ack_on_error = Some(noop_mux_error),
-        }
-        call
-    }
-
-    /// `CreateCall::valid(sdk)` with `max_inflight_requests` below `stream_count`.
-    fn low_inflight(sdk: *mut CZerobusSdk) -> CreateCall {
-        let mut call = CreateCall {
-            stream_count: 3,
-            ..CreateCall::valid(sdk)
-        };
-        call.options.max_inflight_requests = 2;
-        call
+    /// Rows for failures past the argument checks, shared by the sync and
+    /// async create tests: `(case, call, retryable, message it contains)`.
+    /// Core-origin wording is only checked with "contains the core text".
+    fn config_rows(
+        sdk: *mut CZerobusSdk,
+    ) -> Vec<(&'static str, CreateCall, bool, Option<&'static str>)> {
+        let with = |edit: fn(&mut CreateCall)| CreateCall::with(sdk, edit);
+        let ack_on_ack = with(|c| c.options.ack_on_ack = Some(noop_mux_ack));
+        let ack_on_error = with(|c| c.options.ack_on_error = Some(noop_mux_error));
+        let low_inflight = with(|c| {
+            c.stream_count = 3;
+            c.options.max_inflight_requests = 2;
+        });
+        let zero_lanes = with(|c| c.stream_count = 0);
+        vec![
+            ("options->ack_on_ack", ack_on_ack, false, Some(OPT_ACK)),
+            ("options->ack_on_error", ack_on_error, false, Some(OPT_ACK)),
+            ("stream_count=0", zero_lanes, false, Some(STREAM_COUNT)),
+            (
+                "inflight < stream_count",
+                low_inflight,
+                false,
+                Some(INFLIGHT),
+            ),
+            // `test_sdk()` points at 127.0.0.1:1: the one slow row.
+            ("connect failure", CreateCall::valid(sdk), true, None),
+        ]
     }
 
     /// A live 1-lane JSON mux on the mock server, for the panic-path tests.
@@ -2336,261 +2330,155 @@ mod multiplexed_tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (server, url) = runtime.block_on(start_mock_server()).unwrap();
         // The mock opens the lane itself; offset 0 is acked.
-        runtime.block_on(server.inject_responses(
-            "ffi.mux.panic",
-            vec![MockResponse::RecordAck {
-                ack_up_to_offset: 0,
-                delay_ms: 0,
-            }],
-        ));
-        let sdk = sdk_at(&url);
-        let table = CString::new("ffi.mux.panic").unwrap();
+        let ack = MockResponse::RecordAck {
+            ack_up_to_offset: 0,
+            delay_ms: 0,
+        };
+        runtime.block_on(server.inject_responses("ffi.mux.panic", vec![ack]));
+        let call = CreateCall::with(sdk_at(&url), |c| {
+            c.table = Some(CString::new("ffi.mux.panic").unwrap());
+            c.stream_count = 1;
+            // Recovery on: with it off, close can report the lane's EOF.
+            c.options = json_options();
+        });
         let mut result = unwritten_result();
-        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            empty_headers,
-            ptr::null_mut(),
-            None,
-            1,
-            &json_options(),
-            None,
-            None,
-            ptr::null_mut(),
-            None,
-            &mut result,
-        );
-        let (success, message) = take_result(&mut result);
+        let mux = call.headers_raw(FreeCount::leaked(), FreeCount::leaked(), &mut result);
+        let (success, _, message) = take_full(&mut result);
         assert!(success && !mux.is_null(), "{message}");
-        (runtime, sdk, mux)
+        (runtime, call.sdk, mux)
     }
 
-    // ---- Tests ----------------------------------------------------------
+    /// Which argument a C-argument row passes as NULL (the mux is always
+    /// NULL, so a pointer-argument error proves it is checked first).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Null {
+        Mux,
+        Data,
+        Lens,
+    }
+
+    /// Inputs for the C-argument rows.
+    struct Args {
+        data: [u8; 1],
+        lens: [usize; 1],
+        json: CString,
+    }
+
+    impl Args {
+        fn new() -> Self {
+            Self {
+                data: [1],
+                lens: [1],
+                json: CString::new("{}").unwrap(),
+            }
+        }
+
+        /// `(data, lens)` with `null` applied.
+        fn data_lens(&self, null: Null) -> (*const u8, *const usize) {
+            let data = if null == Null::Data {
+                ptr::null()
+            } else {
+                self.data.as_ptr()
+            };
+            let lens = if null == Null::Lens {
+                ptr::null()
+            } else {
+                self.lens.as_ptr()
+            };
+            (data, lens)
+        }
+    }
+
+    /// `ptr` as a one-element array pointer, or NULL for `Null::Data`.
+    fn array_or_null<T>(array: &[*const T; 1], null: Null) -> *const *const T {
+        if null == Null::Data {
+            ptr::null()
+        } else {
+            array.as_ptr()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Blocking {
+        Proto,
+        Json,
+        Protos,
+        Jsons,
+        Wait,
+        Flush,
+        Close,
+        Unacked,
+        // _nowait group (pending decision).
+        ProtoNowait,
+        JsonNowait,
+        ProtosNowait,
+        JsonsNowait,
+    }
 
     /// Every blocking export checks its C arguments: pointer arguments
-    /// first, then the handle, each with a pinned, non-retryable error.
+    /// first, then the handle, each with a pinned, non-retryable error, and
+    /// the return value reports the failure too.
     #[test]
     fn c_arguments_are_checked_before_the_handle() {
-        const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
-        const BAD_DATA: &str = "Invalid data pointer";
-        const BAD_RECORDS: &str = "Invalid records pointer";
+        use Blocking::*;
+        let args = Args::new();
         let null = ptr::null_mut();
-        let data = [1u8];
-        let (proto_ptrs, proto_lens) = ([data.as_ptr()], [data.len()]);
-        let json = CString::new("{}").unwrap();
-        let json_ptrs = [json.as_ptr()];
-
-        // (what, expected message, call → whether its return value reports
-        // the failure).
-        type Call<'a> = Box<dyn Fn(&mut CResult) -> bool + 'a>;
-        let mut calls: Vec<(&str, &str, Call)> = vec![
-            (
-                "proto_record mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_record(null, data.as_ptr(), 1, r)
-                        == INGEST_ERROR
-                }),
-            ),
-            (
-                "proto_record data=NULL",
-                BAD_DATA,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_record(null, ptr::null(), 1, r)
-                        == INGEST_ERROR
-                }),
-            ),
-            (
-                "json_record mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_record(null, json.as_ptr(), r)
-                        == INGEST_ERROR
-                }),
-            ),
-            (
-                "proto_records mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        proto_lens.as_ptr(),
-                        1,
-                        r,
-                    ) == INGEST_ERROR
-                }),
-            ),
-            (
-                "proto_records records=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records(
-                        null,
-                        ptr::null(),
-                        proto_lens.as_ptr(),
-                        1,
-                        r,
-                    ) == INGEST_ERROR
-                }),
-            ),
-            (
-                "proto_records record_lens=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        ptr::null(),
-                        1,
-                        r,
-                    ) == INGEST_ERROR
-                }),
-            ),
-            (
-                "json_records mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_records(null, json_ptrs.as_ptr(), 1, r)
-                        == INGEST_ERROR
-                }),
-            ),
-            (
-                "json_records json_records=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_records(null, ptr::null(), 1, r)
-                        == INGEST_ERROR
-                }),
-            ),
-            (
-                "wait_for_message_id mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| !zerobus_multiplexed_stream_wait_for_message_id(null, 0, r)),
-            ),
-            (
-                "flush mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| !zerobus_multiplexed_stream_flush(null, r)),
-            ),
-            (
-                "close mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| !zerobus_multiplexed_stream_close(null, r)),
-            ),
-            (
-                "get_unacked_records mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    let records = zerobus_multiplexed_stream_get_unacked_records(null, r);
+        let (data_array, json_array) = ([args.data.as_ptr()], [args.json.as_ptr()]);
+        // Whether the return value reports the failure. A `_nowait` call
+        // reports only through `result`, so its check always holds.
+        let run = |export: Blocking, arg: Null, r: &mut CResult| -> bool {
+            let (data, lens) = args.data_lens(arg);
+            let (recs, jrecs) = (
+                array_or_null(&data_array, arg),
+                array_or_null(&json_array, arg),
+            );
+            let json = args.json.as_ptr();
+            match export {
+                Proto => proto1(null, data, 1, r) == INGEST_ERROR,
+                Json => json1(null, json, r) == INGEST_ERROR,
+                Protos => protos(null, recs, lens, 1, r) == INGEST_ERROR,
+                Jsons => jsons(null, jrecs, 1, r) == INGEST_ERROR,
+                Wait => !wait(null, 0, r),
+                Flush => !flush(null, r),
+                Close => !close(null, r),
+                Unacked => {
+                    let records = unacked(null, r);
                     records.records.is_null() && records.len == 0
-                }),
-            ),
+                }
+                ProtoNowait => (proto1_nw(null, data, 1, r), true).1,
+                JsonNowait => (json1_nw(null, json, r), true).1,
+                ProtosNowait => (protos_nw(null, recs, lens, 1, r), true).1,
+                JsonsNowait => (jsons_nw(null, jrecs, 1, r), true).1,
+            }
+        };
+        let rows = [
+            (Proto, Null::Mux, NULL_HANDLE),
+            (Proto, Null::Data, BAD_DATA),
+            (Json, Null::Mux, NULL_HANDLE),
+            (Protos, Null::Mux, NULL_HANDLE),
+            (Protos, Null::Data, BAD_RECORDS),
+            (Protos, Null::Lens, BAD_RECORDS),
+            (Jsons, Null::Mux, NULL_HANDLE),
+            (Jsons, Null::Data, BAD_RECORDS),
+            (Wait, Null::Mux, NULL_HANDLE),
+            (Flush, Null::Mux, NULL_HANDLE),
+            (Close, Null::Mux, NULL_HANDLE),
+            (Unacked, Null::Mux, NULL_HANDLE),
+            // _nowait group (pending decision).
+            (ProtoNowait, Null::Mux, NULL_HANDLE),
+            (ProtoNowait, Null::Data, BAD_DATA),
+            (JsonNowait, Null::Mux, NULL_HANDLE),
+            (ProtosNowait, Null::Mux, NULL_HANDLE),
+            (ProtosNowait, Null::Data, BAD_RECORDS),
+            (ProtosNowait, Null::Lens, BAD_RECORDS),
+            (JsonsNowait, Null::Mux, NULL_HANDLE),
+            (JsonsNowait, Null::Data, BAD_RECORDS),
         ];
-        // _nowait group (pending decision): the `_nowait` ingests report only
-        // through `result`.
-        let nowait: Vec<(&str, &str, Call)> = vec![
-            (
-                "proto_record_nowait mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_record_nowait(
-                        null,
-                        data.as_ptr(),
-                        1,
-                        r,
-                    );
-                    true
-                }),
-            ),
-            (
-                "proto_record_nowait data=NULL",
-                BAD_DATA,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_record_nowait(null, ptr::null(), 1, r);
-                    true
-                }),
-            ),
-            (
-                "json_record_nowait mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_record_nowait(null, json.as_ptr(), r);
-                    true
-                }),
-            ),
-            (
-                "proto_records_nowait mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        proto_lens.as_ptr(),
-                        1,
-                        r,
-                    );
-                    true
-                }),
-            ),
-            (
-                "proto_records_nowait records=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
-                        null,
-                        ptr::null(),
-                        proto_lens.as_ptr(),
-                        1,
-                        r,
-                    );
-                    true
-                }),
-            ),
-            (
-                "proto_records_nowait record_lens=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        ptr::null(),
-                        1,
-                        r,
-                    );
-                    true
-                }),
-            ),
-            (
-                "json_records_nowait mux=NULL",
-                NULL_HANDLE,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_records_nowait(
-                        null,
-                        json_ptrs.as_ptr(),
-                        1,
-                        r,
-                    );
-                    true
-                }),
-            ),
-            (
-                "json_records_nowait json_records=NULL",
-                BAD_RECORDS,
-                Box::new(|r| {
-                    zerobus_multiplexed_stream_ingest_json_records_nowait(null, ptr::null(), 1, r);
-                    true
-                }),
-            ),
-        ];
-        calls.extend(nowait);
-
-        for (what, expected, call) in &calls {
+        for (export, arg, expected) in rows {
+            let what = format!("{export:?} {arg:?}=NULL");
             let mut result = unwritten_result();
             assert!(
-                call(&mut result),
+                run(export, arg, &mut result),
                 "{what}: the return value must report the failure"
             );
             let (success, retryable, message) = take_full(&mut result);
@@ -2620,98 +2508,41 @@ mod multiplexed_tests {
     #[test]
     fn sync_create_failures_report_and_free_once() {
         let sdk = test_sdk();
-        // (case, call, OAuth only, retryable, message it contains)
-        let mut rows: Vec<(&str, CreateCall, bool, bool, Option<&str>)> = create_rows(sdk)
+        let mut rows: Vec<_> = create_rows(sdk)
             .into_iter()
             .map(|(case, call, oauth_only)| {
                 (case, call, oauth_only, false, create_row_message(case))
             })
             .collect();
-        rows.extend([
-            (
-                "options->ack_on_ack",
-                with_options_ack(sdk, "ack_on_ack"),
-                false,
-                false,
-                Some(OPTIONS_ACK_REJECTED),
-            ),
-            (
-                "options->ack_on_error",
-                with_options_ack(sdk, "ack_on_error"),
-                false,
-                false,
-                Some(OPTIONS_ACK_REJECTED),
-            ),
-            // Core-origin wording: only "contains the core text".
-            (
-                "stream_count=0",
-                CreateCall {
-                    stream_count: 0,
-                    ..CreateCall::valid(sdk)
-                },
-                false,
-                false,
-                Some("stream_count must be between 1 and 64"),
-            ),
-            (
-                "max_inflight_requests < stream_count",
-                low_inflight(sdk),
-                false,
-                false,
-                Some("must be at least stream_count"),
-            ),
-            // `test_sdk()` points at 127.0.0.1:1: the one slow row.
-            ("connect failure", CreateCall::valid(sdk), false, true, None),
-        ]);
+        rows.extend(
+            config_rows(sdk)
+                .into_iter()
+                .map(|(case, call, retryable, expected)| (case, call, false, retryable, expected)),
+        );
 
         for (case, call, oauth_only, retryable, expected) in &rows {
+            let check = |what: String, (got_retryable, message): (bool, String)| {
+                assert_eq!(got_retryable, *retryable, "{what}: {message}");
+                if let Some(expected) = expected {
+                    assert!(message.contains(expected), "{what}: {message}");
+                }
+            };
             let ack = FreeCount::leaked();
-            let (got_retryable, message) = call.oauth(Some(ack));
-            assert_eq!(got_retryable, *retryable, "OAuth {case}: {message}");
-            if let Some(expected) = expected {
-                assert!(message.contains(expected), "OAuth {case}: {message}");
-            }
+            check(format!("OAuth {case}"), call.oauth(Some(ack)));
             ack.assert_freed_once(&format!("OAuth {case} ack user_data"));
-
             if !oauth_only {
                 let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
-                let (got_retryable, message) = call.headers(headers, ack);
-                assert_eq!(got_retryable, *retryable, "headers {case}: {message}");
-                if let Some(expected) = expected {
-                    assert!(message.contains(expected), "headers {case}: {message}");
-                }
+                check(format!("headers {case}"), call.headers(headers, ack));
                 headers.assert_freed_once(&format!("headers {case} user_data"));
                 ack.assert_freed_once(&format!("headers {case} ack user_data"));
             }
         }
 
         // A NULL `free_ack_user_data` is allowed.
-        CreateCall {
-            table: None,
-            ..CreateCall::valid(sdk)
-        }
-        .oauth(None);
+        CreateCall::with(sdk, |c| c.table = None).oauth(None);
         // A NULL `result` is allowed; the NULL handle reports the failure.
-        let call = CreateCall {
-            stream_count: 0,
-            ..CreateCall::valid(sdk)
-        };
-        let mux = zerobus_sdk_create_multiplexed_stream(
-            sdk,
-            CreateCall::c_str(&call.table),
-            ptr::null(),
-            0,
-            CreateCall::c_str(&call.client_id),
-            CreateCall::c_str(&call.client_secret),
-            0,
-            &call.options,
-            None,
-            None,
-            ptr::null_mut(),
-            None,
-            ptr::null_mut(),
-        );
-        assert!(mux.is_null());
+        let call = CreateCall::with(sdk, |c| c.stream_count = 0);
+        assert!(call.oauth_raw(None, ptr::null_mut()).is_null());
         crate::zerobus_sdk_free(sdk);
     }
 
@@ -2721,14 +2552,13 @@ mod multiplexed_tests {
     fn async_calls_fail_fast_on_invalid_arguments() {
         let sdk = test_sdk();
         for (case, call, oauth_only) in &create_rows(sdk) {
-            let expected = create_row_message(case);
             let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
             let (returned, success, retryable, message) = call.oauth_async(ack, sink);
             assert!(
                 !returned && !success && !retryable,
                 "OAuth async {case}: {message}"
             );
-            if let Some(expected) = expected {
+            if let Some(expected) = create_row_message(case) {
                 assert!(message.contains(expected), "OAuth async {case}: {message}");
             }
             ack.assert_freed_once(&format!("OAuth async {case} ack user_data"));
@@ -2753,168 +2583,69 @@ mod multiplexed_tests {
         }
         crate::zerobus_sdk_free(sdk);
 
-        const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
+        #[derive(Debug, Clone, Copy)]
+        enum Async {
+            Proto,
+            Json,
+            Protos,
+            Jsons,
+            Wait,
+            Flush,
+            Close,
+            Unacked,
+        }
+        use Async::*;
+        let args = Args::new();
         let null = ptr::null_mut();
-        let data = [1u8];
-        let (proto_ptrs, proto_lens) = ([data.as_ptr()], [data.len()]);
-        let json = CString::new("{}").unwrap();
-        let json_ptrs = [json.as_ptr()];
-        type Call<'a> = Box<dyn Fn(*mut std::ffi::c_void, &mut CResult) -> bool + 'a>;
-        let calls: Vec<(&str, &str, Call)> = vec![
-            (
-                "proto_record_async data=NULL",
-                "Invalid data pointer",
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_proto_record_async(
-                        null,
-                        ptr::null(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "proto_record_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_proto_record_async(
-                        null,
-                        data.as_ptr(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "json_record_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_json_record_async(
-                        null,
-                        json.as_ptr(),
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "proto_records_async records=NULL",
-                "Invalid records pointer",
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_async(
-                        null,
-                        ptr::null(),
-                        proto_lens.as_ptr(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "proto_records_async record_lens=NULL",
-                "Invalid records pointer",
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_async(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        ptr::null(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "proto_records_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_proto_records_async(
-                        null,
-                        proto_ptrs.as_ptr(),
-                        proto_lens.as_ptr(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "json_records_async json_records=NULL",
-                "Invalid records pointer",
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_json_records_async(
-                        null,
-                        ptr::null(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "json_records_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_ingest_json_records_async(
-                        null,
-                        json_ptrs.as_ptr(),
-                        1,
-                        sink_offset,
-                        ud,
-                        r,
-                    )
-                }),
-            ),
-            (
-                "wait_for_message_id_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_wait_for_message_id_async(null, 0, sink_bool, ud, r)
-                }),
-            ),
-            (
-                "flush_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| zerobus_multiplexed_stream_flush_async(null, sink_bool, ud, r)),
-            ),
-            (
-                "close_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| zerobus_multiplexed_stream_close_async(null, sink_bool, ud, r)),
-            ),
-            (
-                "get_unacked_records_async mux=NULL",
-                NULL_HANDLE,
-                Box::new(|ud, r| {
-                    zerobus_multiplexed_stream_get_unacked_records_async(null, sink_records, ud, r)
-                }),
-            ),
+        let (data_array, json_array) = ([args.data.as_ptr()], [args.json.as_ptr()]);
+        let run = |export: Async, arg: Null, ud: *mut c_void, r: &mut CResult| -> bool {
+            let (data, lens) = args.data_lens(arg);
+            let (recs, jrecs) = (
+                array_or_null(&data_array, arg),
+                array_or_null(&json_array, arg),
+            );
+            let (off, b) = (sink_offset, sink_bool);
+            match export {
+                Proto => proto1_a(null, data, 1, off, ud, r),
+                Json => json1_a(null, args.json.as_ptr(), off, ud, r),
+                Protos => protos_a(null, recs, lens, 1, off, ud, r),
+                Jsons => jsons_a(null, jrecs, 1, off, ud, r),
+                Wait => wait_a(null, 0, b, ud, r),
+                Flush => flush_a(null, b, ud, r),
+                Close => close_a(null, b, ud, r),
+                Unacked => unacked_a(null, sink_records, ud, r),
+            }
+        };
+        let rows = [
+            (Proto, Null::Data, BAD_DATA),
+            (Proto, Null::Mux, NULL_HANDLE),
+            (Json, Null::Mux, NULL_HANDLE),
+            (Protos, Null::Data, BAD_RECORDS),
+            (Protos, Null::Lens, BAD_RECORDS),
+            (Protos, Null::Mux, NULL_HANDLE),
+            (Jsons, Null::Data, BAD_RECORDS),
+            (Jsons, Null::Mux, NULL_HANDLE),
+            (Wait, Null::Mux, NULL_HANDLE),
+            (Flush, Null::Mux, NULL_HANDLE),
+            (Close, Null::Mux, NULL_HANDLE),
+            (Unacked, Null::Mux, NULL_HANDLE),
         ];
-        let sinks: Vec<&'static AsyncSink> = calls
+        let sinks: Vec<(String, &'static AsyncSink)> = rows
             .iter()
-            .map(|(what, expected, call)| {
+            .map(|&(export, arg, expected)| {
+                let what = format!("{export:?}_async {arg:?}=NULL");
                 let sink = AsyncSink::leaked();
                 let mut result = unwritten_result();
-                let (returned, success, retryable, message) =
-                    sync_part(call(sink.user_data(), &mut result), &mut result);
+                let returned = run(export, arg, sink.user_data(), &mut result);
+                let (returned, success, retryable, message) = sync_part(returned, &mut result);
                 assert!(!returned && !success && !retryable, "{what}: {message}");
                 assert!(message.contains(expected), "{what}: {message}");
-                sink
+                (what, sink)
             })
             .collect();
         // Let a wrongly spawned callback land.
         std::thread::sleep(Duration::from_millis(200));
-        for ((what, _, _), sink) in calls.iter().zip(sinks) {
+        for (what, sink) in sinks {
             assert_eq!(sink.count(), 0, "{what}: callback must not run");
         }
     }
@@ -2926,91 +2657,34 @@ mod multiplexed_tests {
     #[test]
     fn async_create_failures_report_and_free_once() {
         let sdk = test_sdk();
-        // (case, call, error in the task, retryable, message it contains,
-        // callback wait)
-        let rows = [
-            (
-                "options->ack_on_ack",
-                with_options_ack(sdk, "ack_on_ack"),
-                false,
-                false,
-                Some(OPTIONS_ACK_REJECTED),
-                Duration::ZERO,
-            ),
-            (
-                "options->ack_on_error",
-                with_options_ack(sdk, "ack_on_error"),
-                false,
-                false,
-                Some(OPTIONS_ACK_REJECTED),
-                Duration::ZERO,
-            ),
-            (
-                "stream_count=0",
-                CreateCall {
-                    stream_count: 0,
-                    ..CreateCall::valid(sdk)
-                },
-                true,
-                false,
-                Some("stream_count must be between 1 and 64"),
-                Duration::from_secs(5),
-            ),
-            (
-                "max_inflight_requests < stream_count",
-                low_inflight(sdk),
-                true,
-                false,
-                Some("must be at least stream_count"),
-                Duration::from_secs(5),
-            ),
-            // `test_sdk()` points at 127.0.0.1:1.
-            (
-                "connect failure",
-                CreateCall::valid(sdk),
-                true,
-                true,
-                None,
-                CONNECT_FAILURE_WAIT,
-            ),
-        ];
-        let check = |what: String,
-                     sync: (bool, bool, bool, String),
-                     sink: &AsyncSink,
-                     in_task: bool,
-                     retryable: bool,
-                     expected: Option<&str>,
-                     wait: Duration| {
-            let (returned, success, sync_retryable, message) = sync;
-            let (success, got_retryable, message) = if in_task {
-                assert!(returned && success, "{what}: {message}");
-                let (_, success, got_retryable, message, mux) = sink.one_within(&what, wait);
-                assert_eq!(mux, 0, "{what}: the failure carries a NULL mux");
-                (success, got_retryable, message)
+        for (case, call, retryable, expected) in &config_rows(sdk) {
+            let in_task = !case.starts_with("options->");
+            let wait = if *retryable {
+                CONNECT_FAILURE_WAIT
             } else {
-                assert!(!returned, "{what}: {message}");
-                sink.assert_never_called(&what);
-                (success, sync_retryable, message)
+                Duration::from_secs(5)
             };
-            assert!(!success, "{what}: {message}");
-            assert_eq!(got_retryable, retryable, "{what}: {message}");
-            if let Some(expected) = expected {
-                assert!(message.contains(expected), "{what}: {message}");
-            }
-        };
-        for (case, call, in_task, retryable, expected, wait) in &rows {
+            let check = |what: &str, sync: (bool, bool, bool, String), sink: &AsyncSink| {
+                let (returned, success, sync_retryable, message) = sync;
+                let (success, got_retryable, message) = if in_task {
+                    assert!(returned && success, "{what}: {message}");
+                    let (_, success, got_retryable, message, mux) = sink.one_within(what, wait);
+                    assert_eq!(mux, 0, "{what}: the failure carries a NULL mux");
+                    (success, got_retryable, message)
+                } else {
+                    assert!(!returned, "{what}: {message}");
+                    sink.assert_never_called(what);
+                    (success, sync_retryable, message)
+                };
+                assert!(!success, "{what}: {message}");
+                assert_eq!(got_retryable, *retryable, "{what}: {message}");
+                if let Some(expected) = expected {
+                    assert!(message.contains(expected), "{what}: {message}");
+                }
+            };
             let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-            let sync = call.oauth_async(ack, sink);
             let what = format!("OAuth async {case}");
-            check(
-                what.clone(),
-                sync,
-                sink,
-                *in_task,
-                *retryable,
-                *expected,
-                *wait,
-            );
+            check(&what, call.oauth_async(ack, sink), sink);
             ack.assert_freed_once(&format!("{what} ack user_data"));
 
             let (headers, ack, sink) = (
@@ -3018,17 +2692,8 @@ mod multiplexed_tests {
                 FreeCount::leaked(),
                 AsyncSink::leaked(),
             );
-            let sync = call.headers_async(headers, ack, sink);
             let what = format!("headers async {case}");
-            check(
-                what.clone(),
-                sync,
-                sink,
-                *in_task,
-                *retryable,
-                *expected,
-                *wait,
-            );
+            check(&what, call.headers_async(headers, ack, sink), sink);
             headers.assert_freed_once(&format!("{what} user_data"));
             ack.assert_freed_once(&format!("{what} ack user_data"));
         }
@@ -3041,57 +2706,53 @@ mod multiplexed_tests {
     fn ack_bridge_passes_raw_ids_one_sided() {
         static ACKED: AtomicI64 = AtomicI64::new(0);
         static FAILED: AtomicI64 = AtomicI64::new(0);
-        extern "C" fn on_ack(id: i64, _user_data: *mut std::ffi::c_void) {
+        extern "C" fn on_ack(id: i64, _user_data: *mut c_void) {
             ACKED.store(id, Ordering::SeqCst);
         }
-        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
+        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut c_void) {
             FAILED.store(id, Ordering::SeqCst);
         }
+        let bridge =
+            |ack, error| MultiplexedCallbackAckCallback::new(ack, error, ptr::null_mut(), None);
+        let (acked, failed) = (
+            || ACKED.load(Ordering::SeqCst),
+            || FAILED.load(Ordering::SeqCst),
+        );
         // Lane 63 sets the sign bit, so this raw ID is negative.
         let negative = MessageId::from_raw(((63u64 << 58) | 7) as i64);
-        let failed = MessageId::from_raw((1i64 << 58) | 9);
+        let error_id = MessageId::from_raw((1i64 << 58) | 9);
         assert!(negative.raw() < 0);
 
-        let both = MultiplexedCallbackAckCallback::new(
-            Some(on_ack),
-            Some(on_error),
-            ptr::null_mut(),
-            None,
-        );
+        let both = bridge(Some(on_ack), Some(on_error));
         both.on_ack(negative);
-        both.on_error(failed, "boom");
-        assert_eq!(ACKED.load(Ordering::SeqCst), negative.raw());
-        assert_eq!(FAILED.load(Ordering::SeqCst), failed.raw());
+        both.on_error(error_id, "boom");
+        assert_eq!((acked(), failed()), (negative.raw(), error_id.raw()));
 
         let id = MessageId::from_raw((1i64 << 58) | 3);
-        let ack_only =
-            MultiplexedCallbackAckCallback::new(Some(on_ack), None, ptr::null_mut(), None);
+        let ack_only = bridge(Some(on_ack), None);
         ack_only.on_ack(id);
         ack_only.on_error(MessageId::from_raw(0), "ignored");
-        assert_eq!(ACKED.load(Ordering::SeqCst), id.raw());
         assert_eq!(
-            FAILED.load(Ordering::SeqCst),
-            failed.raw(),
+            (acked(), failed()),
+            (id.raw(), error_id.raw()),
             "on_error must not run"
         );
 
-        let error_only =
-            MultiplexedCallbackAckCallback::new(None, Some(on_error), ptr::null_mut(), None);
+        let error_only = bridge(None, Some(on_error));
         error_only.on_ack(MessageId::from_raw(0));
         error_only.on_error(id, "boom");
         assert_eq!(
-            ACKED.load(Ordering::SeqCst),
-            id.raw(),
+            (acked(), failed()),
+            (id.raw(), id.raw()),
             "on_ack must not run"
         );
-        assert_eq!(FAILED.load(Ordering::SeqCst), id.raw());
     }
 
     #[test]
     fn serialized_headers_provider_allows_concurrent_lanes() {
         static ACTIVE: AtomicUsize = AtomicUsize::new(0);
         static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-        extern "C" fn slow_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
+        extern "C" fn slow_headers(_user_data: *mut c_void) -> CHeaders {
             let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
             MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
             // Hold the call long enough for an unserialized second one to overlap.
@@ -3124,53 +2785,48 @@ mod multiplexed_tests {
     fn pending_ingests_keep_first_error_per_epoch() {
         use databricks_zerobus_ingest_sdk::{GrpcCode, GrpcStatus};
         let tracker = Arc::new(PendingIngests::default());
-        let fail = |message: &str| {
-            let mut ticket = tracker.begin();
-            ticket.error = Some(ZerobusError::InvalidArgument(message.into()));
+        let fail = |error: ZerobusError| tracker.begin().error = Some(error);
+        let invalid = |message: &str| ZerobusError::InvalidArgument(message.into());
+        let taken = |target| match tracker.take_error(target) {
+            Some(ZerobusError::InvalidArgument(m)) => Some(m),
+            None => None,
+            Some(other) => panic!("unexpected stored error: {other:?}"),
         };
 
         // A retryable typed cause comes back unchanged, once.
-        let mut ticket = tracker.begin();
-        ticket.error = Some(ZerobusError::StreamClosedError(GrpcStatus::new(
+        fail(ZerobusError::StreamClosedError(GrpcStatus::new(
             GrpcCode::Unavailable,
             "x",
         )));
-        drop(ticket);
         match tracker.take_error(None).expect("the failure is stored") {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), GrpcCode::Unavailable);
-                assert_eq!(status.message(), "x");
+                assert_eq!(
+                    (status.code(), status.message()),
+                    (GrpcCode::Unavailable, "x")
+                );
             }
             other => panic!("stored error changed variant: {other:?}"),
         }
         assert!(tracker.take_error(None).is_none(), "taken once");
 
         // The first failure wins; the later one is dropped.
-        fail("A");
-        fail("B");
-        assert!(matches!(
-            tracker.take_error(None),
-            Some(ZerobusError::InvalidArgument(m)) if m == "A"
-        ));
-        assert!(tracker.take_error(None).is_none());
+        fail(invalid("A"));
+        fail(invalid("B"));
+        assert_eq!(taken(None).as_deref(), Some("A"));
+        assert_eq!(taken(None), None);
 
         // A failure accepted after a flush began belongs to the next flush.
-        fail("before");
+        fail(invalid("before"));
         let target = tracker.start_flush();
-        fail("after");
-        assert!(matches!(
-            tracker.take_error(Some(target)),
-            Some(ZerobusError::InvalidArgument(m)) if m == "before"
-        ));
-        assert!(
-            tracker.take_error(Some(target)).is_none(),
+        fail(invalid("after"));
+        assert_eq!(taken(Some(target)).as_deref(), Some("before"));
+        assert_eq!(
+            taken(Some(target)),
+            None,
             "a later epoch's error must wait for a later flush"
         );
         let next = tracker.start_flush();
-        assert!(matches!(
-            tracker.take_error(Some(next)),
-            Some(ZerobusError::InvalidArgument(m)) if m == "after"
-        ));
+        assert_eq!(taken(Some(next)).as_deref(), Some("after"));
     }
 
     /// A panic in background work (async create, any async op, async
@@ -3182,11 +2838,10 @@ mod multiplexed_tests {
 
         // Async create: max_inflight usize::MAX panics in the task.
         let sdk = test_sdk();
-        let mut call = CreateCall {
-            stream_count: 1,
-            ..CreateCall::valid(sdk)
-        };
-        call.options.max_inflight_requests = usize::MAX;
+        let call = CreateCall::with(sdk, |c| {
+            c.stream_count = 1;
+            c.options.max_inflight_requests = usize::MAX;
+        });
         let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
         let (returned, success, _, message) = call.oauth_async(ack, sink);
         assert!(returned && success, "{message}");
@@ -3206,12 +2861,13 @@ mod multiplexed_tests {
             assert!(!retryable, "{message}");
             let _ = tx.send(("panicking work", success, message));
         });
-        let (which, success, message) = rx
+        let reported = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("the panic is reported");
-        assert_eq!(which, "panicking work");
-        assert!(!success);
-        assert_eq!(message, format!("{PANIC}: boom"));
+        assert_eq!(
+            reported,
+            ("panicking work", false, format!("{PANIC}: boom"))
+        );
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "on_panic runs only for a panic, and once"
@@ -3221,8 +2877,9 @@ mod multiplexed_tests {
         // read guard are released, so flush and close don't hang.
         let (_runtime, sdk, mux) = live_mux();
         let sink = AsyncSink::leaked();
+        let handle = validate_mux_ptr(mux).unwrap();
         spawn_ingest_async(
-            validate_mux_ptr(mux).unwrap(),
+            handle,
             IngestPayload::PanicForTest,
             sink_offset,
             sink.user_data(),
@@ -3231,8 +2888,6 @@ mod multiplexed_tests {
         let (id, success, retryable, message, _) = sink.one("panicking async ingest");
         assert!(id == INGEST_ERROR && !success && !retryable, "{message}");
         assert!(message.starts_with(PANIC), "async ingest: {message}");
-        let flush = zerobus_multiplexed_stream_flush;
-        let close = zerobus_multiplexed_stream_close;
         let (flushed, _, message) = blocking_within_2s(mux, flush, "flush after the panic");
         assert!(flushed, "{message}");
         let (closed, _, message) = blocking_within_2s(mux, close, "close after the panic");
@@ -3248,9 +2903,7 @@ mod multiplexed_tests {
     fn nowait_ingest_panic_is_reported_by_next_flush_or_close() {
         const NOWAIT_PANIC: &str = "a background _nowait ingest panicked; its record was dropped";
         type Blocking = extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool;
-        let flush: Blocking = zerobus_multiplexed_stream_flush;
-        let close: Blocking = zerobus_multiplexed_stream_close;
-        for (what, call) in [("flush", flush), ("close", close)] {
+        for (what, call) in [("flush", flush as Blocking), ("close", close as Blocking)] {
             let (_runtime, sdk, mux) = live_mux();
             spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
 
@@ -3264,15 +2917,8 @@ mod multiplexed_tests {
             } else {
                 let json = CString::new(r#"{"id": 0}"#).unwrap();
                 let mut result = unwritten_result();
-                zerobus_multiplexed_stream_ingest_json_record_nowait(
-                    mux,
-                    json.as_ptr(),
-                    &mut result,
-                );
-                assert!(
-                    take_result(&mut result).0,
-                    "a valid _nowait after the panic"
-                );
+                json1_nw(mux, json.as_ptr(), &mut result);
+                assert!(take_full(&mut result).0, "a valid _nowait after the panic");
                 let (flushed, _, message) =
                     blocking_within_2s(mux, flush, "flush after a valid _nowait");
                 assert!(flushed, "reported once: {message}");
