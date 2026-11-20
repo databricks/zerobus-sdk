@@ -70,7 +70,10 @@ type Config struct {
 	Recovery RecoverySetting
 	// RecoveryRetries limits consecutive reconnect failures.
 	RecoveryRetries int
-	// RecoveryBackoff is the fixed wait between reconnect attempts.
+	// RecoveryBackoff is the base wait between reconnect attempts. The wait
+	// doubles after each consecutive failure, up to 15s (or RecoveryBackoff if
+	// larger), and random jitter of up to the same amount is added; see
+	// recoveryBackoffDelay.
 	RecoveryBackoff time.Duration
 	// RecoveryTimeout bounds each Open attempt.
 	RecoveryTimeout time.Duration

@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio::time::Duration;
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -22,6 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
+use crate::backoff::recovery_backoff;
 use crate::errors::should_retry_initial_connection;
 use crate::grpc_channel::GrpcChannelSource;
 use crate::grpc_status::{GrpcCode, GrpcStatus};
@@ -97,9 +97,10 @@ impl ZerobusStream {
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
 
-            // 1. Create a stream.
-            let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-                .take(options.recovery_retries as usize);
+            // 1. Create a stream. Retries back off exponentially with jitter so that
+            // clients rejected together (e.g. by a stream-creation rate limit) don't
+            // all retry together.
+            let strategy = recovery_backoff(options.recovery_backoff_ms, options.recovery_retries);
 
             // Initial setup may refresh one stale credential (auth rejection consumes the
             // one-shot budget); reconnect keeps the plain `recovery && is_retryable()` rule
@@ -160,7 +161,7 @@ impl ZerobusStream {
                             attempt = attempt_no,
                             max_attempts = options.recovery_retries + 1,
                             retryable = e.is_retryable(),
-                            backoff_ms = options.recovery_backoff_ms,
+                            base_backoff_ms = options.recovery_backoff_ms,
                             "Stream creation attempt failed: {}",
                             e
                         );

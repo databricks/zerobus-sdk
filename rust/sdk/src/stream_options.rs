@@ -10,7 +10,7 @@ pub mod defaults {
     pub const RECOVERY: bool = true;
     /// Default: 15 seconds per recovery attempt
     pub const RECOVERY_TIMEOUT_MS: u64 = 15_000;
-    /// Default: 2 seconds backoff between retries
+    /// Default: 2 seconds base backoff between retries (doubles per failure, with jitter)
     pub const RECOVERY_BACKOFF_MS: u64 = 2_000;
     /// Default: 4 retry attempts
     pub const RECOVERY_RETRIES: u32 = 4;

@@ -226,7 +226,10 @@ Only the supervisor reconnects or publishes a replacement sender.
 On a retryable active failure:
 
 1. Pause ingestion sends and detach the failed sender under `ingest_mutex`.
-2. Wait the configured backoff unless explicit close interrupts it.
+2. Wait the backoff unless explicit close interrupts it. It starts at
+   `recovery_backoff_ms`, doubles per consecutive failed attempt (up to 15 s, or
+   `recovery_backoff_ms` if larger), and adds random jitter of up to the same
+   amount (`crate::backoff`).
 3. Establish a replacement DoPut exchange and wait for READY.
 4. Rebuild pending ranges from the durable record watermark.
 5. Replay every unacknowledged suffix and any batches buffered during replay.

@@ -18,7 +18,6 @@ use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
 use tokio::time::{timeout, Duration, Instant};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -32,6 +31,7 @@ pub use self::options::{
     ArrowCompression, ArrowDictionaryHandling, ArrowStreamConfigurationOptions,
 };
 use self::supervisor::{Supervisor, SupervisorTaskHandle};
+use crate::backoff::recovery_backoff;
 use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::HeadersProvider;
@@ -266,7 +266,9 @@ impl ZerobusArrowStream {
     /// Creates a new Arrow Flight stream.
     ///
     /// If `recovery` is enabled in options, initial connection will be retried
-    /// up to `recovery_retries` times with `recovery_backoff_ms` delay between attempts.
+    /// up to `recovery_retries` times. The delay before each retry starts at
+    /// `recovery_backoff_ms`, doubles after each failure, and is jittered (see
+    /// `crate::backoff::recovery_backoff_delay`).
     /// One available retry may refresh credentials after an authentication rejection;
     /// a second authentication rejection remains terminal.
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
@@ -371,8 +373,7 @@ impl ZerobusArrowStream {
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
         let request_bodies = stream.request_bodies.clone();
-        let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-            .take(options.recovery_retries as usize);
+        let strategy = recovery_backoff(options.recovery_backoff_ms, options.recovery_retries);
 
         let create_attempt = || {
             let endpoint = endpoint.clone();

@@ -60,7 +60,9 @@ superviseLoop:
 			if !openedOnce {
 				backoffCtx = firstOpenCtx
 			}
-			timer := time.NewTimer(cs.cfg.RecoveryBackoff)
+			// Exponential and jittered, matching the Rust core, so streams
+			// rejected together don't all retry together.
+			timer := time.NewTimer(recoveryBackoffDelay(cs.cfg.RecoveryBackoff, failedAttempts-1))
 			select {
 			case <-timer.C:
 			case <-lifecycleCtx.Done():

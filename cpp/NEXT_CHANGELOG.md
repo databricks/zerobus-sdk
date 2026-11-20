@@ -9,6 +9,17 @@
   `IpcCompression::NoCompression`. To keep sending uncompressed payloads, set it to
   `IpcCompression::NoCompression`.
 
+- Stream creation and recovery retries now back off exponentially with jitter
+  instead of waiting a fixed `recovery_backoff_ms` between attempts (from the Rust core).
+  The wait still starts at `recovery_backoff_ms` and is never shorter than it. It
+  doubles after each consecutive failed attempt, up to 15 seconds (or
+  `recovery_backoff_ms` if larger), and a random jitter of up to the same amount is
+  added. With the defaults (2 s, 4 retries), a stream that keeps failing gives
+  up after about 29–58 s of waiting instead of 8 s. Clients rejected at the same
+  time, for example by the server's stream-creation rate limit, no longer all
+  retry at the same moment. No API change; a backoff of 0 still retries
+  immediately.
+
 ### Bug Fixes
 
 ### Documentation

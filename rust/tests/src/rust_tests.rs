@@ -3500,6 +3500,54 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_stream_creation_retry_backoff_doubles(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            let mut responses: Vec<_> = (0..3)
+                .map(|_| MockResponse::Error {
+                    status: tonic::Status::resource_exhausted("Stream creation rate exceeded"),
+                    delay_ms: 0,
+                })
+                .collect();
+            responses.push(MockResponse::CreateStream {
+                stream_id: "test_stream_after_backoff".to_string(),
+                delay_ms: 0,
+            });
+            mock_server.inject_responses(TABLE_NAME, responses).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let start_time = std::time::Instant::now();
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(50)
+                .build()
+                .await?;
+            let elapsed = start_time.elapsed();
+
+            // A fixed 50ms interval waits 150ms in total. Doubling from 50ms waits at
+            // least 50 + 100 + 200 = 350ms; jitter only adds to that.
+            assert!(
+                elapsed >= std::time::Duration::from_millis(350),
+                "three retries from a 50ms base must back off exponentially, took {elapsed:?}"
+            );
+            assert!(!stream.is_closed());
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_stream_creation_fails_after_exhausting_retries(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
