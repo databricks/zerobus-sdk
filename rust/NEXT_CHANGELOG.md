@@ -6,6 +6,11 @@
 
 ### New Features and Improvements
 
+- Improve support for using platform `protoc` binaries. On platforms where
+  vendored `protoc` is not available, fallback to trying `protoc` on `PATH`.
+  Add support specifying a `PROTOC` environment variable override at build time.
+  This is required for platforms that Google does not publish pre-built
+  `protoc` binaries (FreeBSD, NetBSD, illumos, etc).
 - Added personal access token (PAT) authentication (Private Preview) behind the new
   opt-in `pat-auth` feature. PAT authentication for Zerobus requires server-side
   enablement and is not available for Arrow Flight streams yet. Call
