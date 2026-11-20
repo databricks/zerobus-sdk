@@ -5632,6 +5632,13 @@ mod api_offset_tests {
 mod callback_tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use databricks_zerobus_ingest_sdk::{
+        AckCallback, EncodedRecord, MessageId, StreamBuilder, ZerobusStream,
+    };
+    use zerobus_test_support::mock_grpc::MockResponseGate;
+
     #[tokio::test]
     async fn test_callbacks_on_successful_acks() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
@@ -5767,6 +5774,426 @@ mod callback_tests {
             errors.len()
         );
 
+        Ok(())
+    }
+
+    /// An `AckCallback` whose first `on_error` signals `entered` and then
+    /// blocks a runtime worker until its `CallbackGate` is released or
+    /// dropped. Each call is recorded when it returns.
+    struct BlockingErrorCallback {
+        errors: std::sync::Mutex<Vec<(i64, String)>>,
+        entered: tokio::sync::Notify,
+        gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    /// Releases the blocked callback on `release()` or on drop, so a failing
+    /// assertion can't leave a runtime worker blocked.
+    struct CallbackGate(Option<std::sync::mpsc::Sender<()>>);
+
+    impl CallbackGate {
+        fn release(&mut self) {
+            self.0.take();
+        }
+    }
+
+    impl BlockingErrorCallback {
+        fn new() -> (Arc<Self>, CallbackGate) {
+            let (release, blocked) = std::sync::mpsc::channel();
+            let callback = Arc::new(Self {
+                errors: std::sync::Mutex::new(Vec::new()),
+                entered: tokio::sync::Notify::new(),
+                gate: std::sync::Mutex::new(Some(blocked)),
+            });
+            (callback, CallbackGate(Some(release)))
+        }
+
+        fn record_error(&self, offset: i64, message: &str) {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                self.entered.notify_one();
+                // Returns once the CallbackGate is released or dropped.
+                let _ = gate.recv();
+            }
+            self.errors
+                .lock()
+                .unwrap()
+                .push((offset, message.to_string()));
+        }
+
+        fn error_offsets(&self) -> Vec<i64> {
+            let mut offsets: Vec<i64> = self
+                .errors
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(offset, _)| *offset)
+                .collect();
+            offsets.sort_unstable();
+            offsets
+        }
+
+        async fn wait_entered(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.entered.notified())
+                .await
+                .expect("the first on_error callback must start");
+        }
+    }
+
+    impl AckCallback for BlockingErrorCallback {
+        fn on_ack(&self, _offset_id: i64) {}
+
+        fn on_error(&self, offset_id: i64, error_message: &str) {
+            self.record_error(offset_id, error_message);
+        }
+    }
+
+    impl AckCallback<MessageId> for BlockingErrorCallback {
+        fn on_ack(&self, _message_id: MessageId) {}
+
+        fn on_error(&self, message_id: MessageId, error_message: &str) {
+            self.record_error(message_id.raw(), error_message);
+        }
+    }
+
+    const RECORDS: [&[u8]; 3] = [b"record-0", b"record-1", b"record-2"];
+
+    /// Injects a create and an error that the server sends only after
+    /// `release()`, so all 3 ingests succeed first.
+    async fn inject_gated_error(
+        mock_server: &mock_grpc::MockZerobusServer,
+        status: tonic::Status,
+    ) -> Arc<MockResponseGate> {
+        let gate = Arc::new(MockResponseGate::new());
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedError {
+                        status,
+                        gate: Arc::clone(&gate),
+                        sent: Arc::new(tokio::sync::Notify::new()),
+                    },
+                ],
+            )
+            .await;
+        gate
+    }
+
+    /// A stream with a `BlockingErrorCallback` that failed with `status`
+    /// after 3 ingests; its first `on_error` is blocked on the returned gate.
+    /// `configure` adjusts the builder (recovery is off unless it turns it on).
+    async fn failed_stream_with_blocked_callback(
+        status: tonic::Status,
+        configure: impl FnOnce(StreamBuilder<'_>) -> StreamBuilder<'_>,
+    ) -> Result<
+        (
+            ZerobusStream,
+            Arc<BlockingErrorCallback>,
+            CallbackGate,
+            Vec<i64>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        let error_gate = inject_gated_error(&mock_server, status).await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let (callback, callback_gate) = BlockingErrorCallback::new();
+        let builder = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .ack_callback(callback.clone());
+        let stream = configure(builder).build().await?;
+
+        let mut offsets = Vec::new();
+        for record in RECORDS {
+            offsets.push(stream.ingest_record_offset(record.to_vec()).await?);
+        }
+        error_gate.release();
+        let flush = tokio::time::timeout(Duration::from_secs(5), stream.flush())
+            .await
+            .expect("flush must fail promptly after the stream error");
+        assert!(flush.is_err(), "flush must report the stream error");
+        callback.wait_entered().await;
+        Ok((stream, callback, callback_gate, offsets))
+    }
+
+    async fn unacked_payloads(stream: &ZerobusStream) -> Vec<Vec<u8>> {
+        let mut payloads: Vec<Vec<u8>> = stream
+            .get_unacked_records()
+            .await
+            .expect("get_unacked_records")
+            .map(|record| match record {
+                EncodedRecord::Proto(bytes) => bytes,
+                other => panic!("Unexpected record type: {other:?}"),
+            })
+            .collect();
+        payloads.sort();
+        payloads
+    }
+
+    /// The pinned close stays pending while the callback is blocked, then
+    /// returns `Ok(())` within 2 s of the release, with all 3 `on_error`
+    /// calls done.
+    async fn assert_close_waits_for_callbacks(
+        stream: &mut ZerobusStream,
+        callback: &BlockingErrorCallback,
+        gate: &mut CallbackGate,
+        offsets: &[i64],
+        still_pending_after: Duration,
+    ) {
+        let close = stream.close();
+        tokio::pin!(close);
+        assert!(
+            futures::poll!(&mut close).is_pending(),
+            "close must wait for the queued on_error callbacks"
+        );
+        if !still_pending_after.is_zero() {
+            assert!(
+                tokio::time::timeout(still_pending_after, &mut close)
+                    .await
+                    .is_err(),
+                "close returned after {still_pending_after:?} with the callback still blocked"
+            );
+        }
+        gate.release();
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut close)
+            .await
+            .expect("close must return once the callback is released");
+        assert!(result.is_ok(), "close on a failed stream: {result:?}");
+        assert_eq!(
+            callback.error_offsets(),
+            offsets,
+            "close must return after every on_error, once per offset"
+        );
+    }
+
+    fn expected_payloads() -> Vec<Vec<u8>> {
+        RECORDS.iter().map(|record| record.to_vec()).collect()
+    }
+
+    /// #1191: close on a failed stream waits for its queued on_error
+    /// callbacks, and a second close is prompt and delivers nothing more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_stream_drains_error_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, callback, mut gate, offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder,
+        )
+        .await?;
+        assert_eq!(unacked_payloads(&stream).await, expected_payloads());
+
+        assert_close_waits_for_callbacks(
+            &mut stream,
+            &callback,
+            &mut gate,
+            &offsets,
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(unacked_payloads(&stream).await, expected_payloads());
+
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.close())
+            .await
+            .expect("a second close must be prompt");
+        assert!(second.is_ok(), "second close: {second:?}");
+        assert_eq!(callback.error_offsets(), offsets);
+        Ok(())
+    }
+
+    /// #1191: the drain stops at a finite callback_max_wait_time_ms.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_stream_respects_callback_budget(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, _callback, _gate, _offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder.callback_max_wait_time_ms(Some(200)),
+        )
+        .await?;
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.close())
+            .await
+            .expect("close must stop waiting at the 200 ms callback budget");
+        assert!(result.is_ok(), "close on a failed stream: {result:?}");
+        Ok(())
+    }
+
+    /// #1191: an explicit `None` budget waits until the callbacks finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_stream_without_budget_waits_for_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, callback, mut gate, offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder.callback_max_wait_time_ms(None),
+        )
+        .await?;
+        assert_close_waits_for_callbacks(
+            &mut stream,
+            &callback,
+            &mut gate,
+            &offsets,
+            Duration::from_millis(500),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// #1191: a cancelled close leaves the drain to the next close.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_stream_after_cancelled_close_drains(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, callback, mut gate, offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder,
+        )
+        .await?;
+        {
+            let close = stream.close();
+            tokio::pin!(close);
+            assert!(
+                futures::poll!(&mut close).is_pending(),
+                "close must wait for the queued on_error callbacks"
+            );
+        } // Dropping the pending close cancels it.
+        assert_close_waits_for_callbacks(
+            &mut stream,
+            &callback,
+            &mut gate,
+            &offsets,
+            Duration::ZERO,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// #1191: the callback budget is separate from flush_timeout_ms.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_stream_budget_is_not_flush_timeout(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, callback, mut gate, offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder.flush_timeout_ms(100),
+        )
+        .await?;
+        assert_close_waits_for_callbacks(
+            &mut stream,
+            &callback,
+            &mut gate,
+            &offsets,
+            Duration::from_millis(300),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// #1191: the same drain after a non-retryable failure with recovery on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_non_retryable_failure_with_recovery_drains(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut stream, callback, mut gate, offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::permission_denied("Simulated denial"),
+            |builder| builder.recovery(true),
+        )
+        .await?;
+        assert_eq!(unacked_payloads(&stream).await, expected_payloads());
+        assert_close_waits_for_callbacks(
+            &mut stream,
+            &callback,
+            &mut gate,
+            &offsets,
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(unacked_payloads(&stream).await, expected_payloads());
+        Ok(())
+    }
+
+    /// #1191: dropping a failed stream without close doesn't wait for a
+    /// blocked callback.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_drop_failed_stream_does_not_wait_for_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (stream, _callback, _gate, _offsets) = failed_stream_with_blocked_callback(
+            tonic::Status::internal("Simulated error"),
+            |builder| builder,
+        )
+        .await?;
+        let started = std::time::Instant::now();
+        drop(stream);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "drop took {:?} with the callback blocked",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    /// #1191 guard: a failed 1-lane mux drains its callbacks at close and
+    /// returns the cached terminal error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_on_failed_mux_drains_error_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        let error_gate =
+            inject_gated_error(&mock_server, tonic::Status::internal("Simulated error")).await;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let (callback, mut gate) = BlockingErrorCallback::new();
+        let mut mux = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .multiplexed_ack_callback(callback.clone())
+            .multiplexed(1)
+            .build()
+            .await?;
+
+        let mut ids = Vec::new();
+        for record in RECORDS {
+            ids.push(mux.ingest_record(record.to_vec()).await?.raw());
+        }
+        ids.sort_unstable();
+        error_gate.release();
+        let flush = tokio::time::timeout(Duration::from_secs(5), mux.flush())
+            .await
+            .expect("flush must fail promptly after the lane error");
+        assert!(flush.is_err(), "flush must report the lane error");
+        callback.wait_entered().await;
+
+        let close = mux.close();
+        tokio::pin!(close);
+        assert!(
+            futures::poll!(&mut close).is_pending(),
+            "mux close must wait for the queued on_error callbacks"
+        );
+        gate.release();
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut close)
+            .await
+            .expect("mux close must return once the callback is released");
+        assert!(
+            matches!(&result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::Internal),
+            "mux close must return the cached lane failure, got {result:?}"
+        );
+        assert_eq!(callback.error_offsets(), ids);
         Ok(())
     }
 
