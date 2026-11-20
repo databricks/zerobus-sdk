@@ -6,6 +6,17 @@
 
 ### New Features and Improvements
 
+- Add `ZerobusSdk.builder()` returning a `ZerobusSdkBuilder`, which sets the endpoints, application
+  name, connection mode, and TLS options. The existing `ZerobusSdk` constructors still work and
+  keep their defaults.
+- Add `TlsOptions` to configure TLS: trust only the CA certificates you add (`trustSystemRoots(false)`),
+  add CA certificates as PEM text or as files, present a client certificate for mutual TLS as PEM
+  text or as files, and override the server domain name. Certificate files are read on each new
+  connection, so rotated files take effect without a restart. Previously the SDK always used the
+  operating system's CA certificates.
+- `HeadersProvider` header names ending in `-bin` are now accepted. The value must be the standard
+  base64 encoding of the bytes, and the SDK sends the decoded bytes as binary gRPC metadata.
+
 ### Bug Fixes
 
 - Fix `AckCallback` notifications being silently dropped after a callback throws. An exception from `onAck` or `onError` was left pending on the SDK thread that ran the callback, so every later callback on that thread, including callbacks of other streams, failed without reaching Java. The exception is now cleared and normally logged at ERROR level with its stack trace through the SDK's SLF4J logger (visible when an SLF4J binding is configured; if logging itself fails, the exception is dropped), and later callbacks are delivered. Callbacks also no longer leave the thrown exception and the `onError` message referenced by native code after they return.
@@ -27,3 +38,7 @@
 ### Deprecations
 
 ### API Changes
+
+- New public API: `ZerobusSdk.builder()` returning `ZerobusSdkBuilder`; `TlsOptions` and
+  `TlsOptions.Builder` (created with `TlsOptions.builder()`). `ZerobusSdkBuilder.tlsOptions(...)` takes
+  a `TlsOptions`.

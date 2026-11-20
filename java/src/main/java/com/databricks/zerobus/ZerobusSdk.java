@@ -169,6 +169,35 @@ public class ZerobusSdk implements AutoCloseable {
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
+  ZerobusSdk(
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream,
+      TlsOptions tlsOptions) {
+    this.serverEndpoint = serverEndpoint;
+    this.unityCatalogEndpoint = unityCatalogEndpoint;
+    this.nativeHandle =
+        nativeCreateWithOptions(
+            serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream, tlsOptions);
+    if (this.nativeHandle == 0) {
+      throw new RuntimeException("Failed to create native SDK instance");
+    }
+    logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
+  }
+
+  /**
+   * Returns a fluent {@link ZerobusSdkBuilder} for creating an SDK. Use it to set TLS options,
+   * which the constructors cannot express.
+   *
+   * @return a new SDK builder
+   * @see ZerobusSdkBuilder
+   * @see TlsOptions
+   */
+  public static ZerobusSdkBuilder builder() {
+    return new ZerobusSdkBuilder();
+  }
+
   // ==================== Stream Builder ====================
 
   /**
@@ -1088,6 +1117,13 @@ public class ZerobusSdk implements AutoCloseable {
       String unityCatalogEndpoint,
       String applicationName,
       boolean connectionPerStream);
+
+  private static native long nativeCreateWithOptions(
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream,
+      TlsOptions tlsOptions);
 
   private static native void nativeDestroy(long handle);
 

@@ -39,6 +39,11 @@ public interface HeadersProvider {
    * Dynamically generated header names are not supported because names are retained for the
    * lifetime of the process and the SDK limits the number of distinct names.
    *
+   * <p>A name ending in {@code -bin} carries binary metadata. Its value must be the standard base64
+   * encoding of the bytes, padded or unpadded; the SDK decodes it and sends the raw bytes. Any
+   * other value is sent as ASCII text. For example, {@code "x-context-bin"} with the value {@code
+   * Base64.getEncoder().encodeToString(bytes)} sends {@code bytes} as binary metadata.
+   *
    * <p>Exceptions are treated as retryable during automatic stream recovery. Throw {@link
    * NonRetriableException} for permanent failures that should stop recovery immediately. Instances
    * of {@link Error} are always treated as non-retryable.
