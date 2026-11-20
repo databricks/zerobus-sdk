@@ -5984,7 +5984,7 @@ mod callback_tests {
         RECORDS.iter().map(|record| record.to_vec()).collect()
     }
 
-    /// #1191: close on a failed stream waits for its queued on_error
+    /// Close on a failed stream waits for its queued on_error
     /// callbacks, and a second close is prompt and delivers nothing more.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_stream_drains_error_callbacks(
@@ -6014,7 +6014,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: the drain stops at a finite callback_max_wait_time_ms.
+    /// The drain stops at a finite callback_max_wait_time_ms.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_stream_respects_callback_budget(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6030,7 +6030,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: an explicit `None` budget waits until the callbacks finish.
+    /// An explicit `None` budget waits until the callbacks finish.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_stream_without_budget_waits_for_callbacks(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6050,7 +6050,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: a cancelled close leaves the drain to the next close.
+    /// A cancelled close leaves the drain to the next close.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_stream_after_cancelled_close_drains(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6078,7 +6078,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: the callback budget is separate from flush_timeout_ms.
+    /// The callback budget is separate from flush_timeout_ms.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_stream_budget_is_not_flush_timeout(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6098,7 +6098,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: the same drain after a non-retryable failure with recovery on.
+    /// The same drain after a non-retryable failure with recovery on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_non_retryable_failure_with_recovery_drains(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6120,7 +6120,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191: dropping a failed stream without close doesn't wait for a
+    /// Dropping a failed stream without close doesn't wait for a
     /// blocked callback.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_drop_failed_stream_does_not_wait_for_callbacks(
@@ -6140,7 +6140,7 @@ mod callback_tests {
         Ok(())
     }
 
-    /// #1191 guard: a failed 1-lane mux drains its callbacks at close and
+    /// Guard: a failed 1-lane mux drains its callbacks at close and
     /// returns the cached terminal error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_close_on_failed_mux_drains_error_callbacks(
