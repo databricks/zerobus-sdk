@@ -133,6 +133,10 @@ jobs:
         working-directory: dotnet/examples/JsonBatch
         run: dotnet build
 
+      - name: Test JSON ack callback example builds
+        working-directory: dotnet/examples/JsonAckCallback
+        run: dotnet build
+
       - name: Test Proto single example builds
         working-directory: dotnet/examples/ProtoSingle
         run: dotnet build

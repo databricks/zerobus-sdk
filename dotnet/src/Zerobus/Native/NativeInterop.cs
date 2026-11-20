@@ -1000,9 +1000,17 @@ internal static class NativeInterop
 
     /// <summary>
     /// Converts managed <see cref="StreamConfigurationOptions"/> to the native struct,
-    /// applying defaults for unset values.
+    /// applying defaults for unset values. A non-zero <paramref name="ackKey"/> wires
+    /// the ack trampolines to that <see cref="AckCallbackRegistry"/> entry.
     /// </summary>
-    public static CStreamConfigurationOptions ConvertConfig(StreamConfigurationOptions? options)
+    public static CStreamConfigurationOptions ConvertConfig(StreamConfigurationOptions? options, long ackKey = 0)
+    {
+        var converted = ConvertOptions(options);
+        AckCallbackRegistry.Apply(ref converted, ackKey);
+        return converted;
+    }
+
+    private static CStreamConfigurationOptions ConvertOptions(StreamConfigurationOptions? options)
     {
         if (options is null)
             return NativeMethods.GetDefaultConfig();
@@ -1023,6 +1031,21 @@ internal static class NativeInterop
         {
             config.StreamPausedMaxWaitTimeMs = options.StreamPausedMaxWaitTimeMs.Value;
             config.HasStreamPausedMaxWaitTimeMs = true;
+        }
+
+        // null keeps the FFI default; CallbackWaitForever maps to "no limit".
+        if (options.CallbackMaxWaitTimeMs is { } callbackWait)
+        {
+            if (callbackWait == StreamConfigurationOptions.CallbackWaitForever)
+            {
+                config.CallbackMaxWaitTimeMs = 0;
+                config.HasCallbackMaxWaitTimeMs = false;
+            }
+            else
+            {
+                config.CallbackMaxWaitTimeMs = callbackWait;
+                config.HasCallbackMaxWaitTimeMs = true;
+            }
         }
 
         return config;

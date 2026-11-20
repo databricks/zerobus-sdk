@@ -87,8 +87,8 @@ internal struct CStreamConfigurationOptions
     [MarshalAs(UnmanagedType.U1)]
     public bool HasCallbackMaxWaitTimeMs;
 
-    // Optional ack callback function pointers and user data.
-    // Keep null for .NET for now; this preserves ABI layout with Rust FFI.
+    // Optional ack callback function pointers and user data. Set by
+    // AckCallbackRegistry.Apply when the options carry an IAckCallback.
     public IntPtr AckOnAck;
     public IntPtr AckOnError;
     public IntPtr AckUserData;

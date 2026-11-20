@@ -237,17 +237,27 @@ public sealed class ZerobusSdk : IDisposable
     {
         ValidateStreamConfiguration(tableProperties, options);
 
-        var nativeOpts = NativeInterop.ConvertConfig(options);
+        // Register before the native create, so no ack can arrive unregistered.
+        var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
+        try
+        {
+            var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
 
-        var streamPtr = NativeInterop.SdkCreateStream(
-            _ptr,
-            tableProperties.TableName,
-            tableProperties.DescriptorProto ?? [],
-            clientId,
-            clientSecret,
-            ref nativeOpts);
+            var streamPtr = NativeInterop.SdkCreateStream(
+                _ptr,
+                tableProperties.TableName,
+                tableProperties.DescriptorProto ?? [],
+                clientId,
+                clientSecret,
+                ref nativeOpts);
 
-        return new ZerobusStream(streamPtr);
+            return new ZerobusStream(streamPtr, ackKey);
+        }
+        catch
+        {
+            AckCallbackRegistry.Release(ackKey);
+            throw;
+        }
     }
 
     private async Task<ZerobusStream> CreateStreamCoreAsync(
@@ -258,18 +268,27 @@ public sealed class ZerobusSdk : IDisposable
     {
         ValidateStreamConfiguration(tableProperties, options);
 
-        var nativeOpts = NativeInterop.ConvertConfig(options);
+        var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
+        try
+        {
+            var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
 
-        var streamPtr = await NativeInterop.SdkCreateStreamAsync(
-                _ptr,
-                tableProperties.TableName,
-                tableProperties.DescriptorProto ?? [],
-                clientId,
-                clientSecret,
-                ref nativeOpts)
-            .ConfigureAwait(false);
+            var streamPtr = await NativeInterop.SdkCreateStreamAsync(
+                    _ptr,
+                    tableProperties.TableName,
+                    tableProperties.DescriptorProto ?? [],
+                    clientId,
+                    clientSecret,
+                    ref nativeOpts)
+                .ConfigureAwait(false);
 
-        return new ZerobusStream(streamPtr);
+            return new ZerobusStream(streamPtr, ackKey);
+        }
+        catch
+        {
+            AckCallbackRegistry.Release(ackKey);
+            throw;
+        }
     }
 
     /// <summary>
@@ -419,7 +438,8 @@ public sealed class ZerobusSdk : IDisposable
     {
         ValidateStreamConfiguration(tableProperties, options);
 
-        var nativeOpts = NativeInterop.ConvertConfig(options);
+        var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
+        var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
 
         // Create the callback bridge that the native code will invoke. The bridge
         // holds both delegate instances, so rooting the bridge keeps their native
@@ -453,11 +473,12 @@ public sealed class ZerobusSdk : IDisposable
             // On a thrown failure the FFI already invoked the free callback (the
             // provider is built before any fallible work), so the handle is
             // already freed — do NOT free it again here (double-free).
+            AckCallbackRegistry.Release(ackKey);
             throw;
         }
 
         // The FFI owns the provider handle now; the stream keeps no reference.
-        return new ZerobusStream(streamPtr);
+        return new ZerobusStream(streamPtr, ackKey);
     }
 
     private async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
@@ -467,7 +488,8 @@ public sealed class ZerobusSdk : IDisposable
     {
         ValidateStreamConfiguration(tableProperties, options);
 
-        var nativeOpts = NativeInterop.ConvertConfig(options);
+        var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
+        var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
 
         var bridge = new HeadersProviderBridge(headersProvider);
 
@@ -479,18 +501,27 @@ public sealed class ZerobusSdk : IDisposable
         // Ownership transfer point: this call hands the bridge GCHandle to the
         // FFI as user_data. On failure, the native side has already invoked the
         // free callback; on success, it owns cleanup for the full stream lifetime.
-        var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
-                _ptr,
-                tableName,
-                descriptorProto,
-                bridge.Callback,
-                handlePtr,
-                bridge.FreeCallback,
-                nativeOpts)
-            .ConfigureAwait(false);
+        IntPtr streamPtr;
+        try
+        {
+            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+                    _ptr,
+                    tableName,
+                    descriptorProto,
+                    bridge.Callback,
+                    handlePtr,
+                    bridge.FreeCallback,
+                    nativeOpts)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            AckCallbackRegistry.Release(ackKey);
+            throw;
+        }
 
         // The FFI owns the provider handle now; the stream keeps no reference.
-        return new ZerobusStream(streamPtr);
+        return new ZerobusStream(streamPtr, ackKey);
     }
 
     /// <summary>

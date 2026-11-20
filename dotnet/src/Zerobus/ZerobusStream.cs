@@ -38,9 +38,14 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private int _inflightAsyncOperations;
     private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
 
-    internal ZerobusStream(IntPtr ptr)
+    // The stream's AckCallbackRegistry key, or 0 without an ack callback.
+    // Released once, after the native stream is freed.
+    private readonly long _ackKey;
+
+    internal ZerobusStream(IntPtr ptr, long ackKey = 0)
     {
         _ptr = ptr;
+        _ackKey = ackKey;
     }
 
     /// <summary>
@@ -308,7 +313,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         using var handle = WithWriteLock();
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         var ptr = GetNativePointerForCall();
-        if (NativeMethods.StreamIsClosed(ptr)) return;
+        if (!NeedsNativeClose(ptr)) return;
 
         NativeInterop.StreamClose(ptr);
     }
@@ -319,7 +324,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         return WithWriteLockAsync(
             ptr =>
             {
-                if (NativeMethods.StreamIsClosed(ptr))
+                if (!NeedsNativeClose(ptr))
                     return Task.CompletedTask;
                 return NativeInterop.StreamCloseAsync(ptr);
             });
@@ -350,7 +355,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
                 return;
             }
 
-            shouldClose = !NativeMethods.StreamIsClosed(ptr);
+            shouldClose = NeedsNativeClose(ptr);
         }
 
         if (shouldClose)
@@ -366,6 +371,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
+        AckCallbackRegistry.Release(_ackKey);
         GC.SuppressFinalize(this);
 
         if (closeError is not null)
@@ -385,7 +391,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
 
         Exception? closeError = null;
 
-        if (disposing && !NativeMethods.StreamIsClosed(ptr))
+        if (disposing && NeedsNativeClose(ptr))
         {
             try
             {
@@ -398,10 +404,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
+        // Close waited for pending ack callbacks and free dropped the rest; any
+        // call still arriving now misses the lookup.
+        AckCallbackRegistry.Release(_ackKey);
 
         if (closeError is not null)
             ExceptionDispatchInfo.Capture(closeError).Throw();
     }
+
+    // A stream that failed is already closed, but with an ack callback the
+    // native close still delivers the queued OnError calls, so call it anyway.
+    private bool NeedsNativeClose(IntPtr ptr) => _ackKey != 0 || !NativeMethods.StreamIsClosed(ptr);
 
     /// <summary>
     /// Safety-net release of native memory for leaked instances.
@@ -441,11 +454,16 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         using var handle = WithWriteLock();
 
         var oldPtr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-        var newStream = new ZerobusStream(newPtr);
+        // The core gives the new stream the same ack callback and user data, so
+        // it shares this stream's registry key: add its reference before this
+        // stream drops its own.
+        AckCallbackRegistry.AddRef(_ackKey);
+        var newStream = new ZerobusStream(newPtr, _ackKey);
 
         // Free the old native stream (don't Close — it's already failed/closed)
         if (oldPtr != IntPtr.Zero)
             NativeMethods.StreamFree(oldPtr);
+        AckCallbackRegistry.Release(_ackKey);
 
         return newStream;
     }

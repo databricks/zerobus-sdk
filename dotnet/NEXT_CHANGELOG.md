@@ -7,6 +7,14 @@
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Call `ZerobusSdk.CreateBuilder().ConnectionPerStream(false)` to share one
   HTTP/2 connection across streams.
+- Added an ack callback for streams (Beta). Set `StreamConfigurationOptions.AckCallback` to an
+  `IAckCallback` to receive `OnAck` calls in the background, in offset order, and an `OnError`
+  call for each pending record if the stream fails. An exception thrown by a callback is caught
+  and ignored. `StreamConfigurationOptions.CallbackMaxWaitTimeMs` sets how long `Close()` and
+  `Dispose()` wait for pending callbacks: `null` keeps the SDK default of 5,000 ms, and
+  `StreamConfigurationOptions.CallbackWaitForever` waits without a limit. `RecreateStream` keeps
+  the callback. With a callback set, `Close()` and `Dispose()` call the native close even on a
+  stream that already failed, so its queued `OnError` calls are delivered.
 
 ### Deprecations
 
@@ -46,3 +54,7 @@
 - Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
 
 ### API Changes
+
+- Added the `IAckCallback` interface, the `StreamConfigurationOptions.AckCallback` and
+  `StreamConfigurationOptions.CallbackMaxWaitTimeMs` properties, and the
+  `StreamConfigurationOptions.CallbackWaitForever` constant (Beta).
