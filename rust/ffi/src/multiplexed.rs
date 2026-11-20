@@ -1861,11 +1861,12 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records_async(
 #[cfg(test)]
 mod multiplexed_tests {
     use super::*;
-    use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
     use crate::zerobus_free_error_message;
     use std::ffi::{CStr, CString};
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    // ---- Shared helpers -------------------------------------------------
 
     fn unwritten_result() -> CResult {
         CResult {
@@ -1890,8 +1891,15 @@ mod multiplexed_tests {
         (result.success, message)
     }
 
-    fn test_sdk() -> *mut CZerobusSdk {
-        let endpoint = CString::new("http://127.0.0.1:1").unwrap();
+    /// `(success, retryable, message)`, freeing the message.
+    fn take_full(result: &mut CResult) -> (bool, bool, String) {
+        let retryable = result.is_retryable;
+        let (success, message) = take_result(result);
+        (success, retryable, message)
+    }
+
+    fn sdk_at(url: &str) -> *mut CZerobusSdk {
+        let endpoint = CString::new(url).unwrap();
         let builder = crate::zerobus_sdk_builder_new();
         crate::zerobus_sdk_builder_endpoint(builder, endpoint.as_ptr());
         crate::zerobus_sdk_builder_unity_catalog_url(builder, endpoint.as_ptr());
@@ -1900,6 +1908,11 @@ mod multiplexed_tests {
         let sdk = crate::zerobus_sdk_builder_build(builder, &mut result);
         assert!(result.success && !sdk.is_null());
         sdk
+    }
+
+    /// An SDK at 127.0.0.1:1: every connect fails (retryable).
+    fn test_sdk() -> *mut CZerobusSdk {
+        sdk_at("http://127.0.0.1:1")
     }
 
     fn json_options() -> CStreamConfigurationOptions {
@@ -1916,67 +1929,10 @@ mod multiplexed_tests {
         }
     }
 
-    /// Returns the handle and the unread `result`, so callers can check `is_retryable`.
-    fn create_oauth_raw(
-        sdk: *mut CZerobusSdk,
-        table: &str,
-        stream_count: usize,
-        options: &CStreamConfigurationOptions,
-    ) -> (*mut CZerobusMultiplexedStream, CResult) {
-        create_oauth_raw_with_ack(sdk, table, stream_count, options, None, ptr::null_mut())
-    }
-
-    /// Like `create_oauth_raw`, with a mux ack callback.
-    fn create_oauth_raw_with_ack(
-        sdk: *mut CZerobusSdk,
-        table: &str,
-        stream_count: usize,
-        options: &CStreamConfigurationOptions,
-        ack_on_ack: Option<MuxAckOnAck>,
-        ack_user_data: *mut std::ffi::c_void,
-    ) -> (*mut CZerobusMultiplexedStream, CResult) {
-        let table = CString::new(table).unwrap();
-        let client_id = CString::new("client-id").unwrap();
-        let client_secret = CString::new("client-secret").unwrap();
-        let mut result = unwritten_result();
-        let mux = zerobus_sdk_create_multiplexed_stream(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            client_id.as_ptr(),
-            client_secret.as_ptr(),
-            stream_count,
-            options,
-            ack_on_ack,
-            None,
-            ack_user_data,
-            None,
-            &mut result,
-        );
-        (mux, result)
-    }
-
-    fn create_oauth(
-        sdk: *mut CZerobusSdk,
-        table: &str,
-        stream_count: usize,
-        options: &CStreamConfigurationOptions,
-    ) -> (*mut CZerobusMultiplexedStream, bool, String) {
-        let (mux, mut result) = create_oauth_raw(sdk, table, stream_count, options);
-        let (success, message) = take_result(&mut result);
-        (mux, success, message)
-    }
-
-    /// How long an async create may take to report a connect failure to
+    /// How long a create may take to report a connect failure to
     /// `127.0.0.1:1`. On Windows a closed local port is not refused at once
     /// (each SYN is retried), and the OAuth path connects more than once.
     const CONNECT_FAILURE_WAIT: Duration = Duration::from_secs(60);
-
-    /// Polls `condition` until it holds, failing after 5 seconds.
-    fn wait_until(what: &str, condition: impl Fn() -> bool) {
-        wait_until_within(what, Duration::from_secs(5), condition);
-    }
 
     /// Polls `condition` until it holds, failing after `timeout`.
     fn wait_until_within(what: &str, timeout: Duration, condition: impl Fn() -> bool) {
@@ -1987,554 +1943,34 @@ mod multiplexed_tests {
         }
     }
 
-    #[test]
-    fn null_handles_report_errors_without_panicking() {
-        let null = ptr::null_mut();
-        let data = [1u8];
-        let json = CString::new("{}").unwrap();
-        let mut result = unwritten_result();
-
-        let id = zerobus_multiplexed_stream_ingest_proto_record(
-            null,
-            data.as_ptr(),
-            data.len(),
-            &mut result,
-        );
-        assert_eq!(id, INGEST_ERROR);
-        assert_eq!(
-            take_result(&mut result),
-            (false, "Multiplexed stream pointer is null".into())
-        );
-
-        let id = zerobus_multiplexed_stream_ingest_json_record(null, json.as_ptr(), &mut result);
-        assert_eq!(id, INGEST_ERROR);
-        assert!(!take_result(&mut result).0);
-
-        assert!(!zerobus_multiplexed_stream_wait_for_message_id(
-            null,
-            0,
-            &mut result
-        ));
-        assert!(!take_result(&mut result).0);
-        assert!(!zerobus_multiplexed_stream_flush(null, &mut result));
-        assert!(!take_result(&mut result).0);
-        assert!(!zerobus_multiplexed_stream_close(null, &mut result));
-        assert!(!take_result(&mut result).0);
-
-        let records = zerobus_multiplexed_stream_get_unacked_records(null, &mut result);
-        assert!(records.records.is_null() && records.len == 0);
-        assert!(!take_result(&mut result).0);
-
-        zerobus_multiplexed_stream_ingest_json_record_nowait(null, json.as_ptr(), &mut result);
-        assert!(!take_result(&mut result).0);
-
-        assert!(zerobus_multiplexed_stream_is_closed(null));
-        zerobus_multiplexed_stream_free(null);
+    /// Runs `call` on a thread; fails if it doesn't return within `limit`.
+    fn within<T: Send + 'static>(
+        what: &str,
+        limit: Duration,
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(call());
+        });
+        rx.recv_timeout(limit)
+            .unwrap_or_else(|_| panic!("{what} did not return within {limit:?}"))
     }
 
-    #[test]
-    fn null_handle_is_rejected_by_batch_and_nowait_ingest() {
-        let null = ptr::null_mut();
-        let data = [1u8];
-        let proto_ptrs = [data.as_ptr()];
-        let proto_lens = [data.len()];
-        let json = CString::new("{}").unwrap();
-        let json_ptrs = [json.as_ptr()];
-        let null_handle = || (false, "Multiplexed stream pointer is null".to_string());
-        let mut result = unwritten_result();
-
-        let id = zerobus_multiplexed_stream_ingest_proto_records(
-            null,
-            proto_ptrs.as_ptr(),
-            proto_lens.as_ptr(),
-            1,
-            &mut result,
-        );
-        assert_eq!(id, INGEST_ERROR);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), null_handle());
-
-        let id = zerobus_multiplexed_stream_ingest_json_records(
-            null,
-            json_ptrs.as_ptr(),
-            1,
-            &mut result,
-        );
-        assert_eq!(id, INGEST_ERROR);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), null_handle());
-
-        zerobus_multiplexed_stream_ingest_proto_record_nowait(
-            null,
-            data.as_ptr(),
-            data.len(),
-            &mut result,
-        );
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), null_handle());
-
-        zerobus_multiplexed_stream_ingest_proto_records_nowait(
-            null,
-            proto_ptrs.as_ptr(),
-            proto_lens.as_ptr(),
-            1,
-            &mut result,
-        );
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), null_handle());
-
-        zerobus_multiplexed_stream_ingest_json_records_nowait(
-            null,
-            json_ptrs.as_ptr(),
-            1,
-            &mut result,
-        );
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), null_handle());
-    }
-
-    /// Pointer arguments are checked before the handle, so a NULL handle
-    /// reports the pointer error.
-    #[test]
-    fn null_record_pointers_are_rejected() {
-        let null = ptr::null_mut();
-        let data = [1u8];
-        let proto_ptrs = [data.as_ptr()];
-        let proto_lens = [data.len()];
-        let invalid_data = || (false, "Invalid data pointer".to_string());
-        let invalid_records = || (false, "Invalid records pointer".to_string());
-        let mut result = unwritten_result();
-
-        let id = zerobus_multiplexed_stream_ingest_proto_record(null, ptr::null(), 1, &mut result);
-        assert_eq!(id, INGEST_ERROR);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), invalid_data());
-
-        zerobus_multiplexed_stream_ingest_proto_record_nowait(null, ptr::null(), 1, &mut result);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), invalid_data());
-
-        // NULL records with valid lengths, then valid records with NULL lengths.
-        for (records, lens) in [
-            (ptr::null(), proto_lens.as_ptr()),
-            (proto_ptrs.as_ptr(), ptr::null()),
-        ] {
-            let id = zerobus_multiplexed_stream_ingest_proto_records(
-                null,
-                records,
-                lens,
-                1,
-                &mut result,
-            );
-            assert_eq!(id, INGEST_ERROR);
-            assert!(!result.is_retryable);
-            assert_eq!(take_result(&mut result), invalid_records());
-
-            zerobus_multiplexed_stream_ingest_proto_records_nowait(
-                null,
-                records,
-                lens,
-                1,
-                &mut result,
-            );
-            assert!(!result.is_retryable);
-            assert_eq!(take_result(&mut result), invalid_records());
-        }
-
-        let id = zerobus_multiplexed_stream_ingest_json_records(null, ptr::null(), 1, &mut result);
-        assert_eq!(id, INGEST_ERROR);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), invalid_records());
-
-        zerobus_multiplexed_stream_ingest_json_records_nowait(null, ptr::null(), 1, &mut result);
-        assert!(!result.is_retryable);
-        assert_eq!(take_result(&mut result), invalid_records());
-    }
-
-    #[test]
-    fn copy_proto_records_preserves_bytes_and_order() {
-        let first = [0x00u8, 0xff, 0x01];
-        let second = [0x7fu8];
-        let ptrs = [first.as_ptr(), second.as_ptr()];
-        let lens = [first.len(), second.len()];
-
-        let records = unsafe { copy_proto_records(ptrs.as_ptr(), lens.as_ptr(), 2) }.unwrap();
-
-        assert_eq!(records.len(), 2);
-        assert!(matches!(&records[0], EncodedRecord::Proto(bytes) if bytes[..] == first));
-        assert!(matches!(&records[1], EncodedRecord::Proto(bytes) if bytes[..] == second));
-    }
-
-    #[test]
-    fn create_rejects_invalid_stream_count_before_connecting() {
-        let sdk = test_sdk();
-        for stream_count in [0, 65] {
-            let (mux, success, message) =
-                create_oauth(sdk, "main.default.events", stream_count, &json_options());
-            assert!(mux.is_null());
-            assert!(!success);
-            assert!(
-                message.contains("stream_count must be between 1 and 64"),
-                "unexpected error: {message}"
-            );
-        }
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn create_rejects_stream_count_above_inflight_budget() {
-        let sdk = test_sdk();
-        let mut options = json_options();
-        options.max_inflight_requests = 2;
-        let (mux, success, message) = create_oauth(sdk, "main.default.events", 3, &options);
-        assert!(mux.is_null());
-        assert!(!success);
-        assert!(
-            message.contains("must be at least stream_count"),
-            "unexpected error: {message}"
-        );
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn failed_create_releases_ack_callback() {
-        extern "C" fn noop_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
-        let _guard = crate::tests::ACK_DROP_TEST_LOCK.lock().unwrap();
-
-        let sdk = test_sdk();
-        let options = json_options();
-        let sentinel = (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
-
-        let before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-        // An empty table name fails validation after the callback is taken over.
-        let (mux, mut result) =
-            create_oauth_raw_with_ack(sdk, "", 2, &options, Some(noop_ack), sentinel);
-        let (success, _) = take_result(&mut result);
-        let after = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-
-        assert!(mux.is_null() && !success);
-        assert_eq!(
-            after - before,
-            1,
-            "the ack callback must be dropped exactly once when creation fails"
-        );
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn failed_create_with_headers_provider_frees_user_data_once() {
-        static FREES: AtomicUsize = AtomicUsize::new(0);
-        static SENTINEL: u8 = 0;
-        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
-            if ptr::eq(user_data as *const u8, &SENTINEL) {
-                FREES.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let sdk = test_sdk();
-        let table = CString::new("").unwrap();
-        let options = json_options();
-        let mut result = unwritten_result();
-        let before = FREES.load(Ordering::SeqCst);
-        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            empty_headers,
-            (&SENTINEL as *const u8) as *mut std::ffi::c_void,
-            Some(free_user_data),
-            2,
-            &options,
-            None,
-            None,
-            ptr::null_mut(),
-            None,
-            &mut result,
-        );
-        assert!(mux.is_null());
-        assert!(!take_result(&mut result).0);
-        assert_eq!(FREES.load(Ordering::SeqCst) - before, 1);
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn create_rejects_invalid_arguments_before_connecting() {
-        static FREES: AtomicUsize = AtomicUsize::new(0);
-        static SENTINEL: u8 = 0;
-        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
-            if ptr::eq(user_data as *const u8, &SENTINEL) {
-                FREES.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let sdk = test_sdk();
-        let table = CString::new("main.default.events").unwrap();
-        let client_id = CString::new("client-id").unwrap();
-        let client_secret = CString::new("client-secret").unwrap();
-        let options = json_options();
-        // A truncated varint: not a decodable DescriptorProto.
-        let malformed: &[u8] = &[0xff, 0xff, 0xff];
-        let none: &[u8] = &[];
-        let null_sdk = ptr::null_mut();
-        let null_str = ptr::null();
-
-        let oauth_cases = [
-            (
-                "sdk=NULL",
-                null_sdk,
-                table.as_ptr(),
-                none,
-                client_id.as_ptr(),
-                client_secret.as_ptr(),
-            ),
-            (
-                "table_name=NULL",
-                sdk,
-                null_str,
-                none,
-                client_id.as_ptr(),
-                client_secret.as_ptr(),
-            ),
-            (
-                "client_id=NULL",
-                sdk,
-                table.as_ptr(),
-                none,
-                null_str,
-                client_secret.as_ptr(),
-            ),
-            (
-                "client_secret=NULL",
-                sdk,
-                table.as_ptr(),
-                none,
-                client_id.as_ptr(),
-                null_str,
-            ),
-            (
-                "malformed descriptor",
-                sdk,
-                table.as_ptr(),
-                malformed,
-                client_id.as_ptr(),
-                client_secret.as_ptr(),
-            ),
-        ];
-        for (case, sdk_arg, table_arg, descriptor, id_arg, secret_arg) in oauth_cases {
+    /// A blocking flush or close on `mux`, bounded to 2 s:
+    /// `(returned, retryable, message)`.
+    fn blocking_within_2s(
+        mux: *mut CZerobusMultiplexedStream,
+        call: extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool,
+        what: &str,
+    ) -> (bool, bool, String) {
+        let mux_addr = mux as usize;
+        within(what, Duration::from_secs(2), move || {
             let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream(
-                sdk_arg,
-                table_arg,
-                descriptor.as_ptr(),
-                descriptor.len(),
-                id_arg,
-                secret_arg,
-                2,
-                &options,
-                None,
-                None,
-                ptr::null_mut(),
-                None,
-                &mut result,
-            );
-            assert!(mux.is_null(), "OAuth {case}");
-            let retryable = result.is_retryable;
-            let (success, message) = take_result(&mut result);
-            assert!(!success && !retryable, "OAuth {case}: {message}");
-        }
-
-        let headers_cases = [
-            ("sdk=NULL", null_sdk, table.as_ptr(), none),
-            ("table_name=NULL", sdk, null_str, none),
-            ("malformed descriptor", sdk, table.as_ptr(), malformed),
-        ];
-        for (case, sdk_arg, table_arg, descriptor) in headers_cases {
-            let before = FREES.load(Ordering::SeqCst);
-            let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-                sdk_arg,
-                table_arg,
-                descriptor.as_ptr(),
-                descriptor.len(),
-                empty_headers,
-                (&SENTINEL as *const u8) as *mut std::ffi::c_void,
-                Some(free_user_data),
-                2,
-                &options,
-                None,
-                None,
-                ptr::null_mut(),
-                None,
-                &mut result,
-            );
-            assert!(mux.is_null(), "headers {case}");
-            let retryable = result.is_retryable;
-            let (success, message) = take_result(&mut result);
-            assert!(!success && !retryable, "headers {case}: {message}");
-            assert_eq!(
-                FREES.load(Ordering::SeqCst) - before,
-                1,
-                "headers {case}: user_data must be freed exactly once"
-            );
-        }
-
-        // A NULL `result` is allowed; the failure is reported by the NULL handle.
-        let mux = zerobus_sdk_create_multiplexed_stream(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            client_id.as_ptr(),
-            client_secret.as_ptr(),
-            0,
-            &options,
-            None,
-            None,
-            ptr::null_mut(),
-            None,
-            ptr::null_mut(),
-        );
-        assert!(mux.is_null());
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn create_that_fails_to_connect_is_retryable_and_releases_resources() {
-        extern "C" fn noop_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
-        static FREES: AtomicUsize = AtomicUsize::new(0);
-        static SENTINEL: u8 = 0;
-        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
-            if ptr::eq(user_data as *const u8, &SENTINEL) {
-                FREES.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        let _guard = crate::tests::ACK_DROP_TEST_LOCK.lock().unwrap();
-
-        // `test_sdk()` points at 127.0.0.1:1, so every sub-stream open fails.
-        let sdk = test_sdk();
-        let mut options = json_options();
-        // Fail on the first connect error instead of retrying it.
-        options.recovery = false;
-        let sentinel = (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
-
-        let drops_before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-        let (mux, mut result) = create_oauth_raw_with_ack(
-            sdk,
-            "main.default.events",
-            2,
-            &options,
-            Some(noop_ack),
-            sentinel,
-        );
-        assert!(mux.is_null());
-        let retryable = result.is_retryable;
-        let (success, message) = take_result(&mut result);
-        assert!(!success && retryable, "OAuth create: {message}");
-        wait_until("OAuth create drops the ack callback", || {
-            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
-        });
-        // Let a late second release land before asserting exactly once.
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(
-            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
-            1
-        );
-
-        let table = CString::new("main.default.events").unwrap();
-        let drops_before = ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst);
-        let frees_before = FREES.load(Ordering::SeqCst);
-        let mut result = unwritten_result();
-        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            empty_headers,
-            (&SENTINEL as *const u8) as *mut std::ffi::c_void,
-            Some(free_user_data),
-            2,
-            &options,
-            Some(noop_ack),
-            None,
-            sentinel,
-            None,
-            &mut result,
-        );
-        assert!(mux.is_null());
-        let retryable = result.is_retryable;
-        let (success, message) = take_result(&mut result);
-        assert!(!success && retryable, "headers create: {message}");
-        wait_until("headers create releases its resources", || {
-            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before >= 1
-                && FREES.load(Ordering::SeqCst) - frees_before >= 1
-        });
-        // Let a late second release land before asserting exactly once.
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(
-            ACK_CALLBACK_DROP_COUNT.load(Ordering::SeqCst) - drops_before,
-            1
-        );
-        assert_eq!(FREES.load(Ordering::SeqCst) - frees_before, 1);
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn ack_callback_receives_raw_message_ids() {
-        static LAST_ACK: AtomicI64 = AtomicI64::new(0);
-        static LAST_ERROR: AtomicI64 = AtomicI64::new(0);
-        extern "C" fn on_ack(id: i64, _user_data: *mut std::ffi::c_void) {
-            LAST_ACK.store(id, Ordering::SeqCst);
-        }
-        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
-            LAST_ERROR.store(id, Ordering::SeqCst);
-        }
-
-        let callback = MultiplexedCallbackAckCallback::new(
-            Some(on_ack),
-            Some(on_error),
-            ptr::null_mut(),
-            None,
-        );
-        // Lane 63 sets the sign bit, so this raw ID is negative.
-        let acked = MessageId::from_raw(((63u64 << 58) | 7) as i64);
-        let failed = MessageId::from_raw((1i64 << 58) | 9);
-        callback.on_ack(acked);
-        callback.on_error(failed, "boom");
-
-        assert_eq!(LAST_ACK.load(Ordering::SeqCst), acked.raw());
-        assert!(acked.raw() < 0);
-        assert_eq!(LAST_ERROR.load(Ordering::SeqCst), failed.raw());
-    }
-
-    #[test]
-    fn serialized_headers_provider_allows_concurrent_lanes() {
-        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-        static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-        extern "C" fn slow_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
-            let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-            MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(20));
-            ACTIVE.fetch_sub(1, Ordering::SeqCst);
-            empty_headers(ptr::null_mut())
-        }
-
-        let provider = Arc::new(SerializedHeadersProvider::new(
-            CallbackHeadersProvider::new(slow_headers, ptr::null_mut(), None),
-        ));
-        RUNTIME.block_on(async {
-            let calls: Vec<_> = (0..4)
-                .map(|_| {
-                    let provider = Arc::clone(&provider);
-                    tokio::spawn(async move { provider.get_headers().await })
-                })
-                .collect();
-            for call in calls {
-                let result = call.await.unwrap();
-                assert!(result.is_ok(), "concurrent lane call failed: {result:?}");
-            }
-        });
-        assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1);
+            let returned = call(mux_addr as *mut _, &mut result);
+            let (_, retryable, message) = take_full(&mut result);
+            (returned, retryable, message)
+        })
     }
 
     /// Counts frees of the `user_data` it is passed as.
@@ -2552,7 +1988,9 @@ mod multiplexed_tests {
         }
 
         fn assert_freed_once(&self, what: &str) {
-            wait_until(what, || self.0.load(Ordering::SeqCst) >= 1);
+            wait_until_within(what, Duration::from_secs(5), || {
+                self.0.load(Ordering::SeqCst) >= 1
+            });
             // Let a late second release land before asserting exactly once.
             std::thread::sleep(Duration::from_millis(100));
             assert_eq!(
@@ -2571,314 +2009,6 @@ mod multiplexed_tests {
     extern "C" fn noop_mux_ack(_id: i64, _user_data: *mut std::ffi::c_void) {}
 
     extern "C" fn noop_mux_error(_id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
-    }
-
-    /// One sync create call; `None` strings are passed as NULL.
-    struct CreateCall {
-        sdk: *mut CZerobusSdk,
-        table: Option<CString>,
-        descriptor: Vec<u8>,
-        client_id: Option<CString>,
-        client_secret: Option<CString>,
-        stream_count: usize,
-        options: CStreamConfigurationOptions,
-    }
-
-    impl CreateCall {
-        /// Valid arguments for a JSON mux on `sdk`.
-        fn valid(sdk: *mut CZerobusSdk) -> Self {
-            let mut options = json_options();
-            // Fail on the first connect error instead of retrying it.
-            options.recovery = false;
-            Self {
-                sdk,
-                table: Some(CString::new("main.default.events").unwrap()),
-                descriptor: Vec::new(),
-                client_id: Some(CString::new("client-id").unwrap()),
-                client_secret: Some(CString::new("client-secret").unwrap()),
-                stream_count: 2,
-                options,
-            }
-        }
-
-        fn c_str(value: &Option<CString>) -> *const c_char {
-            value.as_ref().map_or(ptr::null(), |s| s.as_ptr())
-        }
-
-        /// Runs the OAuth create, expecting failure; returns `(retryable, message)`.
-        fn oauth(
-            &self,
-            ack_free: Option<MuxAckFree>,
-            ack_user_data: *mut std::ffi::c_void,
-        ) -> (bool, String) {
-            let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream(
-                self.sdk,
-                Self::c_str(&self.table),
-                self.descriptor.as_ptr(),
-                self.descriptor.len(),
-                Self::c_str(&self.client_id),
-                Self::c_str(&self.client_secret),
-                self.stream_count,
-                &self.options,
-                Some(noop_mux_ack),
-                Some(noop_mux_error),
-                ack_user_data,
-                ack_free,
-                &mut result,
-            );
-            Self::failure(mux, &mut result)
-        }
-
-        /// Runs the headers create, expecting failure; returns `(retryable, message)`.
-        fn headers(&self, headers: &'static FreeCount, ack: &'static FreeCount) -> (bool, String) {
-            let mut result = unwritten_result();
-            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-                self.sdk,
-                Self::c_str(&self.table),
-                self.descriptor.as_ptr(),
-                self.descriptor.len(),
-                empty_headers,
-                headers.user_data(),
-                Some(count_free),
-                self.stream_count,
-                &self.options,
-                Some(noop_mux_ack),
-                Some(noop_mux_error),
-                ack.user_data(),
-                Some(count_free),
-                &mut result,
-            );
-            Self::failure(mux, &mut result)
-        }
-
-        fn failure(mux: *mut CZerobusMultiplexedStream, result: &mut CResult) -> (bool, String) {
-            assert!(mux.is_null(), "create unexpectedly returned a handle");
-            let retryable = result.is_retryable;
-            let (success, message) = take_result(result);
-            assert!(!success, "create reported success");
-            (retryable, message)
-        }
-    }
-
-    #[test]
-    fn create_rejects_ack_callbacks_in_options() {
-        let sdk = test_sdk();
-        for field in ["ack_on_ack", "ack_on_error"] {
-            let mut call = CreateCall::valid(sdk);
-            match field {
-                "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
-                _ => call.options.ack_on_error = Some(noop_mux_error),
-            }
-
-            let ack = FreeCount::leaked();
-            let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
-            assert!(!retryable, "OAuth options->{field}: {message}");
-            assert!(
-                message.contains("are not supported for multiplexed streams"),
-                "OAuth options->{field}: {message}"
-            );
-            ack.assert_freed_once(&format!("OAuth options->{field} ack user_data"));
-
-            let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
-            let (retryable, message) = call.headers(headers, ack);
-            assert!(!retryable, "headers options->{field}: {message}");
-            assert!(
-                message.contains("are not supported for multiplexed streams"),
-                "headers options->{field}: {message}"
-            );
-            headers.assert_freed_once(&format!("headers options->{field} user_data"));
-            ack.assert_freed_once(&format!("headers options->{field} ack user_data"));
-        }
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn ack_bridge_accepts_one_sided_callbacks() {
-        static ACKED: AtomicI64 = AtomicI64::new(0);
-        static FAILED: AtomicI64 = AtomicI64::new(0);
-        extern "C" fn on_ack(id: i64, _user_data: *mut std::ffi::c_void) {
-            ACKED.store(id, Ordering::SeqCst);
-        }
-        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
-            FAILED.store(id, Ordering::SeqCst);
-        }
-        let id = MessageId::from_raw((1i64 << 58) | 3);
-
-        // The NULL side is a no-op; the set side gets the raw message ID.
-        let ack_only =
-            MultiplexedCallbackAckCallback::new(Some(on_ack), None, ptr::null_mut(), None);
-        ack_only.on_ack(id);
-        ack_only.on_error(id, "ignored");
-        assert_eq!(ACKED.load(Ordering::SeqCst), id.raw());
-        assert_eq!(FAILED.load(Ordering::SeqCst), 0);
-
-        let error_only =
-            MultiplexedCallbackAckCallback::new(None, Some(on_error), ptr::null_mut(), None);
-        error_only.on_ack(MessageId::from_raw(0));
-        error_only.on_error(id, "boom");
-        assert_eq!(
-            ACKED.load(Ordering::SeqCst),
-            id.raw(),
-            "on_ack must not run"
-        );
-        assert_eq!(FAILED.load(Ordering::SeqCst), id.raw());
-    }
-
-    #[test]
-    fn every_create_failure_frees_ack_user_data_once() {
-        let sdk = test_sdk();
-        let valid = || CreateCall::valid(sdk);
-        // (case, call, OAuth only)
-        let cases: Vec<(&str, CreateCall, bool)> = vec![
-            (
-                "sdk=NULL",
-                CreateCall {
-                    sdk: ptr::null_mut(),
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "table_name=NULL",
-                CreateCall {
-                    table: None,
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "empty table",
-                CreateCall {
-                    table: Some(CString::new("").unwrap()),
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "client_id=NULL",
-                CreateCall {
-                    client_id: None,
-                    ..valid()
-                },
-                true,
-            ),
-            (
-                "client_secret=NULL",
-                CreateCall {
-                    client_secret: None,
-                    ..valid()
-                },
-                true,
-            ),
-            (
-                "stream_count=0",
-                CreateCall {
-                    stream_count: 0,
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "stream_count=65",
-                CreateCall {
-                    stream_count: 65,
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "malformed descriptor",
-                CreateCall {
-                    descriptor: vec![0xff, 0xff, 0xff],
-                    ..valid()
-                },
-                false,
-            ),
-            (
-                "max_inflight_requests < stream_count",
-                {
-                    let mut call = CreateCall {
-                        stream_count: 3,
-                        ..valid()
-                    };
-                    call.options.max_inflight_requests = 2;
-                    call
-                },
-                false,
-            ),
-        ];
-
-        for (case, call, oauth_only) in &cases {
-            let ack = FreeCount::leaked();
-            let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
-            assert!(!retryable, "OAuth {case}: {message}");
-            ack.assert_freed_once(&format!("OAuth {case} ack user_data"));
-
-            if !oauth_only {
-                let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
-                let (retryable, message) = call.headers(headers, ack);
-                assert!(!retryable, "headers {case}: {message}");
-                headers.assert_freed_once(&format!("headers {case} user_data"));
-                ack.assert_freed_once(&format!("headers {case} ack user_data"));
-            }
-        }
-
-        // `test_sdk()` points at 127.0.0.1:1, so the connect fails (retryable).
-        let call = valid();
-        let ack = FreeCount::leaked();
-        let (retryable, message) = call.oauth(Some(count_free), ack.user_data());
-        assert!(retryable, "OAuth connect failure: {message}");
-        ack.assert_freed_once("OAuth connect failure ack user_data");
-        let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
-        let (retryable, message) = call.headers(headers, ack);
-        assert!(retryable, "headers connect failure: {message}");
-        headers.assert_freed_once("headers connect failure user_data");
-        ack.assert_freed_once("headers connect failure ack user_data");
-
-        // A NULL `free_ack_user_data` is allowed.
-        let call = CreateCall {
-            table: None,
-            ..valid()
-        };
-        call.oauth(None, ptr::null_mut());
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn pending_ingests_keep_first_error_until_taken() {
-        use databricks_zerobus_ingest_sdk::{GrpcCode, GrpcStatus};
-        let tracker = Arc::new(PendingIngests::default());
-
-        // A retryable typed cause comes back unchanged.
-        let mut ticket = tracker.begin();
-        ticket.error = Some(ZerobusError::StreamClosedError(GrpcStatus::new(
-            GrpcCode::Unavailable,
-            "x",
-        )));
-        drop(ticket);
-        let error = tracker.take_error(None).expect("the failure is stored");
-        assert!(error.is_retryable());
-        match error {
-            ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), GrpcCode::Unavailable);
-                assert_eq!(status.message(), "x");
-            }
-            other => panic!("stored error changed variant: {other:?}"),
-        }
-        assert!(tracker.take_error(None).is_none(), "taken once");
-
-        // The first failure wins; the later one is dropped.
-        let (mut first, mut second) = (tracker.begin(), tracker.begin());
-        first.error = Some(ZerobusError::InvalidArgument("A".into()));
-        second.error = Some(ZerobusError::InvalidArgument("B".into()));
-        drop(first);
-        drop(second);
-        assert!(matches!(
-            tracker.take_error(None),
-            Some(ZerobusError::InvalidArgument(message)) if message == "A"
-        ));
-        assert!(tracker.take_error(None).is_none());
     }
 
     /// One reported `_async` completion: `(value, success, retryable, message, mux)`.
@@ -2920,12 +2050,8 @@ mod multiplexed_tests {
             sink.0.lock().unwrap().push(completion);
         }
 
-        /// Waits for the callback, then checks it ran exactly once.
-        fn one(&self, what: &str) -> Completion {
-            self.one_within(what, Duration::from_secs(5))
-        }
-
-        /// `one`, waiting up to `timeout` for the callback.
+        /// Waits up to `timeout` for the callback, then checks it ran
+        /// exactly once.
         fn one_within(&self, what: &str, timeout: Duration) -> Completion {
             wait_until_within(what, timeout, || self.count() >= 1);
             // Let a late second callback land before asserting exactly once.
@@ -2935,7 +2061,12 @@ mod multiplexed_tests {
             completions[0].clone()
         }
 
+        fn one(&self, what: &str) -> Completion {
+            self.one_within(what, Duration::from_secs(5))
+        }
+
         fn assert_never_called(&self, what: &str) {
+            // Let a wrongly spawned callback land.
             std::thread::sleep(Duration::from_millis(200));
             assert_eq!(self.count(), 0, "{what}: callback must not run");
         }
@@ -2966,14 +2097,96 @@ mod multiplexed_tests {
         crate::zerobus_free_record_array(records);
     }
 
-    /// Result of the synchronous part of an `_async` call.
+    /// Result of the synchronous part of an `_async` call:
+    /// `(returned, success, retryable, message)`.
     fn sync_part(returned: bool, result: &mut CResult) -> (bool, bool, bool, String) {
-        let retryable = result.is_retryable;
-        let (success, message) = take_result(result);
+        let (success, retryable, message) = take_full(result);
         (returned, success, retryable, message)
     }
 
+    /// One create call; `None` strings are passed as NULL. Every create
+    /// passes both mux ack callbacks and a counted `ack_user_data`.
+    struct CreateCall {
+        sdk: *mut CZerobusSdk,
+        table: Option<CString>,
+        descriptor: Vec<u8>,
+        client_id: Option<CString>,
+        client_secret: Option<CString>,
+        stream_count: usize,
+        options: CStreamConfigurationOptions,
+    }
+
     impl CreateCall {
+        /// Valid arguments for a JSON mux on `sdk`.
+        fn valid(sdk: *mut CZerobusSdk) -> Self {
+            let mut options = json_options();
+            // Fail on the first connect error instead of retrying it.
+            options.recovery = false;
+            Self {
+                sdk,
+                table: Some(CString::new("main.default.events").unwrap()),
+                descriptor: Vec::new(),
+                client_id: Some(CString::new("client-id").unwrap()),
+                client_secret: Some(CString::new("client-secret").unwrap()),
+                stream_count: 2,
+                options,
+            }
+        }
+
+        fn c_str(value: &Option<CString>) -> *const c_char {
+            value.as_ref().map_or(ptr::null(), |s| s.as_ptr())
+        }
+
+        /// The sync OAuth create, expecting failure: `(retryable, message)`.
+        fn oauth(&self, ack: Option<&'static FreeCount>) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream(
+                self.sdk,
+                Self::c_str(&self.table),
+                self.descriptor.as_ptr(),
+                self.descriptor.len(),
+                Self::c_str(&self.client_id),
+                Self::c_str(&self.client_secret),
+                self.stream_count,
+                &self.options,
+                Some(noop_mux_ack),
+                Some(noop_mux_error),
+                ack.map_or(ptr::null_mut(), |a| a.user_data()),
+                ack.map(|_| count_free as MuxAckFree),
+                &mut result,
+            );
+            Self::failure(mux, &mut result)
+        }
+
+        /// The sync headers create, expecting failure: `(retryable, message)`.
+        fn headers(&self, headers: &'static FreeCount, ack: &'static FreeCount) -> (bool, String) {
+            let mut result = unwritten_result();
+            let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+                self.sdk,
+                Self::c_str(&self.table),
+                self.descriptor.as_ptr(),
+                self.descriptor.len(),
+                empty_headers,
+                headers.user_data(),
+                Some(count_free),
+                self.stream_count,
+                &self.options,
+                Some(noop_mux_ack),
+                Some(noop_mux_error),
+                ack.user_data(),
+                Some(count_free),
+                &mut result,
+            );
+            Self::failure(mux, &mut result)
+        }
+
+        fn failure(mux: *mut CZerobusMultiplexedStream, result: &mut CResult) -> (bool, String) {
+            assert!(mux.is_null(), "create unexpectedly returned a handle");
+            let (success, retryable, message) = take_full(result);
+            assert!(!success, "create reported success");
+            (retryable, message)
+        }
+
         fn oauth_async(
             &self,
             ack: &'static FreeCount,
@@ -3029,12 +2242,11 @@ mod multiplexed_tests {
         }
     }
 
-    #[test]
-    fn async_creates_fail_fast_on_invalid_arguments() {
-        let sdk = test_sdk();
+    /// Create-failure rows shared by the sync and async create tests:
+    /// `(case, call, OAuth only)`.
+    fn create_rows(sdk: *mut CZerobusSdk) -> Vec<(&'static str, CreateCall, bool)> {
         let valid = || CreateCall::valid(sdk);
-        // (case, call, OAuth only)
-        let cases: Vec<(&str, CreateCall, bool)> = vec![
+        vec![
             (
                 "sdk=NULL",
                 CreateCall {
@@ -3068,6 +2280,7 @@ mod multiplexed_tests {
                 true,
             ),
             (
+                // A truncated varint: not a decodable DescriptorProto.
                 "malformed descriptor",
                 CreateCall {
                     descriptor: vec![0xff, 0xff, 0xff],
@@ -3075,14 +2288,449 @@ mod multiplexed_tests {
                 },
                 false,
             ),
+        ]
+    }
+
+    /// The FFI-origin message expected for a `create_rows` case, if any.
+    fn create_row_message(case: &str) -> Option<&'static str> {
+        match case {
+            "sdk=NULL" => Some("SDK pointer is null"),
+            "table_name=NULL" | "client_id=NULL" | "client_secret=NULL" => {
+                Some("Null pointer passed")
+            }
+            _ => None,
+        }
+    }
+
+    const OPTIONS_ACK_REJECTED: &str =
+        "options->ack_on_ack and options->ack_on_error are not supported for multiplexed streams";
+
+    /// `CreateCall::valid(sdk)` with `options->ack_on_ack` or
+    /// `options->ack_on_error` set.
+    fn with_options_ack(sdk: *mut CZerobusSdk, field: &str) -> CreateCall {
+        let mut call = CreateCall::valid(sdk);
+        match field {
+            "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
+            _ => call.options.ack_on_error = Some(noop_mux_error),
+        }
+        call
+    }
+
+    /// `CreateCall::valid(sdk)` with `max_inflight_requests` below `stream_count`.
+    fn low_inflight(sdk: *mut CZerobusSdk) -> CreateCall {
+        let mut call = CreateCall {
+            stream_count: 3,
+            ..CreateCall::valid(sdk)
+        };
+        call.options.max_inflight_requests = 2;
+        call
+    }
+
+    /// A live 1-lane JSON mux on the mock server, for the panic-path tests.
+    fn live_mux() -> (
+        tokio::runtime::Runtime,
+        *mut CZerobusSdk,
+        *mut CZerobusMultiplexedStream,
+    ) {
+        use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (server, url) = runtime.block_on(start_mock_server()).unwrap();
+        // The mock opens the lane itself; offset 0 is acked.
+        runtime.block_on(server.inject_responses(
+            "ffi.mux.panic",
+            vec![MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            }],
+        ));
+        let sdk = sdk_at(&url);
+        let table = CString::new("ffi.mux.panic").unwrap();
+        let mut result = unwritten_result();
+        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            ptr::null_mut(),
+            None,
+            1,
+            &json_options(),
+            None,
+            None,
+            ptr::null_mut(),
+            None,
+            &mut result,
+        );
+        let (success, message) = take_result(&mut result);
+        assert!(success && !mux.is_null(), "{message}");
+        (runtime, sdk, mux)
+    }
+
+    // ---- Tests ----------------------------------------------------------
+
+    /// Every blocking export checks its C arguments: pointer arguments
+    /// first, then the handle, each with a pinned, non-retryable error.
+    #[test]
+    fn c_arguments_are_checked_before_the_handle() {
+        const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
+        const BAD_DATA: &str = "Invalid data pointer";
+        const BAD_RECORDS: &str = "Invalid records pointer";
+        let null = ptr::null_mut();
+        let data = [1u8];
+        let (proto_ptrs, proto_lens) = ([data.as_ptr()], [data.len()]);
+        let json = CString::new("{}").unwrap();
+        let json_ptrs = [json.as_ptr()];
+
+        // (what, expected message, call → whether its return value reports
+        // the failure).
+        type Call<'a> = Box<dyn Fn(&mut CResult) -> bool + 'a>;
+        let mut calls: Vec<(&str, &str, Call)> = vec![
+            (
+                "proto_record mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_record(null, data.as_ptr(), 1, r)
+                        == INGEST_ERROR
+                }),
+            ),
+            (
+                "proto_record data=NULL",
+                BAD_DATA,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_record(null, ptr::null(), 1, r)
+                        == INGEST_ERROR
+                }),
+            ),
+            (
+                "json_record mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_record(null, json.as_ptr(), r)
+                        == INGEST_ERROR
+                }),
+            ),
+            (
+                "proto_records mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records(
+                        null,
+                        proto_ptrs.as_ptr(),
+                        proto_lens.as_ptr(),
+                        1,
+                        r,
+                    ) == INGEST_ERROR
+                }),
+            ),
+            (
+                "proto_records records=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records(
+                        null,
+                        ptr::null(),
+                        proto_lens.as_ptr(),
+                        1,
+                        r,
+                    ) == INGEST_ERROR
+                }),
+            ),
+            (
+                "proto_records record_lens=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records(
+                        null,
+                        proto_ptrs.as_ptr(),
+                        ptr::null(),
+                        1,
+                        r,
+                    ) == INGEST_ERROR
+                }),
+            ),
+            (
+                "json_records mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_records(null, json_ptrs.as_ptr(), 1, r)
+                        == INGEST_ERROR
+                }),
+            ),
+            (
+                "json_records json_records=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_records(null, ptr::null(), 1, r)
+                        == INGEST_ERROR
+                }),
+            ),
+            (
+                "wait_for_message_id mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| !zerobus_multiplexed_stream_wait_for_message_id(null, 0, r)),
+            ),
+            (
+                "flush mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| !zerobus_multiplexed_stream_flush(null, r)),
+            ),
+            (
+                "close mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| !zerobus_multiplexed_stream_close(null, r)),
+            ),
+            (
+                "get_unacked_records mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    let records = zerobus_multiplexed_stream_get_unacked_records(null, r);
+                    records.records.is_null() && records.len == 0
+                }),
+            ),
         ];
-        for (case, call, oauth_only) in &cases {
+        // _nowait group (pending decision): the `_nowait` ingests report only
+        // through `result`.
+        let nowait: Vec<(&str, &str, Call)> = vec![
+            (
+                "proto_record_nowait mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_record_nowait(
+                        null,
+                        data.as_ptr(),
+                        1,
+                        r,
+                    );
+                    true
+                }),
+            ),
+            (
+                "proto_record_nowait data=NULL",
+                BAD_DATA,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_record_nowait(null, ptr::null(), 1, r);
+                    true
+                }),
+            ),
+            (
+                "json_record_nowait mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_record_nowait(null, json.as_ptr(), r);
+                    true
+                }),
+            ),
+            (
+                "proto_records_nowait mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
+                        null,
+                        proto_ptrs.as_ptr(),
+                        proto_lens.as_ptr(),
+                        1,
+                        r,
+                    );
+                    true
+                }),
+            ),
+            (
+                "proto_records_nowait records=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
+                        null,
+                        ptr::null(),
+                        proto_lens.as_ptr(),
+                        1,
+                        r,
+                    );
+                    true
+                }),
+            ),
+            (
+                "proto_records_nowait record_lens=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_proto_records_nowait(
+                        null,
+                        proto_ptrs.as_ptr(),
+                        ptr::null(),
+                        1,
+                        r,
+                    );
+                    true
+                }),
+            ),
+            (
+                "json_records_nowait mux=NULL",
+                NULL_HANDLE,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_records_nowait(
+                        null,
+                        json_ptrs.as_ptr(),
+                        1,
+                        r,
+                    );
+                    true
+                }),
+            ),
+            (
+                "json_records_nowait json_records=NULL",
+                BAD_RECORDS,
+                Box::new(|r| {
+                    zerobus_multiplexed_stream_ingest_json_records_nowait(null, ptr::null(), 1, r);
+                    true
+                }),
+            ),
+        ];
+        calls.extend(nowait);
+
+        for (what, expected, call) in &calls {
+            let mut result = unwritten_result();
+            assert!(
+                call(&mut result),
+                "{what}: the return value must report the failure"
+            );
+            let (success, retryable, message) = take_full(&mut result);
+            assert!(!success && !retryable, "{what}: {message}");
+            assert!(message.contains(expected), "{what}: {message}");
+        }
+        assert!(zerobus_multiplexed_stream_is_closed(null));
+        zerobus_multiplexed_stream_free(null);
+    }
+
+    #[test]
+    fn copy_proto_records_preserves_bytes_and_order() {
+        let first = [0x00u8, 0xff, 0x01];
+        let second = [0x7fu8];
+        let ptrs = [first.as_ptr(), second.as_ptr()];
+        let lens = [first.len(), second.len()];
+
+        let records = unsafe { copy_proto_records(ptrs.as_ptr(), lens.as_ptr(), 2) }.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[0], EncodedRecord::Proto(bytes) if bytes[..] == first));
+        assert!(matches!(&records[1], EncodedRecord::Proto(bytes) if bytes[..] == second));
+    }
+
+    /// Every failing sync create reports the error (retryable only for a
+    /// connect failure) and frees the headers and ack `user_data` once.
+    #[test]
+    fn sync_create_failures_report_and_free_once() {
+        let sdk = test_sdk();
+        // (case, call, OAuth only, retryable, message it contains)
+        let mut rows: Vec<(&str, CreateCall, bool, bool, Option<&str>)> = create_rows(sdk)
+            .into_iter()
+            .map(|(case, call, oauth_only)| {
+                (case, call, oauth_only, false, create_row_message(case))
+            })
+            .collect();
+        rows.extend([
+            (
+                "options->ack_on_ack",
+                with_options_ack(sdk, "ack_on_ack"),
+                false,
+                false,
+                Some(OPTIONS_ACK_REJECTED),
+            ),
+            (
+                "options->ack_on_error",
+                with_options_ack(sdk, "ack_on_error"),
+                false,
+                false,
+                Some(OPTIONS_ACK_REJECTED),
+            ),
+            // Core-origin wording: only "contains the core text".
+            (
+                "stream_count=0",
+                CreateCall {
+                    stream_count: 0,
+                    ..CreateCall::valid(sdk)
+                },
+                false,
+                false,
+                Some("stream_count must be between 1 and 64"),
+            ),
+            (
+                "max_inflight_requests < stream_count",
+                low_inflight(sdk),
+                false,
+                false,
+                Some("must be at least stream_count"),
+            ),
+            // `test_sdk()` points at 127.0.0.1:1: the one slow row.
+            ("connect failure", CreateCall::valid(sdk), false, true, None),
+        ]);
+
+        for (case, call, oauth_only, retryable, expected) in &rows {
+            let ack = FreeCount::leaked();
+            let (got_retryable, message) = call.oauth(Some(ack));
+            assert_eq!(got_retryable, *retryable, "OAuth {case}: {message}");
+            if let Some(expected) = expected {
+                assert!(message.contains(expected), "OAuth {case}: {message}");
+            }
+            ack.assert_freed_once(&format!("OAuth {case} ack user_data"));
+
+            if !oauth_only {
+                let (headers, ack) = (FreeCount::leaked(), FreeCount::leaked());
+                let (got_retryable, message) = call.headers(headers, ack);
+                assert_eq!(got_retryable, *retryable, "headers {case}: {message}");
+                if let Some(expected) = expected {
+                    assert!(message.contains(expected), "headers {case}: {message}");
+                }
+                headers.assert_freed_once(&format!("headers {case} user_data"));
+                ack.assert_freed_once(&format!("headers {case} ack user_data"));
+            }
+        }
+
+        // A NULL `free_ack_user_data` is allowed.
+        CreateCall {
+            table: None,
+            ..CreateCall::valid(sdk)
+        }
+        .oauth(None);
+        // A NULL `result` is allowed; the NULL handle reports the failure.
+        let call = CreateCall {
+            stream_count: 0,
+            ..CreateCall::valid(sdk)
+        };
+        let mux = zerobus_sdk_create_multiplexed_stream(
+            sdk,
+            CreateCall::c_str(&call.table),
+            ptr::null(),
+            0,
+            CreateCall::c_str(&call.client_id),
+            CreateCall::c_str(&call.client_secret),
+            0,
+            &call.options,
+            None,
+            None,
+            ptr::null_mut(),
+            None,
+            ptr::null_mut(),
+        );
+        assert!(mux.is_null());
+        crate::zerobus_sdk_free(sdk);
+    }
+
+    /// Bad arguments make every `_async` call return false at once; the
+    /// callback never runs, and an async create frees its `user_data` once.
+    #[test]
+    fn async_calls_fail_fast_on_invalid_arguments() {
+        let sdk = test_sdk();
+        for (case, call, oauth_only) in &create_rows(sdk) {
+            let expected = create_row_message(case);
             let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
             let (returned, success, retryable, message) = call.oauth_async(ack, sink);
             assert!(
                 !returned && !success && !retryable,
                 "OAuth async {case}: {message}"
             );
+            if let Some(expected) = expected {
+                assert!(message.contains(expected), "OAuth async {case}: {message}");
+            }
             ack.assert_freed_once(&format!("OAuth async {case} ack user_data"));
             sink.assert_never_called(&format!("OAuth async {case}"));
 
@@ -3104,19 +2752,13 @@ mod multiplexed_tests {
             }
         }
         crate::zerobus_sdk_free(sdk);
-    }
 
-    #[test]
-    fn async_ingest_wait_flush_close_fail_fast_on_invalid_arguments() {
+        const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
         let null = ptr::null_mut();
         let data = [1u8];
-        let proto_ptrs = [data.as_ptr()];
-        let proto_lens = [data.len()];
+        let (proto_ptrs, proto_lens) = ([data.as_ptr()], [data.len()]);
         let json = CString::new("{}").unwrap();
         let json_ptrs = [json.as_ptr()];
-        let mut result = unwritten_result();
-
-        // Each call: (what, expected message, the call itself).
         type Call<'a> = Box<dyn Fn(*mut std::ffi::c_void, &mut CResult) -> bool + 'a>;
         let calls: Vec<(&str, &str, Call)> = vec![
             (
@@ -3135,7 +2777,7 @@ mod multiplexed_tests {
             ),
             (
                 "proto_record_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_ingest_proto_record_async(
                         null,
@@ -3149,7 +2791,7 @@ mod multiplexed_tests {
             ),
             (
                 "json_record_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_ingest_json_record_async(
                         null,
@@ -3192,7 +2834,7 @@ mod multiplexed_tests {
             ),
             (
                 "proto_records_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_ingest_proto_records_async(
                         null,
@@ -3221,7 +2863,7 @@ mod multiplexed_tests {
             ),
             (
                 "json_records_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_ingest_json_records_async(
                         null,
@@ -3235,24 +2877,24 @@ mod multiplexed_tests {
             ),
             (
                 "wait_for_message_id_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_wait_for_message_id_async(null, 0, sink_bool, ud, r)
                 }),
             ),
             (
                 "flush_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| zerobus_multiplexed_stream_flush_async(null, sink_bool, ud, r)),
             ),
             (
                 "close_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| zerobus_multiplexed_stream_close_async(null, sink_bool, ud, r)),
             ),
             (
                 "get_unacked_records_async mux=NULL",
-                "Multiplexed stream pointer is null",
+                NULL_HANDLE,
                 Box::new(|ud, r| {
                     zerobus_multiplexed_stream_get_unacked_records_async(null, sink_records, ud, r)
                 }),
@@ -3262,199 +2904,260 @@ mod multiplexed_tests {
             .iter()
             .map(|(what, expected, call)| {
                 let sink = AsyncSink::leaked();
-                let returned = call(sink.user_data(), &mut result);
-                let retryable = result.is_retryable;
-                assert!(!returned, "{what}");
-                assert!(!retryable, "{what}");
-                assert_eq!(
-                    take_result(&mut result),
-                    (false, expected.to_string()),
-                    "{what}"
-                );
+                let mut result = unwritten_result();
+                let (returned, success, retryable, message) =
+                    sync_part(call(sink.user_data(), &mut result), &mut result);
+                assert!(!returned && !success && !retryable, "{what}: {message}");
+                assert!(message.contains(expected), "{what}: {message}");
                 sink
             })
             .collect();
+        // Let a wrongly spawned callback land.
         std::thread::sleep(Duration::from_millis(200));
         for ((what, _, _), sink) in calls.iter().zip(sinks) {
             assert_eq!(sink.count(), 0, "{what}: callback must not run");
         }
     }
 
+    /// Async creates: `options->ack_on_*` is rejected synchronously (false,
+    /// no callback); config and connect errors return true and reach the
+    /// callback once with a NULL mux. Either way both `user_data` are freed
+    /// once.
     #[test]
-    fn async_create_failures_reach_the_callback_and_free_once() {
+    fn async_create_failures_report_and_free_once() {
         let sdk = test_sdk();
-
-        // `test_sdk()` points at 127.0.0.1:1, so the connect fails (retryable).
-        let call = CreateCall::valid(sdk);
-        let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-        let (returned, success, _, message) = call.oauth_async(ack, sink);
-        assert!(returned && success, "OAuth async: {message}");
-        let (_, success, retryable, message, mux) =
-            sink.one_within("OAuth async connect failure", CONNECT_FAILURE_WAIT);
-        assert!(
-            mux == 0 && !success && retryable,
-            "OAuth async callback: {message}"
-        );
-        ack.assert_freed_once("OAuth async connect failure ack user_data");
-
-        let (headers, ack, sink) = (
-            FreeCount::leaked(),
-            FreeCount::leaked(),
-            AsyncSink::leaked(),
-        );
-        let (returned, success, _, message) = call.headers_async(headers, ack, sink);
-        assert!(returned && success, "headers async: {message}");
-        let (_, success, retryable, message, mux) =
-            sink.one_within("headers async connect failure", CONNECT_FAILURE_WAIT);
-        assert!(
-            mux == 0 && !success && retryable,
-            "headers async callback: {message}"
-        );
-        headers.assert_freed_once("headers async connect failure user_data");
-        ack.assert_freed_once("headers async connect failure ack user_data");
-
-        // Config errors are found in the task: true, then one callback with
-        // a NULL mux, and both user_data freed once.
-        let mut low_inflight = CreateCall {
-            stream_count: 3,
-            ..CreateCall::valid(sdk)
-        };
-        low_inflight.options.max_inflight_requests = 2;
-        let rejected = [
+        // (case, call, error in the task, retryable, message it contains,
+        // callback wait)
+        let rows = [
+            (
+                "options->ack_on_ack",
+                with_options_ack(sdk, "ack_on_ack"),
+                false,
+                false,
+                Some(OPTIONS_ACK_REJECTED),
+                Duration::ZERO,
+            ),
+            (
+                "options->ack_on_error",
+                with_options_ack(sdk, "ack_on_error"),
+                false,
+                false,
+                Some(OPTIONS_ACK_REJECTED),
+                Duration::ZERO,
+            ),
             (
                 "stream_count=0",
                 CreateCall {
                     stream_count: 0,
                     ..CreateCall::valid(sdk)
                 },
-                "stream_count must be between 1 and 64",
-            ),
-            (
-                "stream_count=65",
-                CreateCall {
-                    stream_count: 65,
-                    ..CreateCall::valid(sdk)
-                },
-                "stream_count must be between 1 and 64",
+                true,
+                false,
+                Some("stream_count must be between 1 and 64"),
+                Duration::from_secs(5),
             ),
             (
                 "max_inflight_requests < stream_count",
-                low_inflight,
-                "must be at least stream_count",
+                low_inflight(sdk),
+                true,
+                false,
+                Some("must be at least stream_count"),
+                Duration::from_secs(5),
+            ),
+            // `test_sdk()` points at 127.0.0.1:1.
+            (
+                "connect failure",
+                CreateCall::valid(sdk),
+                true,
+                true,
+                None,
+                CONNECT_FAILURE_WAIT,
             ),
         ];
-        for (case, call, expected) in &rejected {
-            let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-            let (returned, success, _, message) = call.oauth_async(ack, sink);
-            assert!(returned && success, "OAuth async {case}: {message}");
-            let (_, success, retryable, message, mux) = sink.one(&format!("OAuth async {case}"));
-            assert!(
-                mux == 0 && !success && !retryable,
-                "OAuth async {case}: {message}"
-            );
-            assert!(message.contains(expected), "OAuth async {case}: {message}");
-            ack.assert_freed_once(&format!("OAuth async {case} ack user_data"));
-
-            let (headers, ack, sink) = (
-                FreeCount::leaked(),
-                FreeCount::leaked(),
-                AsyncSink::leaked(),
-            );
-            let (returned, success, _, message) = call.headers_async(headers, ack, sink);
-            assert!(returned && success, "headers async {case}: {message}");
-            let (_, success, retryable, message, mux) = sink.one(&format!("headers async {case}"));
-            assert!(
-                mux == 0 && !success && !retryable,
-                "headers async {case}: {message}"
-            );
-            assert!(
-                message.contains(expected),
-                "headers async {case}: {message}"
-            );
-            headers.assert_freed_once(&format!("headers async {case} user_data"));
-            ack.assert_freed_once(&format!("headers async {case} ack user_data"));
-        }
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn async_creates_reject_ack_callbacks_in_options_synchronously() {
-        let sdk = test_sdk();
-        for field in ["ack_on_ack", "ack_on_error"] {
-            let mut call = CreateCall::valid(sdk);
-            match field {
-                "ack_on_ack" => call.options.ack_on_ack = Some(noop_mux_ack),
-                _ => call.options.ack_on_error = Some(noop_mux_error),
+        let check = |what: String,
+                     sync: (bool, bool, bool, String),
+                     sink: &AsyncSink,
+                     in_task: bool,
+                     retryable: bool,
+                     expected: Option<&str>,
+                     wait: Duration| {
+            let (returned, success, sync_retryable, message) = sync;
+            let (success, got_retryable, message) = if in_task {
+                assert!(returned && success, "{what}: {message}");
+                let (_, success, got_retryable, message, mux) = sink.one_within(&what, wait);
+                assert_eq!(mux, 0, "{what}: the failure carries a NULL mux");
+                (success, got_retryable, message)
+            } else {
+                assert!(!returned, "{what}: {message}");
+                sink.assert_never_called(&what);
+                (success, sync_retryable, message)
+            };
+            assert!(!success, "{what}: {message}");
+            assert_eq!(got_retryable, retryable, "{what}: {message}");
+            if let Some(expected) = expected {
+                assert!(message.contains(expected), "{what}: {message}");
             }
-            let expected = "are not supported for multiplexed streams";
-
+        };
+        for (case, call, in_task, retryable, expected, wait) in &rows {
             let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-            let (returned, success, retryable, message) = call.oauth_async(ack, sink);
-            assert!(
-                !returned && !success && !retryable,
-                "OAuth async options->{field}: {message}"
+            let sync = call.oauth_async(ack, sink);
+            let what = format!("OAuth async {case}");
+            check(
+                what.clone(),
+                sync,
+                sink,
+                *in_task,
+                *retryable,
+                *expected,
+                *wait,
             );
-            assert!(
-                message.contains(expected),
-                "OAuth async options->{field}: {message}"
-            );
-            ack.assert_freed_once(&format!("OAuth async options->{field} ack user_data"));
-            sink.assert_never_called(&format!("OAuth async options->{field}"));
+            ack.assert_freed_once(&format!("{what} ack user_data"));
 
             let (headers, ack, sink) = (
                 FreeCount::leaked(),
                 FreeCount::leaked(),
                 AsyncSink::leaked(),
             );
-            let (returned, success, retryable, message) = call.headers_async(headers, ack, sink);
-            assert!(
-                !returned && !success && !retryable,
-                "headers async options->{field}: {message}"
+            let sync = call.headers_async(headers, ack, sink);
+            let what = format!("headers async {case}");
+            check(
+                what.clone(),
+                sync,
+                sink,
+                *in_task,
+                *retryable,
+                *expected,
+                *wait,
             );
-            assert!(
-                message.contains(expected),
-                "headers async options->{field}: {message}"
-            );
-            headers.assert_freed_once(&format!("headers async options->{field} user_data"));
-            ack.assert_freed_once(&format!("headers async options->{field} ack user_data"));
-            sink.assert_never_called(&format!("headers async options->{field}"));
+            headers.assert_freed_once(&format!("{what} user_data"));
+            ack.assert_freed_once(&format!("{what} ack user_data"));
         }
         crate::zerobus_sdk_free(sdk);
     }
 
+    /// The ack bridge passes raw message IDs (incl. negative) unchanged,
+    /// and a NULL side is a no-op.
     #[test]
-    fn async_create_task_panic_is_reported_to_the_callback() {
-        let sdk = test_sdk();
-        let mut call = CreateCall {
-            stream_count: 1,
-            ..CreateCall::valid(sdk)
-        };
-        call.options.max_inflight_requests = usize::MAX;
-        let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
-        let (returned, success, _, message) = call.oauth_async(ack, sink);
-        assert!(returned && success, "{message}");
-        let (_, success, retryable, message, mux) = sink.one("panicking async create");
-        assert!(mux == 0 && !success && !retryable, "{message}");
-        assert!(
-            message.starts_with("Rust panic caught at FFI boundary"),
-            "unexpected error: {message}"
+    fn ack_bridge_passes_raw_ids_one_sided() {
+        static ACKED: AtomicI64 = AtomicI64::new(0);
+        static FAILED: AtomicI64 = AtomicI64::new(0);
+        extern "C" fn on_ack(id: i64, _user_data: *mut std::ffi::c_void) {
+            ACKED.store(id, Ordering::SeqCst);
+        }
+        extern "C" fn on_error(id: i64, _msg: *const c_char, _user_data: *mut std::ffi::c_void) {
+            FAILED.store(id, Ordering::SeqCst);
+        }
+        // Lane 63 sets the sign bit, so this raw ID is negative.
+        let negative = MessageId::from_raw(((63u64 << 58) | 7) as i64);
+        let failed = MessageId::from_raw((1i64 << 58) | 9);
+        assert!(negative.raw() < 0);
+
+        let both = MultiplexedCallbackAckCallback::new(
+            Some(on_ack),
+            Some(on_error),
+            ptr::null_mut(),
+            None,
         );
-        crate::zerobus_sdk_free(sdk);
+        both.on_ack(negative);
+        both.on_error(failed, "boom");
+        assert_eq!(ACKED.load(Ordering::SeqCst), negative.raw());
+        assert_eq!(FAILED.load(Ordering::SeqCst), failed.raw());
+
+        let id = MessageId::from_raw((1i64 << 58) | 3);
+        let ack_only =
+            MultiplexedCallbackAckCallback::new(Some(on_ack), None, ptr::null_mut(), None);
+        ack_only.on_ack(id);
+        ack_only.on_error(MessageId::from_raw(0), "ignored");
+        assert_eq!(ACKED.load(Ordering::SeqCst), id.raw());
+        assert_eq!(
+            FAILED.load(Ordering::SeqCst),
+            failed.raw(),
+            "on_error must not run"
+        );
+
+        let error_only =
+            MultiplexedCallbackAckCallback::new(None, Some(on_error), ptr::null_mut(), None);
+        error_only.on_ack(MessageId::from_raw(0));
+        error_only.on_error(id, "boom");
+        assert_eq!(
+            ACKED.load(Ordering::SeqCst),
+            id.raw(),
+            "on_ack must not run"
+        );
+        assert_eq!(FAILED.load(Ordering::SeqCst), id.raw());
     }
 
     #[test]
-    fn take_error_keeps_errors_from_later_epochs() {
+    fn serialized_headers_provider_allows_concurrent_lanes() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        static MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn slow_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+            MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
+            // Hold the call long enough for an unserialized second one to overlap.
+            std::thread::sleep(Duration::from_millis(20));
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+            empty_headers(ptr::null_mut())
+        }
+
+        let provider = Arc::new(SerializedHeadersProvider::new(
+            CallbackHeadersProvider::new(slow_headers, ptr::null_mut(), None),
+        ));
+        RUNTIME.block_on(async {
+            let calls: Vec<_> = (0..4)
+                .map(|_| {
+                    let provider = Arc::clone(&provider);
+                    tokio::spawn(async move { provider.get_headers().await })
+                })
+                .collect();
+            for call in calls {
+                let result = call.await.unwrap();
+                assert!(result.is_ok(), "concurrent lane call failed: {result:?}");
+            }
+        });
+        assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1);
+    }
+
+    /// The tracker keeps the first failure (typed cause unchanged), hands
+    /// it out once, and keeps a later epoch's failure for a later flush.
+    #[test]
+    fn pending_ingests_keep_first_error_per_epoch() {
+        use databricks_zerobus_ingest_sdk::{GrpcCode, GrpcStatus};
         let tracker = Arc::new(PendingIngests::default());
         let fail = |message: &str| {
             let mut ticket = tracker.begin();
             ticket.error = Some(ZerobusError::InvalidArgument(message.into()));
         };
 
+        // A retryable typed cause comes back unchanged, once.
+        let mut ticket = tracker.begin();
+        ticket.error = Some(ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::Unavailable,
+            "x",
+        )));
+        drop(ticket);
+        match tracker.take_error(None).expect("the failure is stored") {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), GrpcCode::Unavailable);
+                assert_eq!(status.message(), "x");
+            }
+            other => panic!("stored error changed variant: {other:?}"),
+        }
+        assert!(tracker.take_error(None).is_none(), "taken once");
+
+        // The first failure wins; the later one is dropped.
+        fail("A");
+        fail("B");
+        assert!(matches!(
+            tracker.take_error(None),
+            Some(ZerobusError::InvalidArgument(m)) if m == "A"
+        ));
+        assert!(tracker.take_error(None).is_none());
+
+        // A failure accepted after a flush began belongs to the next flush.
         fail("before");
         let target = tracker.start_flush();
-        // Accepted after this flush began, so it belongs to the next one.
         fail("after");
-
         assert!(matches!(
             tracker.take_error(Some(target)),
             Some(ZerobusError::InvalidArgument(m)) if m == "before"
@@ -3470,175 +3173,112 @@ mod multiplexed_tests {
         ));
     }
 
+    /// A panic in background work (async create, any async op, async
+    /// ingest) reaches its callback once as a non-retryable error, and
+    /// releases what the work held.
     #[test]
-    fn panic_in_async_work_is_reported_once() {
+    fn panics_in_background_work_are_reported_once() {
+        const PANIC: &str = "Rust panic caught at FFI boundary";
+
+        // Async create: max_inflight usize::MAX panics in the task.
+        let sdk = test_sdk();
+        let mut call = CreateCall {
+            stream_count: 1,
+            ..CreateCall::valid(sdk)
+        };
+        call.options.max_inflight_requests = usize::MAX;
+        let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
+        let (returned, success, _, message) = call.oauth_async(ack, sink);
+        assert!(returned && success, "{message}");
+        let (_, success, retryable, message, mux) = sink.one("panicking async create");
+        assert!(mux == 0 && !success && !retryable, "{message}");
+        assert!(message.starts_with(PANIC), "async create: {message}");
+        crate::zerobus_sdk_free(sdk);
+
+        // Any async op: on_panic runs only for a panic, and once.
         let (tx, rx) = std::sync::mpsc::channel();
         let ok_tx = tx.clone();
         spawn_with_panic_report(async {}, move |result| {
-            let _ = ok_tx.send(("normal work", result.success));
+            let _ = ok_tx.send(("normal work", result.success, String::new()));
         });
-        spawn_with_panic_report(async { panic!("boom") }, move |result| {
-            let mut result = result;
-            let retryable = result.is_retryable;
-            let (success, message) = take_result(&mut result);
-            assert!(!success && !retryable, "{message}");
-            assert_eq!(message, "Rust panic caught at FFI boundary: boom");
-            let _ = tx.send(("panicking work", success));
+        spawn_with_panic_report(async { panic!("boom") }, move |mut result| {
+            let (success, retryable, message) = take_full(&mut result);
+            assert!(!retryable, "{message}");
+            let _ = tx.send(("panicking work", success, message));
         });
-
-        let (which, _) = rx
+        let (which, success, message) = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("the panic is reported");
         assert_eq!(which, "panicking work");
+        assert!(!success);
+        assert_eq!(message, format!("{PANIC}: boom"));
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "on_panic runs only for a panic, and once"
         );
-    }
 
-    /// A live 1-lane JSON mux on the mock server, for the panic-path tests.
-    fn live_mux() -> (
-        tokio::runtime::Runtime,
-        *mut CZerobusSdk,
-        *mut CZerobusMultiplexedStream,
-    ) {
-        use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (server, url) = runtime.block_on(start_mock_server()).unwrap();
-        // The mock opens the lane itself; offset 0 is acked.
-        runtime.block_on(server.inject_responses(
-            "ffi.mux.panic",
-            vec![MockResponse::RecordAck {
-                ack_up_to_offset: 0,
-                delay_ms: 0,
-            }],
-        ));
-        let endpoint = CString::new(url).unwrap();
-        let builder = crate::zerobus_sdk_builder_new();
-        crate::zerobus_sdk_builder_endpoint(builder, endpoint.as_ptr());
-        crate::zerobus_sdk_builder_unity_catalog_url(builder, endpoint.as_ptr());
-        crate::zerobus_sdk_builder_disable_tls(builder);
-        let mut result = unwritten_result();
-        let sdk = crate::zerobus_sdk_builder_build(builder, &mut result);
-        assert!(result.success && !sdk.is_null());
-
-        let table = CString::new("ffi.mux.panic").unwrap();
-        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-            sdk,
-            table.as_ptr(),
-            ptr::null(),
-            0,
-            empty_headers,
-            ptr::null_mut(),
-            None,
-            1,
-            &json_options(),
-            None,
-            None,
-            ptr::null_mut(),
-            None,
-            &mut result,
-        );
-        let (success, message) = take_result(&mut result);
-        assert!(success && !mux.is_null(), "{message}");
-        (runtime, sdk, mux)
-    }
-
-    /// Runs a flush or close on a thread; fails if it doesn't return in 2 s.
-    fn call_within_2s(
-        mux: *mut CZerobusMultiplexedStream,
-        call: extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool,
-        what: &str,
-    ) -> (bool, bool, String) {
-        let mux_addr = mux as usize;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut result = unwritten_result();
-            let returned = call(mux_addr as *mut _, &mut result);
-            let retryable = result.is_retryable;
-            let (_, message) = take_result(&mut result);
-            let _ = tx.send((returned, retryable, message));
-        });
-        rx.recv_timeout(Duration::from_secs(2))
-            .unwrap_or_else(|_| panic!("{what} did not return within 2 s"))
-    }
-
-    const NOWAIT_PANIC: &str = "a background _nowait ingest panicked; its record was dropped";
-
-    #[test]
-    fn nowait_ingest_panic_is_reported_by_next_flush() {
+        // Async ingest: the callback gets INGEST_ERROR; the ticket and the
+        // read guard are released, so flush and close don't hang.
         let (_runtime, sdk, mux) = live_mux();
-        spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
-
-        let flush = zerobus_multiplexed_stream_flush;
-        let (flushed, retryable, message) = call_within_2s(mux, flush, "flush after the panic");
-        assert!(!flushed && !retryable, "{message}");
-        assert!(
-            message.contains(NOWAIT_PANIC),
-            "unexpected error: {message}"
-        );
-
-        // Reported once; the mux keeps working.
-        let json = CString::new(r#"{"id": 0}"#).unwrap();
-        let mut result = unwritten_result();
-        zerobus_multiplexed_stream_ingest_json_record_nowait(mux, json.as_ptr(), &mut result);
-        assert!(
-            take_result(&mut result).0,
-            "a valid _nowait after the panic"
-        );
-        let (flushed, _, message) = call_within_2s(mux, flush, "flush after a valid _nowait");
-        assert!(flushed, "{message}");
-
-        zerobus_multiplexed_stream_free(mux);
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn nowait_ingest_panic_is_reported_by_close() {
-        let (_runtime, sdk, mux) = live_mux();
-        spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
-
-        let close = zerobus_multiplexed_stream_close;
-        let (closed, retryable, message) = call_within_2s(mux, close, "close after the panic");
-        assert!(!closed && !retryable, "{message}");
-        assert!(
-            message.contains(NOWAIT_PANIC),
-            "unexpected error: {message}"
-        );
-        assert!(zerobus_multiplexed_stream_is_closed(mux));
-
-        zerobus_multiplexed_stream_free(mux);
-        crate::zerobus_sdk_free(sdk);
-    }
-
-    #[test]
-    fn async_ingest_panic_reaches_its_callback_once() {
-        let (_runtime, sdk, mux) = live_mux();
-        let handle = validate_mux_ptr(mux).unwrap();
         let sink = AsyncSink::leaked();
         spawn_ingest_async(
-            handle,
+            validate_mux_ptr(mux).unwrap(),
             IngestPayload::PanicForTest,
             sink_offset,
             sink.user_data(),
         )
         .unwrap();
-
         let (id, success, retryable, message, _) = sink.one("panicking async ingest");
         assert!(id == INGEST_ERROR && !success && !retryable, "{message}");
-        assert!(
-            message.starts_with("Rust panic caught at FFI boundary"),
-            "unexpected error: {message}"
-        );
-        // The panic released the ticket and the read guard: flush and close
-        // don't hang.
-        let mut result = unwritten_result();
-        assert!(zerobus_multiplexed_stream_flush(mux, &mut result));
-        take_result(&mut result);
-        assert!(zerobus_multiplexed_stream_close(mux, &mut result));
-        take_result(&mut result);
-
+        assert!(message.starts_with(PANIC), "async ingest: {message}");
+        let flush = zerobus_multiplexed_stream_flush;
+        let close = zerobus_multiplexed_stream_close;
+        let (flushed, _, message) = blocking_within_2s(mux, flush, "flush after the panic");
+        assert!(flushed, "{message}");
+        let (closed, _, message) = blocking_within_2s(mux, close, "close after the panic");
+        assert!(closed, "{message}");
         zerobus_multiplexed_stream_free(mux);
         crate::zerobus_sdk_free(sdk);
+    }
+
+    // _nowait group (pending decision).
+    /// A panicking `_nowait` ingest is reported by the next flush or close,
+    /// once; after a flush reports it, the mux keeps working.
+    #[test]
+    fn nowait_ingest_panic_is_reported_by_next_flush_or_close() {
+        const NOWAIT_PANIC: &str = "a background _nowait ingest panicked; its record was dropped";
+        type Blocking = extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool;
+        let flush: Blocking = zerobus_multiplexed_stream_flush;
+        let close: Blocking = zerobus_multiplexed_stream_close;
+        for (what, call) in [("flush", flush), ("close", close)] {
+            let (_runtime, sdk, mux) = live_mux();
+            spawn_ingest(validate_mux_ptr(mux).unwrap(), IngestPayload::PanicForTest).unwrap();
+
+            let (returned, retryable, message) =
+                blocking_within_2s(mux, call, &format!("{what} after the panic"));
+            assert!(!returned && !retryable, "{what}: {message}");
+            assert!(message.contains(NOWAIT_PANIC), "{what}: {message}");
+
+            if what == "close" {
+                assert!(zerobus_multiplexed_stream_is_closed(mux));
+            } else {
+                let json = CString::new(r#"{"id": 0}"#).unwrap();
+                let mut result = unwritten_result();
+                zerobus_multiplexed_stream_ingest_json_record_nowait(
+                    mux,
+                    json.as_ptr(),
+                    &mut result,
+                );
+                assert!(
+                    take_result(&mut result).0,
+                    "a valid _nowait after the panic"
+                );
+                let (flushed, _, message) =
+                    blocking_within_2s(mux, flush, "flush after a valid _nowait");
+                assert!(flushed, "reported once: {message}");
+            }
+            zerobus_multiplexed_stream_free(mux);
+            crate::zerobus_sdk_free(sdk);
+        }
     }
 }
