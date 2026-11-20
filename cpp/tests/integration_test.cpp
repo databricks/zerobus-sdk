@@ -7,10 +7,18 @@
 // Optional: ZEROBUS_TEST_RECORD_JSON — a record matching the table schema
 // (the default almost certainly won't match; set it for a real run).
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "zerobus/error.hpp"
 #include "zerobus/sdk.hpp"
@@ -28,6 +36,144 @@ void fail(const char* msg) {
 std::string env(const char* name) {
   const char* v = std::getenv(name);
   return (v != nullptr) ? std::string(v) : std::string();
+}
+
+void check(const char* msg, bool ok) {
+  if (!ok) {
+    fail(msg);
+  }
+}
+
+// Runs @p call; checks it throws a non-retryable ZerobusException whose
+// message contains @p message.
+template <typename F>
+void check_throws(const char* what, F call, const std::string& message) {
+  try {
+    call();
+    fail(what);
+  } catch (const zerobus::ZerobusException& e) {
+    if (e.is_retryable() ||
+        std::string(e.what()).find(message) == std::string::npos) {
+      fail(what);
+      std::fprintf(stderr, "  what(): %s (retryable=%s)\n", e.what(),
+                   e.is_retryable() ? "true" : "false");
+    }
+  }
+}
+
+// Records every message ID its mux delivers.
+class IdRecorder : public zerobus::MultiplexedAckCallback {
+ public:
+  void on_ack(zerobus::MessageId id) noexcept override {
+    std::lock_guard<std::mutex> lock(mu_);
+    acked_.insert(id);
+  }
+  void on_error(zerobus::MessageId, const std::string&) noexcept override {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++errors_;
+  }
+  bool saw_all(const std::vector<zerobus::MessageId>& ids) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (zerobus::MessageId id : ids) {
+      if (acked_.count(id) == 0) {
+        return false;
+      }
+    }
+    return errors_ == 0;
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_set<zerobus::MessageId> acked_;
+  int errors_ = 0;
+};
+
+// The multiplexed stream through the builder: 33 lanes, so the lane-32 IDs
+// are negative. Ingest in a loop, flush once.
+void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
+                     const std::string& client_id,
+                     const std::string& client_secret,
+                     const std::string& record_json) {
+  constexpr std::size_t kLanes = 33;
+  auto recorder = std::make_shared<IdRecorder>();
+  std::weak_ptr<IdRecorder> recorder_alive = recorder;
+  std::vector<zerobus::MessageId> ids;
+  {
+    zerobus::MultiplexedStream mux = [&] {
+      zerobus::MultiplexedStreamBuilder builder =
+          sdk.stream_builder()
+              .table(table_name)
+              .oauth(client_id, client_secret)
+              .json()
+              .multiplexed(kLanes)
+              .ack_callback(recorder);
+      return builder.build();
+    }();
+    recorder.reset();
+    check("the callback outlives the builder and the caller's reference",
+          !recorder_alive.expired());
+
+    for (std::size_t i = 0; i < kLanes + 1; ++i) {
+      ids.push_back(mux.ingest_json_record(record_json));
+    }
+    std::optional<zerobus::MessageId> batch =
+        mux.ingest_json_records({record_json, record_json});
+    check("a JSON batch returns an ID", batch.has_value());
+    if (batch) {
+      ids.push_back(*batch);
+    }
+    check("an empty batch returns nullopt",
+          !mux.ingest_json_records({}).has_value());
+    // Round-robin: the 33rd ingest lands on lane 32.
+    const zerobus::MessageId lane_32 = ids[kLanes - 1];
+    check("the lane-32 message ID is negative", lane_32.raw() < 0);
+    mux.wait_for_message_id(lane_32);
+    mux.flush();
+    check("nothing is unacked after flush", mux.get_unacked_records().empty());
+    check("is_closed() is false before close()", !mux.is_closed());
+    mux.close();
+    check("is_closed() is true after close()", mux.is_closed());
+    // close() drains the callbacks.
+    if (auto alive = recorder_alive.lock()) {
+      check("the callback saw every returned ID, incl. negative ones",
+            alive->saw_all(ids));
+    }
+    check_throws(
+        "ingest after close() must throw",
+        [&] { mux.ingest_json_record(record_json); },
+        "MultiplexedStream is closed");
+
+    // Using a moved-from stream is the point of this check.
+    zerobus::MultiplexedStream moved = std::move(mux);
+    check_throws(
+        "a moved-from MultiplexedStream must throw", [&] { mux.flush(); },
+        "MultiplexedStream has been moved from");
+  }
+  // The stream is destroyed; the FFI frees the callback (maybe a bit later).
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!recorder_alive.expired() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  check("the callback is freed after the stream is destroyed",
+        recorder_alive.expired());
+
+  // The proto overloads cross the FFI too: on this JSON table each one throws.
+  zerobus::MultiplexedStream json_mux = sdk.stream_builder()
+                                            .table(table_name)
+                                            .oauth(client_id, client_secret)
+                                            .json()
+                                            .multiplexed(1)
+                                            .build();
+  const std::vector<std::uint8_t> proto = {0x08, 0x01};
+  check_throws(
+      "proto record on a JSON mux must throw",
+      [&] { json_mux.ingest_proto_record(proto); }, "");
+  check_throws(
+      "proto batch on a JSON mux must throw",
+      [&] { json_mux.ingest_proto_records({proto}); }, "");
+  json_mux.close();
 }
 
 }  // namespace
@@ -84,6 +230,9 @@ int main() {
 
     std::printf("integration_test: ingested %d records, flushed, closed\n",
                 kRecordCount);
+
+    run_multiplexed(sdk, table_name, client_id, client_secret, record_json);
+    std::printf("integration_test: multiplexed stream OK\n");
   } catch (const zerobus::ZerobusException& e) {
     fail("live ingestion path threw ZerobusException");
     std::fprintf(stderr, "  what(): %s (retryable=%s)\n", e.what(),

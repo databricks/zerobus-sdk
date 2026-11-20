@@ -1,10 +1,12 @@
-// StreamBuilder: the settings-to-C mapping, validation errors, reuse, and the
-// native bridges a failed build() must release. Nothing here connects: a
+// StreamBuilder and MultiplexedStreamBuilder: the settings-to-C mapping,
+// validation errors, reuse, and the native bridges a failed build() must
+// release. Nothing here connects: a
 // non-empty malformed descriptor makes the FFI create fail before any I/O.
 // Dependency-free, like the other tests: returns non-zero on failure.
 
 #include "zerobus/stream_builder.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -12,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,6 +26,8 @@ namespace {
 
 using zerobus::CallbackWaitPolicy;
 using zerobus::CStreamConfigurationOptions;
+using zerobus::MultiplexedAckCallback;
+using zerobus::MultiplexedStreamBuilder;
 using zerobus::Sdk;
 using zerobus::StreamBuilder;
 using zerobus::ZerobusException;
@@ -115,7 +120,8 @@ std::optional<ZerobusException> thrown(const std::string& what,
 
 // validate() and build() both throw a non-retryable ZerobusException whose
 // message contains @p message.
-void check_rejected(const std::string& what, const StreamBuilder& builder,
+template <typename Builder>
+void check_rejected(const std::string& what, const Builder& builder,
                     const std::string& message) {
   for (bool build : {false, true}) {
     const std::string call = what + (build ? ": build()" : ": validate()");
@@ -136,15 +142,15 @@ void check_rejected(const std::string& what, const StreamBuilder& builder,
 }
 
 // The message of a pre-connect build() failure.
-std::string build_failure(const std::string& what,
-                          const StreamBuilder& builder) {
+template <typename Builder>
+std::string build_failure(const std::string& what, const Builder& builder) {
   auto e = thrown(what, [&] { builder.build(); });
   return e ? e->what() : std::string();
 }
 
 // R5-1: an unset builder converts like create_stream with default
-// StreamOptions; each setter, with a value and with 0, reaches its C field;
-// the callback wait policy maps its three states.
+// StreamOptions; every setter, with distinct values and with 0, reaches its
+// own C field; the callback wait policy maps its states.
 void builder_converts_options_like_create_stream(Sdk& sdk) {
   check_same_c_options("unset builder",
                        StreamBuilderAccess::c_options(
@@ -163,47 +169,53 @@ void builder_converts_options_like_create_stream(Sdk& sdk) {
         expect;
   };
   const std::vector<Case> cases = {
-      {"max_inflight_requests(7)", [](auto& b) { b.max_inflight_requests(7); },
-       [](auto& w, auto& c) { check_eq(w, c.max_inflight_requests, 7); }},
-      {"recovery(false)", [](auto& b) { b.recovery(false); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery, false); }},
-      {"recovery_timeout_ms(0)", [](auto& b) { b.recovery_timeout_ms(0); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_timeout_ms, 0); }},
-      {"recovery_timeout_ms(11)", [](auto& b) { b.recovery_timeout_ms(11); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_timeout_ms, 11); }},
-      {"recovery_backoff_ms(0)", [](auto& b) { b.recovery_backoff_ms(0); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_backoff_ms, 0); }},
-      {"recovery_backoff_ms(12)", [](auto& b) { b.recovery_backoff_ms(12); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_backoff_ms, 12); }},
-      {"recovery_retries(0)", [](auto& b) { b.recovery_retries(0); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_retries, 0); }},
-      {"recovery_retries(13)", [](auto& b) { b.recovery_retries(13); },
-       [](auto& w, auto& c) { check_eq(w, c.recovery_retries, 13); }},
-      {"server_lack_of_ack_timeout_ms(0)",
-       [](auto& b) { b.server_lack_of_ack_timeout_ms(0); },
+      {"every scalar set to a distinct value",
+       [](auto& b) {
+         b.max_inflight_requests(101)
+             .recovery(false)
+             .recovery_timeout_ms(102)
+             .recovery_backoff_ms(103)
+             .recovery_retries(104)
+             .server_lack_of_ack_timeout_ms(105)
+             .flush_timeout_ms(106)
+             .stream_paused_max_wait_time_ms(107);
+       },
        [](auto& w, auto& c) {
-         check_eq(w, c.server_lack_of_ack_timeout_ms, 0);
+         check_eq(w + ": max_inflight_requests", c.max_inflight_requests, 101);
+         check_eq(w + ": recovery", c.recovery, false);
+         check_eq(w + ": recovery_timeout_ms", c.recovery_timeout_ms, 102);
+         check_eq(w + ": recovery_backoff_ms", c.recovery_backoff_ms, 103);
+         check_eq(w + ": recovery_retries", c.recovery_retries, 104);
+         check_eq(w + ": server_lack_of_ack_timeout_ms",
+                  c.server_lack_of_ack_timeout_ms, 105);
+         check_eq(w + ": flush_timeout_ms", c.flush_timeout_ms, 106);
+         check_eq(w + ": has_stream_paused_max_wait_time_ms",
+                  c.has_stream_paused_max_wait_time_ms, true);
+         check_eq(w + ": stream_paused_max_wait_time_ms",
+                  c.stream_paused_max_wait_time_ms, 107);
        }},
-      {"server_lack_of_ack_timeout_ms(14)",
-       [](auto& b) { b.server_lack_of_ack_timeout_ms(14); },
+      {"every scalar set to 0",
+       [](auto& b) {
+         b.max_inflight_requests(0)
+             .recovery_timeout_ms(0)
+             .recovery_backoff_ms(0)
+             .recovery_retries(0)
+             .server_lack_of_ack_timeout_ms(0)
+             .flush_timeout_ms(0)
+             .stream_paused_max_wait_time_ms(0);
+       },
        [](auto& w, auto& c) {
-         check_eq(w, c.server_lack_of_ack_timeout_ms, 14);
-       }},
-      {"flush_timeout_ms(0)", [](auto& b) { b.flush_timeout_ms(0); },
-       [](auto& w, auto& c) { check_eq(w, c.flush_timeout_ms, 0); }},
-      {"flush_timeout_ms(15)", [](auto& b) { b.flush_timeout_ms(15); },
-       [](auto& w, auto& c) { check_eq(w, c.flush_timeout_ms, 15); }},
-      {"stream_paused_max_wait_time_ms(0)",
-       [](auto& b) { b.stream_paused_max_wait_time_ms(0); },
-       [](auto& w, auto& c) {
-         check_eq(w + " has", c.has_stream_paused_max_wait_time_ms, true);
-         check_eq(w, c.stream_paused_max_wait_time_ms, 0);
-       }},
-      {"stream_paused_max_wait_time_ms(16)",
-       [](auto& b) { b.stream_paused_max_wait_time_ms(16); },
-       [](auto& w, auto& c) {
-         check_eq(w + " has", c.has_stream_paused_max_wait_time_ms, true);
-         check_eq(w, c.stream_paused_max_wait_time_ms, 16);
+         check_eq(w + ": max_inflight_requests", c.max_inflight_requests, 0);
+         check_eq(w + ": recovery_timeout_ms", c.recovery_timeout_ms, 0);
+         check_eq(w + ": recovery_backoff_ms", c.recovery_backoff_ms, 0);
+         check_eq(w + ": recovery_retries", c.recovery_retries, 0);
+         check_eq(w + ": server_lack_of_ack_timeout_ms",
+                  c.server_lack_of_ack_timeout_ms, 0);
+         check_eq(w + ": flush_timeout_ms", c.flush_timeout_ms, 0);
+         check_eq(w + ": has_stream_paused_max_wait_time_ms",
+                  c.has_stream_paused_max_wait_time_ms, true);
+         check_eq(w + ": stream_paused_max_wait_time_ms",
+                  c.stream_paused_max_wait_time_ms, 0);
        }},
       {"stream_paused_max_wait_time_ms(nullopt)",
        [](auto& b) {
@@ -288,6 +300,11 @@ void builder_validation_errors(Sdk& sdk) {
   for (const Case& c : cases) {
     check_rejected(c.name, c.builder, c.message);
   }
+  // The mux builder runs the same checks first.
+  check_rejected(
+      "multiplexed(2) missing table",
+      sdk.stream_builder().oauth("id", "secret").json().multiplexed(2),
+      "table name is required");
 
   // OAuth set after a null provider wins, so validate() passes.
   try {
@@ -310,9 +327,57 @@ void builder_validation_errors(Sdk& sdk) {
                 .record_type == zerobus::RecordType::Json);
 }
 
-// R5-4: copies are independent, validate() repeats, a failed build() leaves the
-// builder usable, the caller's strings and vectors are copied, and the builder
-// survives a move of its Sdk.
+// R5-3: the mux checks run before the FFI, with the core's wording; the
+// boundaries are accepted.
+void mux_builder_validation(Sdk& sdk) {
+  const StreamBuilder base =
+      sdk.stream_builder().table("main.default.t").oauth("id", "secret").json();
+  const auto ordinary = std::make_shared<NoopAckCallback>();
+  const auto mux_callback = MultiplexedAckCallback::from([](auto) {});
+  struct Case {
+    const char* name;
+    MultiplexedStreamBuilder builder;
+    const char* message;
+  };
+  const std::vector<Case> cases = {
+      {"multiplexed(0)", base.multiplexed(0),
+       "multiplexed stream_count must be between 1 and 64"},
+      {"multiplexed(65)", base.multiplexed(65),
+       "multiplexed stream_count must be between 1 and 64"},
+      {"max_inflight_requests(2).multiplexed(3)",
+       StreamBuilder(base).max_inflight_requests(2).multiplexed(3),
+       "max_inflight_requests (2) must be at least stream_count (3) for "
+       "multiplexed streams"},
+      {"ack_callback then multiplexed(2)",
+       StreamBuilder(base).ack_callback(ordinary).multiplexed(2),
+       "ack_callback is only valid for ordinary streams; use "
+       "multiplexed(n).ack_callback(...)"},
+      {"ack_callback then multiplexed(2).ack_callback",
+       StreamBuilder(base).ack_callback(ordinary).multiplexed(2).ack_callback(
+           mux_callback),
+       "ack_callback is only valid for ordinary streams; use "
+       "multiplexed(n).ack_callback(...)"},
+  };
+  for (const Case& c : cases) {
+    check_rejected(c.name, c.builder, c.message);
+  }
+
+  const std::vector<std::pair<const char*, MultiplexedStreamBuilder>> accepted =
+      {{"multiplexed(64)", base.multiplexed(64)},
+       {"max_inflight_requests(2).multiplexed(2)",
+        StreamBuilder(base).max_inflight_requests(2).multiplexed(2)}};
+  for (const auto& [name, builder] : accepted) {
+    try {
+      builder.validate();
+    } catch (const ZerobusException& e) {
+      check(std::string(name) + " must be accepted: " + e.what(), false);
+    }
+  }
+}
+
+// R5-4: copies and multiplexed(n) snapshots are independent, validate()
+// repeats, a failed build() leaves the builder usable, the caller's strings
+// and vectors are copied, and the builder survives a move of its Sdk.
 void builder_snapshot_copies_and_sdk_move() {
   Sdk sdk = local_sdk();
   StreamBuilder original = sdk.stream_builder()
@@ -343,10 +408,25 @@ void builder_snapshot_copies_and_sdk_move() {
     table.assign("x");
     descriptor.clear();
   }
-  check_eq("caller's later edits don't reach the builder",
-           build_failure("build() after the caller's edits",
-                         from_temporaries) == first,
-           true);
+  check("the builder copied the table name",
+        StreamBuilderAccess::table_name(from_temporaries) ==
+            std::optional<std::string>("main.default.t"));
+  check("the builder copied the descriptor",
+        StreamBuilderAccess::descriptor(from_temporaries) ==
+            malformed_descriptor());
+
+  // multiplexed(n) takes a snapshot: later changes to the ordinary builder
+  // don't reach it.
+  StreamBuilder ordinary = original;
+  const MultiplexedStreamBuilder mux = ordinary.multiplexed(2);
+  ordinary.flush_timeout_ms(23).table("main.default.other");
+  check_eq("the mux builder keeps its snapshot",
+           StreamBuilderAccess::options(StreamBuilderAccess::base(mux))
+               .flush_timeout_ms,
+           21);
+  check("the mux builder keeps its table",
+        StreamBuilderAccess::table_name(StreamBuilderAccess::base(mux)) ==
+            std::optional<std::string>("main.default.t"));
 
   Sdk moved = std::move(sdk);
   check_eq("build() after the Sdk moved",
@@ -354,8 +434,8 @@ void builder_snapshot_copies_and_sdk_move() {
            true);
 }
 
-// R5-5: a failed build() releases the bridges it allocated; an abandoned
-// builder releases its copies.
+// R5-5: a failed build() (ordinary and mux) releases the bridges it allocated;
+// an abandoned builder releases its copies.
 void builder_bridge_ownership() {
   Sdk sdk = local_sdk();
   auto provider = std::make_shared<NoopProvider>();
@@ -384,6 +464,43 @@ void builder_bridge_ownership() {
            provider_alone);
   check_eq("abandoned builder releases the callback", callback.use_count(),
            callback_alone);
+
+  // The mux path: the FFI frees the ack bridge exactly once, possibly after
+  // build() returns, so wait (bounded) for the count to come back.
+  auto mux_callback = MultiplexedAckCallback::from([](auto) {});
+  const long mux_alone = mux_callback.use_count();
+  {
+    const MultiplexedStreamBuilder builder =
+        sdk.stream_builder()
+            .table("main.default.t")
+            .headers_provider(provider)
+            .compiled_proto(malformed_descriptor())
+            .multiplexed(2)
+            .ack_callback(mux_callback);
+    const long provider_held = provider.use_count();
+    const long mux_held = mux_callback.use_count();
+    check("the mux builder holds the callback", mux_held > mux_alone);
+    for (int i = 0; i < 2; ++i) {
+      build_failure("mux build() with a malformed descriptor", builder);
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while ((provider.use_count() != provider_held ||
+              mux_callback.use_count() != mux_held) &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      check_eq(
+          "mux: provider released after failed build() " + std::to_string(i),
+          provider.use_count(), provider_held);
+      check_eq(
+          "mux: callback released after failed build() " + std::to_string(i),
+          mux_callback.use_count(), mux_held);
+    }
+  }
+  check_eq("abandoned mux builder releases the provider", provider.use_count(),
+           provider_alone);
+  check_eq("abandoned mux builder releases the callback",
+           mux_callback.use_count(), mux_alone);
 }
 
 }  // namespace
@@ -392,6 +509,7 @@ int main() {
   Sdk sdk = local_sdk();
   builder_converts_options_like_create_stream(sdk);
   builder_validation_errors(sdk);
+  mux_builder_validation(sdk);
   builder_snapshot_copies_and_sdk_move();
   builder_bridge_ownership();
 
