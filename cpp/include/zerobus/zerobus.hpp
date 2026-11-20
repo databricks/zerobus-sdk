@@ -13,6 +13,7 @@
 #include "zerobus/config.hpp"
 #include "zerobus/error.hpp"
 #include "zerobus/headers_provider.hpp"
+#include "zerobus/message_id.hpp"
 #include "zerobus/multiplexed_ack_callback.hpp"
 #include "zerobus/multiplexed_stream.hpp"
 #include "zerobus/proto_schema.hpp"

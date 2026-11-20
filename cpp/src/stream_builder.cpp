@@ -105,7 +105,7 @@ StreamBuilder& StreamBuilder::ack_callback(
 }
 
 void StreamBuilder::validate() const {
-  if (!table_name_.has_value()) {
+  if (!table_name_.has_value() || table_name_->empty()) {
     throw ZerobusException("table name is required: call .table()", false);
   }
   if (auth_ == Auth::None) {
@@ -119,6 +119,10 @@ void StreamBuilder::validate() const {
   if (!format_set_) {
     throw ZerobusException(
         "record format is required: call .json() or .compiled_proto()", false);
+  }
+  if (options_.record_type == RecordType::Proto && descriptor_proto_.empty()) {
+    throw ZerobusException(
+        "compiled_proto() needs a non-empty serialized DescriptorProto", false);
   }
   // The core would accept 0 and build a stream whose first ingest waits
   // forever, so reject it here.
@@ -149,8 +153,10 @@ MultiplexedStreamBuilder& MultiplexedStreamBuilder::ack_callback(
   return *this;
 }
 
-// Same checks, order and wording as the Rust core's multiplexed validate(),
-// with the C++ setter names.
+// Same checks and wording as the Rust core's multiplexed validate(), with the
+// C++ setter names. The order differs in one case: StreamBuilder::validate()
+// runs first, so max_inflight_requests 0 reports "at least 1" before the
+// core's "at least stream_count".
 void MultiplexedStreamBuilder::validate() const {
   base_.validate();
   if (stream_count_ < 1 || stream_count_ > 64) {

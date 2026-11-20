@@ -31,8 +31,12 @@ table's columns by name.
 - **`batch.cpp`** — ingest multiple records at once using
   `ingest_json_records()`, with an async ack callback and a custom
   `HeadersProvider` (shown commented out)
+- **`builder.cpp`** (Beta) — the same JSON stream opened with
+  `Sdk::stream_builder()`
+- **`multiplexed.cpp`** (Beta) — batches over a multiplexed stream with a
+  `MultiplexedAckCallback`, and recovery after a failure
 
-Both open a JSON stream by setting `StreamOptions::record_type` to
+`single.cpp` and `batch.cpp` open a JSON stream by setting `StreamOptions::record_type` to
 `RecordType::Json` and leaving `TableProperties::descriptor_proto` empty.
 
 ## Single-Record Example

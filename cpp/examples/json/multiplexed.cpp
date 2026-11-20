@@ -68,27 +68,26 @@ int main() {
                                             .ack_callback(ack_callback)
                                             .build();
 
-    // Send batches, at least one per sub-stream, so all four carry load.
-    for (int batch = 0; batch < 8; ++batch) {
-      std::vector<std::string> records;
-      for (int i = 0; i < 25; ++i) {
-        const int id = batch * 25 + i + 1;
-        records.push_back(
-            "{\"id\": " + std::to_string(id) +
-            ", \"customer_name\": \"Alice\", \"product_name\": \"Mouse\", "
-            "\"quantity\": 1, \"price\": 25.99, \"status\": \"pending\"}");
-      }
-      stream.ingest_json_records(records);  // queue only — no per-batch wait
-    }
-
     try {
+      // Send batches, at least one per sub-stream, so all four carry load.
+      for (int batch = 0; batch < 8; ++batch) {
+        std::vector<std::string> records;
+        for (int i = 0; i < 25; ++i) {
+          const int id = batch * 25 + i + 1;
+          records.push_back(
+              "{\"id\": " + std::to_string(id) +
+              ", \"customer_name\": \"Alice\", \"product_name\": \"Mouse\", "
+              "\"quantity\": 1, \"price\": 25.99, \"status\": \"pending\"}");
+        }
+        stream.ingest_json_records(records);  // queue only — no per-batch wait
+      }
       stream.flush();
       stream.close();
       std::cout << "8 batches acknowledged (" << acked.load()
                 << " ack callbacks so far). Stream closed.\n";
     } catch (const zerobus::ZerobusException& e) {
-      // A sub-stream failed: recover what was not acknowledged and send it
-      // on a new stream.
+      // A sub-stream failed, during an ingest, the flush or the close: recover
+      // what was not acknowledged and send it on a new stream.
       std::cerr << "Stream failed: " << e.what() << "\n";
       std::vector<zerobus::UnackedRecord> unacked =
           stream.get_unacked_records();

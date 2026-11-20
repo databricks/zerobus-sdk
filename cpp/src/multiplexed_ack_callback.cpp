@@ -69,7 +69,14 @@ extern "C" void zerobus_cpp_mux_ack_on_error_trampoline(
     return;
   }
   // error_message is borrowed for this call only; copy it (empty on null).
-  std::string message = error_message != nullptr ? error_message : "";
+  // The copy can throw std::bad_alloc, which must not unwind into the FFI;
+  // fall back to an empty message.
+  std::string message;
+  try {
+    message = error_message != nullptr ? error_message : "";
+  } catch (...) {
+    message.clear();
+  }
   (*static_cast<OwnedCallback*>(user_data))
       ->on_error(MessageId(message_id), message);
 }

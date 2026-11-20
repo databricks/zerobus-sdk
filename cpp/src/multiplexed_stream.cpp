@@ -21,6 +21,23 @@ void ensure_valid(const CZerobusMultiplexedStream* handle) {
   }
 }
 
+// The FFI returns this for an empty batch, with success set.
+constexpr std::int64_t kEmptyBatch = -2;
+
+// An empty batch still crosses the FFI, so a closed mux reports its error as
+// for any other batch. The FFI rejects null arrays even for zero records, so
+// pass these placeholders instead of an empty vector's data().
+const std::uint8_t* const kNoProtoRecords[1] = {nullptr};
+const std::uintptr_t kNoProtoLens[1] = {0};
+const char* const kNoJsonRecords[1] = {nullptr};
+
+std::optional<MessageId> batch_id(std::int64_t id) {
+  if (id == kEmptyBatch) {
+    return std::nullopt;
+  }
+  return MessageId(id);
+}
+
 // Close (best effort) and free a handle that this object owns.
 void release(CZerobusMultiplexedStream* handle) noexcept {
   if (handle != nullptr) {
@@ -76,31 +93,27 @@ MessageId MultiplexedStream::ingest_json_record(const std::string& json) {
 std::optional<MessageId> MultiplexedStream::ingest_proto_records(
     const std::vector<std::vector<std::uint8_t>>& records) {
   ensure_valid(handle_);
-  // An empty batch is a no-op with no ID, as in Stream (the FFI would return
-  // its -2 sentinel with success set).
-  if (records.empty()) {
-    return std::nullopt;
-  }
   detail::ProtoBatchView v = detail::make_proto_batch(records);
+  const bool empty = records.empty();
   detail::ResultGuard guard;
   std::int64_t id = zerobus_multiplexed_stream_ingest_proto_records(
-      handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
+      handle_, empty ? kNoProtoRecords : v.ptrs.data(),
+      empty ? kNoProtoLens : v.lens.data(), v.ptrs.size(), guard.ptr());
   guard.throw_if_error();
-  return MessageId(id);
+  return batch_id(id);
 }
 
 std::optional<MessageId> MultiplexedStream::ingest_json_records(
     const std::vector<std::string>& records) {
   ensure_valid(handle_);
-  if (records.empty()) {
-    return std::nullopt;
-  }
   detail::JsonBatchView v = detail::make_json_batch(records);
+  const bool empty = records.empty();
   detail::ResultGuard guard;
   std::int64_t id = zerobus_multiplexed_stream_ingest_json_records(
-      handle_, v.ptrs.data(), v.ptrs.size(), guard.ptr());
+      handle_, empty ? kNoJsonRecords : v.ptrs.data(), v.ptrs.size(),
+      guard.ptr());
   guard.throw_if_error();
-  return MessageId(id);
+  return batch_id(id);
 }
 
 void MultiplexedStream::wait_for_message_id(MessageId id) {
@@ -128,7 +141,7 @@ void MultiplexedStream::close() {
   guard.throw_if_error();
 }
 
-bool MultiplexedStream::is_closed() const {
+bool MultiplexedStream::is_closed() const noexcept {
   return handle_ == nullptr || zerobus_multiplexed_stream_is_closed(handle_);
 }
 

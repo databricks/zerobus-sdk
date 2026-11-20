@@ -14,7 +14,8 @@ cpp/
 │   ├── stream.hpp        # Stream (proto/JSON ingestion)
 │   ├── stream_builder.hpp  # StreamBuilder + MultiplexedStreamBuilder (Beta)
 │   ├── multiplexed_stream.hpp  # MultiplexedStream (Beta)
-│   ├── multiplexed_ack_callback.hpp  # MessageId + MultiplexedAckCallback (Beta)
+│   ├── multiplexed_ack_callback.hpp  # MultiplexedAckCallback (Beta)
+│   ├── message_id.hpp    # MessageId (Beta)
 │   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight)
 │   ├── proto_schema.hpp  # ProtoSchema (UC JSON → descriptor + encoder)
 │   ├── headers_provider.hpp  # HeadersProvider interface

@@ -545,8 +545,10 @@ calling `close()` explicitly** rather than relying on the destructor:
 ## Thread safety
 
 A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
-access externally (the same contract as the Rust core). A single `Sdk` may
-create many streams. See [`CLAUDE.md`](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CLAUDE.md)
+access externally (the same contract as the Rust core). Every
+`MultiplexedStream` method may run concurrently; only moving or destroying it
+must not overlap another call. `StreamBuilder` and `MultiplexedStreamBuilder`
+are not thread-safe. A single `Sdk` may create many streams. See [`CLAUDE.md`](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CLAUDE.md)
 for the full memory-ownership and threading contract.
 
 ## HTTP proxy support

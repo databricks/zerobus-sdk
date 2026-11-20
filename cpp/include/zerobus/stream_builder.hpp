@@ -48,7 +48,8 @@ class MultiplexedStreamBuilder;
 /// authentication setter wins, and so does the last format setter.
 ///
 /// The builder is copyable and holds its settings by value. It refers to the
-/// `Sdk` it came from, which must outlive every `build()` call. It is not safe
+/// native handle of the `Sdk` it came from, which must stay alive and must not
+/// be destroyed or move-assigned over while the builder is used. It is not safe
 /// for concurrent use; `build()` may be called more than once, and each call
 /// opens a new stream.
 class StreamBuilder {
@@ -72,13 +73,19 @@ class StreamBuilder {
   StreamBuilder& compiled_proto(std::vector<std::uint8_t> descriptor_proto);
 
   /// Maximum number of in-flight (unacknowledged) requests. Must be at least
-  /// 1. See `StreamOptions` for this and the settings below.
+  /// 1. Each setter below maps to the `StreamOptions` field of the same name.
   StreamBuilder& max_inflight_requests(std::size_t n);
+  /// Whether automatic stream recovery is enabled.
   StreamBuilder& recovery(bool enabled);
+  /// Total time budget for a recovery attempt.
   StreamBuilder& recovery_timeout_ms(std::uint64_t ms);
+  /// Backoff between recovery retries.
   StreamBuilder& recovery_backoff_ms(std::uint64_t ms);
+  /// Number of recovery retries before giving up (0 = no retries).
   StreamBuilder& recovery_retries(std::uint32_t n);
+  /// How long to wait for a server ack before the stream is stalled.
   StreamBuilder& server_lack_of_ack_timeout_ms(std::uint64_t ms);
+  /// Time budget for `flush()` and the flush inside `close()`.
   StreamBuilder& flush_timeout_ms(std::uint64_t ms);
   /// `nullopt` waits the full server-specified pause duration.
   StreamBuilder& stream_paused_max_wait_time_ms(

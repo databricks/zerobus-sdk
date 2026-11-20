@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "zerobus/message_id.hpp"
 #include "zerobus/multiplexed_ack_callback.hpp"
 #include "zerobus/record.hpp"
 
@@ -32,8 +33,14 @@ class Sdk;
 /// Moving or destroying the stream must not overlap any other call on it.
 ///
 /// Move-only. The destructor closes the stream (best effort, errors are
-/// swallowed) and frees it, so call `close()` at a controlled point instead:
-/// it flushes, can block up to `flush_timeout_ms`, and reports errors.
+/// swallowed) and frees it. Prefer calling `close()` at a controlled point: it
+/// surfaces errors by throwing, and closing can block for a long time. It
+/// first waits for calls in progress (an ingest waiting for room can take up
+/// to 30 seconds), then flushes, which can take up to `flush_timeout_ms`
+/// (default 5 minutes), then drains the ack callbacks per
+/// `StreamOptions::callback_wait_policy`. With `CallbackWaitPolicy::forever()`
+/// that drain has no deadline, so a blocked callback can hang `close()` and
+/// the destructor, including during exception unwinding.
 class MultiplexedStream {
  public:
   ~MultiplexedStream();
@@ -91,9 +98,12 @@ class MultiplexedStream {
   ///         recover records with `get_unacked_records()`.
   void flush();
 
-  /// Flush and close every sub-stream. Waits for in-progress calls first. May
-  /// be called more than once. The stream stays valid for
-  /// `get_unacked_records()` and `is_closed()` until it is destroyed.
+  /// Flush and close every sub-stream. Waits for in-progress calls first, then
+  /// flushes and drains the ack callbacks; see the class docs for how long
+  /// that can block. May be called more than once. The handle stays valid
+  /// until the stream is destroyed, so `get_unacked_records()` and
+  /// `is_closed()` still work; ingest calls after a close throw the SDK's
+  /// closed error.
   ///
   /// @throws ZerobusException if the flush or close fails; then call
   ///         `get_unacked_records()`.
@@ -102,7 +112,7 @@ class MultiplexedStream {
   /// Whether the stream is closed: by `close()`, or because a call observed a
   /// sub-stream failure. Also true while a close is in progress and for a
   /// moved-from stream.
-  bool is_closed() const;
+  bool is_closed() const noexcept;
 
   /// Close the stream if it is still open and return every record that was
   /// not acknowledged, for sending on a new stream. Errors from the implicit

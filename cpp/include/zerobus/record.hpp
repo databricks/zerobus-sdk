@@ -9,7 +9,8 @@
 namespace zerobus {
 
 /// A record recovered from a stream that was closed or failed before all
-/// records were acknowledged. Returned by `Stream::get_unacked_records()`.
+/// records were acknowledged. Returned by `Stream::get_unacked_records()` and
+/// `MultiplexedStream::get_unacked_records()`.
 ///
 /// Owns its payload bytes (copied out of the FFI-owned buffer before the
 /// underlying `CRecordArray` is freed).
