@@ -19,7 +19,7 @@ IdpTokenSupplier = Callable[[], Union[str, Awaitable[str]]]
 @dataclass(frozen=True)
 class FederatedToken:
     """Authenticate a Zerobus stream by federating an external IdP token, passed as
-    the ``auth`` argument to ``create_stream``.
+    the ``auth`` argument to ``create_stream`` or to ``stream_builder().federated_auth()``.
 
     Immutable: a distinct callback is a distinct ``FederatedToken``. Because
     ``_cache_identity`` is fixed at construction and partitions the account-level

@@ -378,7 +378,9 @@ cached IdP token rather than doing a blocking network call on each invocation.
 > (the SDK awaits it without holding the GIL), or keep a sync callback fast by
 > returning an already-cached token.
 
-See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
+The stream builder takes the same token through `federated_auth(token)`; see
+[Stream Builder](#stream-builder). See
+[`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
 
 ### Custom headers provider
 
@@ -472,7 +474,7 @@ sdk = ZerobusSdk(server_endpoint, workspace_url)
 stream = (
     sdk.stream_builder()
     .table("catalog.schema.events")
-    .oauth(client_id, client_secret)  # or .headers_provider(provider)
+    .oauth(client_id, client_secret)  # or .headers_provider(provider) / .federated_auth(token)
     .json()  # or .compiled_proto(descriptor) / .avro(schema_json)
     .build()
 )
@@ -488,8 +490,29 @@ is a coroutine. The builder has these setters: `table`, `oauth`, `headers_provid
 `compiled_proto`, `avro`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
 `recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
 `max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
-`callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`. Unset values use the SDK
-defaults. For external-IdP federation, use `create_stream(auth=...)`.
+`callback_max_wait_time_ms`, and `stream_paused_max_wait_time_ms`, plus `federated_auth`
+(below). Unset values use the SDK defaults.
+
+For external-IdP federation, pass the same `FederatedToken` that `create_stream(auth=...)`
+takes to `federated_auth(token)`, in place of `oauth()` or `headers_provider()`. It works for
+ordinary and multiplexed streams; see
+[External-IdP federation](#external-idp-federation-eg-entra-id) for the token itself:
+
+```python
+stream = (
+    sdk.stream_builder()
+    .table("catalog.schema.events")
+    .federated_auth(FederatedToken(idp_token_supplier=get_idp_token))
+    .json()
+    .build()
+)
+```
+
+`validate()` checks the configuration without opening a stream, as in the Rust SDK. It raises
+the same errors `build()` raises before connecting, including the core's own checks, and is
+available after `multiplexed(n)` too. It does not resolve authentication or parse the Avro
+writer schema, so `build()` can still fail. In the async SDK, `validate()` is a plain method,
+not a coroutine.
 
 ## Multiplexed Streams (Beta)
 
@@ -499,8 +522,9 @@ and distributes records round-robin across them. Records keep their order within
 sub-stream, but there is no order across sub-streams.
 
 Select it with `multiplexed(n)` as the last step of the [stream builder](#stream-builder).
-Multiplexed streams support JSON, protobuf, and Avro records, with OAuth or a custom headers
-provider. For JSON, first migrate to protobuf and measure again before multiplexing.
+Multiplexed streams support JSON, protobuf, and Avro records, with OAuth, a custom headers
+provider, or external-IdP federation (`federated_auth(token)`). For JSON, first migrate to
+protobuf and measure again before multiplexing.
 
 ```python
 stream = (
@@ -520,23 +544,54 @@ stream.close()
 
 - `multiplexed(n)` takes 1 to 64 sub-streams. It is a terminal step: the returned
   `MultiplexedStreamBuilder` captures the configuration as it is at that point and only has
-  `ack_callback()` and `build()`. `max_inflight_requests` is a budget for the whole stream,
-  divided evenly across sub-streams, so it must be at least `n`.
+  `ack_callback()`, `validate()`, and `build()`. `max_inflight_requests` is a budget for the
+  whole stream; each sub-stream gets `max_inflight_requests // n`, so it must be at least `n`.
 - `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
   identifies the sub-stream and the record's position in it. Message IDs are not ordered and
   may be negative. Pass one to `wait_for_message_id()` on the same stream; use `flush()` to
   confirm everything.
 - A batch from `ingest_records()` lands on one sub-stream, and one message ID covers it.
+- When the chosen sub-stream is at capacity, an ingest call waits for it to drain, for at most
+  30 seconds. Then it raises a retriable `ZerobusException` and the record is not queued, so
+  ingest it again.
+- A sync multiplexed stream, like an ordinary one, is for one thread per instance; an async
+  one is safe to share across tasks.
 - Register an `AckCallback` with `multiplexed(n).ack_callback(callback)`. It is shared by
   every sub-stream; its `offset` argument receives the message ID, and sub-streams may call
   it concurrently. `ack_callback()` on the stream builder itself is for ordinary streams and
   is rejected for multiplexed streams.
 - Opening is atomic: with more than one sub-stream, each opens after a random delay of up to
   one second, and if any fails, the others are closed and `build()` raises.
-- After a sub-stream fails, the stream rejects new records. `get_unacked_records()` and
-  `get_unacked_batches()` close the stream if needed and return the records that were never
-  acknowledged, across every sub-stream, so you can ingest them into a new stream. There is no
-  `recreate_stream()` for multiplexed streams.
+- Once a call reports a sub-stream failure, `is_closed` is `True` and every later ingest,
+  `flush()`, and `close()` raises that error again, which may be a retriable
+  `ZerobusException`; retrying on the same stream does not help. `wait_for_message_id()`
+  still reports only its own sub-stream. `get_unacked_records()` and `get_unacked_batches()`
+  close the stream if needed and return the records that were never acknowledged, across
+  every sub-stream, as bytes. Ingest them into a new stream; in JSON mode, decode them first
+  (see **Decoding unacked records** under [Handling Stream
+  Failures](#handling-stream-failures)). There is no `recreate_stream()` for multiplexed
+  streams; call `build()` again instead:
+
+  ```python
+  mux_builder = sdk.stream_builder().table(table).oauth(client_id, client_secret).json().multiplexed(4)
+  stream = mux_builder.build()
+  queued = 0
+  try:
+      for record in records:  # records: a list of JSON strings or dicts
+          stream.ingest_record(record)
+          queued += 1
+      stream.flush()
+  except ZerobusException:
+      if not stream.is_closed:
+          raise
+      retry = [r.decode() for r in stream.get_unacked_records()]  # JSON comes back as bytes
+      retry += records[queued:]  # the failing call and the rest were never queued
+      stream = mux_builder.build()  # a new stream with the same configuration
+      for record in retry:
+          stream.ingest_record(record)
+      stream.flush()
+  stream.close()
+  ```
 
 See `examples/sync_example_multiplexed.py` and `examples/async_example_multiplexed.py`.
 

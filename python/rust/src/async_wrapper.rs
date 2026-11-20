@@ -22,7 +22,7 @@ use crate::common::{
     SDK_IDENTIFIER_PREFIX,
 };
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
-use crate::stream_settings::{StreamConfig, StreamSettings};
+use crate::stream_settings::{self, StreamConfig, StreamSettings};
 
 // =============================================================================
 // STREAM-BUILDER HELPERS
@@ -427,10 +427,39 @@ impl PersistentStream {
 pub struct MultiplexedStream {
     inner: Arc<RwLock<RustMultiplexedStream>>,
     format: RecordFormat,
+    /// For a federated stream, a strong reference to the IdP callback holder (the
+    /// native supplier holds only a weak one). Exposed to the cyclic GC via
+    /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
+    /// owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    idp_holder: Option<Py<IdpCallbackHolder>>,
+}
+
+impl MultiplexedStream {
+    /// A strong reference to the IdP callback holder for a returned future to carry.
+    /// The future can outlive the Python stream object, and a recovery while it runs
+    /// may need to mint a fresh token through the weakly-held callback.
+    fn idp_holder_ref(&self, py: Python<'_>) -> Option<Py<IdpCallbackHolder>> {
+        self.idp_holder.as_ref().map(|h| h.clone_ref(py))
+    }
 }
 
 #[pymethods]
 impl MultiplexedStream {
+    /// Let the cyclic GC see the strong reference to the IdP callback holder, so a
+    /// self-referential owner/stream/callback cycle can be collected.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(holder) = &self.idp_holder {
+            visit.call(holder)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference when the GC breaks a cycle (the native supplier's
+    /// weak reference then resolves to `None`; the stream is being torn down).
+    fn __clear__(&mut self) {
+        self.idp_holder = None;
+    }
+
     /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
     /// `close` or `get_unacked_*` call that is in progress counts as closed.
     #[getter]
@@ -450,8 +479,10 @@ impl MultiplexedStream {
     ) -> PyResult<Bound<'py, PyAny>> {
         let record_payload = extract_record_payload(payload, self.format)?;
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
 
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let guard = stream.read().await;
             let message_id = guard
                 .ingest_record(record_payload)
@@ -471,8 +502,10 @@ impl MultiplexedStream {
     ) -> PyResult<Bound<'py, PyAny>> {
         let record_payloads = extract_record_payloads(payloads, self.format)?;
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
 
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let guard = stream.read().await;
             let message_id = guard
                 .ingest_records(record_payloads)
@@ -489,7 +522,9 @@ impl MultiplexedStream {
         message_id: i64,
     ) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let guard = stream.read().await;
             guard
                 .wait_for_message_id(MessageId::from_raw(message_id))
@@ -502,7 +537,9 @@ impl MultiplexedStream {
     /// Flush every sub-stream (async)
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let guard = stream.read().await;
             guard.flush().await.map_err(map_error)?;
             Ok(())
@@ -512,7 +549,9 @@ impl MultiplexedStream {
     /// Flush and close every sub-stream (async)
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let mut guard = stream.write().await;
             guard.close().await.map_err(map_error)?;
             Ok(())
@@ -522,8 +561,10 @@ impl MultiplexedStream {
     /// Get unacknowledged records from every sub-stream. Closes the stream first (async).
     fn get_unacked_records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
 
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let mut guard = stream.write().await;
             let records = guard.get_unacked_records().await.map_err(map_error)?;
 
@@ -539,8 +580,10 @@ impl MultiplexedStream {
     /// Get unacknowledged batches from every sub-stream. Closes the stream first (async).
     fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
 
         future_into_py(py, async move {
+            let _idp_holder = idp_holder;
             let mut guard = stream.write().await;
             let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
@@ -747,15 +790,28 @@ impl ZerobusSdk {
         })
     }
 
-    /// Open an ordinary stream configured by `stream_builder()` (async)
+    /// Open an ordinary stream configured by `stream_builder()` (async). `idp_supplier`
+    /// and `databricks_client_id` carry `federated_auth()`, as in
+    /// `create_stream_federated`; the stream keeps the supplier's callback holder.
+    #[pyo3(signature = (table_properties, settings, idp_supplier = None, databricks_client_id = None))]
     fn open_stream<'py>(
         &self,
         py: Python<'py>,
         table_properties: &TableProperties,
         settings: &StreamSettings,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
-        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let idp_supplier = idp_supplier.as_deref();
+        let config = StreamConfig::resolve(
+            py,
+            settings,
+            table_properties,
+            idp_supplier,
+            databricks_client_id,
+        )?;
+        let idp_holder = stream_settings::idp_holder(py, idp_supplier)?;
         let format = config.format();
 
         future_into_py(py, async move {
@@ -764,14 +820,22 @@ impl ZerobusSdk {
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
-                idp_holder: None,
+                idp_holder,
             })
         })
     }
 
     /// Open every sub-stream of a multiplexed stream configured by `stream_builder()`
-    /// (Beta, async)
-    #[pyo3(signature = (table_properties, settings, stream_count, ack_callback = None))]
+    /// (Beta, async). The federated arguments are as in `open_stream`.
+    #[pyo3(signature = (
+        table_properties,
+        settings,
+        stream_count,
+        ack_callback = None,
+        idp_supplier = None,
+        databricks_client_id = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn open_multiplexed_stream<'py>(
         &self,
         py: Python<'py>,
@@ -779,9 +843,19 @@ impl ZerobusSdk {
         settings: &StreamSettings,
         stream_count: usize,
         ack_callback: Option<Py<AckCallback>>,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
-        let config = StreamConfig::resolve(py, settings, table_properties)?;
+        let idp_supplier = idp_supplier.as_deref();
+        let config = StreamConfig::resolve(
+            py,
+            settings,
+            table_properties,
+            idp_supplier,
+            databricks_client_id,
+        )?;
+        let idp_holder = stream_settings::idp_holder(py, idp_supplier)?;
         let format = config.format();
 
         future_into_py(py, async move {
@@ -793,8 +867,43 @@ impl ZerobusSdk {
             Ok(MultiplexedStream {
                 inner: Arc::new(RwLock::new(stream)),
                 format,
+                idp_holder,
             })
         })
+    }
+
+    /// Check a `stream_builder()` configuration without opening anything. With
+    /// `stream_count`, checks it as a multiplexed stream (Beta). The federated arguments
+    /// are as in `open_stream`; the core never calls the supplier here.
+    #[pyo3(signature = (
+        table_properties,
+        settings,
+        stream_count = None,
+        ack_callback = None,
+        idp_supplier = None,
+        databricks_client_id = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn validate_stream(
+        &self,
+        py: Python,
+        table_properties: &TableProperties,
+        settings: &StreamSettings,
+        stream_count: Option<usize>,
+        ack_callback: Option<Py<AckCallback>>,
+        idp_supplier: Option<PyRef<'_, IdpSupplier>>,
+        databricks_client_id: Option<String>,
+    ) -> PyResult<()> {
+        stream_settings::validate_stream(
+            py,
+            &self.inner,
+            table_properties,
+            settings,
+            stream_count,
+            ack_callback,
+            idp_supplier.as_deref(),
+            databricks_client_id,
+        )
     }
 
     /// Create a new Arrow Flight stream with OAuth authentication (async).

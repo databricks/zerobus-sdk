@@ -24,6 +24,8 @@ class _StreamBuilderBase:
     # Named in validation errors: the methods that open the stream, and how to select a format.
     _OPEN_METHODS = "build()"
     _FORMAT_METHODS = "json() or compiled_proto(...)"
+    # Named in the "authentication is required" error: the builder's authentication setters.
+    _AUTH_METHODS = "oauth(...) or headers_provider(...)"
 
     def __init__(self, native_sdk):
         self._sdk = native_sdk
@@ -40,17 +42,27 @@ class _StreamBuilderBase:
         self._table_name = table_name
         return self
 
+    def _clear_auth(self) -> None:
+        """Forget the authentication method. Builders with more methods extend this."""
+        self._client_id = self._client_secret = None
+        self._headers_provider = None
+
+    def _auth_methods_set(self) -> int:
+        """Count the authentication methods that are set. Builders with more methods extend this."""
+        has_oauth = self._client_id is not None or self._client_secret is not None
+        return int(has_oauth) + int(self._headers_provider is not None)
+
     def oauth(self, client_id: str, client_secret: str):
-        """Authenticate with OAuth client credentials. Replaces an earlier ``headers_provider()``."""
+        """Authenticate with OAuth client credentials. Replaces an earlier authentication setter."""
+        self._clear_auth()
         self._client_id = client_id
         self._client_secret = client_secret
-        self._headers_provider = None
         return self
 
     def headers_provider(self, provider):
-        """Authenticate with a custom ``HeadersProvider``. Replaces an earlier ``oauth()``."""
+        """Authenticate with a custom ``HeadersProvider``. Replaces an earlier authentication setter."""
+        self._clear_auth()
         self._headers_provider = provider
-        self._client_id = self._client_secret = None
         return self
 
     def json(self):
@@ -136,7 +148,7 @@ class _StreamBuilderBase:
         has_oauth = self._client_id is not None or self._client_secret is not None
         if has_oauth and (self._client_id is None or self._client_secret is None):
             raise ValueError("oauth requires both client_id and client_secret")
-        if has_oauth == (self._headers_provider is not None):
-            raise ValueError("authentication is required: call exactly one of oauth(...) or headers_provider(...)")
+        if self._auth_methods_set() != 1:
+            raise ValueError(f"authentication is required: call exactly one of {self._AUTH_METHODS}")
         if not self._format_selected():
             raise ValueError(f"record format is required: call {self._FORMAT_METHODS}")

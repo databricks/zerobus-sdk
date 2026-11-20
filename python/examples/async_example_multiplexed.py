@@ -10,8 +10,8 @@ Each ingest call returns a message ID: an opaque int that identifies the sub-str
 record's position in it. Message IDs are not ordered and may be negative. Confirm durability
 with flush(), not by waiting on each message ID.
 
-Multiplexed streams support JSON, protobuf, and Avro records. Authentication uses OAuth or a
-custom headers provider.
+Multiplexed streams support JSON, protobuf, and Avro records. Authentication uses OAuth, a
+custom headers provider, or external-IdP federation (federated_auth(token)).
 """
 
 import asyncio

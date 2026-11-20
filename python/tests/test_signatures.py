@@ -55,6 +55,15 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_sync_open_multiplexed_stream_ack_callback_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.open_multiplexed_stream, "ack_callback")
 
+    def test_sync_validate_stream_optional_arguments(self):
+        for name in ("stream_count", "ack_callback", "idp_supplier", "databricks_client_id"):
+            self._assert_optional(core.sync.ZerobusSdk.validate_stream, name)
+
+    def test_sync_open_stream_federation_arguments_optional(self):
+        for method in (core.sync.ZerobusSdk.open_stream, core.sync.ZerobusSdk.open_multiplexed_stream):
+            for name in ("idp_supplier", "databricks_client_id"):
+                self._assert_optional(method, name)
+
     def test_async_create_stream_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream, "options")
 
@@ -66,6 +75,15 @@ class TestNativeBindingSignatures(unittest.TestCase):
 
     def test_async_open_multiplexed_stream_ack_callback_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.open_multiplexed_stream, "ack_callback")
+
+    def test_async_validate_stream_optional_arguments(self):
+        for name in ("stream_count", "ack_callback", "idp_supplier", "databricks_client_id"):
+            self._assert_optional(core.aio.ZerobusSdk.validate_stream, name)
+
+    def test_async_open_stream_federation_arguments_optional(self):
+        for method in (core.aio.ZerobusSdk.open_stream, core.aio.ZerobusSdk.open_multiplexed_stream):
+            for name in ("idp_supplier", "databricks_client_id"):
+                self._assert_optional(method, name)
 
     def test_async_wait_for_offset_accepts_offset_only(self):
         sig = inspect.signature(core.aio.ZerobusStream.wait_for_offset)

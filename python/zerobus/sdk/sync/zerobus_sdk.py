@@ -292,9 +292,12 @@ class MultiplexedStream:
     ``wait_for_message_id()`` on this stream; do not compare them or use them with another
     stream.
 
-    Once a sub-stream fails, the stream rejects new records. Recover the unacknowledged ones
-    with ``get_unacked_records()`` or ``get_unacked_batches()`` and ingest them into a new
-    stream. Handles Avro encoding transparently on an Avro stream.
+    Once a call reports a sub-stream failure, ``is_closed`` is ``True`` and every later
+    ingest, ``flush()``, and ``close()`` raises that error again, which may be a retriable
+    ``ZerobusException``; ``wait_for_message_id()`` still reports only its own sub-stream.
+    Retrying on this stream does not help: recover the unacknowledged records with ``get_unacked_records()`` or
+    ``get_unacked_batches()`` and ingest them into a new stream. Handles Avro encoding
+    transparently on an Avro stream.
     """
 
     def __init__(self, rust_stream: _RustMultiplexedStream, avro_encoder=None):
@@ -323,7 +326,9 @@ class MultiplexedStream:
         Returns as soon as the record is queued; the SDK sends it and tracks its
         acknowledgment in the background. The idiomatic flow is to ingest in a loop and call
         ``flush()`` once to confirm durability (or use an ``AckCallback``). If the selected
-        sub-stream is at capacity, this waits for it to drain rather than rerouting.
+        sub-stream is at capacity, this waits for it to drain rather than rerouting, for at
+        most 30 seconds; then it raises a retriable ``ZerobusException`` and the record is not
+        queued, so ingest it again.
         """
         return self._inner.ingest_record(self._encode_payload(payload))
 
@@ -331,7 +336,8 @@ class MultiplexedStream:
         """Queue a batch on one sub-stream and return one message ID for it.
 
         Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
-        raises like any other.
+        raises like any other. Waits for a full sub-stream as ``ingest_record()`` does, for at
+        most 30 seconds.
         """
         return self._inner.ingest_records(self._encode_payloads(payloads))
 
@@ -411,7 +417,9 @@ class MultiplexedStreamBuilder(_MultiplexedStreamBuilderBase):
 
         table_properties, settings, stream_count, ack_callback = self._native_args()
         avro_encoder = make_encoder(table_properties.avro_schema)
-        native = self._base._sdk.open_multiplexed_stream(table_properties, settings, stream_count, ack_callback)
+        native = self._base._sdk.open_multiplexed_stream(
+            table_properties, settings, stream_count, ack_callback, **self._base._idp_kwargs()
+        )
         return MultiplexedStream(native, avro_encoder)
 
 
@@ -420,7 +428,8 @@ class StreamBuilder(_GrpcStreamBuilderBase):
 
     Obtain one from ``ZerobusSdk.stream_builder()``, set the table, authentication, and
     record format, then call ``build()`` for an ordinary stream, or ``multiplexed(n)`` and
-    then ``build()`` for a multiplexed stream (Beta).
+    then ``build()`` for a multiplexed stream (Beta). ``validate()`` checks the configuration
+    without opening anything.
 
     Example:
         >>> stream = (
@@ -442,12 +451,15 @@ class StreamBuilder(_GrpcStreamBuilderBase):
 
         Raises:
             ValueError: If the table, authentication, or record format is not set.
+            NonRetriableException: If a setting is invalid.
+            ZerobusException: If the stream fails to open.
         """
         from zerobus.sdk.shared.avro import make_encoder
 
         table_properties, settings = self._native_args()
         avro_encoder = make_encoder(table_properties.avro_schema)
-        return ZerobusStream(self._sdk.open_stream(table_properties, settings), avro_encoder=avro_encoder)
+        native = self._sdk.open_stream(table_properties, settings, **self._idp_kwargs())
+        return ZerobusStream(native, avro_encoder=avro_encoder)
 
 
 class ZerobusSdk:
@@ -613,10 +625,10 @@ class ZerobusSdk:
         """
         Start building a stream, mirroring the Rust SDK's ``stream_builder()``.
 
-        Set the table, authentication (OAuth or a custom headers provider), and record format
-        (JSON, protobuf, or Avro), then call ``build()`` for an ordinary stream, or
-        ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta). For
-        external-IdP federation, use ``create_stream(auth=...)``.
+        Set the table, authentication (OAuth, a custom headers provider, or external-IdP
+        federation), and record format (JSON, protobuf, or Avro), then call ``build()`` for an
+        ordinary stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream
+        (Beta).
         """
         return StreamBuilder(self._inner)
 

@@ -8,6 +8,7 @@ resume round trip against a server is covered by the Rust core tests.
 import asyncio
 import inspect
 import json
+import re
 
 import pytest
 
@@ -42,12 +43,21 @@ def _open(mode, op):
 class TestBuilderValidation:
     def test_build_requires_table(self, sdk, mode):
         builder = sdk.persistent_stream_builder().oauth("id", "secret").json()
-        with pytest.raises(ValueError, match="table is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("table is required: call table(...) before build() or resume()") + "$"
+        ):
             _open(mode, builder.build)
 
     def test_build_requires_auth(self, sdk, mode):
         builder = sdk.persistent_stream_builder().table("c.s.t").json()
         with pytest.raises(ValueError, match="authentication is required"):
+            _open(mode, builder.build)
+
+    def test_build_requires_auth_names_its_own_setters(self, sdk, mode):
+        # The persistent builder has no federated_auth(), so its message must not offer it.
+        builder = sdk.persistent_stream_builder().table("c.s.t").json()
+        message = "authentication is required: call exactly one of oauth(...) or headers_provider(...)"
+        with pytest.raises(ValueError, match=re.escape(message) + "$"):
             _open(mode, builder.build)
 
     def test_last_auth_setter_wins(self, sdk):
@@ -69,7 +79,9 @@ class TestBuilderValidation:
 
     def test_build_requires_format(self, sdk, mode):
         builder = sdk.persistent_stream_builder().table("c.s.t").oauth("id", "secret")
-        with pytest.raises(ValueError, match="record format is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("record format is required: call json() or compiled_proto(...)") + "$"
+        ):
             _open(mode, builder.build)
 
     def test_resume_requires_stream_id(self, sdk, mode):
@@ -80,7 +92,9 @@ class TestBuilderValidation:
 
     def test_resume_requires_table(self, sdk, mode):
         builder = sdk.persistent_stream_builder().oauth("id", "secret").json()
-        with pytest.raises(ValueError, match="table is required"):
+        with pytest.raises(
+            ValueError, match=re.escape("table is required: call table(...) before build() or resume()") + "$"
+        ):
             _open(mode, lambda: builder.resume("stream-1"))
 
     @pytest.mark.parametrize(

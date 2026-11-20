@@ -3,9 +3,9 @@ Builders for ordinary and multiplexed streams, shared by the sync and async SDKs
 
 ``ZerobusSdk.stream_builder()`` mirrors the Rust SDK's ``stream_builder()``: set the table,
 authentication, record format, and stream settings, then call ``build()`` for an ordinary
-stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta). The sync
-and async builders in ``zerobus.sdk.sync`` and ``zerobus.sdk.aio`` add the ``build()``
-methods.
+stream, or ``multiplexed(n)`` and then ``build()`` for a multiplexed stream (Beta).
+``validate()`` checks a configuration without opening anything. The sync and async builders
+in ``zerobus.sdk.sync`` and ``zerobus.sdk.aio`` add the ``build()`` methods.
 
 A multiplexed stream opens several sub-streams to one table and distributes records
 round-robin across them, to raise throughput when one stream is the bottleneck. Records keep
@@ -13,15 +13,15 @@ their order within a sub-stream, but there is no order across sub-streams. Its i
 return a message ID: an opaque ``int`` that identifies the sub-stream and the record's
 position in it. Message IDs are not ordered and may be negative.
 
-Both stream kinds support the JSON, protobuf, and Avro record formats, with OAuth or a custom
-headers provider for authentication. For external-IdP federation, use
-``ZerobusSdk.create_stream(auth=...)``.
+Both stream kinds support the JSON, protobuf, and Avro record formats, with OAuth, a custom
+headers provider, or external-IdP federation (``federated_auth(token)``) for authentication.
 """
 
 import copy
 from typing import Optional
 
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared.auth import FederatedToken
 from zerobus.sdk.shared.builder import _int_in_range, _StreamBuilderBase
 
 _MAX_MULTIPLEXED_STREAMS = 64
@@ -31,12 +31,53 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
     """Collects the settings of an ordinary or multiplexed stream. Setters return the builder."""
 
     _FORMAT_METHODS = "json(), compiled_proto(...), or avro(...)"
+    _AUTH_METHODS = "oauth(...), headers_provider(...), or federated_auth(...)"
     # The sync or async multiplexed builder class that multiplexed(n) returns.
     _MULTIPLEXED_BUILDER = None
+    # Whether a federated_auth() callback may be async: True only in the async SDK.
+    _ASYNC_IDP_SUPPLIER = False
 
     def __init__(self, native_sdk):
         super().__init__(native_sdk)
         self._avro_schema: Optional[str] = None
+        self._federated_token: Optional[FederatedToken] = None
+
+    def _clear_auth(self) -> None:
+        super()._clear_auth()
+        self._federated_token = None
+
+    def _auth_methods_set(self) -> int:
+        return super()._auth_methods_set() + int(self._federated_token is not None)
+
+    def federated_auth(self, token: FederatedToken):
+        """Authenticate with external-IdP federation (RFC 8693 token exchange).
+
+        Takes the same ``FederatedToken`` as ``create_stream(auth=...)``: its
+        ``databricks_client_id`` selects workload identity federation, or account-level
+        federation when ``None``. Reusing one ``FederatedToken`` across streams shares its
+        cached Databricks token. Replaces an earlier authentication setter.
+
+        Raises:
+            ValueError: If ``token`` is not a ``FederatedToken``.
+        """
+        if not isinstance(token, FederatedToken):
+            raise ValueError("token must be a FederatedToken instance")
+        self._clear_auth()
+        self._federated_token = token
+        return self
+
+    def _idp_kwargs(self):
+        """The federated_auth() arguments of the native open and validate calls.
+
+        Builds a fresh native ``IdpSupplier`` per call, never memoized, as
+        ``create_stream(auth=...)`` does: in the async SDK it captures the running event
+        loop, so a cached one would break a later ``asyncio.run()``.
+        """
+        token = self._federated_token
+        if token is None:
+            return {"idp_supplier": None, "databricks_client_id": None}
+        supplier = _core.IdpSupplier(token.idp_token_supplier, self._ASYNC_IDP_SUPPLIER, token._cache_identity)
+        return {"idp_supplier": supplier, "databricks_client_id": token.databricks_client_id}
 
     def json(self):
         """Select the JSON record format."""
@@ -92,11 +133,11 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
 
         This is a terminal step: configure the table, authentication, format, and stream
         settings first. The returned builder captures them as they are now and only offers
-        ``ack_callback()`` and ``build()``.
+        ``ack_callback()``, ``validate()``, and ``build()``.
 
         Use multiplexing when one stream is the throughput bottleneck and global ordering is
-        not required. The ``max_inflight_requests`` budget is divided evenly across
-        sub-streams, so it must be at least ``stream_count``.
+        not required. The ``max_inflight_requests`` budget is shared: each sub-stream gets
+        ``max_inflight_requests // stream_count``, so it must be at least ``stream_count``.
 
         Args:
             stream_count: The number of sub-streams, from 1 to 64.
@@ -105,6 +146,21 @@ class _GrpcStreamBuilderBase(_StreamBuilderBase):
         snapshot = copy.copy(self)
         snapshot._settings = dict(self._settings)
         return self._MULTIPLEXED_BUILDER(snapshot, stream_count)
+
+    def validate(self) -> None:
+        """Check the configuration of an ordinary stream without opening it.
+
+        Runs the checks ``build()`` makes before connecting: the required settings, the
+        descriptor, and the Rust core's own checks. As in the Rust SDK, it does not resolve
+        authentication or parse the Avro writer schema, so ``build()`` can still fail. A plain
+        method in the sync and async SDKs.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set.
+            NonRetriableException: If a setting is invalid.
+        """
+        table_properties, settings = self._native_args()
+        self._sdk.validate_stream(table_properties, settings, **self._idp_kwargs())
 
     def _format_selected(self) -> bool:
         return super()._format_selected() or self._avro_schema is not None
@@ -138,6 +194,25 @@ class _MultiplexedStreamBuilderBase:
         """
         self._ack_callback = callback
         return self
+
+    def validate(self) -> None:
+        """Check the configuration of the multiplexed stream without opening any sub-stream.
+
+        Runs the checks ``build()`` makes before connecting, including the Rust core's check
+        that ``max_inflight_requests`` is at least the stream count. As in the Rust SDK, it
+        does not resolve authentication or parse the Avro writer schema, so ``build()`` can
+        still fail. A plain method in the sync and async SDKs.
+
+        Raises:
+            ValueError: If the table, authentication, or record format is not set, or if
+                ``ack_callback()`` was set on the stream builder instead of here.
+            NonRetriableException: If ``max_inflight_requests`` is below the stream count, or
+                another setting is invalid.
+        """
+        table_properties, settings, stream_count, ack_callback = self._native_args()
+        self._base._sdk.validate_stream(
+            table_properties, settings, stream_count, ack_callback, **self._base._idp_kwargs()
+        )
 
     def _native_args(self):
         """Validate the settings and return the arguments of the native open call."""
