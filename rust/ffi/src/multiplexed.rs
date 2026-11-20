@@ -1968,9 +1968,19 @@ mod multiplexed_tests {
         (mux, success, message)
     }
 
+    /// How long an async create may take to report a connect failure to
+    /// `127.0.0.1:1`. On Windows a closed local port is not refused at once
+    /// (each SYN is retried), and the OAuth path connects more than once.
+    const CONNECT_FAILURE_WAIT: Duration = Duration::from_secs(60);
+
     /// Polls `condition` until it holds, failing after 5 seconds.
     fn wait_until(what: &str, condition: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        wait_until_within(what, Duration::from_secs(5), condition);
+    }
+
+    /// Polls `condition` until it holds, failing after `timeout`.
+    fn wait_until_within(what: &str, timeout: Duration, condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + timeout;
         while !condition() {
             assert!(std::time::Instant::now() < deadline, "timed out: {what}");
             std::thread::sleep(Duration::from_millis(10));
@@ -2912,7 +2922,12 @@ mod multiplexed_tests {
 
         /// Waits for the callback, then checks it ran exactly once.
         fn one(&self, what: &str) -> Completion {
-            wait_until(what, || self.count() >= 1);
+            self.one_within(what, Duration::from_secs(5))
+        }
+
+        /// `one`, waiting up to `timeout` for the callback.
+        fn one_within(&self, what: &str, timeout: Duration) -> Completion {
+            wait_until_within(what, timeout, || self.count() >= 1);
             // Let a late second callback land before asserting exactly once.
             std::thread::sleep(Duration::from_millis(100));
             let completions = self.0.lock().unwrap();
@@ -3274,7 +3289,8 @@ mod multiplexed_tests {
         let (ack, sink) = (FreeCount::leaked(), AsyncSink::leaked());
         let (returned, success, _, message) = call.oauth_async(ack, sink);
         assert!(returned && success, "OAuth async: {message}");
-        let (_, success, retryable, message, mux) = sink.one("OAuth async connect failure");
+        let (_, success, retryable, message, mux) =
+            sink.one_within("OAuth async connect failure", CONNECT_FAILURE_WAIT);
         assert!(
             mux == 0 && !success && retryable,
             "OAuth async callback: {message}"
@@ -3288,7 +3304,8 @@ mod multiplexed_tests {
         );
         let (returned, success, _, message) = call.headers_async(headers, ack, sink);
         assert!(returned && success, "headers async: {message}");
-        let (_, success, retryable, message, mux) = sink.one("headers async connect failure");
+        let (_, success, retryable, message, mux) =
+            sink.one_within("headers async connect failure", CONNECT_FAILURE_WAIT);
         assert!(
             mux == 0 && !success && retryable,
             "headers async callback: {message}"
