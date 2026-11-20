@@ -129,9 +129,11 @@ void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
     check("the lane-32 message ID is negative", lane_32.raw() < 0);
     mux.wait_for_message_id(lane_32);
     mux.flush();
-    check("nothing is unacked after flush", mux.get_unacked_records().empty());
     check("is_closed() is false before close()", !mux.is_closed());
-    mux.close();
+    // get_unacked_records() closes the mux first, then returns the records.
+    check("nothing is unacked after flush", mux.get_unacked_records().empty());
+    check("is_closed() is true after get_unacked_records()", mux.is_closed());
+    mux.close();  // Already closed: still succeeds.
     check("is_closed() is true after close()", mux.is_closed());
     // close() drains the callbacks.
     if (auto alive = recorder_alive.lock()) {
