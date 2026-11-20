@@ -67,3 +67,8 @@
 ### Deprecations
 
 ### API Changes
+
+- Add `WithInsecureTransportForTesting`, which selects a plaintext (non-TLS)
+  data-plane connection. It exists only in builds with the `testing` build tag
+  (`-tags testing`), for the Layer-1 conformance harness. It sends tokens and
+  data in plaintext, so never use it against a real endpoint.
