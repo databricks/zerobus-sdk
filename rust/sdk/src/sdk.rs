@@ -70,6 +70,9 @@ pub struct ZerobusSdk {
     /// never share a connection with streams, whatever `connection_per_stream`
     /// says.
     unary_channel: OnceLock<Arc<GrpcChannelSource>>,
+    /// HTTP/2 keepalive interval and timeout of the unary channel. Fixed in
+    /// production; tests shorten them through the SDK builder.
+    pub(crate) unary_keepalive: (Duration, Duration),
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -213,6 +216,7 @@ impl ZerobusSdk {
             workspace_id,
             shared_stream_channel: OnceLock::new(),
             unary_channel: OnceLock::new(),
+            unary_keepalive: (UNARY_KEEPALIVE_INTERVAL, UNARY_KEEPALIVE_TIMEOUT),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -407,7 +411,7 @@ impl ZerobusSdk {
         Arc::clone(self.unary_channel.get_or_init(|| {
             Arc::new(
                 self.new_grpc_channel_source()
-                    .with_keepalive(UNARY_KEEPALIVE_INTERVAL, UNARY_KEEPALIVE_TIMEOUT),
+                    .with_keepalive(self.unary_keepalive.0, self.unary_keepalive.1),
             )
         }))
     }

@@ -367,6 +367,8 @@ mod tests {
         assert!(UnaryIngestError(GrpcStatus::unauthenticated("x")).is_auth_rejection());
         assert!(UnaryIngestError(GrpcStatus::permission_denied("x")).is_auth_rejection());
         assert!(!UnaryIngestError(GrpcStatus::internal("x")).is_auth_rejection());
+        assert!(!UnaryIngestError(GrpcStatus::unauthenticated("x")).is_retryable());
+        assert!(!UnaryIngestError(GrpcStatus::permission_denied("x")).is_retryable());
 
         let mut auth_retry_available = true;
         let rejection = UnaryIngestError(GrpcStatus::unauthenticated("stale token"));
