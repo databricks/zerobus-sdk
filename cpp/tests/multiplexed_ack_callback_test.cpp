@@ -97,9 +97,14 @@ void from_adapter_dispatches() {
         errors.size() == 1 &&
             errors[0] == std::make_pair(kNegativeId, std::string("bad")));
 
-  // An omitted error handler ignores errors.
-  auto ack_only = MultiplexedAckCallback::from([](MessageId) {});
+  // An omitted error handler ignores errors; acks still arrive.
+  std::vector<std::int64_t> ack_only_acks;
+  auto ack_only = MultiplexedAckCallback::from(
+      [&](MessageId id) { ack_only_acks.push_back(id.raw()); });
   detail::zerobus_cpp_mux_ack_on_error_trampoline(1, "ignored", &ack_only);
+  detail::zerobus_cpp_mux_ack_on_ack_trampoline(2, &ack_only);
+  check("from() without an error handler: errors ignored, acks delivered",
+        ack_only_acks == std::vector<std::int64_t>{2});
 }
 
 void message_id_equality_and_hash() {

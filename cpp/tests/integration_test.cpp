@@ -11,11 +11,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -61,30 +63,36 @@ void check_throws(const char* what, F call, const std::string& message) {
   }
 }
 
-// Records every message ID its mux delivers.
+// Counts every message ID its mux delivers.
 class IdRecorder : public zerobus::MultiplexedAckCallback {
  public:
   void on_ack(zerobus::MessageId id) noexcept override {
     std::lock_guard<std::mutex> lock(mu_);
-    acked_.insert(id);
+    ++acked_[id];
   }
   void on_error(zerobus::MessageId, const std::string&) noexcept override {
     std::lock_guard<std::mutex> lock(mu_);
     ++errors_;
   }
-  bool saw_all(const std::vector<zerobus::MessageId>& ids) {
+  // Every ID in @p ids was acked exactly once, nothing else was, and no
+  // error was reported.
+  bool saw_each_once(const std::vector<zerobus::MessageId>& ids) {
     std::lock_guard<std::mutex> lock(mu_);
+    if (errors_ != 0 || acked_.size() != ids.size()) {
+      return false;
+    }
     for (zerobus::MessageId id : ids) {
-      if (acked_.count(id) == 0) {
+      auto it = acked_.find(id);
+      if (it == acked_.end() || it->second != 1) {
         return false;
       }
     }
-    return errors_ == 0;
+    return true;
   }
 
  private:
   std::mutex mu_;
-  std::unordered_set<zerobus::MessageId> acked_;
+  std::unordered_map<zerobus::MessageId, int> acked_;
   int errors_ = 0;
 };
 
@@ -128,22 +136,38 @@ void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
     const zerobus::MessageId lane_32 = ids[kLanes - 1];
     check("the lane-32 message ID is negative", lane_32.raw() < 0);
     mux.wait_for_message_id(lane_32);
+    // A lane this mux doesn't have: the call reaches the core, which rejects
+    // it (so wait_for_message_id is not a no-op).
+    check_throws(
+        "a wait on lane 40 of a 33-lane mux must throw",
+        [&] {
+          mux.wait_for_message_id(zerobus::MessageId(std::int64_t{40} << 58));
+        },
+        "Invalid stream index 40");
     mux.flush();
     check("is_closed() is false before close()", !mux.is_closed());
-    // get_unacked_records() closes the mux first, then returns the records.
-    check("nothing is unacked after flush", mux.get_unacked_records().empty());
-    check("is_closed() is true after get_unacked_records()", mux.is_closed());
-    mux.close();  // Already closed: still succeeds.
+    mux.close();
     check("is_closed() is true after close()", mux.is_closed());
-    // close() drains the callbacks.
-    if (auto alive = recorder_alive.lock()) {
-      check("the callback saw every returned ID, incl. negative ones",
-            alive->saw_all(ids));
+    // close() keeps the handle, so recovery still works on the closed mux.
+    check("nothing is unacked after close()",
+          mux.get_unacked_records().empty());
+    // close() drained the callbacks; the FFI still holds the callback.
+    auto alive = recorder_alive.lock();
+    check("the callback is alive until the stream is destroyed",
+          alive != nullptr);
+    check("the callback saw every returned ID once, incl. negative ones",
+          alive != nullptr && alive->saw_each_once(ids));
+    alive.reset();
+    for (const auto& [what, call] :
+         std::vector<std::pair<const char*, std::function<void()>>>{
+             {"ingest after close() must throw",
+              [&] { mux.ingest_json_record(record_json); }},
+             {"an empty batch after close() must throw",
+              [&] { mux.ingest_json_records({}); }},
+             {"flush after close() must throw", [&] { mux.flush(); }},
+         }) {
+      check_throws(what, call, "MultiplexedStream is closed");
     }
-    check_throws(
-        "ingest after close() must throw",
-        [&] { mux.ingest_json_record(record_json); },
-        "MultiplexedStream is closed");
 
     // Using a moved-from stream is the point of this check.
     zerobus::MultiplexedStream moved = std::move(mux);
@@ -161,16 +185,48 @@ void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
   check("the callback is freed after the stream is destroyed",
         recorder_alive.expired());
 
+  auto small_mux = [&] {
+    return sdk.stream_builder()
+        .table(table_name)
+        .oauth(client_id, client_secret)
+        .json()
+        .multiplexed(2)
+        .build();
+  };
+  // Move-assigning over a live mux releases it and takes the other one.
+  zerobus::MultiplexedStream json_mux = small_mux();
+  zerobus::MultiplexedStream other = small_mux();
+  json_mux = std::move(other);
+  check_throws(
+      "the moved-from source must throw", [&] { other.flush(); },
+      "MultiplexedStream has been moved from");
+
+  // One MultiplexedStream may be used from several threads at once.
+  constexpr int kThreads = 4;
+  constexpr int kPerThread = 10;
+  std::mutex ids_mu;
+  std::unordered_set<zerobus::MessageId> concurrent_ids;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&] {
+      for (int i = 0; i < kPerThread; ++i) {
+        zerobus::MessageId id = json_mux.ingest_json_record(record_json);
+        std::lock_guard<std::mutex> lock(ids_mu);
+        concurrent_ids.insert(id);
+      }
+    });
+  }
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+  json_mux.flush();
+  check("concurrent ingests get distinct IDs",
+        concurrent_ids.size() == kThreads * kPerThread);
+
   // The proto overloads cross the FFI too: on this JSON table the core rejects
   // each one, which proves the call reached it.
   const std::string kMismatch =
       "Record type does not match stream configuration";
-  zerobus::MultiplexedStream json_mux = sdk.stream_builder()
-                                            .table(table_name)
-                                            .oauth(client_id, client_secret)
-                                            .json()
-                                            .multiplexed(1)
-                                            .build();
   const std::vector<std::uint8_t> proto = {0x08, 0x01};
   check_throws(
       "proto record on a JSON mux must throw",
@@ -236,6 +292,16 @@ int main() {
     // than folded into close()'s teardown.
     stream.flush();
     stream.close();
+
+    // The same stream through the builder.
+    zerobus::Stream built = sdk.stream_builder()
+                                .table(table_name)
+                                .oauth(client_id, client_secret)
+                                .json()
+                                .build();
+    built.ingest_json_record(record_json);
+    built.flush();
+    built.close();
 
     std::printf("integration_test: ingested %d records, flushed, closed\n",
                 kRecordCount);

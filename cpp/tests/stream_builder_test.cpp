@@ -296,6 +296,10 @@ void builder_validation_errors(Sdk& sdk) {
       {"max_inflight_requests(0)",
        StreamBuilder(complete).max_inflight_requests(0),
        "max_inflight_requests must be at least 1"},
+      {"table(\"\")", StreamBuilder(complete).table(""),
+       "table name is required: call .table()"},
+      {"compiled_proto({})", StreamBuilder(complete).compiled_proto({}),
+       "compiled_proto() needs a non-empty serialized DescriptorProto"},
   };
   for (const Case& c : cases) {
     check_rejected(c.name, c.builder, c.message);
