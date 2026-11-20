@@ -8,6 +8,11 @@
   `ArrowStreamOptions::ipc_compression` defaults to `IpcCompression::Zstd` instead of
   `IpcCompression::NoCompression`. To keep sending uncompressed payloads, set it to
   `IpcCompression::NoCompression`.
+- Added a stream builder (Beta). `Sdk::stream_builder()` returns a `StreamBuilder` with `table()`,
+  `oauth()` or `headers_provider()`, `json()` or `compiled_proto()`, a setter per `StreamOptions`
+  field, `validate()` and `build()`. Unset options keep the `StreamOptions` defaults, so `build()`
+  opens the same stream as `create_stream`. Unlike `create_stream`, it rejects
+  `max_inflight_requests` 0.
 
 ### Bug Fixes
 
@@ -26,3 +31,5 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `zerobus::StreamBuilder` and `Sdk::stream_builder()` (Beta).

@@ -9,6 +9,7 @@
 // header; comments here cover only implementation details.
 #include "zerobus/sdk.hpp"
 
+#include <memory>
 #include <utility>
 
 #include "detail/config_convert.hpp"
@@ -161,18 +162,33 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
   return *this;
 }
 
-// Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
-// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
-// headers provider (null second arg); the third arg keeps the ack callback (if
-// any) alive for the raw user_data the core holds.
+StreamBuilder Sdk::stream_builder() { return StreamBuilder(handle_); }
+
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,
                           const StreamOptions& options) {
+  return open_stream(handle_, table, client_id, client_secret, options);
+}
+
+Stream Sdk::create_stream(const TableProperties& table,
+                          std::shared_ptr<HeadersProvider> headers_provider,
+                          const StreamOptions& options) {
+  return open_stream(handle_, table, std::move(headers_provider), options);
+}
+
+// Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
+// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
+// headers provider (null second arg); the third arg keeps the ack callback (if
+// any) alive for the raw user_data the core holds.
+Stream Sdk::open_stream(CZerobusSdk* handle, const TableProperties& table,
+                        const std::string& client_id,
+                        const std::string& client_secret,
+                        const StreamOptions& options) {
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
   CZerobusStream* stream = zerobus_sdk_create_stream(
-      handle_, detail::checked_c_str(table.table_name, "table_name"),
+      handle, detail::checked_c_str(table.table_name, "table_name"),
       descriptor_ptr(table.descriptor_proto), table.descriptor_proto.size(),
       detail::checked_c_str(client_id, "client_id"),
       detail::checked_c_str(client_secret, "client_secret"), &copts,
@@ -191,9 +207,9 @@ Stream Sdk::create_stream(const TableProperties& table,
 // zerobus_cpp_headers_free only after any in-flight get_headers has returned.
 // This closes the recovery-vs-teardown use-after-free, so the Stream no longer
 // keeps its own provider shared_ptr.
-Stream Sdk::create_stream(const TableProperties& table,
-                          std::shared_ptr<HeadersProvider> headers_provider,
-                          const StreamOptions& options) {
+Stream Sdk::open_stream(CZerobusSdk* handle, const TableProperties& table,
+                        std::shared_ptr<HeadersProvider> headers_provider,
+                        const StreamOptions& options) {
   if (headers_provider == nullptr) {
     throw ZerobusException("headers_provider must not be null", false);
   }
@@ -202,14 +218,15 @@ Stream Sdk::create_stream(const TableProperties& table,
   // Validate the table name before allocating `owned` so a throw here can't
   // leak it (argument evaluation order vs. the `new` is unspecified).
   const char* c_table = detail::checked_c_str(table.table_name, "table_name");
-  // Heap-allocate the owning shared_ptr; the FFI takes ownership and frees it
-  // via zerobus_cpp_headers_free on every path (success or failure).
-  auto* owned =
-      new std::shared_ptr<HeadersProvider>(std::move(headers_provider));
+  // Heap-allocate the owning shared_ptr. The unique_ptr owns it until the
+  // native call, which takes ownership and frees it via
+  // zerobus_cpp_headers_free on every path (success or failure).
+  auto owned = std::make_unique<std::shared_ptr<HeadersProvider>>(
+      std::move(headers_provider));
   CZerobusStream* stream = zerobus_sdk_create_stream_with_headers_provider(
-      handle_, c_table, descriptor_ptr(table.descriptor_proto),
+      handle, c_table, descriptor_ptr(table.descriptor_proto),
       table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
-      owned, detail::zerobus_cpp_headers_free, &copts, guard.ptr());
+      owned.release(), detail::zerobus_cpp_headers_free, &copts, guard.ptr());
   if (stream == nullptr) {
     // The FFI already freed `owned` via zerobus_cpp_headers_free on the failure
     // path, so we must not delete it here.

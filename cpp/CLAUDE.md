@@ -12,6 +12,7 @@ cpp/
 │   ├── zerobus.hpp       # Umbrella header — include this
 │   ├── sdk.hpp           # Sdk + SdkBuilder + TableProperties
 │   ├── stream.hpp        # Stream (proto/JSON ingestion)
+│   ├── stream_builder.hpp  # StreamBuilder (Beta), from Sdk::stream_builder()
 │   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight)
 │   ├── proto_schema.hpp  # ProtoSchema (UC JSON → descriptor + encoder)
 │   ├── headers_provider.hpp  # HeadersProvider interface
@@ -21,10 +22,10 @@ cpp/
 │   ├── error.hpp         # ZerobusException
 │   └── version.hpp       # ZEROBUS_CPP_VERSION
 ├── src/                  # Implementation (the only place that includes zerobus.h)
-│   ├── sdk.cpp / stream.cpp / arrow_stream.cpp / proto_schema.cpp
+│   ├── sdk.cpp / stream.cpp / stream_builder.cpp / arrow_stream.cpp / proto_schema.cpp
 │   ├── ack_callback.cpp  # AckCallback::from lambda adapter
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
-│   └── detail/           # Internal: ffi_util, config_convert, headers_callback, ack_callback
+│   └── detail/           # Internal: ffi_util, config_convert, headers_callback, ack_callback, stream_builder_access (tests)
 ├── tests/                # Dependency-free unit tests (plain executables)
 ├── examples/             # Runnable usage examples (JSON, proto, Arrow)
 ├── cmake/
@@ -129,6 +130,14 @@ When a `StreamOptions::ack_callback` is set:
 - `AckCallback::on_ack` / `on_error` are `noexcept`. The trampolines must not let
   anything unwind across the boundary; an escaping exception calls
   `std::terminate` at the throw site.
+
+## Stream builder
+
+`StreamBuilder` holds a `StreamOptions` plus the table, auth and format, and
+`build()` calls `Sdk::open_stream`, the same native create path (and `to_c`) as
+`Sdk::create_stream`. Keep it that way: one conversion, one create path. The
+builder's only extra rule is rejecting `max_inflight_requests` 0. Tests read
+its settings through `detail::StreamBuilderAccess`.
 
 ## Configuration mapping
 

@@ -10,6 +10,7 @@
 #include "zerobus/config.hpp"
 #include "zerobus/headers_provider.hpp"
 #include "zerobus/stream.hpp"
+#include "zerobus/stream_builder.hpp"
 
 namespace zerobus {
 
@@ -89,6 +90,10 @@ class Sdk {
   Sdk(const Sdk&) = delete;
   Sdk& operator=(const Sdk&) = delete;
 
+  /// Start building a proto/JSON stream (Beta). The `Sdk` must outlive every
+  /// `build()` call on the returned builder.
+  StreamBuilder stream_builder();
+
   /// Create a proto/JSON stream authenticated with OAuth client credentials.
   Stream create_stream(const TableProperties& table,
                        const std::string& client_id,
@@ -119,7 +124,18 @@ class Sdk {
 
  private:
   friend class SdkBuilder;
+  friend class StreamBuilder;
   explicit Sdk(CZerobusSdk* handle) : handle_(handle) {}
+
+  // The one native create path, shared by create_stream and
+  // StreamBuilder::build.
+  static Stream open_stream(CZerobusSdk* sdk, const TableProperties& table,
+                            const std::string& client_id,
+                            const std::string& client_secret,
+                            const StreamOptions& options);
+  static Stream open_stream(CZerobusSdk* sdk, const TableProperties& table,
+                            std::shared_ptr<HeadersProvider> headers_provider,
+                            const StreamOptions& options);
 
   CZerobusSdk* handle_;
 };

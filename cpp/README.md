@@ -208,6 +208,33 @@ stream.flush();                      // wait once for all acks
 stream.close();                      // flush + close at a controlled point
 ```
 
+### Stream builder (Beta)
+
+`Sdk::stream_builder()` is a fluent alternative to `create_stream`. Set a table,
+one authentication method (`oauth()` or `headers_provider()`) and one format
+(`json()` or `compiled_proto(descriptor)`), plus any option you want to change,
+then call `build()`. Unset options keep the `StreamOptions` defaults, so the
+stream is the same as one from `create_stream`.
+
+```cpp
+zerobus::Stream stream = sdk.stream_builder()
+                             .table("main.analytics.events")
+                             .oauth(client_id, client_secret)
+                             .json()
+                             .max_inflight_requests(50'000)
+                             .build();
+for (const std::string& record : records) {
+  stream.ingest_json_record(record);   // queue only — no per-record wait
+}
+stream.flush();
+stream.close();
+```
+
+Setters never throw. `validate()` and `build()` throw a non-retryable
+`ZerobusException` if the table, authentication or format is missing, or if
+`max_inflight_requests` is 0. The builder is copyable, is not thread-safe, and
+must not outlive its `Sdk`. See [`examples/json/builder.cpp`](examples/json/builder.cpp).
+
 ### Protobuf ingestion from a Unity Catalog schema (dynamic)
 
 `ProtoSchema::from_uc_json()` builds both the descriptor and a JSON→proto
@@ -324,6 +351,7 @@ canonical version):
 | Type | Purpose |
 |------|---------|
 | `zerobus::Sdk` / `zerobus::SdkBuilder` | Connection factory; creates streams |
+| `zerobus::StreamBuilder` | Fluent proto/JSON stream configuration (Beta); from `Sdk::stream_builder()` |
 | `zerobus::Stream` | Proto/JSON ingestion stream |
 | `zerobus::ArrowStream` | Arrow Flight ingestion stream |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |
