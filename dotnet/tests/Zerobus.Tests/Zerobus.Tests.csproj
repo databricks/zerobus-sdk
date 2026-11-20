@@ -6,6 +6,8 @@
     <AssemblyName>Databricks.Zerobus.Tests</AssemblyName>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- AckCallbackTests calls the native ack trampolines through function pointers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
