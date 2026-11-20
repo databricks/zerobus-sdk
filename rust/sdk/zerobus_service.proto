@@ -62,6 +62,9 @@ service Zerobus {
   // 3-parts UC table. Unary: it returns once the records are durable, without
   // opening a stream. Also served over REST as
   // POST /zerobus/v1/tables/{table_name}/insert.
+  //
+  // Not idempotent: if a call fails after the server accepted the batch, the
+  // outcome is unknown and resending it can insert the records twice.
   rpc InsertRecords(InsertRecordsRequest) returns (InsertRecordsResponse);
 }
 
@@ -384,13 +387,12 @@ message InsertRecordsRequest {
   // Required.
   optional string table_name = 1;
 
-  // The raw JSON request body, one object per row to insert: either a JSON
-  // array of objects, or JSON Lines (one object per line). The server tells
-  // them apart by the first byte, and parses them with serde_json, which
-  // preserves arbitrary-precision integers (i64/u64).
+  // The raw JSON body: a JSON array of objects, or JSON Lines (one object per
+  // line, blank lines skipped). A first non-whitespace byte of `[` means an
+  // array; anything else is read as JSON Lines. Integers keep 64-bit precision.
   //
-  // Required, but marked `optional` in proto; presence is enforced by the
-  // server at runtime. Maximum total size is 10MB.
+  // Required, but marked `optional` in proto. The server rejects a missing or
+  // empty body and any row that isn't an object. Size cap: 10 MB by default.
   //
   // Example body:
   //   [

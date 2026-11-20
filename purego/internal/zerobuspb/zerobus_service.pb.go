@@ -1472,13 +1472,12 @@ type InsertRecordsRequest struct {
 	//
 	// Required.
 	TableName *string `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
-	// The raw JSON request body, one object per row to insert: either a JSON
-	// array of objects, or JSON Lines (one object per line). The server tells
-	// them apart by the first byte, and parses them with serde_json, which
-	// preserves arbitrary-precision integers (i64/u64).
+	// The raw JSON body: a JSON array of objects, or JSON Lines (one object per
+	// line, blank lines skipped). A first non-whitespace byte of `[` means an
+	// array; anything else is read as JSON Lines. Integers keep 64-bit precision.
 	//
-	// Required, but marked `optional` in proto; presence is enforced by the
-	// server at runtime. Maximum total size is 10MB.
+	// Required, but marked `optional` in proto. The server rejects a missing or
+	// empty body and any row that isn't an object. Size cap: 10 MB by default.
 	//
 	// Example body:
 	//

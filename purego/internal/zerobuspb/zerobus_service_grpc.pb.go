@@ -55,6 +55,9 @@ type ZerobusClient interface {
 	// 3-parts UC table. Unary: it returns once the records are durable, without
 	// opening a stream. Also served over REST as
 	// POST /zerobus/v1/tables/{table_name}/insert.
+	//
+	// Not idempotent: if a call fails after the server accepted the batch, the
+	// outcome is unknown and resending it can insert the records twice.
 	InsertRecords(ctx context.Context, in *InsertRecordsRequest, opts ...grpc.CallOption) (*InsertRecordsResponse, error)
 }
 
@@ -142,6 +145,9 @@ type ZerobusServer interface {
 	// 3-parts UC table. Unary: it returns once the records are durable, without
 	// opening a stream. Also served over REST as
 	// POST /zerobus/v1/tables/{table_name}/insert.
+	//
+	// Not idempotent: if a call fails after the server accepted the batch, the
+	// outcome is unknown and resending it can insert the records twice.
 	InsertRecords(context.Context, *InsertRecordsRequest) (*InsertRecordsResponse, error)
 	mustEmbedUnimplementedZerobusServer()
 }
