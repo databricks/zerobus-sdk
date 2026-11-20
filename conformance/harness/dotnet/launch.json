@@ -1,0 +1,5 @@
+{
+  "argv": ["dotnet", "{harness_dir}/bin/Debug/net8.0/zerobus-testing-harness-dotnet.dll"],
+  "artifact": "{harness_dir}/bin/Debug/net8.0/zerobus-testing-harness-dotnet.dll",
+  "build_hint": "cd conformance/harness/dotnet && dotnet build"
+}
