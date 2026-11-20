@@ -1993,6 +1993,9 @@ mod multiplexed_tests {
     enum Null {
         Mux,
         Data,
+        // A proto batch's lens array, checked in the same condition as its
+        // records but in each export's own code.
+        Lens,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -2037,7 +2040,12 @@ mod multiplexed_tests {
             } else {
                 json_array.as_ptr()
             };
-            let (lens, json) = (lens.as_ptr(), json.as_ptr());
+            let lens = if arg == Null::Lens {
+                ptr::null()
+            } else {
+                lens.as_ptr()
+            };
+            let json = json.as_ptr();
             match export {
                 Proto => proto1(null, data, 1, r) == INGEST_ERROR,
                 Json => json1(null, json, r) == INGEST_ERROR,
@@ -2062,6 +2070,7 @@ mod multiplexed_tests {
             (Json, Null::Mux, NULL_HANDLE),
             (Protos, Null::Mux, NULL_HANDLE),
             (Protos, Null::Data, BAD_RECORDS),
+            (Protos, Null::Lens, BAD_RECORDS),
             (Jsons, Null::Mux, NULL_HANDLE),
             (Jsons, Null::Data, BAD_RECORDS),
             (Wait, Null::Mux, NULL_HANDLE),
@@ -2074,6 +2083,7 @@ mod multiplexed_tests {
             (JsonNowait, Null::Mux, NULL_HANDLE),
             (ProtosNowait, Null::Mux, NULL_HANDLE),
             (ProtosNowait, Null::Data, BAD_RECORDS),
+            (ProtosNowait, Null::Lens, BAD_RECORDS),
             (JsonsNowait, Null::Mux, NULL_HANDLE),
             (JsonsNowait, Null::Data, BAD_RECORDS),
         ];

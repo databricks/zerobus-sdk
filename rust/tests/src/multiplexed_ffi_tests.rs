@@ -2025,9 +2025,10 @@ fn async_calls_fail_fast_on_invalid_arguments() {
         let sink = AsyncSink::leaked();
         results.push((op.to_owned(), async_op(op, null, sink), NULL_HANDLE, sink));
     }
-    let (lens, cb) = ([1usize], sink_offset);
+    let (data, lens, cb) = ([1u8], [1usize], sink_offset);
+    let records = [data.as_ptr()];
     type Call<'a> = Box<dyn Fn(*mut c_void, *mut CResult) -> bool + 'a>;
-    let null_pointer: [(&str, Call, &str); 3] = [
+    let null_pointer: [(&str, Call, &str); 4] = [
         (
             "proto_record_async data=NULL",
             Box::new(|ud, r| proto1_a(null, ptr::null(), 1, cb, ud, r)),
@@ -2036,6 +2037,11 @@ fn async_calls_fail_fast_on_invalid_arguments() {
         (
             "proto_records_async records=NULL",
             Box::new(|ud, r| protos_a(null, ptr::null(), lens.as_ptr(), 1, cb, ud, r)),
+            BAD_RECORDS,
+        ),
+        (
+            "proto_records_async record_lens=NULL",
+            Box::new(|ud, r| protos_a(null, records.as_ptr(), ptr::null(), 1, cb, ud, r)),
             BAD_RECORDS,
         ),
         (
