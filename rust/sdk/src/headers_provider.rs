@@ -10,6 +10,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tonic::metadata::{MetadataMap, MetadataValue};
+use tracing::error;
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -59,20 +61,21 @@ pub trait HeadersProvider: Send + Sync {
     /// Invalidates cached authentication state that the server just rejected.
     ///
     /// The SDK calls this when the server rejects the supplied credentials with an
-    /// authentication error during stream creation. The default is a no-op, which is
-    /// correct for providers that hold no cache. The built-in OAuth provider clears
-    /// the rejected token from its cache, so the next `get_headers` re-mints — unless
-    /// a concurrent refresh already replaced it with a newer token, which is kept and
-    /// served without re-minting.
+    /// authentication error during stream creation or a unary call. The default is
+    /// a no-op, which is correct for providers that hold no cache. The built-in OAuth
+    /// provider clears the rejected token from its cache, so the next `get_headers`
+    /// re-mints — unless a concurrent refresh already replaced it with a newer token,
+    /// which is kept and served without re-minting.
     async fn invalidate(&self) {}
 
     /// Whether a rejected credential can be replaced by a fresh one.
     ///
-    /// When the server rejects the credentials while a stream is being created and
-    /// recovery is on, the SDK calls [`invalidate`](Self::invalidate) and retries once
-    /// so a refreshed credential can be sent. A provider whose credential is fixed,
-    /// such as a personal access token, returns `false` to skip that retry and surface
-    /// the rejection immediately. The default is `true`.
+    /// When the server rejects the credentials while a stream is being created, or
+    /// during a unary call, and recovery is on, the SDK calls
+    /// [`invalidate`](Self::invalidate) and retries once so a refreshed credential
+    /// can be sent. A provider whose credential is fixed, such as a personal access
+    /// token, returns `false` to skip that retry and surface the rejection
+    /// immediately. The default is `true`.
     fn can_refresh(&self) -> bool {
         true
     }
@@ -672,6 +675,38 @@ impl HeadersProvider for NoAuthHeadersProvider {
     }
 }
 
+/// Builds the gRPC request metadata from the headers a [`HeadersProvider`]
+/// returned. Reserved keys are matched case-insensitively, as tonic lowercases
+/// every key on insert. The `authorization` value is marked sensitive, so it is
+/// redacted from debug output, and a `-bin` header is sent as binary metadata
+/// (see [`insert_header_metadata`]). `table_name` is used only for logging.
+#[allow(clippy::result_large_err)]
+pub(crate) fn grpc_metadata_from_headers(
+    headers: HashMap<&'static str, String>,
+    table_name: &str,
+) -> ZerobusResult<MetadataMap> {
+    let mut metadata = MetadataMap::new();
+    for (key, value) in headers {
+        if key.eq_ignore_ascii_case("x-databricks-zerobus-table-name") {
+            let table_name = MetadataValue::try_from(value.as_str())
+                .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
+            metadata.insert("x-databricks-zerobus-table-name", table_name);
+        } else if key.eq_ignore_ascii_case("authorization") {
+            let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
+                error!(table_name = %table_name, "authorization token is not a valid HTTP header value");
+                ZerobusError::InvalidUCTokenError(
+                    "authorization token is not a valid HTTP header value".to_string(),
+                )
+            })?;
+            auth_value.set_sensitive(true);
+            metadata.insert("authorization", auth_value);
+        } else {
+            insert_header_metadata(&mut metadata, key, &value)?;
+        }
+    }
+    Ok(metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,5 +1158,64 @@ mod tests {
 
         assert!(!debug.contains("dapi-secret-token"), "debug: {debug}");
         assert!(debug.contains("cat.sch.tbl"), "debug: {debug}");
+    }
+
+    #[test]
+    fn maps_headers_and_marks_authorization_sensitive() {
+        let headers = HashMap::from([
+            ("authorization", "Bearer token".to_string()),
+            ("x-databricks-zerobus-table-name", "c.s.t".to_string()),
+            ("x-custom", "value".to_string()),
+        ]);
+        let metadata = grpc_metadata_from_headers(headers, "c.s.t").unwrap();
+
+        let auth = metadata.get("authorization").unwrap();
+        assert_eq!(auth, "Bearer token");
+        assert!(auth.is_sensitive());
+        assert_eq!(
+            metadata.get("x-databricks-zerobus-table-name").unwrap(),
+            "c.s.t"
+        );
+        assert_eq!(metadata.get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn rejects_invalid_header_values_with_the_matching_error() {
+        let invalid = "bad\nvalue".to_string();
+        let error = |key: &'static str| {
+            grpc_metadata_from_headers(HashMap::from([(key, invalid.clone())]), "c.s.t")
+                .unwrap_err()
+        };
+        assert!(matches!(
+            error("x-databricks-zerobus-table-name"),
+            ZerobusError::InvalidTableName(_)
+        ));
+        assert!(matches!(
+            error("authorization"),
+            ZerobusError::InvalidUCTokenError(_)
+        ));
+        assert!(matches!(
+            error("x-custom"),
+            ZerobusError::InvalidArgument(msg) if msg == "Invalid metadata for header 'x-custom'"
+        ));
+    }
+
+    #[test]
+    fn mixed_case_reserved_headers_keep_reserved_handling() {
+        let headers = HashMap::from([
+            ("Authorization", "Bearer secret".to_string()),
+            ("X-Databricks-Zerobus-Table-Name", "bad\nname".to_string()),
+        ]);
+        let err = grpc_metadata_from_headers(headers.clone(), "t").unwrap_err();
+        assert!(matches!(err, ZerobusError::InvalidTableName(_)), "{err:?}");
+
+        let mut headers = headers;
+        headers.insert("X-Databricks-Zerobus-Table-Name", "c.s.t".to_string());
+        let metadata = grpc_metadata_from_headers(headers, "t").unwrap();
+        assert!(metadata.get("authorization").unwrap().is_sensitive());
+        assert_eq!(
+            metadata.get("x-databricks-zerobus-table-name").unwrap(),
+            "c.s.t"
+        );
     }
 }

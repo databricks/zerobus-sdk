@@ -13,6 +13,7 @@ This directory contains examples demonstrating JSON-based data ingestion into Da
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
 - [Persistent Stream Example](#persistent-stream-example)
+- [Unary Example](#unary-example)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -28,6 +29,7 @@ JSON examples are recommended for getting started - they're simpler and don't re
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 - **`persistent.rs`** - Create a durable stream or resume it by `stream_id`
+- **`unary.rs`** - Send a batch in one call without a stream, for sparse traffic
 
 ## Three Ways to Pass Data
 
@@ -186,6 +188,39 @@ writes new records. The record ids continue after the last committed offset: the
 first run writes ids 1 and 2, and the next run writes ids 3 and 4. Its final
 `close()` ends only the current connection; the durable stream remains available
 for another resume.
+
+## Unary Example
+
+A unary client sends each batch in one call and returns once the batch is
+durable. It opens no stream, so it suits sparse traffic, such as a few batches
+per minute. For continuous ingestion, use a stream as in `batch.rs`.
+
+```bash
+cargo run -p rust-examples-json --example json_unary
+```
+
+**Expected output:**
+```
+Batch of 3 records is durable
+```
+
+```rust
+let client = sdk
+    .unary_client_builder()
+    .table(&config.table_name)
+    .oauth(&config.client_id, &config.client_secret)
+    .json()
+    .build()
+    .await?;
+
+// One call for the whole batch; nothing to flush or close afterwards.
+client.ingest_records(batch).await?;
+```
+
+Build the client once and reuse it. Send the records you have in one
+`ingest_records()` call; never one record per call in a loop. See
+[Unary Ingestion](../../README.md#unary-ingestion-sparse-traffic) for the full
+behavior, including JSON Lines.
 
 ## Adapting for Your Custom Table
 
