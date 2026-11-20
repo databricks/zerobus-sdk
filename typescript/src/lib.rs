@@ -20,7 +20,7 @@ use napi_derive::napi;
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
     DefaultTokenFactory, EncodedRecord as RustRecordPayload,
-    HeadersProvider as RustHeadersProvider, ZerobusError as RustZerobusError,
+    HeadersProvider as RustHeadersProvider, StreamBuilder, ZerobusError as RustZerobusError,
     ZerobusResult as RustZerobusResult, ZerobusSdk as RustZerobusSdk,
     ZerobusStream as RustZerobusStream,
 };
@@ -28,6 +28,8 @@ use prost_types;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+mod multiplexed;
 
 /// User-Agent header value for TypeScript SDK requests.
 const TS_SDK_USER_AGENT: &str = concat!("zerobus-sdk-ts/", env!("CARGO_PKG_VERSION"));
@@ -50,6 +52,7 @@ pub enum RecordType {
 ///
 /// These options control stream behavior including recovery, timeouts, and inflight limits.
 #[napi(object)]
+#[derive(Default)]
 pub struct StreamConfigurationOptions {
     /// Maximum number of unacknowledged requests that can be in flight.
     /// Default: 1,000,000
@@ -821,6 +824,18 @@ async fn call_headers_tsfn(
     Ok(headers)
 }
 
+/// Calls the JS headers callback once and wraps its headers as a static provider.
+async fn static_headers_provider(
+    tsfn: ThreadsafeFunction<(), ErrorStrategy::Fatal>,
+) -> Result<Arc<dyn RustHeadersProvider>> {
+    let headers = call_headers_tsfn(tsfn)
+        .await
+        .map_err(|e| Error::from_reason(format!("Headers callback failed: {}", e)))?;
+    let static_provider = StaticHeadersProvider::new(headers)
+        .map_err(|e| Error::from_reason(format!("Invalid headers: {}", e)))?;
+    Ok(Arc::new(static_provider))
+}
+
 /// OAuth headers provider for TypeScript SDK.
 /// Uses the Rust SDK's token factory but with the TS user agent.
 struct TsOAuthHeadersProvider {
@@ -1026,65 +1041,9 @@ impl ZerobusSdk {
         options: Option<StreamConfigurationOptions>,
         headers_provider: Option<JsHeadersProvider>,
     ) -> Result<JsObject> {
-        // Decode the optional protobuf descriptor up-front so we can hand it
-        // to the builder's `.compiled_proto()` setter; the builder constructs
-        // the (now-private) `TableProperties` itself.
-        let descriptor_proto: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
-            table_properties.descriptor_proto
-        {
-            let bytes = base64_decode(desc_str)
-                .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
-            let dp: prost_types::DescriptorProto =
-                prost::Message::decode(&bytes[..]).map_err(|e| {
-                    Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
-                })?;
-            Some(dp)
-        } else {
-            None
-        };
-
-        let opts = options.unwrap_or(StreamConfigurationOptions {
-            max_inflight_requests: None,
-            recovery: None,
-            recovery_timeout_ms: None,
-            recovery_backoff_ms: None,
-            recovery_retries: None,
-            flush_timeout_ms: None,
-            server_lack_of_ack_timeout_ms: None,
-            record_type: None,
-            stream_paused_max_wait_time_ms: None,
-        });
-
-        // The schema selects the format (descriptor -> Proto, avro_schema -> Avro,
-        // neither -> JSON/Proto); an explicit record_type must agree with it.
-        let has_descriptor = descriptor_proto.is_some();
-        let avro_schema = table_properties.avro_schema.clone();
-
-        let record_type = if avro_schema.is_some() {
-            if has_descriptor {
-                return Err(Error::from_reason(
-                    "TableProperties.descriptorProto and avroSchema are mutually exclusive",
-                ));
-            }
-            match opts.record_type {
-                None | Some(2) => RecordType::Avro,
-                _ => {
-                    return Err(Error::from_reason(
-                        "avroSchema is set but recordType is not RecordType.Avro",
-                    ))
-                }
-            }
-        } else {
-            match opts.record_type {
-                Some(0) => RecordType::Json,
-                Some(2) => {
-                    return Err(Error::from_reason(
-                        "recordType is RecordType.Avro but no avroSchema was provided on TableProperties",
-                    ))
-                }
-                _ => RecordType::Proto,
-            }
-        };
+        let opts = options.unwrap_or_default();
+        let format = resolve_format(&table_properties, opts.record_type)?;
+        let record_type = format.record_type;
 
         let headers_tsfn = match headers_provider {
             Some(JsHeadersProvider {
@@ -1100,81 +1059,24 @@ impl ZerobusSdk {
 
         env.execute_tokio_future(
             async move {
-                let headers_provider_arc: Arc<dyn RustHeadersProvider> = if let Some(tsfn) =
-                    headers_tsfn
-                {
-                    let headers = call_headers_tsfn(tsfn).await.map_err(|e| {
-                        napi::Error::from_reason(format!("Headers callback failed: {}", e))
-                    })?;
-                    let static_provider = StaticHeadersProvider::new(headers)
-                        .map_err(|e| napi::Error::from_reason(format!("Invalid headers: {}", e)))?;
-                    Arc::new(static_provider)
-                } else {
-                    Arc::new(TsOAuthHeadersProvider::new(
-                        client_id,
-                        client_secret,
-                        table_name.clone(),
-                        workspace_id,
-                        unity_catalog_url,
-                    ))
-                };
+                let headers_provider_arc: Arc<dyn RustHeadersProvider> =
+                    if let Some(tsfn) = headers_tsfn {
+                        static_headers_provider(tsfn).await?
+                    } else {
+                        Arc::new(TsOAuthHeadersProvider::new(
+                            client_id,
+                            client_secret,
+                            table_name.clone(),
+                            workspace_id,
+                            unity_catalog_url,
+                        ))
+                    };
 
-                let mut builder = sdk
+                let builder = sdk
                     .stream_builder()
                     .table(table_name)
                     .headers_provider(headers_provider_arc);
-
-                if let Some(v) = opts.max_inflight_requests {
-                    builder = builder.max_inflight_requests(v as usize);
-                }
-                if let Some(v) = opts.recovery {
-                    builder = builder.recovery(v);
-                }
-                if let Some(v) = opts.recovery_timeout_ms {
-                    builder = builder.recovery_timeout_ms(v as u64);
-                }
-                if let Some(v) = opts.recovery_backoff_ms {
-                    builder = builder.recovery_backoff_ms(v as u64);
-                }
-                if let Some(v) = opts.recovery_retries {
-                    builder = builder.recovery_retries(v);
-                }
-                if let Some(v) = opts.flush_timeout_ms {
-                    builder = builder.flush_timeout_ms(v as u64);
-                }
-                if let Some(v) = opts.server_lack_of_ack_timeout_ms {
-                    builder = builder.server_lack_of_ack_timeout_ms(v as u64);
-                }
-                if let Some(v) = opts.stream_paused_max_wait_time_ms {
-                    builder = builder.stream_paused_max_wait_time_ms(Some(v as u64));
-                }
-
-                let builder = match record_type {
-                    RecordType::Json => builder.json(),
-                    #[cfg(feature = "avro")]
-                    RecordType::Avro => {
-                        let schema = avro_schema.ok_or_else(|| {
-                            napi::Error::from_reason(
-                                "Avro record type requires avroSchema on TableProperties",
-                            )
-                        })?;
-                        builder.avro(schema)
-                    }
-                    #[cfg(not(feature = "avro"))]
-                    RecordType::Avro => {
-                        return Err(napi::Error::from_reason(
-                            "Avro support is not compiled in this build",
-                        ))
-                    }
-                    RecordType::Proto => {
-                        let desc = descriptor_proto.ok_or_else(|| {
-                            napi::Error::from_reason(
-                                "Proto record type requires descriptor_proto on TableProperties",
-                            )
-                        })?;
-                        builder.compiled_proto(desc)
-                    }
-                };
+                let builder = apply_format(apply_options(builder, &opts), format)?;
 
                 let stream = builder.build().await.map_err(|e| {
                     napi::Error::from_reason(format!("Failed to create stream: {}", e))
@@ -1186,6 +1088,36 @@ impl ZerobusSdk {
                 })
             },
             |_env, stream| Ok(stream),
+        )
+    }
+
+    /// Internal: opens a multiplexed stream (Beta). Not part of the public API; use
+    /// `streamBuilder()...multiplexed(n).build()` from the package entry point.
+    ///
+    /// `ackDispatcher` is wrapper.js's internal adapter, not a user callback.
+    #[napi(js_name = "_createMultiplexedStream", skip_typescript)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_multiplexed_stream(
+        &self,
+        env: Env,
+        table_properties: TableProperties,
+        client_id: String,
+        client_secret: String,
+        stream_count: f64,
+        options: Option<StreamConfigurationOptions>,
+        headers_provider: Option<JsHeadersProvider>,
+        ack_dispatcher: Option<JsFunction>,
+    ) -> Result<JsObject> {
+        multiplexed::create(
+            self,
+            env,
+            table_properties,
+            client_id,
+            client_secret,
+            stream_count,
+            options,
+            headers_provider,
+            ack_dispatcher,
         )
     }
 
@@ -1253,6 +1185,128 @@ impl ZerobusSdk {
             record_type: stream.record_type,
         })
     }
+}
+
+/// Stream format resolved from `TableProperties` and `recordType` before any network call.
+struct ResolvedFormat {
+    record_type: RecordType,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    /// Read only by the `avro` build; without it `apply_format` rejects Avro.
+    #[cfg_attr(not(feature = "avro"), allow(dead_code))]
+    avro_schema: Option<String>,
+}
+
+/// Decodes the descriptor and picks the record type. The schema selects the format
+/// (descriptor -> Proto, avro_schema -> Avro, neither -> JSON/Proto); an explicit
+/// `record_type` must agree with it.
+fn resolve_format(
+    table_properties: &TableProperties,
+    record_type: Option<i32>,
+) -> Result<ResolvedFormat> {
+    // Decode the optional protobuf descriptor up-front so we can hand it
+    // to the builder's `.compiled_proto()` setter; the builder constructs
+    // the (now-private) `TableProperties` itself.
+    let descriptor_proto: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
+        table_properties.descriptor_proto
+    {
+        let bytes = base64_decode(desc_str)
+            .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
+        let dp: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
+            .map_err(|e| Error::from_reason(format!("Failed to parse descriptor proto: {}", e)))?;
+        Some(dp)
+    } else {
+        None
+    };
+
+    let avro_schema = table_properties.avro_schema.clone();
+
+    let record_type = if avro_schema.is_some() {
+        if descriptor_proto.is_some() {
+            return Err(Error::from_reason(
+                "TableProperties.descriptorProto and avroSchema are mutually exclusive",
+            ));
+        }
+        match record_type {
+            None | Some(2) => RecordType::Avro,
+            _ => {
+                return Err(Error::from_reason(
+                    "avroSchema is set but recordType is not RecordType.Avro",
+                ))
+            }
+        }
+    } else {
+        match record_type {
+            Some(0) => RecordType::Json,
+            Some(2) => return Err(Error::from_reason(
+                "recordType is RecordType.Avro but no avroSchema was provided on TableProperties",
+            )),
+            _ => RecordType::Proto,
+        }
+    };
+
+    Ok(ResolvedFormat {
+        record_type,
+        descriptor_proto,
+        avro_schema,
+    })
+}
+
+/// Forwards the options that are set; unset ones keep the Rust core defaults.
+fn apply_options<'a>(
+    mut builder: StreamBuilder<'a>,
+    opts: &StreamConfigurationOptions,
+) -> StreamBuilder<'a> {
+    if let Some(v) = opts.max_inflight_requests {
+        builder = builder.max_inflight_requests(v as usize);
+    }
+    if let Some(v) = opts.recovery {
+        builder = builder.recovery(v);
+    }
+    if let Some(v) = opts.recovery_timeout_ms {
+        builder = builder.recovery_timeout_ms(v as u64);
+    }
+    if let Some(v) = opts.recovery_backoff_ms {
+        builder = builder.recovery_backoff_ms(v as u64);
+    }
+    if let Some(v) = opts.recovery_retries {
+        builder = builder.recovery_retries(v);
+    }
+    if let Some(v) = opts.flush_timeout_ms {
+        builder = builder.flush_timeout_ms(v as u64);
+    }
+    if let Some(v) = opts.server_lack_of_ack_timeout_ms {
+        builder = builder.server_lack_of_ack_timeout_ms(v as u64);
+    }
+    if let Some(v) = opts.stream_paused_max_wait_time_ms {
+        builder = builder.stream_paused_max_wait_time_ms(Some(v as u64));
+    }
+    builder
+}
+
+/// Sets the record format resolved by `resolve_format` on the builder.
+fn apply_format(builder: StreamBuilder<'_>, format: ResolvedFormat) -> Result<StreamBuilder<'_>> {
+    Ok(match format.record_type {
+        RecordType::Json => builder.json(),
+        #[cfg(feature = "avro")]
+        RecordType::Avro => {
+            let schema = format.avro_schema.ok_or_else(|| {
+                Error::from_reason("Avro record type requires avroSchema on TableProperties")
+            })?;
+            builder.avro(schema)
+        }
+        #[cfg(not(feature = "avro"))]
+        RecordType::Avro => {
+            return Err(Error::from_reason(
+                "Avro support is not compiled in this build",
+            ))
+        }
+        RecordType::Proto => {
+            let desc = format.descriptor_proto.ok_or_else(|| {
+                Error::from_reason("Proto record type requires descriptor_proto on TableProperties")
+            })?;
+            builder.compiled_proto(desc)
+        }
+    })
 }
 
 /// Helper function to decode base64 strings.
