@@ -22,7 +22,8 @@ service MockAdmin {
   // returns the first capture at a wire offset. Ephemeral wire offsets restart at 0 on a
   // reconnect, so after recovery these can reflect an earlier connection — assert on counts.
   // GetCapturedRecordBytes is gRPC-only: the Flight plane counts rows from headers without
-  // keeping per-offset bytes, so it returns nothing for Flight streams.
+  // keeping per-offset bytes, so it returns NOT_FOUND for Flight streams (and for any offset with
+  // no captured record).
   rpc GetAckOffset(StreamQuery) returns (OffsetResponse);            // highest cumulative ack offset
   rpc GetCapturedRecordBytes(RecordQuery) returns (BytesResponse);   // raw encoded bytes at offset (gRPC only)
 

@@ -87,6 +87,9 @@ jobs:
               - '.github/workflows/ci-dotnet.yml'
             orchestrator:
               - 'conformance/orchestrator/**'
+              - 'conformance/schemas/**'
+              - 'conformance/harness/proto/**'
+              - 'conformance/mock_server/proto/**'
 
   # Blocking jobs — required for merge
   rust:
@@ -184,6 +187,14 @@ jobs:
           python-version: '3.12'
       - run: pip install -e '.[test]' && pytest
         working-directory: conformance/orchestrator
+      # The committed contract stubs must match a fresh generation from the protos.
+      - name: Check generated stubs are up to date
+        working-directory: conformance/orchestrator
+        run: |
+          ./scripts/gen_stubs.sh
+          # --porcelain with untracked files catches a NEW stub that was regenerated but never
+          # committed (plain `git diff` only sees tracked files).
+          test -z "$(git status --porcelain --untracked-files=all -- src/zerobus_test_runner/_generated)"
 
   # Non-blocking cross-SDK jobs — run wrapper tests against the local Rust
   # source when rust/** changes. Skip wrappers already selected by their own

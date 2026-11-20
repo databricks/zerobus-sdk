@@ -7,9 +7,16 @@ name = "zerobus_test_runner"
 version = "0.1.0"
 description = "Layer-1 conformance test orchestrator for the Zerobus SDKs"
 requires-python = ">=3.10"
-# The scenario-authoring engine is pure Python. 
-# Runtime deps arrive with the layers that need them.
-dependencies = []
+# The runtime drives harnesses and the mock over gRPC and builds schema artifacts. The grpcio and
+# protobuf floors MUST equal scripts/gen_stubs.sh's PIN: they are what the committed stubs require
+# at import, and a lower version fails the generated-code version guards. protobuf is capped below
+# the next major, whose generated-code internals the committed stubs may not support.
+dependencies = [
+    "grpcio>=1.85.1",
+    "grpcio-tools>=1.85.1",
+    "protobuf>=7.35.1,<8",
+    "pyarrow>=14",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -23,7 +30,9 @@ testpaths = ["tests"]
 
 [tool.black]
 line-length = 120
+extend-exclude = "/_generated/"
 
 [tool.isort]
 profile = "black"
 line_length = 120
+extend_skip = ["_generated"]

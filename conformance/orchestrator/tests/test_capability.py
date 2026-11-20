@@ -24,9 +24,10 @@ def test_gate_order_and_terminal_states():
     assert classify("rust", "grpc", "avro", PROTO_ONLY, SIMPLE).state is State.NA
     # Gate 3: schema without an arrow artifact.
     assert classify("rust", "arrow_flight", "arrow", None, SIMPLE).state is State.NA
-    # Wiring: valid, supported, applicable, but harness not implemented for go.
+    # Wiring: valid, supported, applicable, but harness not implemented for go -> NOT_WIRED,
+    # distinct from UNSUPPORTED (which would wrongly say the SDK can't do it).
     c = classify("go", "grpc", "proto", None, SIMPLE)
-    assert c.state is State.UNSUPPORTED and "not wired" in c.reason
+    assert c.state is State.NOT_WIRED and "no conformance harness" in c.reason
     # A wired tuple runs.
     assert classify("rust", "grpc", "proto", PROTO_ONLY, SIMPLE).runs
 
@@ -46,10 +47,12 @@ def test_capability_table_matches_shipped_sdks():
 
 
 def test_supported_but_unwired_reports_not_wired_not_unsupported():
-    # typescript ships avro, but the harness does not wire it yet: report "not wired (TODO)",
-    # not the false "does not support".
+    # typescript ships avro, but the harness does not wire it yet: NOT_WIRED, not the false
+    # UNSUPPORTED ("does not support").
     c = classify("typescript", "grpc", "avro", None, frozenset({"avro"}))
-    assert c.state is State.UNSUPPORTED and "not wired" in c.reason
+    assert c.state is State.NOT_WIRED and "no conformance harness" in c.reason
     # go ships Arrow Flight but has no harness yet.
     c2 = classify("go", "arrow_flight", "arrow", None, frozenset({"arrow"}))
-    assert c2.state is State.UNSUPPORTED and "not wired" in c2.reason
+    assert c2.state is State.NOT_WIRED and "no conformance harness" in c2.reason
+    # Contrast: a genuinely unsupported tuple stays UNSUPPORTED.
+    assert classify("dotnet", "arrow_flight", "arrow", None, frozenset({"arrow"})).state is State.UNSUPPORTED
