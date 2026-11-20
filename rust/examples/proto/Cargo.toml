@@ -24,6 +24,10 @@ path = "dynamic/batch.rs"
 name = "proto_dynamic_single"
 path = "dynamic/single.rs"
 
+[[example]]
+name = "proto_dynamic_uc_schema"
+path = "dynamic/uc_schema.rs"
+
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

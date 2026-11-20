@@ -18,6 +18,7 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
   - [Running the Example](#running-the-example-2)
   - [Code Highlights](#code-highlights-2)
   - [Dynamic Batch](#dynamic-batch)
+  - [Schema Fetched from Unity Catalog](#schema-fetched-from-unity-catalog)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
   - [Update Example Files](#update-example-files)
@@ -45,6 +46,7 @@ The examples are grouped by how the protobuf schema is obtained:
   are built field-by-field with `DynamicRecord`.
   - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
   - **`dynamic/batch.rs`** - Ingest multiple dynamic records at once using `ingest_records_offset()`
+  - **`dynamic/uc_schema.rs`** - Fetch the table's schema from Unity Catalog instead of writing the columns by hand
 
 ## Three Ways to Pass Data
 
@@ -296,6 +298,24 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 stream.flush().await?;
 ```
 
+### Schema Fetched from Unity Catalog
+
+`dynamic/uc_schema.rs` fetches the table's schema from Unity Catalog at runtime, so
+neither a `.proto` file nor hand-written columns are needed:
+
+```bash
+cargo run -p rust-examples-proto --example proto_dynamic_uc_schema
+```
+
+```rust
+// The stream's OAuth token is scoped to Zerobus writes, so mint a separate
+// token that can only read this table.
+let options = SchemaFetchOptions::default();
+let token = fetch_uc_read_token(workspace_url, table, client_id, client_secret, &options).await?;
+let schema = fetch_uc_table_schema(workspace_url, table, &token, &options).await?;
+let descriptor = message_descriptor(&descriptor_from_uc_schema(&schema)?)?;
+```
+
 ## Adapting for Your Custom Table
 
 To use your own table, you need to generate schema files and update the example code.
@@ -315,7 +335,7 @@ cargo run -- \
   --output-dir "../../examples/proto/compiled/output"
 ```
 
-Both `compiled/single.rs` and `compiled/batch.rs` share the same `compiled/output/` directory, so the generated schema files only need to be produced once. (The dynamic example needs no generated files.)
+Both `compiled/single.rs` and `compiled/batch.rs` share the same `compiled/output/` directory, so the generated schema files only need to be produced once. (The dynamic examples need no generated files.)
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema definition
