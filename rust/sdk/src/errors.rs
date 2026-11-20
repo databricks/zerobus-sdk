@@ -133,13 +133,18 @@ pub enum ZerobusError {
     #[error("Token fetch failed: {0}")]
     TokenFetchError(String),
     /// Returned when fetching a table's schema from the Unity Catalog REST API
-    /// fails: a network error, a non-success HTTP status, or an unparseable
-    /// response body. `retryable` reflects whether the failure is transient
-    /// (network error, 5xx except 501, 408, or 429) and drives
-    /// [`is_retryable`](Self::is_retryable).
+    /// fails: a network error, a non-success HTTP status, or an unusable
+    /// response body. `status` is the HTTP status of a non-success response
+    /// (e.g. 401 means the token needs refreshing). `retryable` reflects
+    /// whether the failure is transient (network error, 5xx except 501, 408, or
+    /// 429) and drives [`is_retryable`](Self::is_retryable).
     #[error("Failed to fetch table schema: {message}")]
     #[non_exhaustive]
-    SchemaFetchError { message: String, retryable: bool },
+    SchemaFetchError {
+        message: String,
+        status: Option<u16>,
+        retryable: bool,
+    },
     /// Returned when Avro schema parsing fails (e.g., malformed JSON schema).
     #[cfg(feature = "avro")]
     #[error("Avro schema parse failed: {0}")]
