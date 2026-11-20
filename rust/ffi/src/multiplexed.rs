@@ -1153,18 +1153,6 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
 
 // Async variants of the multiplexed stream functions.
 
-/// Reports `err` through a bool completion callback on a runtime thread.
-fn report_bool_async(
-    callback: BoolAsyncCallback,
-    user_data: *mut std::ffi::c_void,
-    err: ZerobusError,
-) {
-    let user_data = SendPtr::new(user_data);
-    RUNTIME.spawn(async move {
-        invoke_bool_async_callback(callback, false, CResult::error(err), user_data.get());
-    });
-}
-
 /// Lets the work this task just woke, such as a sub-stream's sender parked in
 /// this worker's LIFO slot, run before a completion callback, which may block.
 async fn yield_before_callback() {
@@ -1205,7 +1193,9 @@ where
 /// Every multiplexed `_async` function follows the same contract. It validates
 /// its arguments and returns at once: false with `result` set only on an
 /// invalid argument, in which case its callback never runs; otherwise true, and
-/// every other error, including a closed or closing mux, reaches the callback.
+/// every other error, including a closed mux, reaches the callback. Async
+/// ingests report a close in progress as an error; async wait and flush wait
+/// for it, as the blocking calls do.
 /// The callback then runs exactly once, on a runtime thread. It must be
 /// thread-safe, must not unwind, and must not call the blocking
 /// `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
@@ -1662,9 +1652,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_async(
 /// `callback` (Beta).
 ///
 /// `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
-/// would return, or the closing error while a close is in progress. That
-/// error does not mean the record was not acknowledged: close flushes it, so
-/// check `get_unacked_records` before re-sending.
+/// would return. Like it, the wait starts after a close in progress
+/// finishes, and then reports the result on the closed mux.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1684,21 +1673,16 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
                 return false;
             }
         };
-        let guard = match read_now(handle) {
-            Ok(guard) => guard,
-            Err(err) => {
-                report_bool_async(callback, user_data, err);
-                write_success_result(result);
-                return true;
-            }
-        };
+        let stream = Arc::clone(&handle.stream);
         let user_data = SendPtr::new(user_data);
         spawn_with_panic_report(
             async move {
-                let res = guard
+                // Queues behind a close in progress, as the blocking wait does.
+                let res = stream
+                    .read_owned()
+                    .await
                     .wait_for_message_id(MessageId::from_raw(message_id))
                     .await;
-                drop(guard);
                 yield_before_callback().await;
                 let (value, result) = match res {
                     Ok(()) => (true, CResult::success()),
@@ -1716,8 +1700,9 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
 /// Flush on a background task and report completion via `callback` (Beta).
 ///
 /// Covers the same records as `zerobus_multiplexed_stream_flush`: every
-/// blocking, `_nowait` and `_async` ingest accepted before this call. A
-/// close in progress is reported through `callback`.
+/// blocking, `_nowait` and `_async` ingest accepted before this call. Like
+/// the blocking flush, it starts after a close in progress finishes, and then
+/// reports the result on the closed mux.
 ///
 /// Follows the multiplexed `_async` contract described on
 /// `CreateMultiplexedStreamAsyncCallback`.
@@ -1736,23 +1721,16 @@ pub extern "C" fn zerobus_multiplexed_stream_flush_async(
                 return false;
             }
         };
-        let guard = match read_now(handle) {
-            Ok(guard) => guard,
-            Err(err) => {
-                report_bool_async(callback, user_data, err);
-                write_success_result(result);
-                return true;
-            }
-        };
         // Fix the epoch now, so submissions accepted later are not waited for.
         let target = handle.pending.start_flush();
         let pending = Arc::clone(&handle.pending);
+        let stream = Arc::clone(&handle.stream);
         let user_data = SendPtr::new(user_data);
         spawn_with_panic_report(
             async move {
                 pending.wait_drained(target).await;
-                let flushed = guard.flush().await;
-                drop(guard);
+                // Queues behind a close in progress, as the blocking flush does.
+                let flushed = stream.read_owned().await.flush().await;
                 // As in the blocking flush: its own error wins and leaves a
                 // stored `_nowait` failure for the next flush or close.
                 let res =

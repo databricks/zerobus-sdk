@@ -255,7 +255,9 @@ typedef struct CZerobusMultiplexedStream {
  * Every multiplexed `_async` function follows the same contract. It validates
  * its arguments and returns at once: false with `result` set only on an
  * invalid argument, in which case its callback never runs; otherwise true, and
- * every other error, including a closed or closing mux, reaches the callback.
+ * every other error, including a closed mux, reaches the callback. Async
+ * ingests report a close in progress as an error; async wait and flush wait
+ * for it, as the blocking calls do.
  * The callback then runs exactly once, on a runtime thread. It must be
  * thread-safe, must not unwind, and must not call the blocking
  * `zerobus_multiplexed_stream_*` functions (calling `_async` ones is fine).
@@ -1333,9 +1335,8 @@ bool zerobus_multiplexed_stream_ingest_json_records_async(struct CZerobusMultipl
  * `callback` (Beta).
  *
  * `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
- * would return, or the closing error while a close is in progress. That
- * error does not mean the record was not acknowledged: close flushes it, so
- * check `get_unacked_records` before re-sending.
+ * would return. Like it, the wait starts after a close in progress
+ * finishes, and then reports the result on the closed mux.
  *
  * Follows the multiplexed `_async` contract described on
  * `CreateMultiplexedStreamAsyncCallback`.
@@ -1350,8 +1351,9 @@ bool zerobus_multiplexed_stream_wait_for_message_id_async(struct CZerobusMultipl
  * Flush on a background task and report completion via `callback` (Beta).
  *
  * Covers the same records as `zerobus_multiplexed_stream_flush`: every
- * blocking, `_nowait` and `_async` ingest accepted before this call. A
- * close in progress is reported through `callback`.
+ * blocking, `_nowait` and `_async` ingest accepted before this call. Like
+ * the blocking flush, it starts after a close in progress finishes, and then
+ * reports the result on the closed mux.
  *
  * Follows the multiplexed `_async` contract described on
  * `CreateMultiplexedStreamAsyncCallback`.
