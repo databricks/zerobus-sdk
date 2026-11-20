@@ -28,8 +28,9 @@ namespace Databricks.Zerobus;
 /// concurrently. Keep them short and move longer work to your own task: a slow
 /// or blocking callback holds an SDK thread and can delay <c>Flush()</c>,
 /// <c>Close()</c> and other streams. Do not call stream methods from a callback.
-/// An exception thrown by a callback is caught and ignored; later callbacks
-/// still run.
+/// An exception thrown by a callback is caught and reported with
+/// <see cref="System.Diagnostics.Trace.TraceError(string)"/>, including the
+/// offset; later callbacks still run.
 /// </para>
 /// </remarks>
 public interface IAckCallback

@@ -64,7 +64,7 @@ Callbacks run on the SDK's background threads. One stream's callbacks run one at
 callback shared by several streams can run concurrently. Keep them short and thread-safe, and
 move longer work to your own task: a slow or blocking callback can delay `Flush()`, `Close()`
 and other streams. Do not call stream methods from a callback. An exception thrown by a
-callback is caught and ignored.
+callback is caught and logged with `Trace.TraceError`.
 
 `Flush()` can return before the last `OnAck` has run. `Close()` and `Dispose()` wait for
 pending callbacks for up to `CallbackMaxWaitTimeMs` (`null`: 5,000 ms;

@@ -2,6 +2,7 @@
 // native CStreamConfigurationOptions.
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -92,9 +93,10 @@ internal static class AckCallbackRegistry
         {
             entry.Callback.OnAck(offset);
         }
-        catch
+        catch (Exception ex)
         {
             // Never let an exception unwind across the native boundary.
+            LogCallbackException("OnAck", offset, ex);
         }
     }
 
@@ -107,9 +109,24 @@ internal static class AckCallbackRegistry
         {
             entry.Callback.OnError(offset, message);
         }
-        catch
+        catch (Exception ex)
         {
             // Never let an exception unwind across the native boundary.
+            LogCallbackException("OnError", offset, ex);
+        }
+    }
+
+    // Reports a swallowed callback exception. Trace is built in and does nothing
+    // unless the application adds a listener.
+    private static void LogCallbackException(string method, long offset, Exception ex)
+    {
+        try
+        {
+            Trace.TraceError($"Zerobus: IAckCallback.{method}(offset {offset}) threw: {ex}");
+        }
+        catch
+        {
+            // A failing trace listener must not unwind across the native boundary either.
         }
     }
 
