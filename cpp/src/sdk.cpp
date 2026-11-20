@@ -9,11 +9,13 @@
 // header; comments here cover only implementation details.
 #include "zerobus/sdk.hpp"
 
+#include <memory>
 #include <utility>
 
 #include "detail/config_convert.hpp"
 #include "detail/ffi_util.hpp"
 #include "detail/headers_callback.hpp"
+#include "detail/multiplexed_ack_callback.hpp"
 #include "zerobus/version.hpp"
 
 namespace zerobus {
@@ -161,18 +163,33 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
   return *this;
 }
 
-// Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
-// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
-// headers provider (null second arg); the third arg keeps the ack callback (if
-// any) alive for the raw user_data the core holds.
+StreamBuilder Sdk::stream_builder() { return StreamBuilder(handle_); }
+
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,
                           const StreamOptions& options) {
+  return open_stream(handle_, table, client_id, client_secret, options);
+}
+
+Stream Sdk::create_stream(const TableProperties& table,
+                          std::shared_ptr<HeadersProvider> headers_provider,
+                          const StreamOptions& options) {
+  return open_stream(handle_, table, std::move(headers_provider), options);
+}
+
+// Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
+// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
+// headers provider (null second arg); the third arg keeps the ack callback (if
+// any) alive for the raw user_data the core holds.
+Stream Sdk::open_stream(CZerobusSdk* handle, const TableProperties& table,
+                        const std::string& client_id,
+                        const std::string& client_secret,
+                        const StreamOptions& options) {
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
   CZerobusStream* stream = zerobus_sdk_create_stream(
-      handle_, detail::checked_c_str(table.table_name, "table_name"),
+      handle, detail::checked_c_str(table.table_name, "table_name"),
       descriptor_ptr(table.descriptor_proto), table.descriptor_proto.size(),
       detail::checked_c_str(client_id, "client_id"),
       detail::checked_c_str(client_secret, "client_secret"), &copts,
@@ -191,9 +208,9 @@ Stream Sdk::create_stream(const TableProperties& table,
 // zerobus_cpp_headers_free only after any in-flight get_headers has returned.
 // This closes the recovery-vs-teardown use-after-free, so the Stream no longer
 // keeps its own provider shared_ptr.
-Stream Sdk::create_stream(const TableProperties& table,
-                          std::shared_ptr<HeadersProvider> headers_provider,
-                          const StreamOptions& options) {
+Stream Sdk::open_stream(CZerobusSdk* handle, const TableProperties& table,
+                        std::shared_ptr<HeadersProvider> headers_provider,
+                        const StreamOptions& options) {
   if (headers_provider == nullptr) {
     throw ZerobusException("headers_provider must not be null", false);
   }
@@ -202,14 +219,15 @@ Stream Sdk::create_stream(const TableProperties& table,
   // Validate the table name before allocating `owned` so a throw here can't
   // leak it (argument evaluation order vs. the `new` is unspecified).
   const char* c_table = detail::checked_c_str(table.table_name, "table_name");
-  // Heap-allocate the owning shared_ptr; the FFI takes ownership and frees it
-  // via zerobus_cpp_headers_free on every path (success or failure).
-  auto* owned =
-      new std::shared_ptr<HeadersProvider>(std::move(headers_provider));
+  // Heap-allocate the owning shared_ptr. The unique_ptr owns it until the
+  // native call, which takes ownership and frees it via
+  // zerobus_cpp_headers_free on every path (success or failure).
+  auto owned = std::make_unique<std::shared_ptr<HeadersProvider>>(
+      std::move(headers_provider));
   CZerobusStream* stream = zerobus_sdk_create_stream_with_headers_provider(
-      handle_, c_table, descriptor_ptr(table.descriptor_proto),
+      handle, c_table, descriptor_ptr(table.descriptor_proto),
       table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
-      owned, detail::zerobus_cpp_headers_free, &copts, guard.ptr());
+      owned.release(), detail::zerobus_cpp_headers_free, &copts, guard.ptr());
   if (stream == nullptr) {
     // The FFI already freed `owned` via zerobus_cpp_headers_free on the failure
     // path, so we must not delete it here.
@@ -218,6 +236,88 @@ Stream Sdk::create_stream(const TableProperties& table,
   }
   // Provider ownership now lives in the FFI; keep only the ack callback alive.
   return Stream(stream, nullptr, options.ack_callback);
+}
+
+namespace {
+
+// Owns the heap shared_ptr handed to the FFI as the mux ack user_data until the
+// native create takes it. The FFI then frees it via zerobus_cpp_mux_ack_free
+// exactly once on every path, success or failure.
+struct MuxAckBridge {
+  std::unique_ptr<std::shared_ptr<MultiplexedAckCallback>> owned;
+
+  explicit MuxAckBridge(std::shared_ptr<MultiplexedAckCallback> callback) {
+    if (callback != nullptr) {
+      owned = std::make_unique<std::shared_ptr<MultiplexedAckCallback>>(
+          std::move(callback));
+    }
+  }
+  bool set() const { return owned != nullptr; }
+};
+
+}  // namespace
+
+// Mux create, OAuth. The options' ordinary ack fields stay null: the builder
+// rejects an ordinary ack_callback before this point.
+MultiplexedStream Sdk::open_multiplexed_stream(
+    CZerobusSdk* handle, const TableProperties& table,
+    const std::string& client_id, const std::string& client_secret,
+    std::size_t stream_count, const StreamOptions& options,
+    std::shared_ptr<MultiplexedAckCallback> ack_callback) {
+  detail::ResultGuard guard;
+  CStreamConfigurationOptions copts = detail::to_c(options);
+  const char* c_table = detail::checked_c_str(table.table_name, "table_name");
+  const char* c_id = detail::checked_c_str(client_id, "client_id");
+  const char* c_secret = detail::checked_c_str(client_secret, "client_secret");
+  MuxAckBridge ack(std::move(ack_callback));
+  const bool has_ack = ack.set();
+  CZerobusMultiplexedStream* mux = zerobus_sdk_create_multiplexed_stream(
+      handle, c_table, descriptor_ptr(table.descriptor_proto),
+      table.descriptor_proto.size(), c_id, c_secret, stream_count, &copts,
+      has_ack ? detail::zerobus_cpp_mux_ack_on_ack_trampoline : nullptr,
+      has_ack ? detail::zerobus_cpp_mux_ack_on_error_trampoline : nullptr,
+      ack.owned.release(), has_ack ? detail::zerobus_cpp_mux_ack_free : nullptr,
+      guard.ptr());
+  if (mux == nullptr) {
+    // The FFI already freed the ack user_data; do not free it here.
+    guard.throw_if_error();
+    throw ZerobusException("failed to create multiplexed stream", false);
+  }
+  return MultiplexedStream(mux);
+}
+
+// Mux create with a headers provider. Provider and ack user_data are both
+// handed to the FFI, which frees each exactly once.
+MultiplexedStream Sdk::open_multiplexed_stream(
+    CZerobusSdk* handle, const TableProperties& table,
+    std::shared_ptr<HeadersProvider> headers_provider, std::size_t stream_count,
+    const StreamOptions& options,
+    std::shared_ptr<MultiplexedAckCallback> ack_callback) {
+  if (headers_provider == nullptr) {
+    throw ZerobusException("headers_provider must not be null", false);
+  }
+  detail::ResultGuard guard;
+  CStreamConfigurationOptions copts = detail::to_c(options);
+  const char* c_table = detail::checked_c_str(table.table_name, "table_name");
+  auto provider = std::make_unique<std::shared_ptr<HeadersProvider>>(
+      std::move(headers_provider));
+  MuxAckBridge ack(std::move(ack_callback));
+  const bool has_ack = ack.set();
+  CZerobusMultiplexedStream* mux =
+      zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+          handle, c_table, descriptor_ptr(table.descriptor_proto),
+          table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
+          provider.release(), detail::zerobus_cpp_headers_free, stream_count,
+          &copts,
+          has_ack ? detail::zerobus_cpp_mux_ack_on_ack_trampoline : nullptr,
+          has_ack ? detail::zerobus_cpp_mux_ack_on_error_trampoline : nullptr,
+          ack.owned.release(),
+          has_ack ? detail::zerobus_cpp_mux_ack_free : nullptr, guard.ptr());
+  if (mux == nullptr) {
+    guard.throw_if_error();
+    throw ZerobusException("failed to create multiplexed stream", false);
+  }
+  return MultiplexedStream(mux);
 }
 
 // Create an OAuth-authenticated Arrow Flight stream. The schema IPC

@@ -67,6 +67,9 @@ include(BuildRustFfi)
 add_library(zerobus_cpp
     src/sdk.cpp
     src/stream.cpp
+    src/stream_builder.cpp
+    src/multiplexed_stream.cpp
+    src/multiplexed_ack_callback.cpp
     src/arrow_stream.cpp
     src/proto_schema.cpp
     src/headers_callback.cpp

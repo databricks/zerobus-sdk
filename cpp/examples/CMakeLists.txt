@@ -24,6 +24,12 @@ target_link_libraries(json_single PRIVATE zerobus::zerobus)
 add_executable(json_batch json/batch.cpp)
 target_link_libraries(json_batch PRIVATE zerobus::zerobus)
 
+add_executable(json_builder json/builder.cpp)
+target_link_libraries(json_builder PRIVATE zerobus::zerobus)
+
+add_executable(json_multiplexed json/multiplexed.cpp)
+target_link_libraries(json_multiplexed PRIVATE zerobus::zerobus)
+
 # ---------------------------------------------------------------------------
 # Protocol Buffers examples (dynamic schema — no protoc required)
 # ---------------------------------------------------------------------------
@@ -36,6 +42,8 @@ target_link_libraries(proto_batch PRIVATE zerobus::zerobus)
 if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
   add_dependencies(json_single ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(json_batch ${ZEROBUS_FFI_BUILD_TARGET})
+  add_dependencies(json_builder ${ZEROBUS_FFI_BUILD_TARGET})
+  add_dependencies(json_multiplexed ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(proto_single ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(proto_batch ${ZEROBUS_FFI_BUILD_TARGET})
 endif()

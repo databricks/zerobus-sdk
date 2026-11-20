@@ -22,6 +22,7 @@ zerobus_add_test(arrow_config_defaults_test)
 zerobus_add_test(arrow_config_convert_test)
 zerobus_add_test(embedded_nul_test)
 zerobus_add_test(ack_callback_test)
+zerobus_add_test(multiplexed_ack_callback_test)
 zerobus_add_test(headers_provider_test)
 zerobus_add_test(error_test)
 zerobus_add_test(record_test)
@@ -33,6 +34,7 @@ target_compile_definitions(version_test
 zerobus_add_test(proto_schema_test)
 zerobus_add_test(headers_callback_test)
 zerobus_add_test(sdk_test)
+zerobus_add_test(stream_builder_test)
 zerobus_add_test(integration_test)
 
 # Concurrency test spawns std::threads, so it needs the platform thread library.
