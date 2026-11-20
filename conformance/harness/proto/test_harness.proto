@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+// Control protocol between the orchestrator and a per-SDK harness subprocess.
+// The harness implements this; the orchestrator is the client.
+//
+// Error model: every RPC returns OK. When the SDK under test rejects an action, the
+// response's SdkError is set; otherwise it is absent. A non-OK gRPC status means the
+// harness process itself failed, which the orchestrator treats as an infra error.
+package zerobus.conformance.harness;
+
+service TestHarness {
+  // Open a stream from the SDK under test to the mock at server_endpoint.
+  rpc CreateStream(CreateStreamRequest) returns (CreateStreamResponse);
+  // Queue ONE logical record; returns its offset. Queue-only: never block for an ack here.
+  rpc IngestRecord(IngestRecordRequest) returns (IngestRecordResponse);
+  // Queue a batch in one call via the SDK's batch ingest. Returns the one offset the SDK
+  // assigns the batch (SDK batch APIs return a single offset, not one per record).
+  rpc IngestRecords(IngestRecordsRequest) returns (IngestRecordsResponse);
+  // Block until the write for `offset` is durably acknowledged. There is no per-call timeout:
+  // the wait is bounded by the SDK's own ack/flush timeout and surfaces the SDK's own error.
+  rpc AwaitWriteCompleted(AwaitRequest) returns (AwaitResponse);
+  // Block until all queued records are acknowledged.
+  rpc Flush(FlushRequest) returns (ActionResponse);
+  rpc Close(CloseRequest) returns (ActionResponse);
+  // Gracefully shut the harness process down.
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+// Enum values are prefixed with the enum name: proto3 enum values share the enclosing
+// package scope, so unprefixed names like GRPC/PROTO would risk clashes.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_GRPC = 1;
+  PROTOCOL_ARROW_FLIGHT = 2;
+}
+
+enum RecordFormat {
+  RECORD_FORMAT_UNSPECIFIED = 0;
+  RECORD_FORMAT_PROTO = 1;
+  RECORD_FORMAT_JSON = 2;
+  RECORD_FORMAT_AVRO = 3;
+  RECORD_FORMAT_ARROW = 4;
+}
+
+// The SDK under test reported this error. Presence marks a failure: the harness sets this on a
+// rejected action and leaves it unset on success (an empty message is still a failure). retryable
+// mirrors the SDK's own classification of the error.
+message SdkError {
+  string message = 1;
+  bool retryable = 2;
+}
+
+message CreateStreamRequest {
+  Protocol protocol = 1;
+  RecordFormat format = 2;
+  // The mock's MOCK_ENDPOINT, "host:port" (plaintext; harness uses no-TLS/no-auth).
+  string server_endpoint = 3;
+  string table_path = 4;
+  // Schema artifact, populated per format:
+  bytes descriptor_proto_bytes = 5;  // PROTO: serialized google.protobuf.DescriptorProto
+  string avro_schema_json = 6;       // AVRO: Avro writer schema JSON
+  bytes arrow_schema_ipc = 7;        // ARROW: an Arrow IPC stream carrying just the schema (schema message + EOS)
+}
+
+message CreateStreamResponse {
+  string stream_id = 1;  // harness-local stream handle (unset when error is set)
+  SdkError error = 2;
+}
+
+message IngestRecordRequest {
+  string stream_id = 1;
+  // Canonical logical record as a JSON object string; the harness converts it to the SDK's
+  // record type and submits it via the SDK.
+  // Keys are the schema's field names as declared in schema.proto (snake_case), not camelCase.
+  string record_json = 2;
+}
+
+message IngestRecordResponse {
+  int64 offset = 1;
+  SdkError error = 2;
+}
+
+message IngestRecordsRequest {
+  string stream_id = 1;
+  // Canonical logical records, each a JSON object string (keys = schema field names, snake_case).
+  repeated string record_json = 2;
+}
+
+message IngestRecordsResponse {
+  int64 offset = 1;  // the single offset the SDK's batch ingest returns for the whole batch
+  SdkError error = 2;
+}
+
+message AwaitRequest {
+  string stream_id = 1;
+  int64 offset = 2;
+}
+
+message AwaitResponse {
+  SdkError error = 1;  // absent means the write was durably acknowledged
+}
+
+message FlushRequest {
+  string stream_id = 1;
+}
+
+message CloseRequest {
+  string stream_id = 1;
+}
+
+message ActionResponse {
+  SdkError error = 1;
+}
+
+message Empty {}

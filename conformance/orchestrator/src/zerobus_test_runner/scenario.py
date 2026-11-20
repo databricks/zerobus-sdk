@@ -15,8 +15,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from zerobus_test_runner.capability import CAPABILITIES, TRANSPORTS, admits, valid_tuples
+from zerobus_test_runner.paths import SCHEMAS_DIR
 
 KNOWN_FORMATS = frozenset({"proto", "json", "avro", "arrow"})
+
+# Mock observations that return bytes (everything else returns an int count/offset). Used to
+# type-check an expect() bound at record time so a mismatched literal can't TypeError at runtime.
+_BYTES_RESULT_QUERIES = frozenset({"captured_record_bytes"})
 
 
 class ScenarioError(Exception):
@@ -135,6 +140,16 @@ class Ingest:
 
 
 @dataclass(eq=False)
+class IngestMany:
+    """Queue a batch in one call. The SDK's batch ingest returns a single offset for the
+    whole batch, so this produces one RecordRef (that batch offset), not one per record."""
+
+    stream: StreamRef
+    records: list
+    out: RecordRef
+
+
+@dataclass(eq=False)
 class Flush:
     stream: StreamRef
 
@@ -147,7 +162,6 @@ class Close:
 @dataclass(eq=False)
 class AwaitWrite:
     rec: RecordRef
-    timeout_ms: int
 
 
 @dataclass(eq=False)
@@ -188,6 +202,15 @@ class Recorder:
             raise ScenarioError("expect(): first argument must be an s.mock.* observation")
         if (equals is None) == (at_least is None):
             raise ScenarioError("expect(): pass exactly one of equals= or at_least=")
+        bound = equals if equals is not None else at_least
+        wants_bytes = target.query in _BYTES_RESULT_QUERIES
+        if not isinstance(bound, _Ref):  # a RecordRef/OffsetRef resolves to an int offset at runtime
+            if wants_bytes and not isinstance(bound, (bytes, bytearray)):
+                raise ScenarioError(f"expect(): {target.label} returns bytes; the bound must be bytes")
+            if not wants_bytes and not isinstance(bound, int):
+                raise ScenarioError(f"expect(): {target.label} returns an int; the bound must be an int")
+        if wants_bytes and at_least is not None:
+            raise ScenarioError(f"expect(): {target.label} returns bytes; at_least is not meaningful")
         self.steps.append(Expect(target, equals, at_least))
 
     def expect_terminal_failure(self, stream: Any) -> None:
@@ -224,6 +247,25 @@ class _SdkRecorder:
         self._r.steps.append(Ingest(stream, copy.deepcopy(record), ref))
         return ref
 
+    def ingest_many(self, stream: StreamRef, records: list) -> RecordRef:
+        """Queue a batch in one call. Returns the single RecordRef for the batch's offset
+        (SDK batch ingest assigns one offset to the whole batch)."""
+        self._r._check_stream(stream, "ingest_many()")
+        if not isinstance(records, (list, tuple)) or not records:
+            raise ScenarioError("ingest_many(): records must be a non-empty list of JSON-object dicts")
+        copies = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise ScenarioError("ingest_many(): each record must be a JSON-object dict")
+            try:
+                json.dumps(record, allow_nan=False)
+            except (TypeError, ValueError) as e:
+                raise ScenarioError(f"ingest_many(): record is not strict JSON: {e}") from e
+            copies.append(copy.deepcopy(record))
+        ref = RecordRef(self._r, len(self._r.steps), stream)
+        self._r.steps.append(IngestMany(stream, copies, ref))
+        return ref
+
     def flush(self, stream: StreamRef) -> None:
         self._r._check_stream(stream, "flush()")
         self._r.steps.append(Flush(stream))
@@ -232,12 +274,12 @@ class _SdkRecorder:
         self._r._check_stream(stream, "close()")
         self._r.steps.append(Close(stream))
 
-    def await_write(self, rec: RecordRef, timeout_ms: int = 10000) -> None:
+    def await_write(self, rec: RecordRef) -> None:
+        """Wait for the record's durable ack. The wait is bounded by the SDK's own ack/flush
+        timeout (no per-call timeout), matching the SDK's wait_for_offset surface."""
         if not isinstance(rec, RecordRef) or rec.owner is not self._r:
             raise ScenarioError("await_write(): expected a RecordRef returned by this scenario's s.sdk.ingest")
-        if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms <= 0:
-            raise ScenarioError("await_write(): timeout_ms must be a positive int")
-        self._r.steps.append(AwaitWrite(rec, timeout_ms))
+        self._r.steps.append(AwaitWrite(rec))
 
 
 class _MockRecorder:
@@ -383,8 +425,10 @@ def validate(sc: Scenario) -> list[str]:
     n_terminal_failure = 0
     retryable_inject = False
     nonretryable_inject = False
+    has_ingest_many = False
     admitted = static_admitted_tuples(sc)
     admits_arrow = any(tr == "arrow_flight" for _, tr, _ in admitted)
+    admits_grpc = any(tr == "grpc" for _, tr, _ in admitted)
 
     def bad_offset(ref: Any, idx: int, what: str) -> None:
         if not isinstance(ref, OffsetRef):
@@ -410,10 +454,18 @@ def validate(sc: Scenario) -> list[str]:
         if isinstance(step, CreateStream):
             n_create += 1
             produced.add(id(step.out))
+            if not (SCHEMAS_DIR / step.schema).is_dir():
+                problems.append(f"step {idx}: unknown schema '{step.schema}' (no directory under conformance/schemas/)")
         elif isinstance(step, Ingest):
             if not bad_ref(step.stream, StreamRef, idx, "ingest stream"):
                 if id(step.stream) in closed:
                     problems.append(f"step {idx}: ingest after close")
+            produced.add(id(step.out))
+        elif isinstance(step, IngestMany):
+            has_ingest_many = True
+            if not bad_ref(step.stream, StreamRef, idx, "ingest_many stream"):
+                if id(step.stream) in closed:
+                    problems.append(f"step {idx}: ingest_many after close")
             produced.add(id(step.out))
         elif isinstance(step, Flush):
             if not bad_ref(step.stream, StreamRef, idx, "flush stream"):
@@ -479,6 +531,9 @@ def validate(sc: Scenario) -> list[str]:
         problems.append("scenario has no s.expect(...) assertion")
     if nonretryable_inject and n_terminal_failure == 0:
         problems.append("inject_stream_error(retryable=False) needs an s.expect_terminal_failure(...) to pass")
+    if has_ingest_many and admits_grpc:
+        # The SDK batch path sends IngestRecordBatch, which the mock rejects over gRPC today.
+        problems.append("ingest_many is not supported by the mock on gRPC yet; gate with transports=['arrow_flight']")
     if not problems and not admitted:
         problems.append("gate admits no (sdk, transport, format) tuple in the capability table (dead or mistyped gate)")
     return problems

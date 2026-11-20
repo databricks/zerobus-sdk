@@ -1,0 +1,9 @@
+{
+  "type": "record",
+  "name": "SimpleRecord",
+  "namespace": "zerobus.conformance.fixtures",
+  "fields": [
+    {"name": "id", "type": "long"},
+    {"name": "message", "type": "string"}
+  ]
+}
