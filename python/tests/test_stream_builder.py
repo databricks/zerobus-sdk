@@ -541,6 +541,22 @@ def _token(databricks_client_id=None):
     return FederatedToken(lambda: "idp-token", databricks_client_id=databricks_client_id)
 
 
+def _assert_released(ref):
+    """Wait until the object behind ``ref`` is collected; fail if it never is.
+
+    An async open runs on a Rust task, which can release its references after ``asyncio.run()``
+    has returned, and PyO3 applies a release made without the GIL the next time native code runs.
+    So collect, call into the extension, and retry for a bounded time. A leak still fails.
+    """
+    deadline = time.monotonic() + 5
+    gc.collect()
+    while ref() is not None and time.monotonic() < deadline:
+        core.TableProperties("c.s.t")  # native code applies pending releases
+        time.sleep(0.01)
+        gc.collect()
+    assert ref() is None, "the callback owner is still alive: a native reference keeps it"
+
+
 class TestFederatedAuth:
     """``federated_auth()`` on ``stream_builder()``, as ``create_stream(auth=...)`` takes it."""
 
@@ -742,8 +758,7 @@ class TestFederatedAuth:
         assert isinstance(owner.err, core.ZerobusException)
         ref = weakref.ref(owner)
         del owner
-        gc.collect()
-        assert ref() is None
+        _assert_released(ref)
 
     def test_failed_validate_does_not_keep_the_callback_owner_alive(self, mode):
         class Owner:
