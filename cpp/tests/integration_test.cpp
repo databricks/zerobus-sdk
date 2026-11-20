@@ -159,7 +159,10 @@ void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
   check("the callback is freed after the stream is destroyed",
         recorder_alive.expired());
 
-  // The proto overloads cross the FFI too: on this JSON table each one throws.
+  // The proto overloads cross the FFI too: on this JSON table the core rejects
+  // each one, which proves the call reached it.
+  const std::string kMismatch =
+      "Record type does not match stream configuration";
   zerobus::MultiplexedStream json_mux = sdk.stream_builder()
                                             .table(table_name)
                                             .oauth(client_id, client_secret)
@@ -169,10 +172,10 @@ void run_multiplexed(zerobus::Sdk& sdk, const std::string& table_name,
   const std::vector<std::uint8_t> proto = {0x08, 0x01};
   check_throws(
       "proto record on a JSON mux must throw",
-      [&] { json_mux.ingest_proto_record(proto); }, "");
+      [&] { json_mux.ingest_proto_record(proto); }, kMismatch);
   check_throws(
       "proto batch on a JSON mux must throw",
-      [&] { json_mux.ingest_proto_records({proto}); }, "");
+      [&] { json_mux.ingest_proto_records({proto}); }, kMismatch);
   json_mux.close();
 }
 
