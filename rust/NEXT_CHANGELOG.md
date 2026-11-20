@@ -17,6 +17,13 @@
 
 ### Bug Fixes
 
+- `ZerobusStream::close()` on a stream that already failed now delivers the queued ack
+  callbacks before it returns. A failed stream queues an `on_error()` for each pending
+  record; `close()` used to return at once, and the callbacks it had not yet run were
+  dropped when the stream was freed. It now waits for them for up to
+  `callback_max_wait_time_ms`, as a normal close does, and still returns `Ok(())`. This
+  reaches every SDK built on the Rust core.
+
 ### Documentation
 
 ### Internal Changes
