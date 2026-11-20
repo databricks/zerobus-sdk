@@ -110,9 +110,6 @@ pub struct StreamBuilder<'a> {
 struct StreamSettings {
     // gRPC and Arrow Flight streams.
     recovery_timeout_ms: u64,
-    /// Whether the caller called `recovery_retries`. A multiplexed stream
-    /// raises the default for its lanes, but never an explicit value.
-    recovery_retries_set: bool,
     flush_timeout_ms: u64,
     stream_paused_max_wait_time_ms: Option<u64>,
     // gRPC streams only.
@@ -142,7 +139,6 @@ impl Default for StreamSettings {
         let arrow = ArrowStreamConfigurationOptions::default();
         Self {
             recovery_timeout_ms: grpc.recovery_timeout_ms,
-            recovery_retries_set: false,
             flush_timeout_ms: grpc.flush_timeout_ms,
             stream_paused_max_wait_time_ms: grpc.stream_paused_max_wait_time_ms,
             max_inflight_requests: grpc.max_inflight_requests,
@@ -347,12 +343,8 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the maximum number of recovery retry attempts.
-    ///
-    /// When this is not called, each sub-stream of a
-    /// [`multiplexed`](Self::multiplexed) stream uses twice the default.
     pub fn recovery_retries(mut self, n: u32) -> Self {
         self.core.recovery_retries = n;
-        self.settings.recovery_retries_set = true;
         self
     }
 

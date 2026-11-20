@@ -15,14 +15,6 @@
   output. An authentication rejection while creating the stream fails immediately
   instead of spending the one-shot credential-refresh retry.
 
-### Bug Fixes
-
-### Documentation
-
-### Internal Changes
-
-### Breaking Changes
-
 - Stream creation and recovery retries now back off exponentially with jitter
   instead of waiting a fixed `recovery_backoff_ms` between attempts. The wait
   still starts at `recovery_backoff_ms` and is never shorter than it. It doubles
@@ -37,13 +29,14 @@
   example by the server's stream-creation rate limit, no longer all retry at
   the same moment. No API change; `recovery_backoff_ms(0)` still retries
   immediately.
-- Multiplexed streams (Beta): when `recovery_retries` is not set, each
-  sub-stream now uses twice the default (8 instead of 4), both for its initial
-  open and for later recoveries. A single sub-stream that runs out of retries
-  fails the whole multiplexed stream, so with the per-stream default a mux
-  failed much more often than an ordinary stream, and more often the more
-  sub-streams it had. An explicit `recovery_retries(n)` still applies to each
-  sub-stream as given.
+
+### Bug Fixes
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
 
 ### Deprecations
 

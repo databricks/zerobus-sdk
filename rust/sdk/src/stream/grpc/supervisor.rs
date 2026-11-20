@@ -159,7 +159,7 @@ impl ZerobusStream {
                     if let Err(ref e) = result {
                         warn!(
                             attempt = attempt_no,
-                            max_attempts = options.recovery_retries.saturating_add(1),
+                            max_attempts = options.recovery_retries + 1,
                             retryable = e.is_retryable(),
                             base_backoff_ms = options.recovery_backoff_ms,
                             "Stream creation attempt failed: {}",
@@ -192,7 +192,7 @@ impl ZerobusStream {
                     } else {
                         error!(
                             attempts = attempt.load(Ordering::Relaxed),
-                            max_attempts = options.recovery_retries.saturating_add(1),
+                            max_attempts = options.recovery_retries + 1,
                             table_name = %table_properties.table_name,
                             "Recovery failed; giving up stream re-creation: {}",
                             e

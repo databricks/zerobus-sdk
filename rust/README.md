@@ -869,11 +869,7 @@ its local offset. Per-sub-stream ordering is preserved, but records,
 `MessageId`s, acknowledgments, and recovered unacknowledged records have no
 global order. A `MessageId` must only be used with the mux that created it.
 
-Retryable failures follow each sub-stream's configured recovery policy. If
-`recovery_retries` is not set, each sub-stream uses twice the default (8
-instead of 4), because one sub-stream running out of retries fails the whole
-mux; an explicit `recovery_retries` applies to each sub-stream as given. This
-covers opening the mux as well as later recoveries. If one
+Retryable failures follow each sub-stream's configured recovery policy. If one
 sub-stream reaches a terminal failure observed by a mux operation, the mux is
 poisoned and stops accepting records. Healthy lanes remain active until
 explicit close or drop. `flush()` waits for every lane's flush attempt;
@@ -1261,7 +1257,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Base delay between retry attempts (ms); doubles per failure, up to 15 s, plus random jitter |
-| `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts. If unset, each sub-stream of a mux uses twice the default. |
+| `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (`Proto`, `Json`, or `Avro` with the `avro` feature); set by the stream builder |
@@ -1277,7 +1273,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `recovery` | `bool` | true | Reconnect and replay unacknowledged batch suffixes after retryable failures |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for one recovery attempt (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Base delay between retry attempts (ms); doubles per failure, up to 15 s, plus random jitter |
-| `recovery_retries` | `u32` | 4 | Maximum recovery attempts. If unset, each sub-stream of a mux uses twice the default. |
+| `recovery_retries` | `u32` | 4 | Maximum recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
 | `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |

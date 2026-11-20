@@ -9,8 +9,6 @@
   zero value `IPCCompressionDefault` and nil options also mean ZSTD instead of no compression. To
   keep sending uncompressed payloads, set `IPCCompression` to `IPCCompressionNone`.
 
-### Breaking Changes
-
 - Stream creation and recovery retries now back off exponentially with jitter
   instead of waiting a fixed `RecoveryBackoffMs` between attempts (from the Rust core).
   The wait still starts at `RecoveryBackoffMs` and is never shorter than it. It
