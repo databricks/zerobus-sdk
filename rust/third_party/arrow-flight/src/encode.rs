@@ -15,16 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{collections::VecDeque, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Debug,
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+};
 
 use crate::{FlightData, FlightDescriptor, SchemaAsIpc, error::Result};
 
-use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, UnionArray};
+use arrow_array::types::*;
+use arrow_array::{
+    Array, ArrayRef, DictionaryArray, PrimitiveArray, RecordBatch, RecordBatchOptions, UInt64Array,
+    UnionArray,
+};
+use arrow_buffer::ArrowNativeType;
 use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteContext, IpcWriteOptions};
 
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, UnionMode};
 use bytes::Bytes;
 use futures::{Stream, StreamExt, ready, stream::BoxStream};
+use prost::Message as _;
 
 /// Creates a [`Stream`] of [`FlightData`]s from a
 /// `Stream` of [`Result`]<[`RecordBatch`], [`FlightError`]>.
@@ -373,7 +385,14 @@ impl FlightDataEncoder {
             DictionaryHandling::Hydrate => hydrate_dictionaries(&batch, schema)?,
         };
 
-        let batches = split_batch_for_grpc_response(batch, self.max_flight_data_size);
+        let batches = match self.dictionary_handling {
+            DictionaryHandling::Hydrate => {
+                split_batch_for_grpc_response(batch, self.max_flight_data_size)
+            }
+            DictionaryHandling::Resend => {
+                split_dictionary_batches(batch, self.max_flight_data_size, &self.encoder.options)?
+            }
+        };
         let last = batches.len().saturating_sub(1); // handle empty batches
         for (i, batch) in batches.into_iter().enumerate() {
             self.encoder
@@ -704,6 +723,189 @@ fn split_batch_for_grpc_response(
     batches
 }
 
+// DATABRICKS PATCH: row slicing shares complete dictionary values. Compact
+// selected rows and bound the actual IPC frames before queuing any data from a
+// logical batch, preserving the SDK's existing offset/recovery boundary.
+fn split_dictionary_batches(
+    batch: RecordBatch,
+    target: usize,
+    options: &IpcWriteOptions,
+) -> Result<Vec<RecordBatch>> {
+    let initial = split_batch_for_grpc_response(batch, target);
+    let split = initial.len() > 1;
+    let mut pending = initial
+        .into_iter()
+        .rev()
+        .map(|batch| {
+            if split {
+                compact_dictionary_batch(&batch)
+            } else {
+                Ok(batch)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut output = Vec::new();
+    // The SDK adds a small offset/record-count metadata envelope afterwards.
+    let budget = target.saturating_sub(512).max(1);
+    while let Some(batch) = pending.pop() {
+        let mut probe = FlightIpcEncoder::new(options.clone(), false);
+        prepare_schema_for_flight(batch.schema_ref(), &mut probe.dictionary_tracker, true);
+        let (dictionaries, record) = probe.encode_batch(&batch)?;
+        let fits = dictionaries
+            .chain(std::iter::once(record))
+            .all(|frame| frame.encoded_len() <= budget);
+        if fits {
+            output.push(batch);
+            continue;
+        }
+        // Even a single-row batch can own unused dictionary/view buffers.
+        let batch = compact_dictionary_batch(&batch)?;
+        let mut probe = FlightIpcEncoder::new(options.clone(), false);
+        prepare_schema_for_flight(batch.schema_ref(), &mut probe.dictionary_tracker, true);
+        let (dictionaries, record) = probe.encode_batch(&batch)?;
+        if dictionaries
+            .chain(std::iter::once(record))
+            .all(|frame| frame.encoded_len() <= budget)
+        {
+            output.push(batch);
+            continue;
+        }
+        if batch.num_rows() < 2 {
+            return Err(arrow_schema::ArrowError::InvalidArgumentError(
+                "one row exceeds the dictionary Flight message target".into(),
+            )
+            .into());
+        }
+        let middle = batch.num_rows() / 2;
+        pending.push(compact_dictionary_batch(
+            &batch.slice(middle, batch.num_rows() - middle),
+        )?);
+        pending.push(compact_dictionary_batch(&batch.slice(0, middle))?);
+    }
+    Ok(output)
+}
+
+fn compact_dictionary_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let indices = UInt64Array::from_iter_values(0..batch.num_rows() as u64);
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| {
+            if !has_dictionary(&column.to_data()) {
+                return Ok(Arc::clone(column));
+            }
+            let selected = arrow_select::take::take(column.as_ref(), &indices, None)?;
+            compact_dictionary_array(selected.as_ref())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RecordBatch::try_new(batch.schema(), columns)?)
+}
+
+fn has_dictionary(data: &arrow_data::ArrayData) -> bool {
+    matches!(data.data_type(), DataType::Dictionary(_, _))
+        || data.child_data().iter().any(has_dictionary)
+}
+
+fn compact_dictionary_array(array: &dyn Array) -> Result<ArrayRef> {
+    match array.data_type() {
+        DataType::Utf8View => {
+            return Ok(Arc::new(
+                array
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringViewArray>()
+                    .unwrap()
+                    .gc(),
+            ));
+        }
+        DataType::BinaryView => {
+            return Ok(Arc::new(
+                array
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryViewArray>()
+                    .unwrap()
+                    .gc(),
+            ));
+        }
+        DataType::ListView(field) | DataType::LargeListView(field) => {
+            let dense_type = if matches!(array.data_type(), DataType::ListView(_)) {
+                DataType::List(field.clone())
+            } else {
+                DataType::LargeList(field.clone())
+            };
+            let dense = arrow_cast::cast(array, &dense_type)?;
+            let compacted = compact_dictionary_array(dense.as_ref())?;
+            return Ok(arrow_cast::cast(compacted.as_ref(), array.data_type())?);
+        }
+        _ => {}
+    }
+    if let DataType::Dictionary(key, _) = array.data_type() {
+        macro_rules! compact {
+            ($key:ty) => {
+                compact_dictionary_values(
+                    array
+                        .as_any()
+                        .downcast_ref::<DictionaryArray<$key>>()
+                        .unwrap(),
+                )
+            };
+        }
+        return match key.as_ref() {
+            DataType::Int8 => compact!(Int8Type),
+            DataType::Int16 => compact!(Int16Type),
+            DataType::Int32 => compact!(Int32Type),
+            DataType::Int64 => compact!(Int64Type),
+            DataType::UInt8 => compact!(UInt8Type),
+            DataType::UInt16 => compact!(UInt16Type),
+            DataType::UInt32 => compact!(UInt32Type),
+            DataType::UInt64 => compact!(UInt64Type),
+            _ => unreachable!("Arrow dictionary keys are integers"),
+        };
+    }
+    let data = array.to_data();
+    if data.child_data().is_empty() {
+        return Ok(arrow_array::make_array(data));
+    }
+    let children = data
+        .child_data()
+        .iter()
+        .map(|child| {
+            compact_dictionary_array(arrow_array::make_array(child.clone()).as_ref())
+                .map(|array| array.to_data())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(arrow_array::make_array(
+        data.into_builder().child_data(children).build()?,
+    ))
+}
+
+fn compact_dictionary_values<K: ArrowDictionaryKeyType>(
+    array: &DictionaryArray<K>,
+) -> Result<ArrayRef> {
+    let mut used = array
+        .keys()
+        .iter()
+        .flatten()
+        .map(|key| key.as_usize() as u64)
+        .collect::<Vec<_>>();
+    used.sort_unstable();
+    used.dedup();
+    // Keep an ordered dictionary an ordered subsequence of its original values.
+    let remapping = used
+        .iter()
+        .enumerate()
+        .map(|(new, old)| (*old as usize, new))
+        .collect::<HashMap<_, _>>();
+    let keys = array
+        .keys()
+        .iter()
+        .map(|key| key.map(|key| K::Native::from_usize(remapping[&key.as_usize()]).unwrap()))
+        .collect::<PrimitiveArray<K>>();
+    let selected =
+        arrow_select::take::take(array.values().as_ref(), &UInt64Array::from(used), None)?;
+    let values = compact_dictionary_array(selected.as_ref())?;
+    Ok(Arc::new(DictionaryArray::<K>::try_new(keys, values)?))
+}
+
 /// The data needed to encode a stream of flight data, holding on to
 /// shared Dictionaries.
 ///
@@ -802,8 +1004,8 @@ mod tests {
         FixedSizeListBuilder, GenericByteDictionaryBuilder, GenericListViewBuilder, Int32Builder,
         LargeListBuilder, ListBuilder, StringDictionaryBuilder, StructBuilder,
     };
+    use arrow_array::cast::downcast_array;
     use arrow_array::*;
-    use arrow_array::{cast::downcast_array, types::*};
     use arrow_buffer::ScalarBuffer;
     use arrow_cast::pretty::pretty_format_batches;
     use arrow_ipc::{CompressionType, MetadataVersion};
@@ -1944,6 +2146,249 @@ mod tests {
         let flight_batch = encoded_batch.into();
 
         (flight_dictionaries, flight_batch)
+    }
+
+    #[test]
+    fn dictionary_splits_compact_frames_and_preserve_values() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::{StringArray, builder::StringDictionaryBuilder};
+        let values = (0..4096)
+            .map(|i| format!("{i:08}-{}", "x".repeat(512)))
+            .collect::<Vec<_>>();
+        let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+        for value in &values {
+            builder.append(value).unwrap();
+        }
+        let primitive = Arc::new(UInt64Array::from_iter_values(0..values.len() as u64)) as ArrayRef;
+        let primitive_buffer = primitive.to_data().buffers()[0].as_ptr();
+        let batch = RecordBatch::try_from_iter([
+            ("name", Arc::new(builder.finish()) as ArrayRef),
+            ("ts", primitive),
+        ])
+        .unwrap();
+        let target = 128 * 1024;
+        let parts = split_dictionary_batches(batch, target, &IpcWriteOptions::default()).unwrap();
+        assert!(parts.len() > 1);
+        let mut decoded = Vec::new();
+        for part in parts {
+            assert_eq!(
+                part.column(1).to_data().buffers()[0].as_ptr() as usize,
+                primitive_buffer as usize + decoded.len() * size_of::<u64>(),
+                "ordinary columns must remain zero-copy slices"
+            );
+            let mut encoder = FlightIpcEncoder::new(IpcWriteOptions::default(), false);
+            prepare_schema_for_flight(part.schema_ref(), &mut encoder.dictionary_tracker, true);
+            let (dictionaries, batch) = encoder.encode_batch(&part).unwrap();
+            assert!(
+                dictionaries
+                    .chain(std::iter::once(batch))
+                    .all(|frame| frame.encoded_len() <= target)
+            );
+            let strings = arrow_cast::cast(part.column(0).as_ref(), &DataType::Utf8).unwrap();
+            decoded.extend(
+                strings
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.unwrap().to_owned()),
+            );
+        }
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn nested_dictionary_maps_preserve_empty_null_and_value_order_when_split() {
+        use arrow_array::{
+            StructArray,
+            builder::{MapBuilder, StringDictionaryBuilder},
+            types::Int16Type,
+        };
+        let mut maps = MapBuilder::new(
+            None,
+            StringDictionaryBuilder::<Int16Type>::new(),
+            StringDictionaryBuilder::<Int16Type>::new(),
+        );
+        for i in 0..512 {
+            match i {
+                0 => maps.append(true).unwrap(),
+                1 => maps.append(false).unwrap(),
+                _ => {
+                    maps.keys().append("instance").unwrap();
+                    if i == 2 {
+                        maps.values().append_null();
+                    } else {
+                        maps.values()
+                            .append(format!("{i:08}-{}", "x".repeat(1024)))
+                            .unwrap();
+                    }
+                    maps.append(true).unwrap();
+                }
+            }
+        }
+        let maps = Arc::new(maps.finish()) as ArrayRef;
+        let column = StructArray::from(vec![(
+            Arc::new(Field::new("labels", maps.data_type().clone(), true)),
+            maps,
+        )]);
+        let batch =
+            RecordBatch::try_from_iter([("payload", Arc::new(column) as ArrayRef)]).unwrap();
+        let schema = Arc::new(prepare_schema_for_flight(
+            batch.schema_ref(),
+            &mut DictionaryTracker::new(false),
+            false,
+        ));
+        let expected = hydrate_dictionaries(&batch, schema.clone()).unwrap();
+        let parts = split_dictionary_batches(batch, 16384, &IpcWriteOptions::default()).unwrap();
+        assert!(parts.len() > 1);
+        let decoded = parts
+            .into_iter()
+            .map(|part| hydrate_dictionaries(&part, schema.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let restored = arrow_select::concat::concat_batches(&schema, &decoded).unwrap();
+        assert_eq!(restored, expected);
+    }
+
+    #[test]
+    fn dictionary_list_views_drop_unreferenced_child_ranges() {
+        for large in [false, true] {
+            let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+            for i in 0..128 {
+                builder
+                    .append(format!("{i:08}-{}", "x".repeat(1024)))
+                    .unwrap();
+            }
+            let values = Arc::new(builder.finish()) as ArrayRef;
+            let field = Arc::new(Field::new_list_field(values.data_type().clone(), true));
+            let array = if large {
+                Arc::new(LargeListViewArray::new(
+                    field,
+                    vec![127i64, 0].into(),
+                    vec![1i64, 1].into(),
+                    values,
+                    None,
+                )) as ArrayRef
+            } else {
+                Arc::new(ListViewArray::new(
+                    field,
+                    vec![127i32, 0].into(),
+                    vec![1i32, 1].into(),
+                    values,
+                    None,
+                )) as ArrayRef
+            };
+            let batch = RecordBatch::try_from_iter([("labels", array)]).unwrap();
+            let parts = split_dictionary_batches(batch, 8192, &IpcWriteOptions::default()).unwrap();
+            assert_eq!(parts.iter().map(|part| part.num_rows()).sum::<usize>(), 2);
+        }
+    }
+
+    #[test]
+    fn dictionary_string_views_release_unused_backing_buffers() {
+        let values = StringViewArray::from(vec!["a".repeat(1024), "b".repeat(128 * 1024)]);
+        let dictionary = DictionaryArray::new(Int8Array::from(vec![0]), Arc::new(values));
+        let batch =
+            RecordBatch::try_from_iter([("view", Arc::new(dictionary) as ArrayRef)]).unwrap();
+        let parts = split_dictionary_batches(batch, 8192, &IpcWriteOptions::default()).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].get_array_memory_size() < 8192);
+    }
+
+    #[test]
+    fn ordered_dictionary_compaction_preserves_value_order() {
+        let values = Arc::new(StringArray::from(vec!["a", "b", "c"]));
+        let dictionary =
+            DictionaryArray::new(Int8Array::from(vec![Some(2), None, Some(0)]), values);
+        let compacted = compact_dictionary_values(&dictionary).unwrap();
+        let dictionary = compacted
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int8Type>>()
+            .unwrap();
+        assert_eq!(
+            dictionary.values().as_ref(),
+            &StringArray::from(vec!["a", "c"])
+        );
+        assert_eq!(
+            dictionary.keys(),
+            &Int8Array::from(vec![Some(1), None, Some(0)])
+        );
+    }
+
+    #[test]
+    fn boolean_dictionary_splits_without_repacking_values() {
+        let keys = Int8Array::from(
+            (0..8192)
+                .map(|i| {
+                    if i % 7 == 0 {
+                        None
+                    } else {
+                        Some((i % 2) as i8)
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+        let dictionary =
+            DictionaryArray::new(keys, Arc::new(BooleanArray::from(vec![false, true])));
+        let batch =
+            RecordBatch::try_from_iter([("flag", Arc::new(dictionary) as ArrayRef)]).unwrap();
+        let parts =
+            split_dictionary_batches(batch.clone(), 2048, &IpcWriteOptions::default()).unwrap();
+        assert!(parts.len() > 1);
+        let restored = arrow_select::concat::concat_batches(&batch.schema(), &parts).unwrap();
+        assert_eq!(restored, batch);
+    }
+
+    #[test]
+    fn nested_dictionary_values_are_compacted_recursively() {
+        let values = StringArray::from(
+            (0..128)
+                .map(|i| format!("{i:08}-{}", "x".repeat(1024)))
+                .collect::<Vec<_>>(),
+        );
+        let inner = DictionaryArray::new(Int32Array::from_iter_values(0..128), Arc::new(values));
+        let structure = StructArray::from(vec![(
+            Arc::new(Field::new("inner", inner.data_type().clone(), true)),
+            Arc::new(inner) as ArrayRef,
+        )]);
+        let outer = DictionaryArray::new(Int8Array::from_iter_values(0..=127), Arc::new(structure));
+        let batch = RecordBatch::try_from_iter([("outer", Arc::new(outer) as ArrayRef)]).unwrap();
+        let schema = Arc::new(prepare_schema_for_flight(
+            batch.schema_ref(),
+            &mut DictionaryTracker::new(false),
+            false,
+        ));
+        let expected = hydrate_dictionaries(&batch, schema.clone()).unwrap();
+        let target = 8192;
+        let parts = split_dictionary_batches(batch, target, &IpcWriteOptions::default()).unwrap();
+        assert!(parts.len() > 1);
+        for part in &parts {
+            let mut encoder = FlightIpcEncoder::new(IpcWriteOptions::default(), false);
+            prepare_schema_for_flight(part.schema_ref(), &mut encoder.dictionary_tracker, true);
+            let (dictionaries, record) = encoder.encode_batch(part).unwrap();
+            assert!(
+                dictionaries
+                    .chain(std::iter::once(record))
+                    .all(|frame| frame.encoded_len() <= target)
+            );
+        }
+        let decoded = parts
+            .iter()
+            .map(|part| hydrate_dictionaries(part, schema.clone()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arrow_select::concat::concat_batches(&schema, &decoded).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn unsplittable_dictionary_row_is_rejected_before_queueing() {
+        use arrow_array::{builder::StringDictionaryBuilder, types::Int32Type};
+        let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+        builder.append("x".repeat(65536)).unwrap();
+        let batch =
+            RecordBatch::try_from_iter([("name", Arc::new(builder.finish()) as ArrayRef)]).unwrap();
+        assert!(split_dictionary_batches(batch, 1024, &IpcWriteOptions::default()).is_err());
     }
 
     #[test]

@@ -17,6 +17,11 @@
 
 ### Bug Fixes
 
+- Bound replacement dictionary Flight messages by compacting dictionary values
+  after row splitting. Large dictionaries no longer follow every small slice
+  unchanged. Splitting remains inside the SDK's logical batch and recovery
+  boundary; an unsplittable row fails before any data from that batch is queued.
+
 ### Documentation
 
 ### Internal Changes

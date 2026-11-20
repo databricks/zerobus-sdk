@@ -6348,6 +6348,85 @@ mod arrow_flight_tests {
         use super::*;
 
         #[tokio::test]
+        async fn test_split_dictionary_partial_ack_suffix_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use arrow_array::{builder::StringDictionaryBuilder, types::Int32Type, ArrayRef};
+            use arrow_flight::encode::{DictionaryHandling, FlightDataEncoderBuilder};
+            use databricks_zerobus_ingest_sdk::ArrowDictionaryHandling;
+            use futures::TryStreamExt;
+
+            let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+            for i in 0..4096 {
+                builder.append(format!("{i:08}-{}", "x".repeat(1024)))?;
+            }
+            let batch =
+                RecordBatch::try_from_iter([("name", Arc::new(builder.finish()) as ArrayRef)])?;
+            let frames = FlightDataEncoderBuilder::new()
+                .with_dictionary_handling(DictionaryHandling::Resend)
+                .build(futures::stream::iter(vec![Ok(batch.clone())]))
+                .try_collect::<Vec<_>>()
+                .await?;
+            let lengths = frames
+                .iter()
+                .filter_map(|frame| {
+                    arrow_ipc::root_as_message(&frame.data_header)
+                        .unwrap()
+                        .header_as_record_batch()
+                        .map(|batch| batch.length() as usize)
+                })
+                .collect::<Vec<_>>();
+            assert!(lengths.len() >= 2, "the actual dictionary batch must split");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 5,
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable(
+                                "disconnect after partial dictionary batch ACK",
+                            ),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(batch.schema())
+                .dictionary_handling(ArrowDictionaryHandling::Resend)
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(10000)
+                .flush_timeout_ms(15000)
+                .build_arrow()
+                .await?;
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+            assert_eq!(mock_server.get_total_records_received().await,
+                (lengths[0] + 4096 - 5) as u64,
+                "disconnect on the next dictionary frame must replay only the unacknowledged suffix");
+            assert!(mock_server.get_dictionary_message_count().await >= 2);
+            assert!(mock_server.get_record_batch_message_count().await >= 3);
+            assert!(mock_server.wire_ipc_schema_has_dictionary_encoding().await);
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_ingest_dict_batch() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_ingest_dict_batch");
