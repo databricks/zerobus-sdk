@@ -208,11 +208,15 @@ int main() {
                            .unity_catalog_url(workspace_url)
                            .build();
 
-    // Empty descriptor_proto => JSON stream.
+    // A JSON stream: no descriptor, and the record type set to JSON (the
+    // StreamOptions default is Proto, which needs a descriptor).
     zerobus::TableProperties table;
     table.table_name = table_name;
+    zerobus::StreamOptions options;
+    options.record_type = zerobus::RecordType::Json;
 
-    zerobus::Stream stream = sdk.create_stream(table, client_id, client_secret);
+    zerobus::Stream stream =
+        sdk.create_stream(table, client_id, client_secret, options);
 
     // Queue in a loop, flush once — never wait per record.
     constexpr int kRecordCount = 10;
