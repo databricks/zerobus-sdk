@@ -14,6 +14,15 @@
   sends the token as given and never refreshes it, and never includes it in `Debug`
   output. An authentication rejection while creating the stream fails immediately
   instead of spending the one-shot credential-refresh retry.
+- Added `schema::fetch_uc_table_schema` and
+  `schema::fetch_uc_table_schema_with_client`, which fetch a table's schema from
+  the Unity Catalog REST API (`GET /api/2.1/unity-catalog/tables/{table}`) given
+  a bearer token and return a `UcTableSchema`. The `_with_client` variant takes a
+  caller-supplied `reqwest::Client` (for a proxy, custom TLS roots, or timeouts);
+  the other wraps it with a default client. Combine the result with the existing
+  `descriptor_from_uc_schema` (dynamic protobuf) or `arrow_schema_from_uc_schema`
+  (Arrow Flight) to resolve a table's schema at runtime without pre-generating a
+  `.proto` file.
 
 ### Bug Fixes
 
@@ -37,3 +46,6 @@
 - Added `HeadersProvider::can_refresh`, a defaulted method returning `true`. A provider
   with a fixed credential returns `false` to skip the one-shot auth retry during stream
   creation; `PatHeadersProvider` does. Existing implementations are unaffected.
+- Added the `ZerobusError::SchemaFetchError { message, retryable }` variant,
+  returned by `schema::fetch_uc_table_schema`. The enum is `#[non_exhaustive]`,
+  so this is an additive change.
