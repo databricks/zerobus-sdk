@@ -44,15 +44,23 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '11'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '17'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '21'
+            protobufVersion: '4.33.0'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '21'
+            protobufVersion: '3.25.9'
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             javaVersion: '21'
+            protobufVersion: '4.33.0'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -109,14 +117,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install maven 2>/dev/null || true
       - name: Build with Maven
-        run: mvn clean compile
+        shell: bash
+        run: mvn clean compile "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Run tests
-        run: mvn test
+        shell: bash
+        run: mvn test "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}
+          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}-protobuf-${{ matrix.protobufVersion }}
           path: |
             java/target/surefire-reports/
             java/target/test-classes/
