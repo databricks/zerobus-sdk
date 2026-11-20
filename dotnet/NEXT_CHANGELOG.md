@@ -10,11 +10,11 @@
 - Added an ack callback for streams (Beta). Set `StreamConfigurationOptions.AckCallback` to an
   `IAckCallback` to receive `OnAck` calls in the background, in offset order, and an `OnError`
   call for each pending record if the stream fails. An exception thrown by a callback is caught
-  and logged with `Trace.TraceError`. `StreamConfigurationOptions.CallbackMaxWaitTimeMs` sets how long `Close()` and
-  `Dispose()` wait for pending callbacks: `null` keeps the SDK default of 5,000 ms, and
-  `StreamConfigurationOptions.CallbackWaitForever` waits without a limit. `RecreateStream` keeps
-  the callback. With a callback set, `Close()` and `Dispose()` call the native close even on a
-  stream that already failed, so its queued `OnError` calls are delivered.
+  and logged with `Trace.TraceError`. `StreamConfigurationOptions.CallbackMaxWaitTimeMs` sets how
+  long `Close()` and `Dispose()` wait for pending callbacks: `null` keeps the SDK default of
+  5,000 ms, and `StreamConfigurationOptions.CallbackWaitForever` waits without a limit.
+  `RecreateStream` keeps the callback. With a callback set, `Close()` and `Dispose()` call the
+  native close even on a stream that already failed, so its queued `OnError` calls are delivered.
 
 ### Deprecations
 
