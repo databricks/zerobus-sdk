@@ -11,14 +11,13 @@ use std::sync::Arc;
 use prost::Message;
 use tokio::time::Duration;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::supervisor::StreamInitInfo;
 use super::transport::{
     self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
 };
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_channel::GrpcClient;
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::insert_header_metadata;
 use crate::RecordType;
@@ -42,7 +41,7 @@ impl super::ZerobusStream {
     /// This covers IdP-revoked tokens, not a same-named table recreated within
     /// the token's lifetime, which the server accepts.
     pub(super) async fn create_stream_connection(
-        channel: ZerobusClient<Channel>,
+        channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
@@ -73,7 +72,7 @@ impl super::ZerobusStream {
     /// retryable `DeadlineExceeded` and thereby bypass the one-shot auth-retry limit.
     /// Reconnect keeps using [`create_stream_connection`] so its behavior is unchanged.
     pub(super) async fn create_initial_stream_connection(
-        channel: ZerobusClient<Channel>,
+        channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
@@ -144,7 +143,7 @@ impl super::ZerobusStream {
 
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     async fn create_stream_connection_inner(
-        mut channel: ZerobusClient<Channel>,
+        mut channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
