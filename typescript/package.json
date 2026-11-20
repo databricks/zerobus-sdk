@@ -108,7 +108,7 @@
     }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
+    "@napi-rs/cli": "^3.10.12",
     "@types/node": "^20.0.0",
     "apache-arrow": "^18.1.0",
     "avsc": "^5.7.9",
