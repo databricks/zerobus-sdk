@@ -59,8 +59,8 @@ impl<'a> StreamBuilder<'a> {
     /// across sub-streams using integer division. JSON, compiled protobuf,
     /// dynamic protobuf, and (with the `avro` feature) Avro are supported;
     /// Arrow Flight uses `.arrow(schema).multiplexed(n).build_arrow()` with the
-    /// `arrow-flight` feature. Arrow batches remain whole; callbacks and stats
-    /// exporters are unsupported.
+    /// `arrow-flight` feature. Arrow batches remain whole; acknowledgment callbacks
+    /// are unsupported. Arrow stats exporters receive packed [`MessageId::raw`] offsets.
     pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
         MultiplexedStreamBuilder::new(self, stream_count)
     }
@@ -125,11 +125,6 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         #[cfg(feature = "arrow-flight")]
         if matches!(self.inner.core.format, Some(FormatConfig::Arrow(_))) {
             self.inner.validate_arrow()?;
-            if self.inner.stats_exporter.is_some() {
-                return Err(ZerobusError::InvalidArgument(
-                    "stats_exporter is not supported for multiplexed Arrow Flight streams".into(),
-                ));
-            }
             if self.max_inflight_batches_per_stream().is_none() {
                 return Err(ZerobusError::InvalidArgument(format!(
                     "max_inflight_batches ({}) must be at least stream_count ({}) for multiplexed streams",
@@ -260,8 +255,8 @@ impl<'a> MultiplexedStreamBuilder<'a> {
     /// Opens a multiplexed Arrow Flight stream. Requires `.arrow(schema)`.
     ///
     /// Whole batches route round-robin. `max_inflight_batches` is a mux-wide
-    /// budget divided evenly across lanes (unused remainder). Callbacks and
-    /// stats exporters are unsupported.
+    /// budget divided evenly across lanes (unused remainder). Acknowledgment
+    /// callbacks are unsupported. Stats offsets are packed [`MessageId::raw`] values.
     /// Construction is atomic and cancellation-safe, like [`Self::build`].
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<crate::MultiplexedArrowStream> {
@@ -282,12 +277,17 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             schema,
         };
         let sdk = inner.core.sdk;
-        let opens = delays
-            .into_iter()
-            .zip(headers_providers)
-            .map(|(delay, headers_provider)| {
+        let stats_exporter = inner.stats_exporter;
+        let opens = delays.into_iter().zip(headers_providers).enumerate().map(
+            |(stream_index, (delay, headers_provider))| {
                 let table_properties = table_properties.clone();
                 let options = options.clone();
+                let stats_exporter = stats_exporter.as_ref().map(|exporter| {
+                    crate::multiplexed_stream::multiplexed_stats_exporter(
+                        stream_index,
+                        Arc::clone(exporter),
+                    )
+                });
                 async move {
                     tokio::time::sleep(delay).await;
                     crate::ZerobusArrowStream::new(
@@ -298,11 +298,12 @@ impl<'a> MultiplexedStreamBuilder<'a> {
                         headers_provider,
                         options,
                         Arc::clone(&sdk.sdk_identifier),
-                        None,
+                        stats_exporter,
                     )
                     .await
                 }
-            });
+            },
+        );
         let streams = collect_opened(opens, |mut stream: crate::ZerobusArrowStream| async move {
             stream.close().await
         })
