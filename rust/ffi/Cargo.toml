@@ -18,7 +18,7 @@ databricks-zerobus-ingest-sdk = { path = "../sdk", version = "3.0.0", features =
 arrow-ipc.workspace = true
 
 # FFI helpers
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 once_cell.workspace = true
 prost.workspace = true
 prost-types.workspace = true
@@ -39,6 +39,8 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 [dev-dependencies]
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
+# Mock gRPC server for the multiplexed panic-path tests, which need a live mux.
+zerobus-test-support = { path = "../test-support" }
 
 [build-dependencies]
 cbindgen.workspace = true

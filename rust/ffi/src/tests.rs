@@ -1459,8 +1459,9 @@ async fn test_ack_callback_teardown_no_messages_wait_indefinitely() {
 use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
 use crate::zerobus_sdk_create_stream_with_headers_provider;
 
-// Global counter, so serialize this pair's before/after sampling window.
-static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Global counter, so serialize every test's before/after sampling window,
+// including the multiplexed create-failure test.
+pub(crate) static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // No-op ack/error callbacks; never invoked (create fails before any ack).
 extern "C" fn noop_ack(_offset_id: i64, _user_data: *mut std::ffi::c_void) {}
@@ -2476,6 +2477,7 @@ fn test_every_extern_c_entry_point_is_guarded() {
     let modules = [
         ("sdk.rs", include_str!("sdk.rs")),
         ("stream.rs", include_str!("stream.rs")),
+        ("multiplexed.rs", include_str!("multiplexed.rs")),
         ("builder.rs", include_str!("builder.rs")),
         ("proto_schema.rs", include_str!("proto_schema.rs")),
         ("arrow.rs", include_str!("arrow.rs")),

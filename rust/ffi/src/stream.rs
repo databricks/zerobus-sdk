@@ -13,11 +13,13 @@ use std::sync::Arc;
 
 // Builder option application helpers
 
-fn apply_c_stream_options<'a>(
+/// Applies every `CStreamConfigurationOptions` field except the ack callback,
+/// which ordinary and multiplexed streams register through different setters.
+fn apply_c_stream_tuning<'a>(
     builder: StreamBuilder<'a>,
     c: &CStreamConfigurationOptions,
 ) -> StreamBuilder<'a> {
-    let builder = builder
+    builder
         .max_inflight_requests(c.max_inflight_requests)
         .recovery(c.recovery)
         .recovery_timeout_ms(c.recovery_timeout_ms)
@@ -34,29 +36,39 @@ fn apply_c_stream_options<'a>(
             Some(c.callback_max_wait_time_ms)
         } else {
             None
-        });
+        })
+}
 
-    // Register the ack callback only when the caller supplied a function pointer.
+/// Returns the C ack callback bridge, or `None` when neither function pointer is set.
+fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<CallbackAckCallback> {
     if c.ack_on_ack.is_some() || c.ack_on_error.is_some() {
-        builder.ack_callback(Arc::new(CallbackAckCallback::new(
+        Some(CallbackAckCallback::new(
             c.ack_on_ack,
             c.ack_on_error,
             c.ack_user_data,
-        )))
+        ))
     } else {
-        builder
+        None
     }
 }
 
-#[derive(Clone, Copy)]
-struct SendPtr<T>(*mut T);
+pub(crate) struct SendPtr<T>(*mut T);
+
+// Written out because `derive` would require `T: Copy`; only the pointer is copied.
+impl<T> Clone for SendPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for SendPtr<T> {}
 
 impl<T> SendPtr<T> {
-    const fn new(ptr: *mut T) -> Self {
+    pub(crate) const fn new(ptr: *mut T) -> Self {
         Self(ptr)
     }
 
-    const fn get(self) -> *mut T {
+    pub(crate) const fn get(self) -> *mut T {
         self.0
     }
 }
@@ -65,7 +77,7 @@ impl<T> SendPtr<T> {
 // The pointee's lifetime and synchronization remain the caller's contract.
 unsafe impl<T> Send for SendPtr<T> {}
 
-enum StreamCreateAuth {
+pub(crate) enum StreamCreateAuth {
     OAuth {
         client_id: String,
         client_secret: String,
@@ -80,15 +92,16 @@ enum StreamCreateAuth {
     },
 }
 
-async fn build_stream_from_parts(
-    sdk_ref: &databricks_zerobus_ingest_sdk::ZerobusSdk,
+/// Configures table, authentication, record format, and tuning options.
+/// The caller registers its ack callback and selects the terminal build mode.
+pub(crate) fn configure_stream_builder<'a>(
+    sdk_ref: &'a databricks_zerobus_ingest_sdk::ZerobusSdk,
     table_name: String,
     descriptor_proto: Option<prost_types::DescriptorProto>,
     auth: StreamCreateAuth,
-    options: Option<CStreamConfigurationOptions>,
-) -> Result<*mut CZerobusStream, ZerobusError> {
+    options: Option<&CStreamConfigurationOptions>,
+) -> Result<StreamBuilder<'a>, ZerobusError> {
     let record_type = options
-        .as_ref()
         .map(|c| c_record_type(c.record_type))
         .unwrap_or(CRecordType::Proto);
 
@@ -128,8 +141,28 @@ async fn build_stream_from_parts(
         }
     };
 
-    if let Some(c) = options.as_ref() {
-        builder = apply_c_stream_options(builder, c);
+    if let Some(c) = options {
+        builder = apply_c_stream_tuning(builder, c);
+    }
+    Ok(builder)
+}
+
+async fn build_stream_from_parts(
+    sdk_ref: &databricks_zerobus_ingest_sdk::ZerobusSdk,
+    table_name: String,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    auth: StreamCreateAuth,
+    options: Option<CStreamConfigurationOptions>,
+) -> Result<*mut CZerobusStream, ZerobusError> {
+    let mut builder = configure_stream_builder(
+        sdk_ref,
+        table_name,
+        descriptor_proto,
+        auth,
+        options.as_ref(),
+    )?;
+    if let Some(callback) = options.as_ref().and_then(c_ack_callback) {
+        builder = builder.ack_callback(Arc::new(callback));
     }
 
     let stream = builder.build().await?;
@@ -160,7 +193,7 @@ fn invoke_create_stream_async_callback(
     }
 }
 
-fn invoke_offset_async_callback(
+pub(crate) fn invoke_offset_async_callback(
     callback: OffsetAsyncCallback,
     offset: i64,
     result: CResult,
@@ -187,7 +220,7 @@ fn invoke_offset_async_callback(
     }
 }
 
-fn invoke_bool_async_callback(
+pub(crate) fn invoke_bool_async_callback(
     callback: BoolAsyncCallback,
     value: bool,
     result: CResult,
@@ -214,7 +247,7 @@ fn invoke_bool_async_callback(
     }
 }
 
-fn invoke_record_array_async_callback(
+pub(crate) fn invoke_record_array_async_callback(
     callback: RecordArrayAsyncCallback,
     records: CRecordArray,
     result: CResult,
@@ -1778,7 +1811,8 @@ pub extern "C" fn zerobus_stream_get_unacked_records_async(
     })
 }
 
-/// Free a CRecordArray returned by zerobus_stream_get_unacked_records
+/// Free a CRecordArray returned by zerobus_stream_get_unacked_records or
+/// zerobus_multiplexed_stream_get_unacked_records
 #[no_mangle]
 pub extern "C" fn zerobus_free_record_array(array: CRecordArray) {
     ffi_guard(ptr::null_mut(), (), move || {

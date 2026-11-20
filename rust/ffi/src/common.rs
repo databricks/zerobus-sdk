@@ -151,6 +151,8 @@ pub struct CStreamConfigurationOptions {
     /// callback object is destroyed, not merely until close() returns.
     /// error_message is valid only during the call (copy to keep). Callbacks must
     /// not unwind across the C boundary (panics are contained and logged).
+    /// Multiplexed streams reject these fields; pass the mux create function's
+    /// own `ack_on_ack` / `ack_on_error` parameters instead.
     // Signatures are written inline rather than via the AckOn*Callback aliases
     // so cbindgen emits nullable C function pointers instead of an opaque struct.
     pub ack_on_ack: Option<extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void)>,
@@ -466,9 +468,10 @@ impl CallbackAckCallback {
     }
 }
 
-// Safety: the callback handler is a single sequential task, so on_ack/on_error
-// are never re-entered concurrently. user_data thread-safety is the caller's
-// contract (see the field docs); the raw pointer is only shared, not derefed here.
+// Safety: the struct holds no mutable state. An ordinary stream calls it from a
+// single sequential task; a multiplexed stream shares it across sub-stream
+// tasks, so calls may be concurrent. Either way, user_data thread-safety is the
+// caller's contract; the raw pointer is only shared, not derefed here.
 unsafe impl Send for CallbackAckCallback {}
 unsafe impl Sync for CallbackAckCallback {}
 
@@ -592,7 +595,7 @@ pub(crate) fn write_success_result(result: *mut CResult) {
 }
 
 /// Best-effort human-readable message extracted from a caught panic payload.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         format!("Rust panic caught at FFI boundary: {s}")
     } else if let Some(s) = payload.downcast_ref::<String>() {
