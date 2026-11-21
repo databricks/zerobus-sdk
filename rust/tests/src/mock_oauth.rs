@@ -11,8 +11,12 @@
 //! point the SDK at. The gRPC mock speaks HTTP/2 via tonic; this endpoint is a
 //! plain HTTP/1.1 JSON POST, so it is hand-rolled on a raw `TcpListener` and
 //! needs no extra dependency.
+//!
+//! Shared by `oauth_token_tests` and `federated_token_tests`; each uses only
+//! part of it.
+#![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,6 +85,30 @@ impl MockTokenResponse {
     }
 }
 
+/// One token request as the mock received it, for asserting the wire contract.
+#[derive(Clone, Debug)]
+pub struct RecordedRequest {
+    pub method: String,
+    pub path: String,
+    /// Header names lower-cased; a repeated header keeps its last value.
+    pub headers: HashMap<String, String>,
+    /// The `application/x-www-form-urlencoded` body, decoded. A repeated key
+    /// keeps its last value.
+    pub form: HashMap<String, String>,
+}
+
+impl RecordedRequest {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    pub fn form_value(&self, key: &str) -> Option<&str> {
+        self.form.get(key).map(String::as_str)
+    }
+}
+
 /// A mock Unity Catalog OAuth token endpoint bound to loopback.
 ///
 /// The returned handle shares state with the background server task: tests set
@@ -94,6 +122,8 @@ pub struct MockOAuthServer {
     responses: Arc<Mutex<VecDeque<MockTokenResponse>>>,
     /// Number of token requests fully received (mints observed by the server).
     mint_count: Arc<AtomicUsize>,
+    /// Every fully received request, in arrival order.
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
 impl MockOAuthServer {
@@ -107,6 +137,11 @@ impl MockOAuthServer {
     /// Number of token requests the endpoint has received so far.
     pub fn mint_count(&self) -> usize {
         self.mint_count.load(Ordering::SeqCst)
+    }
+
+    /// Every token request received so far, in arrival order.
+    pub async fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().await.clone()
     }
 }
 
@@ -122,10 +157,12 @@ pub async fn start_mock_oauth_server() -> (MockOAuthServer, String) {
     let responses = Arc::new(Mutex::new(VecDeque::new()));
     let default_response = Arc::new(MockTokenResponse::ok("mock-default-token"));
     let mint_count = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
 
     let server = MockOAuthServer {
         responses: Arc::clone(&responses),
         mint_count: Arc::clone(&mint_count),
+        requests: Arc::clone(&requests),
     };
 
     tokio::spawn(async move {
@@ -140,11 +177,13 @@ pub async fn start_mock_oauth_server() -> (MockOAuthServer, String) {
             let responses = Arc::clone(&responses);
             let default_response = Arc::clone(&default_response);
             let mint_count = Arc::clone(&mint_count);
+            let requests = Arc::clone(&requests);
             tokio::spawn(handle_connection(
                 socket,
                 responses,
                 default_response,
                 mint_count,
+                requests,
             ));
         }
     });
@@ -159,12 +198,15 @@ async fn handle_connection(
     responses: Arc<Mutex<VecDeque<MockTokenResponse>>>,
     default_response: Arc<MockTokenResponse>,
     mint_count: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
 ) {
-    if !read_request(&mut socket).await {
+    let Some(request) = read_request(&mut socket).await else {
         return;
-    }
+    };
 
-    // The request arrived in full: count it as a mint before replying.
+    // The request arrived in full: record it and count it as a mint before
+    // replying, so a test that observes the reply also observes the request.
+    requests.lock().await.push(request);
     mint_count.fetch_add(1, Ordering::SeqCst);
 
     let response = match responses.lock().await.pop_front() {
@@ -193,9 +235,9 @@ async fn handle_connection(
     }
 }
 
-/// Reads until the header terminator, then drains `Content-Length` body bytes.
-/// Returns `false` if the peer closed before a full request arrived.
-async fn read_request(socket: &mut TcpStream) -> bool {
+/// Reads until the header terminator, then reads `Content-Length` body bytes.
+/// Returns `None` if the peer closed before a full request arrived.
+async fn read_request(socket: &mut TcpStream) -> Option<RecordedRequest> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
 
@@ -204,23 +246,73 @@ async fn read_request(socket: &mut TcpStream) -> bool {
             break pos + 4;
         }
         match socket.read(&mut chunk).await {
-            Ok(0) => return false,
+            Ok(0) | Err(_) => return None,
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(_) => return false,
         }
     };
 
     let content_length = parse_content_length(&buf[..header_end]).unwrap_or(0);
-    let mut remaining = content_length.saturating_sub(buf.len() - header_end);
-    while remaining > 0 {
+    while buf.len() < header_end + content_length {
         match socket.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => remaining = remaining.saturating_sub(n),
-            Err(_) => break,
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
     debug!("mock OAuth received a token request");
-    true
+
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let mut lines = head.split("\r\n");
+    let mut request_line = lines.next().unwrap_or_default().split(' ');
+    let method = request_line.next().unwrap_or_default().to_string();
+    let path = request_line.next().unwrap_or_default().to_string();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    let body = &buf[header_end..header_end + content_length];
+    Some(RecordedRequest {
+        method,
+        path,
+        headers,
+        form: parse_form(body),
+    })
+}
+
+/// Decodes an `application/x-www-form-urlencoded` body.
+fn parse_form(body: &[u8]) -> HashMap<String, String> {
+    body.split(|&b| b == b'&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let mut kv = pair.splitn(2, |&b| b == b'=');
+            let key = form_decode(kv.next().unwrap_or_default());
+            let value = form_decode(kv.next().unwrap_or_default());
+            (key, value)
+        })
+        .collect()
+}
+
+/// Decodes one form component: `+` is a space and `%XX` is a byte.
+fn form_decode(raw: &[u8]) -> String {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < raw.len() => {
+                let hex = std::str::from_utf8(&raw[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Builds the JSON token body, inserting `expires_in` verbatim when present.

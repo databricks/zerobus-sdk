@@ -496,14 +496,16 @@ mod stream_creation_tests {
             .build()
             .expect("SDK should build");
 
-        // First stream: a cold mint of the short-lived token.
+        // First stream: a cold mint of the short-lived token. It keeps the default
+        // timeout, because a cold mint can take over a second on a loaded CI
+        // runner; only the second stream, which never mints, needs the tight
+        // budget.
         let first = sdk
             .stream_builder()
             .table(TABLE_NAME)
             .oauth(CLIENT_ID, CLIENT_SECRET)
             .json()
             .recovery(false)
-            .recovery_timeout_ms(1000)
             .build()
             .await;
         assert!(first.is_ok(), "first stream: {:?}", first.err());
