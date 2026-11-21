@@ -89,4 +89,20 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestAckCallbackOnRuntimeWorker(AckCallback callback);
+
+  /**
+   * Exercises {@link IdpTokenSupplier} error classification on one native blocking thread.
+   *
+   * @param supplier the stateful supplier used by the native test
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestIdpTokenSupplierCallbacks(IdpTokenSupplier supplier);
+
+  /**
+   * Verifies that a supplier failure surfaces through the native federated token provider.
+   *
+   * @param supplier a supplier that throws {@code NonRetriableException("idp unavailable")}
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestFederatedProviderSupplierError(IdpTokenSupplier supplier);
 }
