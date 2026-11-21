@@ -87,6 +87,10 @@ When using custom `HeadersProvider` (instead of default OAuth):
 - This replaces the older per-stream handle registry: freeing the handle on `close()`
   could race a recovery `get_headers` still running on a worker thread (use-after-free).
 - Leaking a handle leaks the Go `HeadersProvider` object and any resources it holds.
+- `CreateStreamWithFederatedToken` / `CreateArrowStreamWithFederatedToken` follow the same
+  contract: each create wraps the `*FederatedToken` in a new `cgo.Handle`, and the FFI releases
+  it via `goFreeIdpTokenSupplier`. `goGetIdpToken` runs the supplier through
+  `callIdpTokenSupplier`, which recovers panics so none unwinds into Rust.
 
 ### Arrow batch cleanup
 
