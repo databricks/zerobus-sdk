@@ -2197,6 +2197,75 @@ mod tests {
         assert_eq!(decoded, values);
     }
 
+    #[tokio::test]
+    async fn dictionary_frame_bounds_include_ipc_compression_and_metadata() {
+        use arrow_array::{StringArray, builder::StringDictionaryBuilder, types::Int32Type};
+        use arrow_ipc::CompressionType;
+        use futures::TryStreamExt;
+
+        let values = (0..512)
+            .map(|i| format!("{i:08}-{}", "dictionary-value".repeat(32)))
+            .collect::<Vec<_>>();
+        let mut builder = StringDictionaryBuilder::<Int32Type>::new();
+        for value in &values {
+            builder.append(value).unwrap();
+        }
+        let batch =
+            RecordBatch::try_from_iter([("name", Arc::new(builder.finish()) as ArrayRef)]).unwrap();
+        let target = 16 * 1024;
+        for compression in [
+            None,
+            Some(CompressionType::ZSTD),
+            Some(CompressionType::LZ4_FRAME),
+        ] {
+            let options = IpcWriteOptions::default()
+                .try_with_compression(compression)
+                .unwrap();
+            let encoder = FlightDataEncoderBuilder::new()
+                .with_options(options)
+                .with_max_flight_data_size(target)
+                .with_dictionary_handling(DictionaryHandling::Resend)
+                .build(futures::stream::iter(vec![Ok(batch.clone())]));
+            let mut frames = encoder.try_collect::<Vec<_>>().await.unwrap();
+            let mut record_frames = 0;
+            for frame in &mut frames {
+                let message = arrow_ipc::root_as_message(&frame.data_header).unwrap();
+                if message.header_as_record_batch().is_some() {
+                    record_frames += 1;
+                }
+                frame.app_metadata = Bytes::from_static(
+                    br#"{"offset_id":9223372036854775807,"num_records":18446744073709551615}"#,
+                );
+                assert!(
+                    frame.encoded_len() <= target,
+                    "{compression:?} exceeded the frame target"
+                );
+            }
+            assert!(
+                record_frames > 1,
+                "the fixture must exercise dictionary splitting"
+            );
+            let mut decoder =
+                FlightDataDecoder::new(futures::stream::iter(frames.into_iter().map(Ok)));
+            let mut actual = Vec::new();
+            while let Some(decoded) = decoder.next().await {
+                if let DecodedPayload::RecordBatch(part) = decoded.unwrap().payload {
+                    let strings =
+                        arrow_cast::cast(part.column(0).as_ref(), &DataType::Utf8).unwrap();
+                    actual.extend(
+                        strings
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.unwrap().to_owned()),
+                    );
+                }
+            }
+            assert_eq!(actual, values, "{compression:?} changed dictionary values");
+        }
+    }
+
     #[test]
     fn nested_dictionary_maps_preserve_empty_null_and_value_order_when_split() {
         use arrow_array::{
