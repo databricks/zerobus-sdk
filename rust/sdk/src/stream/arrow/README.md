@@ -121,6 +121,14 @@ IPC write options, which the encoder passes to arrow-ipc: when a batch's
 dictionary starts with the previous batch's values, the dictionary message is a
 delta (`isDelta`) with only the new values; otherwise it carries the full
 dictionary.
+For `Resend`, row-split batches compact their dictionaries to values used by
+that slice, including nested dictionary values. Each dictionary and record-batch
+frame is checked against the configured Flight target using the actual IPC
+compression options, with room reserved for SDK metadata. All slices are
+prepared before any record-batch frame from the logical batch is queued. A
+single row that cannot fit returns an encoding error. This preserves the
+logical-batch recovery boundary and record offsets.
+
 The server numbers only record-batch messages, so dictionary messages carry no
 wire offset.
 

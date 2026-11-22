@@ -1307,6 +1307,12 @@ support Arrow dictionaries yet, so keep the default, `Hydrate`. Until it does,
 `Resend` or `Delta` with dictionary-encoded columns makes stream creation fail
 with `ZerobusError::InvalidSchema`.
 
+For `Resend`, large batches compact dictionary values after row splitting and
+check the encoded dictionary and record-batch messages against the Flight size
+target, including the selected IPC compression. A single row that still exceeds
+the target fails encoding before any records from its logical batch are queued.
+Compaction preserves dictionary key widths, ordered values, and nested types.
+
 For Arrow Flight streams, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long the oldest batch may remain pending during normal
 stream operation, not an inactivity timeout. No timer runs while the stream is

@@ -97,6 +97,117 @@ async fn stats_preserve_batch_identity_across_lanes_and_compression_modes() {
 }
 
 #[tokio::test]
+async fn dictionary_splits_preserve_multiplexed_stats_and_values() {
+    use std::collections::{HashMap, HashSet};
+    use std::num::NonZeroUsize;
+
+    use arrow_array::{builder::StringDictionaryBuilder, types::Int32Type, ArrayRef};
+    use databricks_zerobus_ingest_sdk::ArrowDictionaryHandling;
+
+    let mut state = 0x0123456789abcdefu64;
+    let values = (0..4096)
+        .map(|row| {
+            let mut value = format!("{row:08}-");
+            for _ in 0..128 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                value.push_str(&format!("{state:016x}"));
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    let mut dictionary = StringDictionaryBuilder::<Int32Type>::new();
+    for value in &values {
+        dictionary.append(value).unwrap();
+    }
+    let data =
+        RecordBatch::try_from_iter([("name", Arc::new(dictionary.finish()) as ArrayRef)]).unwrap();
+    let (server, endpoint) = start_mock_flight_server().await.unwrap();
+    let sdk = sdk(endpoint);
+    let (exporter, mut rx) = channel_exporter(NonZeroUsize::new(128).unwrap());
+    let mut mux = sdk
+        .stream_builder()
+        .table(TABLE)
+        .headers_provider(Arc::new(TestHeadersProvider::default()))
+        .arrow(data.schema())
+        .dictionary_handling(ArrowDictionaryHandling::Resend)
+        .compression(ArrowCompression::IpcZstd)
+        .stats_exporter(exporter)
+        .flush_timeout_ms(15_000)
+        .multiplexed(2)
+        .build_arrow()
+        .await
+        .unwrap();
+    let mut expected = HashMap::new();
+    for lane in 0..2 {
+        let id = mux.ingest_batch(data.clone()).await.unwrap();
+        assert_eq!(id.stream_index(), lane);
+        expected.insert(id.raw(), data.num_rows() as u64);
+    }
+    mux.flush().await.unwrap();
+    mux.close().await.unwrap();
+    let mut sent = HashSet::new();
+    let mut acked = HashSet::new();
+    while let Ok(stat) = rx.try_recv() {
+        match stat {
+            StreamStat::BatchSent {
+                offset,
+                attempt,
+                stats,
+            } => {
+                assert_eq!(attempt, 0);
+                assert_eq!(Some(&stats.records), expected.get(&offset));
+                assert!(stats.approximate_wire_bytes > 0);
+                assert!(stats.uncompressed_bytes > stats.approximate_wire_bytes);
+                assert!(sent.insert(offset), "duplicate send for {offset}");
+            }
+            StreamStat::BatchAcked { offset } => {
+                assert!(expected.contains_key(&offset));
+                assert!(
+                    acked.insert(offset),
+                    "duplicate acknowledgment for {offset}"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent, acked);
+    assert_eq!(server.connection_count(), 2);
+    assert_eq!(
+        server.get_total_records_received().await,
+        (values.len() * 2) as u64
+    );
+    let frames = server.get_record_batch_message_count().await;
+    assert!(
+        frames >= 4,
+        "both identical lanes must split their dictionary batch"
+    );
+    assert_eq!(
+        server.get_zstd_compressed_record_batch_count().await,
+        frames
+    );
+    assert!(server.get_dictionary_message_count().await >= frames);
+    let mut actual = server
+        .get_decoded_utf8_columns()
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut expected_values = values
+        .iter()
+        .cloned()
+        .cycle()
+        .take(values.len() * 2)
+        .map(Some)
+        .collect::<Vec<_>>();
+    actual.sort();
+    expected_values.sort();
+    assert_eq!(actual, expected_values);
+}
+
+#[tokio::test]
 async fn round_robin_ipc_message_ids() {
     let (server, endpoint) = start_mock_flight_server().await.unwrap();
     let sdk = sdk(endpoint);

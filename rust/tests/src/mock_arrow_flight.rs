@@ -6,14 +6,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow_array::{Array, StringArray};
+use arrow_array::{Array, DictionaryArray, StringArray};
+use arrow_flight::decode::{DecodedPayload, FlightDataDecoder};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use arrow_schema::Schema;
-use futures::Stream;
+use arrow_schema::DataType;
+use futures::{Stream, StreamExt};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -22,6 +23,38 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
+
+fn logical_utf8_values(array: &dyn Array) -> Option<Vec<Option<String>>> {
+    if let Some(strings) = array.as_any().downcast_ref::<StringArray>() {
+        return Some(strings.iter().map(|v| v.map(str::to_owned)).collect());
+    }
+    let DataType::Dictionary(key, _) = array.data_type() else {
+        return None;
+    };
+    macro_rules! strings {
+        ($key:ty) => {{
+            let dictionary = array.as_any().downcast_ref::<DictionaryArray<$key>>()?;
+            let values = dictionary.values().as_any().downcast_ref::<StringArray>()?;
+            Some(
+                (0..dictionary.len())
+                    .map(|row| dictionary.key(row).map(|key| values.value(key).to_owned()))
+                    .collect(),
+            )
+        }};
+    }
+    use arrow_array::types::*;
+    match key.as_ref() {
+        DataType::Int8 => strings!(Int8Type),
+        DataType::Int16 => strings!(Int16Type),
+        DataType::Int32 => strings!(Int32Type),
+        DataType::Int64 => strings!(Int64Type),
+        DataType::UInt8 => strings!(UInt8Type),
+        DataType::UInt16 => strings!(UInt16Type),
+        DataType::UInt32 => strings!(UInt32Type),
+        DataType::UInt64 => strings!(UInt64Type),
+        _ => None,
+    }
+}
 
 /// Observations extracted from an Arrow IPC message header on the wire.
 struct IpcWireObservation {
@@ -438,7 +471,8 @@ impl FlightService for MockFlightServer {
             // auto-acks (the server derives ack_up_to_records per connection).
             let mut expected_offset: i64 = 0;
             let mut connection_record_count: u64 = 0;
-            let mut wire_schema: Option<Arc<Schema>> = None;
+            let (decode_tx, decode_rx) = futures::channel::mpsc::unbounded();
+            let mut decoder = FlightDataDecoder::new(decode_rx);
 
             // Load configured responses
             {
@@ -494,11 +528,13 @@ impl FlightService for MockFlightServer {
                     let mut count = zstd_compressed_record_batch_count.lock().await;
                     *count += observation.zstd_record_batches;
                 }
+                if !flight_data.data_header.is_empty() {
+                    decode_tx.unbounded_send(Ok(flight_data.clone())).unwrap();
+                }
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
-                        wire_schema = Schema::try_from(&flight_data).ok().map(Arc::new);
                         // A scripted FailSetup rejects this connection's setup: send the
                         // error instead of the ready signal (simulates a reconnect failure).
                         let setup_failure = match stream_responses.get(response_index) {
@@ -594,29 +630,24 @@ impl FlightService for MockFlightServer {
                         *count += observation.rows;
                     }
                     if observation.record_batch_messages > 0 {
-                        if let Some(schema) = &wire_schema {
-                            match arrow_flight::utils::flight_data_to_arrow_batch(
-                                &flight_data,
-                                Arc::clone(schema),
-                                &HashMap::new(),
-                            ) {
-                                Ok(batch) => {
-                                    let mut decoded = decoded_utf8_columns.lock().await;
-                                    for column in batch.columns() {
-                                        if let Some(strings) =
-                                            column.as_any().downcast_ref::<StringArray>()
-                                        {
-                                            decoded.push(
-                                                strings
-                                                    .iter()
-                                                    .map(|value| value.map(str::to_string))
-                                                    .collect(),
-                                            );
+                        while let Some(decoded) = decoder.next().await {
+                            match decoded {
+                                Ok(data) => {
+                                    if let DecodedPayload::RecordBatch(batch) = data.payload {
+                                        let mut decoded = decoded_utf8_columns.lock().await;
+                                        for column in batch.columns() {
+                                            if let Some(strings) =
+                                                logical_utf8_values(column.as_ref())
+                                            {
+                                                decoded.push(strings);
+                                            }
                                         }
+                                        break;
                                     }
                                 }
                                 Err(error) => {
                                     warn!("Failed to decode received record batch: {error}");
+                                    break;
                                 }
                             }
                         }
