@@ -13,6 +13,14 @@ package com.databricks.zerobus;
  * <p>Implementations should be thread-safe as callbacks may be invoked from multiple threads.
  * Callbacks should be lightweight to avoid blocking the internal processing threads.
  *
+ * <p>Callbacks run on internal SDK threads, so they must not call stream methods that block on
+ * native work: {@code ingestRecordOffset}, {@code ingestRecordsOffset}, the deprecated {@code
+ * ZerobusStream.ingestRecord}, {@code ingestBatch} (Arrow), {@code waitForOffset}, {@code flush},
+ * {@code close}, {@code isClosed}, {@code getUnackedRecords}, and {@code getUnackedBatches}, as
+ * well as {@code ZerobusSdk.recreateStream} and {@code recreateArrowStream}, which can call them.
+ * Called from a callback, these throw {@link IllegalStateException}; hand such work to another
+ * thread instead.
+ *
  * <p>Example usage:
  *
  * <pre>{@code
@@ -43,8 +51,10 @@ public interface AckCallback {
    * <p>The offset ID represents the durability acknowledgment up to and including this offset. All
    * records with offset IDs less than or equal to this value have been durably stored.
    *
-   * <p>This method must not throw. JNI does not clear a pending Java exception from the callback,
-   * so a thrown exception can poison later callback operations.
+   * <p>Implementations should not throw. An exception thrown from this method is normally logged at
+   * ERROR level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging,
+   * is visible only when an SLF4J binding is configured; if logging itself fails, the exception is
+   * dropped. Later callbacks are still delivered.
    *
    * @param offsetId the offset ID that has been acknowledged
    */
@@ -56,8 +66,10 @@ public interface AckCallback {
    * <p>This method is called when the SDK encounters an error that affects a specific submission
    * offset. The error may be retryable or non-retryable depending on the nature of the failure.
    *
-   * <p>This method must not throw. JNI does not clear a pending Java exception from the callback,
-   * so a thrown exception can poison later callback operations.
+   * <p>Implementations should not throw. An exception thrown from this method is normally logged at
+   * ERROR level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging,
+   * is visible only when an SLF4J binding is configured; if logging itself fails, the exception is
+   * dropped. Later callbacks are still delivered.
    *
    * @param offsetId the offset ID that encountered an error
    * @param errorMessage a description of the error that occurred

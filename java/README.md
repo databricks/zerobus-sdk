@@ -99,6 +99,11 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 **When using the fat JAR** (standalone scripts or CLI tools without a build system):
 - No additional dependencies required - all dependencies are bundled
 
+**When shrinking or obfuscating with ProGuard or R8**: keep `com.databricks.zerobus.**`
+(for example `-keep class com.databricks.zerobus.** { *; }`). The native library binds the SDK's
+native methods and the classes it calls back by name, so renamed or removed members make it fail
+to load.
+
 **When using the regular JAR as a file on the classpath** (without Maven or Gradle):
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)
 - [`slf4j-api` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-api/2.0.17)
@@ -1723,6 +1728,19 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
 Implementations must be thread-safe and lightweight (callbacks run on internal
 processing threads). `close()` waits at most five seconds for in-flight
 callbacks; remaining callbacks may still be pending when it returns.
+
+**What a callback may do.** Keep callbacks to quick, non-blocking work such as logging,
+updating metrics, or incrementing counters, and hand anything else (I/O, retries,
+re-ingesting records) to another thread or executor. Streams are not thread-safe, so that
+thread must not call the stream concurrently with others: queue the work for the thread
+that owns the stream, or guard every call with your own lock. A callback must not call
+stream or SDK methods that block on native work: `ingestRecordOffset`,
+`ingestRecordsOffset`, the deprecated `ZerobusStream.ingestRecord`, `ingestBatch` (Arrow),
+`waitForOffset`, `flush`, `close`, `isClosed`, `getUnackedRecords`, `getUnackedBatches`,
+`ZerobusSdk.recreateStream`, and `recreateArrowStream`. Called from a callback, these
+throw `IllegalStateException`. A callback should not throw; if it does, the exception is
+normally logged at ERROR level through SLF4J (if logging itself fails, it is dropped) and
+later callbacks are still delivered.
 
 ## Best Practices
 

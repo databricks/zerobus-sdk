@@ -4,7 +4,7 @@
 //! batch ingestion, acknowledgment waiting, flushing, and closing.
 
 use crate::class_cache::{as_jclass, get_class_cache};
-use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::errors::{guard, guard_or, throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
 use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
 use jni::objects::{JByteArray, JClass, JObject, JValue};
@@ -66,10 +66,14 @@ async fn close_native_stream(
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeDestroy<'local>(
-    _env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_destroy(env, _class, handle))
+}
+
+fn native_destroy<'local>(_env: JNIEnv<'local>, _class: JClass<'local>, handle: jlong) {
     if handle != 0 {
         // Safety: handle was created by createArrowStream
         unsafe {
@@ -88,6 +92,17 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeDest
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIngestBatch<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    batch_data: JByteArray<'local>,
+) -> jlong {
+    guard_or(env, -1, |env| {
+        native_ingest_batch(env, _obj, handle, batch_data)
+    })
+}
+
+fn native_ingest_batch<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -165,6 +180,15 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeInge
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeWaitForOffset<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    offset: jlong,
+) {
+    guard(env, |env| native_wait_for_offset(env, _obj, handle, offset))
+}
+
+fn native_wait_for_offset<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -198,10 +222,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeWait
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeFlush<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_flush(env, _obj, handle))
+}
+
+fn native_flush<'local>(mut env: JNIEnv<'local>, _obj: JObject<'local>, handle: jlong) {
     // Get stream handle
     let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
 
@@ -230,10 +258,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeFlus
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeClose<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
 ) {
+    guard(env, |env| native_close(env, _obj, handle))
+}
+
+fn native_close<'local>(mut env: JNIEnv<'local>, _obj: JObject<'local>, handle: jlong) {
     // Get stream handle
     let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
 
@@ -253,6 +285,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeClos
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIsClosed<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> jboolean {
+    guard(env, |env| native_is_closed(env, _obj, handle))
+}
+
+fn native_is_closed<'local>(
     _env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -284,6 +324,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIsCl
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetTableName<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| native_get_table_name(env, _obj, handle))
+}
+
+fn native_get_table_name<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,
@@ -328,6 +376,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetT
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetUnackedBatches<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+) -> JObject<'local> {
+    guard(env, |env| native_get_unacked_batches(env, _obj, handle))
+}
+
+fn native_get_unacked_batches<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     handle: jlong,

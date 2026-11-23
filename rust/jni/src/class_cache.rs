@@ -21,6 +21,8 @@ pub struct CachedClasses {
     pub non_retriable_exception_class: GlobalRef,
     /// `java.lang.Error`
     pub error_class: GlobalRef,
+    /// `java.lang.IllegalStateException`
+    pub illegal_state_exception_class: GlobalRef,
     /// `java.lang.Long`
     pub long_class: GlobalRef,
     /// `java.util.concurrent.CompletableFuture`
@@ -29,6 +31,8 @@ pub struct CachedClasses {
     pub array_list_class: GlobalRef,
     /// `com.databricks.zerobus.EncodedBatch`
     pub encoded_batch_class: GlobalRef,
+    /// `com.databricks.zerobus.CallbackExceptionLogger`
+    pub callback_exception_logger_class: GlobalRef,
 }
 
 static CLASS_CACHE: OnceLock<CachedClasses> = OnceLock::new();
@@ -43,10 +47,15 @@ pub fn init_class_cache(env: &mut JNIEnv) -> Result<(), String> {
             "com/databricks/zerobus/NonRetriableException",
         )?,
         error_class: find_and_cache(env, "java/lang/Error")?,
+        illegal_state_exception_class: find_and_cache(env, "java/lang/IllegalStateException")?,
         long_class: find_and_cache(env, "java/lang/Long")?,
         completable_future_class: find_and_cache(env, "java/util/concurrent/CompletableFuture")?,
         array_list_class: find_and_cache(env, "java/util/ArrayList")?,
         encoded_batch_class: find_and_cache(env, "com/databricks/zerobus/EncodedBatch")?,
+        callback_exception_logger_class: find_and_cache(
+            env,
+            "com/databricks/zerobus/CallbackExceptionLogger",
+        )?,
     };
 
     CLASS_CACHE
