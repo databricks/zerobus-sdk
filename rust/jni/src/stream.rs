@@ -16,7 +16,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Wrap payload bytes as the `EncodedRecord` variant for the stream's `RecordType`.
-fn encoded_record_from(record_type: RecordType, bytes: Vec<u8>) -> Result<EncodedRecord, String> {
+pub(crate) fn encoded_record_from(
+    record_type: RecordType,
+    bytes: Vec<u8>,
+) -> Result<EncodedRecord, String> {
     match record_type {
         RecordType::Proto => Ok(EncodedRecord::Proto(bytes)),
         RecordType::Json => String::from_utf8(bytes)
@@ -27,6 +30,35 @@ fn encoded_record_from(record_type: RecordType, bytes: Vec<u8>) -> Result<Encode
         // `RecordType` is non-exhaustive; without `avro` its `Avro` variant does not exist.
         other => Err(format!("Unsupported record type: {:?}", other)),
     }
+}
+
+/// Copy a Java `List<byte[]>` into records of the stream's `RecordType`.
+///
+/// Returns the message for a `ZerobusException` if the list cannot be read or a payload does not
+/// fit the record type.
+pub(crate) fn encoded_records_from_list(
+    env: &mut JNIEnv,
+    payloads: &JObject,
+    record_type: RecordType,
+) -> Result<Vec<EncodedRecord>, String> {
+    let list =
+        JList::from_env(env, payloads).map_err(|e| format!("Invalid payload list: {}", e))?;
+    let mut iter = list
+        .iter(env)
+        .map_err(|e| format!("Failed to iterate payload list: {}", e))?;
+
+    let mut records: Vec<EncodedRecord> = Vec::new();
+    while let Some(obj) = iter
+        .next(env)
+        .map_err(|e| format!("Failed to get next payload: {}", e))?
+    {
+        let byte_array: JByteArray = obj.into();
+        let bytes = env
+            .convert_byte_array(byte_array)
+            .map_err(|e| format!("Invalid payload: {}", e))?;
+        records.push(encoded_record_from(record_type, bytes)?);
+    }
+    Ok(records)
 }
 
 /// Native stream handle stored in Java.
@@ -282,52 +314,13 @@ fn native_ingest_records_offset<'local>(
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Convert Java List to Vec of byte arrays
-    let list = match JList::from_env(&mut env, &payloads) {
-        Ok(l) => l,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid payload list: {}", e));
+    let records = match encoded_records_from_list(&mut env, &payloads, stream_handle.record_type) {
+        Ok(r) => r,
+        Err(msg) => {
+            throw_zerobus_exception(&mut env, &msg);
             return -1;
         }
     };
-
-    let mut records: Vec<EncodedRecord> = Vec::new();
-
-    // Iterate over the list
-    let mut iter = match list.iter(&mut env) {
-        Ok(i) => i,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to iterate payload list: {}", e));
-            return -1;
-        }
-    };
-
-    while let Some(obj) = match iter.next(&mut env) {
-        Ok(o) => o,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to get next payload: {}", e));
-            return -1;
-        }
-    } {
-        let byte_array: JByteArray = obj.into();
-        let bytes: Vec<u8> = match env.convert_byte_array(byte_array) {
-            Ok(b) => b,
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid payload: {}", e));
-                return -1;
-            }
-        };
-
-        let record = match encoded_record_from(stream_handle.record_type, bytes) {
-            Ok(r) => r,
-            Err(msg) => {
-                throw_zerobus_exception(&mut env, &msg);
-                return -1;
-            }
-        };
-
-        records.push(record);
-    }
 
     if records.is_empty() {
         return -1;
@@ -551,50 +544,7 @@ fn native_get_unacked_records<'local>(
         }
     };
 
-    // Create an ArrayList
-    let array_list_class = as_jclass(&get_class_cache().array_list_class);
-
-    let list = match env.new_object(&array_list_class, "()V", &[]) {
-        Ok(l) => l,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to create ArrayList: {}", e));
-            return JObject::null();
-        }
-    };
-
-    // Add each record to the list
-    for record in records {
-        let bytes = match record {
-            EncodedRecord::Proto(p) => p,
-            EncodedRecord::Json(j) => j.into_bytes(),
-            #[cfg(feature = "avro")]
-            EncodedRecord::Avro(a) => a,
-            _ => {
-                throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
-                return JObject::null();
-            }
-        };
-
-        let byte_array = match env.byte_array_from_slice(&bytes) {
-            Ok(b) => b,
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Failed to create byte array: {}", e));
-                return JObject::null();
-            }
-        };
-
-        if let Err(e) = env.call_method(
-            &list,
-            "add",
-            "(Ljava/lang/Object;)Z",
-            &[JValue::Object(&byte_array.into())],
-        ) {
-            throw_zerobus_exception(&mut env, &format!("Failed to add to list: {}", e));
-            return JObject::null();
-        }
-    }
-
-    list
+    records_to_java_list(&mut env, records)
 }
 
 #[cfg(test)]
@@ -646,6 +596,67 @@ fn native_get_unacked_batches<'local>(
         }
     };
 
+    batches_to_java_list(&mut env, batches)
+}
+
+/// Convert records into a Java `ArrayList<byte[]>`.
+///
+/// Returns a null reference with a pending Java exception on failure.
+fn records_to_java_list<'local>(
+    env: &mut JNIEnv<'local>,
+    records: impl IntoIterator<Item = EncodedRecord>,
+) -> JObject<'local> {
+    let array_list_class = as_jclass(&get_class_cache().array_list_class);
+
+    let list = match env.new_object(&array_list_class, "()V", &[]) {
+        Ok(l) => l,
+        Err(e) => {
+            throw_zerobus_exception(env, &format!("Failed to create ArrayList: {}", e));
+            return JObject::null();
+        }
+    };
+
+    for record in records {
+        let bytes = match record {
+            EncodedRecord::Proto(p) => p,
+            EncodedRecord::Json(j) => j.into_bytes(),
+            #[cfg(feature = "avro")]
+            EncodedRecord::Avro(a) => a,
+            _ => {
+                throw_from_zerobus_error(env, &unsupported_record_type_error());
+                return JObject::null();
+            }
+        };
+
+        let byte_array = match env.byte_array_from_slice(&bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                throw_zerobus_exception(env, &format!("Failed to create byte array: {}", e));
+                return JObject::null();
+            }
+        };
+
+        if let Err(e) = env.call_method(
+            &list,
+            "add",
+            "(Ljava/lang/Object;)Z",
+            &[JValue::Object(&byte_array.into())],
+        ) {
+            throw_zerobus_exception(env, &format!("Failed to add to list: {}", e));
+            return JObject::null();
+        }
+    }
+
+    list
+}
+
+/// Convert batches into a Java `ArrayList<EncodedBatch>`.
+///
+/// Returns a null reference with a pending Java exception on failure.
+pub(crate) fn batches_to_java_list<'local>(
+    env: &mut JNIEnv<'local>,
+    batches: impl IntoIterator<Item = EncodedBatch>,
+) -> JObject<'local> {
     // Create an ArrayList
     let array_list_class = as_jclass(&get_class_cache().array_list_class);
 
@@ -654,7 +665,7 @@ fn native_get_unacked_batches<'local>(
     let list = match env.new_object(&array_list_class, "()V", &[]) {
         Ok(l) => l,
         Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to create ArrayList: {}", e));
+            throw_zerobus_exception(env, &format!("Failed to create ArrayList: {}", e));
             return JObject::null();
         }
     };
@@ -674,7 +685,7 @@ fn native_get_unacked_batches<'local>(
                 (RecordType::Avro as jint, records.into_iter().collect())
             }
             _ => {
-                throw_from_zerobus_error(&mut env, &unsupported_record_type_error());
+                throw_from_zerobus_error(env, &unsupported_record_type_error());
                 return JObject::null();
             }
         };
@@ -683,10 +694,7 @@ fn native_get_unacked_batches<'local>(
         let records_list = match env.new_object(&array_list_class, "()V", &[]) {
             Ok(l) => l,
             Err(e) => {
-                throw_zerobus_exception(
-                    &mut env,
-                    &format!("Failed to create inner ArrayList: {}", e),
-                );
+                throw_zerobus_exception(env, &format!("Failed to create inner ArrayList: {}", e));
                 return JObject::null();
             }
         };
@@ -695,10 +703,7 @@ fn native_get_unacked_batches<'local>(
             let byte_array = match env.byte_array_from_slice(&record_bytes) {
                 Ok(b) => b,
                 Err(e) => {
-                    throw_zerobus_exception(
-                        &mut env,
-                        &format!("Failed to create byte array: {}", e),
-                    );
+                    throw_zerobus_exception(env, &format!("Failed to create byte array: {}", e));
                     return JObject::null();
                 }
             };
@@ -709,7 +714,7 @@ fn native_get_unacked_batches<'local>(
                 "(Ljava/lang/Object;)Z",
                 &[JValue::Object(&byte_array.into())],
             ) {
-                throw_zerobus_exception(&mut env, &format!("Failed to add to inner list: {}", e));
+                throw_zerobus_exception(env, &format!("Failed to add to inner list: {}", e));
                 return JObject::null();
             }
         }
@@ -722,7 +727,7 @@ fn native_get_unacked_batches<'local>(
         ) {
             Ok(b) => b,
             Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Failed to create EncodedBatch: {}", e));
+                throw_zerobus_exception(env, &format!("Failed to create EncodedBatch: {}", e));
                 return JObject::null();
             }
         };
@@ -733,7 +738,7 @@ fn native_get_unacked_batches<'local>(
             "(Ljava/lang/Object;)Z",
             &[JValue::Object(&batch_obj)],
         ) {
-            throw_zerobus_exception(&mut env, &format!("Failed to add batch to list: {}", e));
+            throw_zerobus_exception(env, &format!("Failed to add batch to list: {}", e));
             return JObject::null();
         }
     }

@@ -9,13 +9,14 @@ use crate::federated_auth::java_idp_token_supplier;
 use crate::headers_provider::JavaHeadersProvider;
 use crate::options::{
     apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
-    extract_stream_options,
+    extract_stream_options, ExtractedStreamOptions,
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
 use crate::tls_options::extract_tls_options;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, IdpTokenSupplier, RecordType, StreamBuilder, TlsSettings, ZerobusSdk,
+    HeadersProvider, IdpTokenSupplier, RecordType, StreamBuilder, TlsSettings, ZerobusError,
+    ZerobusSdk,
 };
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE};
@@ -68,7 +69,7 @@ impl NativeSdkHandle {
 }
 
 /// How a stream created over JNI authenticates.
-enum JniStreamAuth {
+pub(crate) enum JniStreamAuth {
     /// OAuth client credentials.
     OAuth {
         client_id: String,
@@ -115,7 +116,7 @@ impl JniStreamAuth {
 
 /// Reads OAuth credentials, or a `HeadersProvider` when one is passed (the
 /// credentials are then empty and ignored).
-fn extract_oauth_or_headers_provider_auth(
+pub(crate) fn extract_oauth_or_headers_provider_auth(
     env: &mut JNIEnv<'_>,
     client_id: &JString<'_>,
     client_secret: &JString<'_>,
@@ -145,7 +146,7 @@ fn extract_oauth_or_headers_provider_auth(
 }
 
 /// Reads the federation parameters passed by the Java `FederatedToken`.
-fn extract_federated_auth(
+pub(crate) fn extract_federated_auth(
     env: &mut JNIEnv<'_>,
     idp_token_supplier: &JObject<'_>,
     federated_client_id: &JString<'_>,
@@ -650,53 +651,19 @@ fn create_stream<'local>(
         }
     };
 
-    // Extract parameters
-    let table_name: String = match env.get_string(&table_name) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid table name: {}", e));
+    let args = match StreamCreateArgs::extract(
+        &mut env,
+        table_name,
+        descriptor_proto,
+        avro_schema,
+        auth,
+        options,
+        format_code,
+    ) {
+        Ok(args) => args,
+        Err(msg) => {
+            throw_zerobus_exception(&mut env, &msg);
             return JObject::null();
-        }
-    };
-
-    // Extract descriptor proto bytes (may be null for JSON)
-    let descriptor_proto_bytes: Option<Vec<u8>> = if descriptor_proto.is_null() {
-        None
-    } else {
-        match env.convert_byte_array(descriptor_proto) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid descriptor proto: {}", e));
-                return JObject::null();
-            }
-        }
-    };
-
-    // Avro writer schema (JSON); only present for Avro streams.
-    #[cfg(feature = "avro")]
-    let avro_schema_json: Option<String> = if avro_schema.is_null() {
-        None
-    } else {
-        match env.get_string(&avro_schema) {
-            Ok(s) => Some(s.into()),
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid Avro schema: {}", e));
-                return JObject::null();
-            }
-        }
-    };
-    #[cfg(not(feature = "avro"))]
-    let _ = &avro_schema; // unused without the feature, but kept to match the Java signature
-
-    let extracted_options = if options.is_null() {
-        None
-    } else {
-        match extract_stream_options(&mut env, &options) {
-            Ok(opts) => Some(opts),
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Invalid options: {}", e));
-                return JObject::null();
-            }
         }
     };
 
@@ -705,60 +672,13 @@ fn create_stream<'local>(
     let sdk_arc = sdk.sdk.clone();
 
     // Store credentials for later use in stream recreation
-    let credentials = auth.stored_credentials();
+    let credentials = args.stored_credentials();
 
     // Spawn async operation to create stream
     spawn_and_complete(
         future_ref,
         async move {
-            // Parse descriptor proto if provided
-            let descriptor_proto = if let Some(bytes) = descriptor_proto_bytes {
-                Some(prost::Message::decode(bytes.as_slice()).map_err(|e| {
-                    databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
-                        "Failed to parse descriptor proto: {}",
-                        e
-                    ))
-                })?)
-            } else {
-                None
-            };
-
-            let base = auth.apply(sdk_arc.stream_builder().table(table_name));
-            // Map the wire format code to the builder, mirroring the FFI layer's integer
-            // dispatch. `RecordType` no longer derives `TryFrom<i32>`, and its `Avro` variant
-            // only exists with the `avro` feature, so match on the code (its discriminant).
-            let (record_type, mut builder) = match format_code {
-                code if code == RecordType::Proto as jint => {
-                    let desc = descriptor_proto.ok_or_else(|| {
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Proto descriptor is required for Proto record type".to_string(),
-                        )
-                    })?;
-                    (RecordType::Proto, base.compiled_proto(desc))
-                }
-                code if code == RecordType::Json as jint => (RecordType::Json, base.json()),
-                #[cfg(feature = "avro")]
-                code if code == RecordType::Avro as jint => {
-                    let schema = avro_schema_json.ok_or_else(|| {
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Avro schema is required for Avro record type".to_string(),
-                        )
-                    })?;
-                    (RecordType::Avro, base.avro(schema))
-                }
-                _ => {
-                    return Err(
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(format!(
-                            "Unsupported record format code: {}",
-                            format_code
-                        )),
-                    );
-                }
-            };
-            if let Some(opts) = extracted_options {
-                builder = apply_stream_options(builder, opts);
-            }
-
+            let (record_type, builder) = args.configure(&sdk_arc)?;
             let stream = builder.build().await?;
 
             Ok(NativeStreamHandle::new(
@@ -772,6 +692,133 @@ fn create_stream<'local>(
     );
 
     future
+}
+
+/// Stream-creation arguments copied off the JNI thread, so the async build task owns them.
+pub(crate) struct StreamCreateArgs {
+    table_name: String,
+    auth: JniStreamAuth,
+    descriptor_proto_bytes: Option<Vec<u8>>,
+    #[cfg(feature = "avro")]
+    avro_schema_json: Option<String>,
+    options: Option<ExtractedStreamOptions>,
+    format_code: jint,
+}
+
+impl StreamCreateArgs {
+    /// Reads the stream-creation arguments from their Java values.
+    ///
+    /// Returns the message for a `ZerobusException` if a value cannot be read.
+    pub(crate) fn extract<'local>(
+        env: &mut JNIEnv<'local>,
+        table_name: JString<'local>,
+        descriptor_proto: JByteArray<'local>,
+        avro_schema: JString<'local>,
+        auth: JniStreamAuth,
+        options: JObject<'local>,
+        format_code: jint,
+    ) -> Result<Self, String> {
+        let table_name: String = env
+            .get_string(&table_name)
+            .map_err(|e| format!("Invalid table name: {}", e))?
+            .into();
+
+        // Null for JSON and Avro streams.
+        let descriptor_proto_bytes = if descriptor_proto.is_null() {
+            None
+        } else {
+            Some(
+                env.convert_byte_array(descriptor_proto)
+                    .map_err(|e| format!("Invalid descriptor proto: {}", e))?,
+            )
+        };
+
+        // Avro writer schema (JSON); only present for Avro streams.
+        #[cfg(feature = "avro")]
+        let avro_schema_json = if avro_schema.is_null() {
+            None
+        } else {
+            Some(
+                env.get_string(&avro_schema)
+                    .map_err(|e| format!("Invalid Avro schema: {}", e))?
+                    .into(),
+            )
+        };
+        #[cfg(not(feature = "avro"))]
+        let _ = &avro_schema; // unused without the feature, but kept to match the Java signature
+
+        let options = if options.is_null() {
+            None
+        } else {
+            Some(
+                extract_stream_options(env, &options)
+                    .map_err(|e| format!("Invalid options: {}", e))?,
+            )
+        };
+
+        Ok(Self {
+            table_name,
+            auth,
+            descriptor_proto_bytes,
+            #[cfg(feature = "avro")]
+            avro_schema_json,
+            options,
+            format_code,
+        })
+    }
+
+    /// Returns the OAuth credentials to keep on the native stream handle.
+    pub(crate) fn stored_credentials(&self) -> (String, String) {
+        self.auth.stored_credentials()
+    }
+
+    /// Applies the authentication, record format and options to a new stream builder.
+    pub(crate) fn configure(
+        self,
+        sdk: &ZerobusSdk,
+    ) -> Result<(RecordType, StreamBuilder<'_>), ZerobusError> {
+        let descriptor_proto = match self.descriptor_proto_bytes {
+            Some(bytes) => Some(prost::Message::decode(bytes.as_slice()).map_err(|e| {
+                ZerobusError::InvalidArgument(format!("Failed to parse descriptor proto: {}", e))
+            })?),
+            None => None,
+        };
+
+        let base = self.auth.apply(sdk.stream_builder().table(self.table_name));
+        // Match on the wire code: `RecordType` has no `TryFrom<i32>`, and `Avro` exists only
+        // with the `avro` feature.
+        let format_code = self.format_code;
+        let (record_type, mut builder) = match format_code {
+            code if code == RecordType::Proto as jint => {
+                let desc = descriptor_proto.ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "Proto descriptor is required for Proto record type".to_string(),
+                    )
+                })?;
+                (RecordType::Proto, base.compiled_proto(desc))
+            }
+            code if code == RecordType::Json as jint => (RecordType::Json, base.json()),
+            #[cfg(feature = "avro")]
+            code if code == RecordType::Avro as jint => {
+                let schema = self.avro_schema_json.ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "Avro schema is required for Avro record type".to_string(),
+                    )
+                })?;
+                (RecordType::Avro, base.avro(schema))
+            }
+            _ => {
+                return Err(ZerobusError::InvalidArgument(format!(
+                    "Unsupported record format code: {}",
+                    format_code
+                )));
+            }
+        };
+        if let Some(opts) = self.options {
+            builder = apply_stream_options(builder, opts);
+        }
+        Ok((record_type, builder))
+    }
 }
 
 /// Recreate a stream from a failed stream.
