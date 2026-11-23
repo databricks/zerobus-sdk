@@ -42,10 +42,10 @@ public final class NativeLoader {
   private static final String LIBRARY_NAME = "zerobus_jni";
   private static final String NATIVE_RESOURCE_PATH = "/native";
 
-  // Bumped with the Rust NATIVE_ABI_VERSION whenever native signatures change, to reject a stale
-  // libzerobus_jni (natives bind by name only, so an old one would read arguments from wrong
-  // slots).
-  static final int EXPECTED_NATIVE_ABI = 3;
+  // Bumped with the Rust NATIVE_ABI_VERSION whenever native methods are added or their signatures
+  // change, to reject a stale libzerobus_jni (natives bind by name only, so an old one would read
+  // arguments from wrong slots or lack newer methods).
+  static final int EXPECTED_NATIVE_ABI = 4;
 
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;

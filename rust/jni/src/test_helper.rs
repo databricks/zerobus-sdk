@@ -21,7 +21,7 @@ use jni::JNIEnv;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use zerobus_test_support::mock_grpc::{start_mock_server, MockZerobusServer};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockZerobusServer};
 
 /// Test finding a class from a Tokio daemon thread using direct `find_class`.
 ///
@@ -535,6 +535,56 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestSt
                 JObject::null()
             }
         }
+    })
+}
+
+/// Scripts the mock server's replies on `table`. The script position is shared per table:
+/// every stream opened on the table before its first request acknowledges its first `acks`
+/// requests, then fails the next one with `INVALID_ARGUMENT: <error>` when `error` is not null.
+/// Script the table again before opening a stream after that.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestScriptMockServer<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    url: JString<'local>,
+    table: JString<'local>,
+    acks: jint,
+    error: JString<'local>,
+) {
+    guard(env, |mut env| {
+        let Some(server) = mock_server(&mut env, &url) else {
+            return;
+        };
+        let table: String = match env.get_string(&table) {
+            Ok(table) => table.into(),
+            Err(e) => return throw_zerobus_exception(&mut env, &format!("Invalid table: {e}")),
+        };
+        let error: Option<String> = if error.is_null() {
+            None
+        } else {
+            match env.get_string(&error) {
+                Ok(error) => Some(error.into()),
+                Err(e) => return throw_zerobus_exception(&mut env, &format!("Invalid error: {e}")),
+            }
+        };
+
+        let mut responses = vec![MockResponse::CreateStream {
+            stream_id: format!("{table}-stream"),
+            delay_ms: 0,
+        }];
+        responses.extend((0..i64::from(acks)).map(|offset| MockResponse::RecordAck {
+            ack_up_to_offset: offset,
+            delay_ms: 0,
+        }));
+        if let Some(message) = error {
+            responses.push(MockResponse::Error {
+                status: tonic::Status::invalid_argument(message),
+                delay_ms: 0,
+            });
+        }
+        block_on(server.inject_responses(&table, responses));
     })
 }
 

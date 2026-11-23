@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumWriter;
@@ -102,6 +103,10 @@ final class MockServerTestSupport {
 
   static String base64(byte[] bytes) {
     return Base64.getEncoder().encodeToString(bytes);
+  }
+
+  static List<String> sorted(Stream<String> values) {
+    return values.sorted().collect(Collectors.toList());
   }
 
   static List<Integer> batchSizes(List<EncodedBatch> batches) {

@@ -490,6 +490,81 @@ public class ZerobusSdk implements AutoCloseable {
         });
   }
 
+  // ==================== Multiplexed Stream Creation ====================
+
+  /**
+   * Shared implementation for creating a multiplexed JSON, Protocol Buffer, or Avro stream (Beta).
+   * Used by {@link StreamBuilder}.
+   *
+   * @param factory wraps the native handle in the typed multiplexed stream
+   */
+  <S> CompletableFuture<S> createMultiplexedStreamInternal(
+      String tableName,
+      RecordFormat format,
+      byte[] descriptorProto,
+      String avroSchemaJson,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider,
+      StreamConfigurationOptions options,
+      AckCallback ackCallback,
+      int streamCount,
+      BaseZerobusMultiplexedStream.Factory<S> factory) {
+
+    ensureOpen();
+
+    StreamConfigurationOptions effectiveOptions = options != null ? options : DEFAULT_OPTIONS;
+    String effectiveClientId = headersProvider == null ? clientId : "";
+    String effectiveClientSecret = headersProvider == null ? clientSecret : "";
+
+    logger.debug(
+        "Creating multiplexed {} stream with {} sub-streams for table: {}",
+        format,
+        streamCount,
+        tableName);
+
+    CompletableFuture<Long> handleFuture;
+    if (headersProvider instanceof FederatedAuthHeadersProvider) {
+      FederatedToken token = ((FederatedAuthHeadersProvider) headersProvider).token();
+      handleFuture =
+          nativeCreateMultiplexedStreamWithFederatedAuth(
+              nativeHandle,
+              tableName,
+              descriptorProto,
+              avroSchemaJson,
+              token.getIdpTokenSupplier(),
+              token.getClientId(),
+              token.getCacheIdentity(),
+              effectiveOptions,
+              format.code(),
+              ackCallback,
+              streamCount);
+    } else {
+      handleFuture =
+          nativeCreateMultiplexedStream(
+              nativeHandle,
+              tableName,
+              descriptorProto,
+              avroSchemaJson,
+              effectiveClientId,
+              effectiveClientSecret,
+              headersProvider,
+              effectiveOptions,
+              format.code(),
+              ackCallback,
+              streamCount);
+    }
+
+    return handleFuture.thenApply(
+        handle -> {
+          if (handle == null || handle == 0) {
+            throw new RuntimeException(
+                "Failed to create multiplexed " + format + " stream: null handle returned");
+          }
+          return factory.create(handle, tableName, effectiveOptions);
+        });
+  }
+
   /**
    * Recreates an Avro stream from a closed stream, re-ingesting unacknowledged records.
    *
@@ -1182,6 +1257,32 @@ public class ZerobusSdk implements AutoCloseable {
       String cacheIdentity,
       Object options,
       int formatCode);
+
+  private native CompletableFuture<Long> nativeCreateMultiplexedStream(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String avroSchemaJson,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider,
+      Object options,
+      int formatCode,
+      AckCallback ackCallback,
+      int streamCount);
+
+  private native CompletableFuture<Long> nativeCreateMultiplexedStreamWithFederatedAuth(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String avroSchemaJson,
+      IdpTokenSupplier idpTokenSupplier,
+      String federatedClientId,
+      String cacheIdentity,
+      Object options,
+      int formatCode,
+      AckCallback ackCallback,
+      int streamCount);
 
   private native CompletableFuture<Long> nativeCreateArrowStream(
       long sdkHandle,

@@ -26,6 +26,9 @@ import org.apache.arrow.vector.types.pojo.Schema;
  */
 public final class StreamBuilder {
 
+  /** Upper bound on {@code multiplexed(int)} sub-streams, matching the native SDK. */
+  private static final int MAX_MULTIPLEXED_STREAMS = 64;
+
   private final ZerobusSdk sdk;
 
   private String tableName;
@@ -295,6 +298,14 @@ public final class StreamBuilder {
     return value;
   }
 
+  private static int requireStreamCount(int streamCount) {
+    if (streamCount < 1 || streamCount > MAX_MULTIPLEXED_STREAMS) {
+      throw new IllegalArgumentException(
+          "streamCount must be between 1 and " + MAX_MULTIPLEXED_STREAMS + ", got: " + streamCount);
+    }
+    return streamCount;
+  }
+
   private static String requireNonBlank(String value, String name) {
     Objects.requireNonNull(value, name);
     if (isBlank(value)) {
@@ -421,6 +432,109 @@ public final class StreamBuilder {
           base.clientSecret,
           base.headersProvider,
           base.toStreamOptions());
+    }
+
+    /**
+     * Selects a multiplexed stream (Beta) of {@code streamCount} sub-streams.
+     *
+     * <p>Use multiplexing when one stream is the throughput bottleneck and global ordering is not
+     * required. Records keep their order within a sub-stream, but there is no order across
+     * sub-streams. The {@link StreamBuilder#maxInflightRecords(int)} budget is divided evenly
+     * across sub-streams and must be at least {@code streamCount}; otherwise the future returned by
+     * {@link MultiplexedStreamBuilder#build()} fails with a {@link NonRetriableException}.
+     *
+     * @param streamCount the number of sub-streams, from 1 to 64
+     * @return a {@link MultiplexedStreamBuilder} that builds a {@link
+     *     ZerobusMultiplexedProtoStream}
+     * @throws IllegalArgumentException if {@code streamCount} is not between 1 and 64
+     */
+    MultiplexedStreamBuilder<ZerobusMultiplexedProtoStream> multiplexed(int streamCount) {
+      return new MultiplexedStreamBuilder<>(
+          base,
+          requireStreamCount(streamCount),
+          RecordFormat.PROTO,
+          descriptorProto.toByteArray(),
+          null,
+          ZerobusMultiplexedProtoStream::new);
+    }
+  }
+
+  /**
+   * Builds a multiplexed stream (Beta). Created via {@code multiplexed(int)} on {@link
+   * ProtoStreamBuilder}.
+   *
+   * <p>Construction opens every sub-stream concurrently, each after a random delay of up to one
+   * second when more than one is requested. It is atomic: if any sub-stream fails to open, the
+   * others are closed and the returned future fails.
+   *
+   * @param <S> the multiplexed stream type
+   */
+  static final class MultiplexedStreamBuilder<S> {
+    private final StreamBuilder base;
+    private final int streamCount;
+    private final RecordFormat format;
+    private final byte[] descriptorProto;
+    private final String avroSchemaJson;
+    private final BaseZerobusMultiplexedStream.Factory<S> factory;
+
+    private AckCallback ackCallback;
+
+    private MultiplexedStreamBuilder(
+        StreamBuilder base,
+        int streamCount,
+        RecordFormat format,
+        byte[] descriptorProto,
+        String avroSchemaJson,
+        BaseZerobusMultiplexedStream.Factory<S> factory) {
+      this.base = base;
+      this.streamCount = streamCount;
+      this.format = format;
+      this.descriptorProto = descriptorProto;
+      this.avroSchemaJson = avroSchemaJson;
+      this.factory = factory;
+    }
+
+    /**
+     * Sets the acknowledgment callback, shared by every sub-stream.
+     *
+     * <p>The callback's {@code long} argument is the message ID returned by the ingest methods, not
+     * an offset. Sub-streams may invoke the callback concurrently and in no global order, so it
+     * must be thread-safe.
+     *
+     * @param ackCallback the acknowledgment callback
+     * @return this builder for method chaining
+     */
+    public MultiplexedStreamBuilder<S> ackCallback(AckCallback ackCallback) {
+      this.ackCallback = Objects.requireNonNull(ackCallback, "ackCallback");
+      return this;
+    }
+
+    /**
+     * Builds and opens the multiplexed stream.
+     *
+     * @return a future that completes with the multiplexed stream when every sub-stream is ready
+     * @throws IllegalStateException if the table name or authentication has not been set, or if an
+     *     ACK callback was configured via {@link StreamBuilder#ackCallback(AckCallback)}
+     */
+    public CompletableFuture<S> build() {
+      base.validateRequired();
+      if (base.ackCallback != null) {
+        throw new IllegalStateException(
+            "StreamBuilder.ackCallback() is only valid for ordinary streams; use"
+                + " multiplexed(n).ackCallback() for multiplexed streams");
+      }
+      return base.sdk.createMultiplexedStreamInternal(
+          base.tableName,
+          format,
+          descriptorProto,
+          avroSchemaJson,
+          base.clientId,
+          base.clientSecret,
+          base.headersProvider,
+          base.toStreamOptions(),
+          ackCallback,
+          streamCount,
+          factory);
     }
   }
 

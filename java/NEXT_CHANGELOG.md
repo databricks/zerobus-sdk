@@ -53,10 +53,11 @@
 
 ### Internal Changes
 
-- Bumped the native JNI ABI version to 3 for the new federated stream-creation
-  methods and the TLS-options constructor. Release a `jni/v*` build from this
-  source before the Java release, and rebuild any laptop-built macOS dylibs that
-  `release-java.yml` imports through `macos-binaries-release`.
+- Bumped the native JNI ABI version to 4 for the new federated stream-creation
+  methods, the TLS-options constructor, and the multiplexed stream methods.
+  Release a `jni/v*` build from this source before the Java release, and rebuild
+  any laptop-built macOS dylibs that `release-java.yml` imports through
+  `macos-binaries-release`.
 
 ### Breaking Changes
 

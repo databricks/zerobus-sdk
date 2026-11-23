@@ -97,7 +97,8 @@ pub(crate) struct BlockingCallInCallback;
 pub(crate) const BLOCKING_CALL_IN_CALLBACK_MESSAGE: &str =
     "Blocking stream methods (ingestRecordOffset, ingestRecordsOffset, the deprecated \
      ZerobusStream.ingestRecord, ingestBatch, \
-     waitForOffset, flush, close, isClosed, getUnackedRecords, getUnackedBatches, and \
+     waitForOffset, flush, close, isClosed, getUnackedRecords, getUnackedBatches, the \
+     multiplexed ingestRecord, ingestRecords, and waitForMessageId, and \
      ZerobusSdk.recreateStream / recreateArrowStream) cannot be called from an AckCallback: callbacks run on SDK threads that must not block. Hand the work \
      to another thread instead.";
 

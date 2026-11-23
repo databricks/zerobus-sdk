@@ -117,6 +117,25 @@ public class NativeTestHelper {
   public static native String nativeTestStartMockServer() throws ZerobusException;
 
   /**
+   * Scripts the mock server's replies on {@code table}. The script position is shared per table:
+   * every stream opened on the table before its first request acknowledges its first {@code acks}
+   * requests (a record or a batch), then fails the next one with {@code INVALID_ARGUMENT} if {@code
+   * error} is not null. Requests beyond the script are never acknowledged. Script the table again
+   * before opening a stream after that.
+   *
+   * <p>With {@code error} set, open at most one stream on the table: the mock replays the error to
+   * any later stream while it opens.
+   *
+   * @param url the mock server URL
+   * @param table the table name
+   * @param acks the number of requests each stream acknowledges
+   * @param error the error message for the request after the acknowledged ones, or null
+   * @throws ZerobusException if there is no mock server at {@code url}
+   */
+  public static native void nativeTestScriptMockServer(
+      String url, String table, int acks, String error) throws ZerobusException;
+
+  /**
    * Returns how many records the mock server has received, counting each record of a batch.
    *
    * @param url the mock server URL

@@ -28,8 +28,9 @@ import org.junit.jupiter.api.Timeout;
  * Runs ordinary streams of every format through the real native library, against an in-process mock
  * server that never acknowledges, so every record comes back through the unacked records.
  *
- * <p>Covers the native code that reads stream creation arguments and batch payloads and returns
- * unacked records and batches. Skipped when the native library is not available.
+ * <p>Ordinary streams share the native code that reads stream creation arguments and batch payloads
+ * and returns unacked records and batches with multiplexed streams. Skipped when the native library
+ * is not available.
  */
 @Timeout(value = 20, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class OrdinaryStreamNativeTest {
