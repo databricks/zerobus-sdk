@@ -59,8 +59,6 @@ enum AuthConfig {
 /// Which record format was selected.
 pub(super) enum FormatConfig {
     Json,
-    /// JSON records sent as JSON Lines. Only the unary builder selects it.
-    JsonLines,
     CompiledProto(Box<prost_types::DescriptorProto>),
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
@@ -82,12 +80,6 @@ impl FormatConfig {
     pub(super) fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
         let (record_type, descriptor_proto, message_descriptor) = match self {
             Self::Json => (RecordType::Json, None, None),
-            // No stream setter selects it; this guards against one that would.
-            Self::JsonLines => {
-                return Err(ZerobusError::InvalidArgument(
-                    "JSON Lines is supported only by unary clients".into(),
-                ));
-            }
             Self::CompiledProto(descriptor) => (RecordType::Proto, Some(*descriptor), None),
             Self::DynamicProto(descriptor) => (
                 RecordType::Proto,
@@ -229,7 +221,6 @@ impl<'a> ClientBuilderCore<'a> {
     pub(super) fn format_kind(&self) -> &'static str {
         match &self.format {
             Some(FormatConfig::Json) => "Json",
-            Some(FormatConfig::JsonLines) => "JsonLines",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]

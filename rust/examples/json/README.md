@@ -220,7 +220,7 @@ client.ingest_records(batch).await?;
 Build the client once and reuse it. Send the records you have in one
 `ingest_records()` call; never one record per call in a loop. See
 [Unary Ingestion](../../README.md#unary-ingestion-sparse-traffic) for the full
-behavior, including JSON Lines.
+behavior.
 
 ## Adapting for Your Custom Table
 

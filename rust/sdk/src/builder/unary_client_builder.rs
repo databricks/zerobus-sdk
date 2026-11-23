@@ -25,7 +25,7 @@ use std::time::Duration;
 use super::client_builder_core::{missing_auth_error_without_pat, ClientBuilderCore, FormatConfig};
 use crate::grpc_channel::base_endpoint;
 use crate::headers_provider::{HeadersProvider, IdpTokenSupplier};
-use crate::unary_client::{UnaryBody, UnaryOptions};
+use crate::unary_client::UnaryOptions;
 use crate::{UnaryClient, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// A fluent builder for a unary ingestion client.
@@ -116,22 +116,9 @@ impl<'a> UnaryClientBuilder<'a> {
 
     /// Select JSON records, sent as one JSON array: `[r0,r1,...]`.
     ///
-    /// Unary calls support only JSON. Use [`json_lines`](Self::json_lines) to
-    /// send the same records as JSON Lines instead. The last format setter
-    /// called wins.
+    /// Unary calls support only JSON.
     pub fn json(mut self) -> Self {
         self.core.format = Some(FormatConfig::Json);
-        self
-    }
-
-    /// Select JSON records, sent as JSON Lines: one record per line, with no
-    /// brackets.
-    ///
-    /// Records are passed as with [`json`](Self::json); the SDK does the line
-    /// framing. Raw line breaks in a record, such as pretty-printing, become
-    /// spaces, which does not change its value.
-    pub fn json_lines(mut self) -> Self {
-        self.core.format = Some(FormatConfig::JsonLines);
         self
     }
 
@@ -165,7 +152,7 @@ impl<'a> UnaryClientBuilder<'a> {
     }
 
     /// Set the maximum request body size in bytes allowed per call, including
-    /// the brackets and separators. Calls exceeding this limit fail fast with
+    /// the brackets and commas. Calls exceeding this limit fail fast with
     /// [`ZerobusError::InvalidArgument`] before any network I/O.
     ///
     /// Defaults to slightly below the 10 MiB server limit.
@@ -185,7 +172,7 @@ impl<'a> UnaryClientBuilder<'a> {
             .validate_target_with(missing_auth_error_without_pat)?;
         if self.core.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json() or .json_lines()".into(),
+                "record format is required: call .json()".into(),
             ));
         }
         Ok(())
@@ -202,16 +189,6 @@ impl<'a> UnaryClientBuilder<'a> {
         self.validate()?;
 
         let core = self.core;
-        let body = match core.format {
-            Some(FormatConfig::Json) => UnaryBody::JsonArray,
-            Some(FormatConfig::JsonLines) => UnaryBody::JsonLines,
-            // Formats that unary clients do not support yet.
-            _ => {
-                return Err(ZerobusError::InvalidArgument(
-                    "unary clients support only .json() and .json_lines()".into(),
-                ))
-            }
-        };
         // A unary call has one timeout per attempt, so a proactive token
         // refresh gets half of it, as a stream's refresh gets half of its
         // recovery timeout.
@@ -231,7 +208,6 @@ impl<'a> UnaryClientBuilder<'a> {
                 recovery_backoff_ms: core.recovery_backoff_ms,
                 server_lack_of_ack_timeout_ms: core.server_lack_of_ack_timeout_ms,
                 max_ingest_payload_bytes: core.max_ingest_payload_bytes,
-                body,
             },
         ))
     }
@@ -285,25 +261,7 @@ mod tests {
                 .oauth("a", "b")
                 .validate(),
         );
-        assert_eq!(
-            msg,
-            "record format is required: call .json() or .json_lines()"
-        );
-    }
-
-    #[test]
-    fn json_lines_is_a_format_and_the_last_format_setter_wins() {
-        let sdk = test_sdk();
-        let lines = sdk
-            .unary_client_builder()
-            .table("t")
-            .oauth("a", "b")
-            .json_lines();
-        assert!(lines.validate().is_ok());
-        assert!(format!("{lines:?}").contains("JsonLines"));
-
-        let array = lines.json();
-        assert!(format!("{array:?}").contains("\"Json\""));
+        assert_eq!(msg, "record format is required: call .json()");
     }
 
     #[tokio::test]
@@ -317,7 +275,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json() or .json_lines()"),
+            matches!(&error, ZerobusError::InvalidArgument(msg) if msg == "record format is required: call .json()"),
             "{error:?}"
         );
 

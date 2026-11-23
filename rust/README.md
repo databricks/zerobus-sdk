@@ -1249,7 +1249,7 @@ How a call behaves:
 
 - **All-or-nothing:** one invalid record rejects the whole batch.
 - **Validation:** every record must be exactly one JSON object. Otherwise the call fails with `InvalidArgument`, names the 0-based index of a bad record, and sends nothing. Field names and types are checked by the server.
-- **Size limit:** `max_ingest_payload_bytes` applies to the whole request body, including the brackets and separators. A larger batch fails with `InvalidArgument` before any network I/O.
+- **Size limit:** `max_ingest_payload_bytes` applies to the whole request body, including the brackets and commas. A larger batch fails with `InvalidArgument` before any network I/O.
 - **Retries:** a retryable error is retried `recovery_retries` times, `recovery_backoff_ms` apart. A retried batch can be written twice if an earlier attempt reached the server (at-least-once). With `recovery(false)`, nothing is retried, so the SDK never writes a batch twice.
 - **Timeout:** `server_lack_of_ack_timeout_ms` bounds each attempt, from getting the headers until the server confirms the batch.
 - **Errors:** a failed call returns `ZerobusError::UnaryIngestError` with the gRPC status. An attempt that timed out has `GrpcCode::DeadlineExceeded`. If getting the headers fails, the call returns the headers provider's error instead, such as `TokenFetchError`, after retrying it if it is retryable.
@@ -1257,21 +1257,7 @@ How a call behaves:
 
 **Connection:** all unary clients of one SDK share one HTTP/2 connection, separate from streams and unaffected by `connection_per_stream`. While a call is in flight, the connection sends keepalive pings, so a connection that dropped silently between calls is detected and the retry opens a new one. Many threads writing many tables through their own unary clients share that one connection; for that much traffic, use streams.
 
-**Settings:** the builder offers `table()`, the authentication setters, `json()` / `json_lines()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, with the same defaults as streams. Stream-only settings are not offered.
-
-### JSON Lines
-
-`.json_lines()` sends the same records as JSON Lines instead of a JSON array: one record per line, without brackets. You pass the records exactly as with `.json()`; the SDK does the line framing.
-
-JSON does not allow a raw line break inside a string: a line break in a value is always written as the escape `\n`. A raw line break in a record can therefore only be formatting between tokens, as in pretty-printed JSON. The SDK replaces each raw line break with a space, which keeps the value and keeps the record on one line. Escaped `\n` inside string values are left untouched. For example, this record:
-
-```text
-{
-  "msg": "a\nb"
-}
-```
-
-is sent as `{   "msg": "a\nb" }`.
+**Settings:** the builder offers `table()`, the authentication setters, `json()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, with the same defaults as streams. Stream-only settings are not offered.
 
 See [`examples/json/unary.rs`](examples/json/unary.rs) for a complete program.
 
@@ -1519,7 +1505,7 @@ let result = stream.ingest_record_offset(oversized).await;
 // Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10420224 bytes
 ```
 
-The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit. For a [unary client](#unary-ingestion-sparse-traffic), the limit applies to the whole request body, including the JSON array brackets and separators.
+The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit. For a [unary client](#unary-ingestion-sparse-traffic), the limit applies to the whole request body, including the JSON array brackets and commas.
 
 The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (JSON and Protocol Buffer streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
 
@@ -1799,7 +1785,7 @@ Flush and end the connection, or check whether the stream is closed. A closed st
 
 ### `UnaryClientBuilder`
 
-Returned by `ZerobusSdk::unary_client_builder()`. Its setters have the same names and defaults as the matching `StreamBuilder` setters: `table()`, `oauth()`, `federated_auth()`, `headers_provider()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`. The format setters are `json()` and `json_lines()`; the last one called wins.
+Returned by `ZerobusSdk::unary_client_builder()`. Its setters have the same names and defaults as the matching `StreamBuilder` setters: `table()`, `oauth()`, `federated_auth()`, `headers_provider()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`. The format setter is `json()`.
 
 ```rust
 pub fn validate(&self) -> ZerobusResult<()>

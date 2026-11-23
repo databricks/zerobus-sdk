@@ -16,18 +16,17 @@
   instead of spending the one-shot credential-refresh retry.
 - Added a unary ingestion client for sparse traffic. Each
   `UnaryClient::ingest_records()` call sends one batch in one `InsertRecords`
-  request and returns once the batch is durable, without opening a stream.
-  Build one with `ZerobusSdk::unary_client_builder()`. JSON only: `.json()`
-  sends the batch as a JSON array, `.json_lines()` as JSON Lines. The client
-  checks that every record is exactly one JSON object and names the index of
-  a bad record, enforces `max_ingest_payload_bytes` on the whole
-  request body, retries retryable errors per the recovery settings, and bounds
-  each attempt by `server_lack_of_ack_timeout_ms`. All unary clients of one SDK
-  share one connection, separate from streams and unaffected by
+  request and returns once the batch is durable, without opening a stream. Build
+  one with `ZerobusSdk::unary_client_builder()`. JSON only: `.json()` sends the
+  batch as a JSON array. The client checks that every record is exactly one JSON
+  object and names the index of a bad record, enforces `max_ingest_payload_bytes`
+  on the whole request body, retries retryable errors per the recovery settings,
+  and bounds each attempt by `server_lack_of_ack_timeout_ms`. All unary clients of
+  one SDK share one connection, separate from streams and unaffected by
   `connection_per_stream`. It sends HTTP/2 keepalive pings while a call is in
-  flight, so a connection that dropped silently between calls is replaced.
-  Like streams, it picks up rotated TLS certificates on the next call.
-  For continuous ingestion, keep using streams.
+  flight, so a connection that dropped silently between calls is replaced. Like
+  streams, it picks up rotated TLS certificates on the next call. For continuous
+  ingestion, keep using streams.
 
 ### Bug Fixes
 
