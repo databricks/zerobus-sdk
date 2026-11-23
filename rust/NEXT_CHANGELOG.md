@@ -21,6 +21,8 @@
 
 ### Internal Changes
 
+- Added the `InsertRecords` RPC to the service proto.
+
 ### Breaking Changes
 
 ### Deprecations

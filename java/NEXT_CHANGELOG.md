@@ -27,3 +27,7 @@
 ### Deprecations
 
 ### API Changes
+
+- The JAR now includes the generated `InsertRecordsRequest` and
+  `InsertRecordsResponse` classes from the shared service proto. They are wire
+  types, not a supported API.

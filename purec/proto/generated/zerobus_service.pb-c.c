@@ -817,6 +817,96 @@ void   databricks__zerobus__retire_stream_response__free_unpacked
   assert(message->base.descriptor == &databricks__zerobus__retire_stream_response__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   databricks__zerobus__insert_records_request__init
+                     (Databricks__Zerobus__InsertRecordsRequest         *message)
+{
+  static const Databricks__Zerobus__InsertRecordsRequest init_value = DATABRICKS__ZEROBUS__INSERT_RECORDS_REQUEST__INIT;
+  *message = init_value;
+}
+size_t databricks__zerobus__insert_records_request__get_packed_size
+                     (const Databricks__Zerobus__InsertRecordsRequest *message)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_request__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t databricks__zerobus__insert_records_request__pack
+                     (const Databricks__Zerobus__InsertRecordsRequest *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_request__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t databricks__zerobus__insert_records_request__pack_to_buffer
+                     (const Databricks__Zerobus__InsertRecordsRequest *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_request__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+Databricks__Zerobus__InsertRecordsRequest *
+       databricks__zerobus__insert_records_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (Databricks__Zerobus__InsertRecordsRequest *)
+     protobuf_c_message_unpack (&databricks__zerobus__insert_records_request__descriptor,
+                                allocator, len, data);
+}
+void   databricks__zerobus__insert_records_request__free_unpacked
+                     (Databricks__Zerobus__InsertRecordsRequest *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_request__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   databricks__zerobus__insert_records_response__init
+                     (Databricks__Zerobus__InsertRecordsResponse         *message)
+{
+  static const Databricks__Zerobus__InsertRecordsResponse init_value = DATABRICKS__ZEROBUS__INSERT_RECORDS_RESPONSE__INIT;
+  *message = init_value;
+}
+size_t databricks__zerobus__insert_records_response__get_packed_size
+                     (const Databricks__Zerobus__InsertRecordsResponse *message)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_response__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t databricks__zerobus__insert_records_response__pack
+                     (const Databricks__Zerobus__InsertRecordsResponse *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_response__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t databricks__zerobus__insert_records_response__pack_to_buffer
+                     (const Databricks__Zerobus__InsertRecordsResponse *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_response__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+Databricks__Zerobus__InsertRecordsResponse *
+       databricks__zerobus__insert_records_response__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (Databricks__Zerobus__InsertRecordsResponse *)
+     protobuf_c_message_unpack (&databricks__zerobus__insert_records_response__descriptor,
+                                allocator, len, data);
+}
+void   databricks__zerobus__insert_records_response__free_unpacked
+                     (Databricks__Zerobus__InsertRecordsResponse *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &databricks__zerobus__insert_records_response__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 static const ProtobufCFieldDescriptor databricks__zerobus__json_record_batch__field_descriptors[1] =
 {
   {
@@ -1768,6 +1858,76 @@ const ProtobufCMessageDescriptor databricks__zerobus__retire_stream_response__de
   (ProtobufCMessageInit) databricks__zerobus__retire_stream_response__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
+static const ProtobufCFieldDescriptor databricks__zerobus__insert_records_request__field_descriptors[2] =
+{
+  {
+    "table_name",
+    1,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_STRING,
+    0,   /* quantifier_offset */
+    offsetof(Databricks__Zerobus__InsertRecordsRequest, table_name),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "records_json",
+    3,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_BYTES,
+    offsetof(Databricks__Zerobus__InsertRecordsRequest, has_records_json),
+    offsetof(Databricks__Zerobus__InsertRecordsRequest, records_json),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned databricks__zerobus__insert_records_request__field_indices_by_name[] = {
+  1,   /* field[1] = records_json */
+  0,   /* field[0] = table_name */
+};
+static const ProtobufCIntRange databricks__zerobus__insert_records_request__number_ranges[2 + 1] =
+{
+  { 1, 0 },
+  { 3, 1 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor databricks__zerobus__insert_records_request__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "databricks.zerobus.InsertRecordsRequest",
+  "InsertRecordsRequest",
+  "Databricks__Zerobus__InsertRecordsRequest",
+  "databricks.zerobus",
+  sizeof(Databricks__Zerobus__InsertRecordsRequest),
+  2,
+  databricks__zerobus__insert_records_request__field_descriptors,
+  databricks__zerobus__insert_records_request__field_indices_by_name,
+  2,  databricks__zerobus__insert_records_request__number_ranges,
+  (ProtobufCMessageInit) databricks__zerobus__insert_records_request__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+#define databricks__zerobus__insert_records_response__field_descriptors NULL
+#define databricks__zerobus__insert_records_response__field_indices_by_name NULL
+#define databricks__zerobus__insert_records_response__number_ranges NULL
+const ProtobufCMessageDescriptor databricks__zerobus__insert_records_response__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "databricks.zerobus.InsertRecordsResponse",
+  "InsertRecordsResponse",
+  "Databricks__Zerobus__InsertRecordsResponse",
+  "databricks.zerobus",
+  sizeof(Databricks__Zerobus__InsertRecordsResponse),
+  0,
+  databricks__zerobus__insert_records_response__field_descriptors,
+  databricks__zerobus__insert_records_response__field_indices_by_name,
+  0,  databricks__zerobus__insert_records_response__number_ranges,
+  (ProtobufCMessageInit) databricks__zerobus__insert_records_response__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCEnumValue databricks__zerobus__record_type__enum_values_by_number[4] =
 {
   { "RECORD_TYPE_UNSPECIFIED", "DATABRICKS__ZEROBUS__RECORD_TYPE__RECORD_TYPE_UNSPECIFIED", 0 },
@@ -1800,14 +1960,16 @@ const ProtobufCEnumDescriptor databricks__zerobus__record_type__descriptor =
   databricks__zerobus__record_type__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCMethodDescriptor databricks__zerobus__zerobus__method_descriptors[3] =
+static const ProtobufCMethodDescriptor databricks__zerobus__zerobus__method_descriptors[4] =
 {
   { "EphemeralStream", &databricks__zerobus__ephemeral_stream_request__descriptor, &databricks__zerobus__ephemeral_stream_response__descriptor },
   { "PersistentStream", &databricks__zerobus__persistent_stream_request__descriptor, &databricks__zerobus__persistent_stream_response__descriptor },
   { "RetireStream", &databricks__zerobus__retire_stream_request__descriptor, &databricks__zerobus__retire_stream_response__descriptor },
+  { "InsertRecords", &databricks__zerobus__insert_records_request__descriptor, &databricks__zerobus__insert_records_response__descriptor },
 };
 const unsigned databricks__zerobus__zerobus__method_indices_by_name[] = {
   0,        /* EphemeralStream */
+  3,        /* InsertRecords */
   1,        /* PersistentStream */
   2         /* RetireStream */
 };
@@ -1818,7 +1980,7 @@ const ProtobufCServiceDescriptor databricks__zerobus__zerobus__descriptor =
   "Zerobus",
   "Databricks__Zerobus__Zerobus",
   "databricks.zerobus",
-  3,
+  4,
   databricks__zerobus__zerobus__method_descriptors,
   databricks__zerobus__zerobus__method_indices_by_name
 };
@@ -1845,6 +2007,14 @@ void databricks__zerobus__zerobus__retire_stream(ProtobufCService *service,
 {
   assert(service->descriptor == &databricks__zerobus__zerobus__descriptor);
   service->invoke(service, 2, (const ProtobufCMessage *) input, (ProtobufCClosure) closure, closure_data);
+}
+void databricks__zerobus__zerobus__insert_records(ProtobufCService *service,
+                                                  const Databricks__Zerobus__InsertRecordsRequest *input,
+                                                  Databricks__Zerobus__InsertRecordsResponse_Closure closure,
+                                                  void *closure_data)
+{
+  assert(service->descriptor == &databricks__zerobus__zerobus__descriptor);
+  service->invoke(service, 3, (const ProtobufCMessage *) input, (ProtobufCClosure) closure, closure_data);
 }
 void databricks__zerobus__zerobus__init (Databricks__Zerobus__Zerobus_Service *service,
                                          Databricks__Zerobus__Zerobus_ServiceDestroy destroy)
