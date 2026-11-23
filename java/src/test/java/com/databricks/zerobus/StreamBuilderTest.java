@@ -305,6 +305,55 @@ public class StreamBuilderTest {
   }
 
   @Test
+  void federatedJsonBuildRoutesTokenThroughHeadersProviderSlot() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    FederatedToken token = FederatedToken.workloadIdentity(() -> "idp-token", "sp-client-id");
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.fed")
+        .oauth("json-id", "json-secret")
+        .federatedAuth(token)
+        .json()
+        .build();
+
+    ArgumentCaptor<HeadersProvider> provider = ArgumentCaptor.forClass(HeadersProvider.class);
+    verify(sdk)
+        .createJsonStreamInternal(eq("cat.sch.fed"), eq(null), eq(null), provider.capture(), any());
+    assertTrue(provider.getValue() instanceof FederatedAuthHeadersProvider);
+    assertSame(token, ((FederatedAuthHeadersProvider) provider.getValue()).token());
+    verifyNoMoreInteractions(sdk);
+  }
+
+  @Test
+  void laterAuthCallDropsTheFederatedToken() {
+    assumeNativeLibrary();
+    FederatedToken token = FederatedToken.accountLevel(() -> "idp-token");
+
+    ZerobusSdk oauthSdk = mock(ZerobusSdk.class);
+    new StreamBuilder(oauthSdk)
+        .table("cat.sch.fed")
+        .federatedAuth(token)
+        .oauth("json-id", "json-secret")
+        .json()
+        .build();
+    verify(oauthSdk)
+        .createJsonStreamInternal(
+            eq("cat.sch.fed"), eq("json-id"), eq("json-secret"), eq(null), any());
+
+    ZerobusSdk headersSdk = mock(ZerobusSdk.class);
+    HeadersProvider custom = java.util.Collections::emptyMap;
+    new StreamBuilder(headersSdk)
+        .table("cat.sch.fed")
+        .federatedAuth(token)
+        .headersProvider(custom)
+        .json()
+        .build();
+    verify(headersSdk)
+        .createJsonStreamInternal(eq("cat.sch.fed"), eq(null), eq(null), eq(custom), any());
+  }
+
+  @Test
   void avroBuildRoutesToCreateAvroStreamInternal() {
     assumeNativeLibrary();
     ZerobusSdk sdk = mock(ZerobusSdk.class);

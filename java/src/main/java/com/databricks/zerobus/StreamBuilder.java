@@ -30,7 +30,9 @@ public final class StreamBuilder {
 
   private String tableName;
 
-  // Authentication. OAuth credentials and a custom headers provider are mutually exclusive.
+  // Authentication. OAuth credentials, a custom headers provider, and federated auth are mutually
+  // exclusive. Federated auth is stored as a FederatedAuthHeadersProvider so that it follows the
+  // same create and recreate path as a headers provider.
   private String clientId;
   private String clientSecret;
   private HeadersProvider headersProvider;
@@ -86,6 +88,22 @@ public final class StreamBuilder {
    */
   public StreamBuilder headersProvider(HeadersProvider headersProvider) {
     this.headersProvider = Objects.requireNonNull(headersProvider, "headersProvider");
+    this.clientId = null;
+    this.clientSecret = null;
+    return this;
+  }
+
+  /**
+   * Authenticates by federating an external identity provider token (for example from Microsoft
+   * Entra ID). The SDK exchanges it for a Zerobus-scoped Databricks token and refreshes it before
+   * it expires. See {@link FederatedToken} for the supported modes.
+   *
+   * @param federatedToken the federated identity to authenticate as
+   * @return this builder for method chaining
+   */
+  public StreamBuilder federatedAuth(FederatedToken federatedToken) {
+    this.headersProvider =
+        new FederatedAuthHeadersProvider(Objects.requireNonNull(federatedToken, "federatedToken"));
     this.clientId = null;
     this.clientSecret = null;
     return this;
@@ -246,7 +264,7 @@ public final class StreamBuilder {
     }
     if (headersProvider == null && (isBlank(clientId) || isBlank(clientSecret))) {
       throw new IllegalStateException(
-          "authentication is required: call oauth() or headersProvider()");
+          "authentication is required: call oauth(), headersProvider(), or federatedAuth()");
     }
   }
 
