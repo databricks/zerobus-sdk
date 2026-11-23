@@ -13,8 +13,8 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * Java cannot return different stream types from a single {@code build()}, the record format is
  * selected with a terminal method that returns a typed sub-builder: {@link #json()}, {@link
  * #compiledProto(DescriptorProto)}, {@link #avro(String)}, or {@link #arrow(Schema)}. Each
- * sub-builder exposes a {@code build()} that returns the matching stream type. The JSON and
- * Protocol Buffer sub-builders also offer {@code multiplexed(int)}, which selects a multiplexed
+ * sub-builder exposes a {@code build()} that returns the matching stream type. The JSON, Protocol
+ * Buffer, and Avro sub-builders also offer {@code multiplexed(int)}, which selects a multiplexed
  * stream (Beta) built by a {@link MultiplexedStreamBuilder}.
  *
  * <h3>Thread Safety</h3>
@@ -432,6 +432,30 @@ public final class StreamBuilder {
           base.headersProvider,
           base.toStreamOptions());
     }
+
+    /**
+     * Selects a multiplexed stream (Beta) of {@code streamCount} sub-streams.
+     *
+     * <p>Use multiplexing when one stream is the throughput bottleneck and global ordering is not
+     * required. Records keep their order within a sub-stream, but there is no order across
+     * sub-streams. The {@link StreamBuilder#maxInflightRecords(int)} budget is divided evenly
+     * across sub-streams and must be at least {@code streamCount}; otherwise the future returned by
+     * {@link MultiplexedStreamBuilder#build()} fails with a {@link NonRetriableException}.
+     *
+     * @param streamCount the number of sub-streams, from 1 to 64
+     * @return a {@link MultiplexedStreamBuilder} that builds a {@link ZerobusMultiplexedAvroStream}
+     * @throws IllegalArgumentException if {@code streamCount} is not between 1 and 64
+     */
+    public MultiplexedStreamBuilder<ZerobusMultiplexedAvroStream> multiplexed(int streamCount) {
+      return new MultiplexedStreamBuilder<>(
+          base,
+          requireStreamCount(streamCount),
+          RecordFormat.AVRO,
+          null,
+          schemaJson,
+          (handle, tableName, options) ->
+              new ZerobusMultiplexedAvroStream(handle, tableName, options, schemaJson));
+    }
   }
 
   /** Builds a {@link ZerobusProtoStream}. Created via {@link StreamBuilder#compiledProto}. */
@@ -488,7 +512,7 @@ public final class StreamBuilder {
 
   /**
    * Builds a multiplexed stream (Beta). Created via {@code multiplexed(int)} on {@link
-   * JsonStreamBuilder} or {@link ProtoStreamBuilder}.
+   * JsonStreamBuilder}, {@link ProtoStreamBuilder}, or {@link AvroStreamBuilder}.
    *
    * <p>Construction opens every sub-stream concurrently, each after a random delay of up to one
    * second when more than one is requested. It is atomic: if any sub-stream fails to open, the

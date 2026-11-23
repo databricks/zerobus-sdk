@@ -36,10 +36,10 @@
 - `HeadersProvider` header names ending in `-bin` are now accepted. The value must be the standard
   base64 encoding of the bytes, and the SDK sends the decoded bytes as binary gRPC metadata. Names
   beginning with `grpc-` and ending in `-bin` are reserved and rejected.
-- Added multiplexed streams (Beta) for JSON and Protocol Buffers via `multiplexed(streamCount)` on
-  the `json()` and `compiledProto(...)` sub-builders. A multiplexed stream spreads records
-  round-robin across sub-streams to raise throughput when one stream is the bottleneck. Ingest
-  methods return an opaque `long` message ID instead of an offset, and unlike other streams,
+- Added multiplexed streams (Beta) for JSON, Protocol Buffers, and Avro via `multiplexed(streamCount)`
+  on the `json()`, `compiledProto(...)`, and `avro(...)` sub-builders. A multiplexed stream spreads
+  records round-robin across sub-streams to raise throughput when one stream is the bottleneck.
+  Ingest methods return an opaque `long` message ID instead of an offset, and unlike other streams,
   multiplexed streams are thread-safe. See the README for details.
 
 ### Bug Fixes
@@ -77,5 +77,6 @@
   `TlsOptions.Builder` (created with `TlsOptions.builder()`). `ZerobusSdkBuilder.tlsOptions(...)` takes
   a `TlsOptions`.
 - New public API (Beta): `ZerobusMultiplexedJsonStream`, `ZerobusMultiplexedProtoStream`,
-  `StreamBuilder.MultiplexedStreamBuilder`, and `multiplexed(int)` on
-  `StreamBuilder.JsonStreamBuilder` and `StreamBuilder.ProtoStreamBuilder`.
+  `ZerobusMultiplexedAvroStream`, `StreamBuilder.MultiplexedStreamBuilder`, and `multiplexed(int)` on
+  `StreamBuilder.JsonStreamBuilder`, `StreamBuilder.ProtoStreamBuilder`, and
+  `StreamBuilder.AvroStreamBuilder`.

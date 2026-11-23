@@ -1301,6 +1301,45 @@ public class IntegrationTest {
     }
   }
 
+  @Test
+  @Order(19)
+  @DisplayName("Multiplexed Avro stream - singles and batches, each ACKed with its message ID")
+  void testMultiplexedAvroStream() throws Exception {
+    Schema schema = new Schema.Parser().parse(AVRO_SCHEMA_JSON);
+    GenericDatumWriter<GenericRecord> writer = new GenericDatumWriter<>(schema);
+    MuxAckRecorder callback = new MuxAckRecorder();
+    Set<Long> ingestedIds = new HashSet<>();
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        ZerobusMultiplexedAvroStream stream =
+            sdk.streamBuilder()
+                .table(tableName)
+                .oauth(clientId, clientSecret)
+                .avro(AVRO_SCHEMA_JSON)
+                .multiplexed(2)
+                .ackCallback(callback)
+                .build()
+                .join()) {
+      List<GenericRecord> batch = new ArrayList<>();
+      List<byte[]> encodedBatch = new ArrayList<>();
+      for (int i = 0; i < BATCH_SIZE; i++) {
+        ingestedIds.add(stream.ingestRecord(avroRecord(schema, "test-mux-avro-" + i, i, i)));
+        batch.add(avroRecord(schema, "test-mux-avro-batch-" + i, i, i));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(out, null);
+        writer.write(avroRecord(schema, "test-mux-avro-bytes-" + i, i, i), encoder);
+        encoder.flush();
+        encodedBatch.add(out.toByteArray());
+      }
+      ingestedIds.add(stream.ingestRecords(batch).get());
+      ingestedIds.add(stream.ingestRecords(encodedBatch).get());
+      stream.flush();
+
+      callback.awaitAcked(ingestedIds);
+      stream.close();
+      assertTrue(stream.getUnackedRecords().isEmpty());
+    }
+  }
+
   private static AirQuality muxRecord(String deviceName) {
     return AirQuality.newBuilder().setDeviceName(deviceName).setTemp(21).setHumidity(55).build();
   }

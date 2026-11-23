@@ -12,9 +12,9 @@ import org.slf4j.LoggerFactory;
  * Base class for multiplexed streams (Beta), providing common native method declarations and
  * lifecycle management.
  *
- * <p>This class is not intended to be used directly. Use {@link ZerobusMultiplexedJsonStream} or
- * {@link ZerobusMultiplexedProtoStream}, created with {@code multiplexed(int)} on the matching
- * {@link StreamBuilder} format sub-builder.
+ * <p>This class is not intended to be used directly. Use {@link ZerobusMultiplexedJsonStream},
+ * {@link ZerobusMultiplexedProtoStream}, or {@link ZerobusMultiplexedAvroStream}, created with
+ * {@code multiplexed(int)} on the matching {@link StreamBuilder} format sub-builder.
  *
  * <p>Its {@code ingestRecord} and {@code ingestRecords} return a message ID ({@code long} or {@code
  * Optional<Long>}), unlike the deprecated {@code ZerobusStream.ingestRecord}, which returns a

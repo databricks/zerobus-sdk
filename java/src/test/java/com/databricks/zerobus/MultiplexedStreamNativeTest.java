@@ -1,10 +1,14 @@
 package com.databricks.zerobus;
 
+import static com.databricks.zerobus.MockServerTestSupport.AVRO_SCHEMA;
 import static com.databricks.zerobus.MockServerTestSupport.PROVIDER;
 import static com.databricks.zerobus.MockServerTestSupport.WAIT_SECONDS;
 import static com.databricks.zerobus.MockServerTestSupport.airQuality;
+import static com.databricks.zerobus.MockServerTestSupport.avroRecord;
 import static com.databricks.zerobus.MockServerTestSupport.awaitWriteCount;
 import static com.databricks.zerobus.MockServerTestSupport.base64;
+import static com.databricks.zerobus.MockServerTestSupport.decode;
+import static com.databricks.zerobus.MockServerTestSupport.encode;
 import static com.databricks.zerobus.MockServerTestSupport.json;
 import static com.databricks.zerobus.MockServerTestSupport.neverAcked;
 import static com.databricks.zerobus.MockServerTestSupport.sorted;
@@ -37,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.apache.avro.generic.GenericRecord;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -183,6 +188,35 @@ class MultiplexedStreamNativeTest {
       assertThrows(NonRetriableException.class, () -> stream.waitForMessageId(id));
       stream.close();
       assertEquals(sorted(records.stream()), sorted(stream.getUnackedRecords().stream()));
+    }
+  }
+
+  @Test
+  void avroRecordsCrossTheBridgeInBothDirections() throws Exception {
+    long before = writeCount(url);
+    List<GenericRecord> records = new ArrayList<>();
+    for (int i = 0; i < 7; i++) {
+      records.add(avroRecord("avro-" + i));
+    }
+
+    try (ZerobusSdk sdk = new ZerobusSdk(url, url)) {
+      ZerobusMultiplexedAvroStream stream =
+          neverAcked(sdk).avro(AVRO_SCHEMA.toString()).multiplexed(2).build().join();
+      stream.ingestRecord(records.get(0));
+      stream.ingestRecord(encode(records.get(1)));
+      assertTrue(stream.ingestRecords(records.subList(2, 5)).isPresent());
+      assertTrue(
+          stream
+              .ingestRecords(Arrays.asList(encode(records.get(5)), encode(records.get(6))))
+              .isPresent());
+      assertFalse(stream.ingestRecords(Collections.<byte[]>emptyList()).isPresent());
+      awaitWriteCount(url, before, records.size());
+
+      assertThrows(ZerobusException.class, stream::close);
+      // Each batch comes back whole and in order; batches have no order across sub-streams.
+      assertEquals(
+          grouped(records.stream().map(GenericRecord::toString), 1, 1, 3, 2),
+          batchContents(stream.getUnackedBatches(), bytes -> decode(bytes).toString()));
     }
   }
 
@@ -410,6 +444,51 @@ class MultiplexedStreamNativeTest {
       assertTrue(stream.getUnackedRecords().isEmpty());
     }
     assertTrue(callback.errors.isEmpty(), "unexpected ACK errors: " + callback.errors);
+  }
+
+  @Test
+  void avroRecordsStayIntactAcrossThreads() throws Exception {
+    final int threads = 6;
+    final int recordsPerThread = 50;
+    final int batchSize = 5;
+    long before = writeCount(url);
+
+    try (ZerobusSdk sdk = new ZerobusSdk(url, url)) {
+      ZerobusMultiplexedAvroStream stream =
+          neverAcked(sdk).avro(AVRO_SCHEMA.toString()).multiplexed(4).build().join();
+      List<String> ingested = Collections.synchronizedList(new ArrayList<>());
+
+      // Every thread encodes GenericRecords at the same time, as single records and as batches, so
+      // the stream's Avro encoding runs concurrently.
+      List<Throwable> failures =
+          runConcurrently(
+              threads,
+              thread -> {
+                for (int i = 0; i < recordsPerThread; i += 2 * batchSize) {
+                  for (int j = i; j < i + batchSize; j++) {
+                    GenericRecord record = avroRecord("thread-" + thread + "-" + j);
+                    stream.ingestRecord(record);
+                    ingested.add(record.toString());
+                  }
+                  List<GenericRecord> batch = new ArrayList<>();
+                  for (int j = i + batchSize; j < i + 2 * batchSize; j++) {
+                    batch.add(avroRecord("thread-" + thread + "-" + j));
+                  }
+                  assertTrue(stream.ingestRecords(batch).isPresent());
+                  batch.forEach(record -> ingested.add(record.toString()));
+                }
+              });
+      assertEquals(Collections.emptyList(), failures);
+      awaitWriteCount(url, before, threads * recordsPerThread);
+
+      assertThrows(ZerobusException.class, stream::close);
+      // Every record comes back exactly as it was ingested.
+      List<String> recovered = new ArrayList<>();
+      for (byte[] bytes : stream.getUnackedRecords()) {
+        recovered.add(decode(bytes).toString());
+      }
+      assertEquals(sorted(ingested.stream()), sorted(recovered.stream()));
+    }
   }
 
   @Test

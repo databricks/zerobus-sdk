@@ -493,6 +493,7 @@ public class StreamBuilderTest {
 
   @Test
   void multiplexedRejectsOutOfRangeStreamCount() {
+    String schemaJson = "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
     DescriptorProto descriptor = DescriptorProto.newBuilder().setName("Rec").build();
 
     for (int count : new int[] {0, -1, 65}) {
@@ -500,6 +501,8 @@ public class StreamBuilderTest {
       assertThrows(
           IllegalArgumentException.class,
           () -> builder().compiledProto(descriptor).multiplexed(count));
+      assertThrows(
+          IllegalArgumentException.class, () -> builder().avro(schemaJson).multiplexed(count));
     }
     assertDoesNotThrow(() -> builder().json().multiplexed(1));
     assertDoesNotThrow(() -> builder().json().multiplexed(64));
@@ -526,6 +529,7 @@ public class StreamBuilderTest {
     DescriptorProto descriptor = DescriptorProto.newBuilder().setName("Rec").build();
     AckCallback callback = noopCallback();
     HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
+    String schemaJson = "{\"type\":\"record\",\"name\":\"R\",\"fields\":[]}";
 
     new StreamBuilder(sdk)
         .table("cat.sch.proto")
@@ -540,6 +544,12 @@ public class StreamBuilderTest {
         .headersProvider(provider)
         .json()
         .multiplexed(3)
+        .build();
+    new StreamBuilder(sdk)
+        .table("cat.sch.avro")
+        .oauth("avro-id", "avro-secret")
+        .avro(schemaJson)
+        .multiplexed(2)
         .build();
 
     ArgumentCaptor<StreamConfigurationOptions> opts =
@@ -570,6 +580,19 @@ public class StreamBuilderTest {
             any(),
             eq(null),
             eq(3),
+            any());
+    verify(sdk)
+        .createMultiplexedStreamInternal(
+            eq("cat.sch.avro"),
+            eq(RecordFormat.AVRO),
+            eq(null),
+            eq(schemaJson),
+            eq("avro-id"),
+            eq("avro-secret"),
+            eq(null),
+            any(),
+            eq(null),
+            eq(2),
             any());
     verifyNoMoreInteractions(sdk);
   }

@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -124,6 +125,24 @@ class AvroEncoderTest {
   }
 
   @Test
+  void threadSafeModeEncodesTheSameBytes() throws Exception {
+    Schema schema = new Schema.Parser().parse(SCHEMA_JSON);
+    GenericRecord record = sampleRecord(schema, 42L, "alice");
+    assertArrayEquals(
+        new AvroEncoder(SCHEMA_JSON).encode(record),
+        AvroEncoder.threadSafe(SCHEMA_JSON).encode(record));
+
+    List<GenericRecord> records =
+        Arrays.asList(sampleRecord(schema, 1L, "alice"), sampleRecord(schema, 2L, "bob"));
+    List<byte[]> expected = new AvroEncoder(SCHEMA_JSON).encodeBatch(records);
+    List<byte[]> actual = AvroEncoder.threadSafe(SCHEMA_JSON).encodeBatch(records);
+    assertEquals(expected.size(), actual.size());
+    for (int i = 0; i < expected.size(); i++) {
+      assertArrayEquals(expected.get(i), actual.get(i), "record " + i);
+    }
+  }
+
+  @Test
   void encodeRejectsValueThatDoesNotMatchSchema() {
     Schema schema = new Schema.Parser().parse(SCHEMA_JSON);
     GenericRecord bad = sampleRecord(schema, 42L, "alice");
@@ -152,6 +171,44 @@ class AvroEncoderTest {
     good.put("b", "ok");
     // After the failure the encoder is dropped, so this matches a fresh encoder (no leftover "a").
     assertArrayEquals(new AvroEncoder(AB_SCHEMA).encode(good), encoder.encode(good));
+  }
+
+  // {x: long, y: long} — reordering two fields of the same type gives no Avro type error, so only
+  // the schema check catches it.
+  private static final String XY_SCHEMA =
+      "{\"type\":\"record\",\"name\":\"XY\",\"fields\":["
+          + "{\"name\":\"x\",\"type\":\"long\"},{\"name\":\"y\",\"type\":\"long\"}]}";
+  private static final String YX_SCHEMA =
+      "{\"type\":\"record\",\"name\":\"XY\",\"fields\":["
+          + "{\"name\":\"y\",\"type\":\"long\"},{\"name\":\"x\",\"type\":\"long\"}]}";
+
+  @Test
+  void acceptsRecordsFromManyEqualSchemaInstances() throws Exception {
+    // Threads may build records from their own parsed copies of the writer schema. More copies than
+    // the encoder remembers keep encoding correctly, and a schema that only reorders same-typed
+    // fields still fails.
+    AvroEncoder encoder = AvroEncoder.threadSafe(XY_SCHEMA);
+    byte[] expected =
+        new AvroEncoder(XY_SCHEMA).encode(xyRecord(new Schema.Parser().parse(XY_SCHEMA), 7L, 8L));
+    List<Schema> copies = new ArrayList<>();
+    for (int i = 0; i < 70; i++) {
+      copies.add(new Schema.Parser().parse(XY_SCHEMA));
+    }
+    for (int round = 0; round < 2; round++) {
+      for (Schema copy : copies) {
+        assertArrayEquals(expected, encoder.encode(xyRecord(copy, 7L, 8L)));
+      }
+    }
+
+    Schema reordered = new Schema.Parser().parse(YX_SCHEMA);
+    assertThrows(NonRetriableException.class, () -> encoder.encode(xyRecord(reordered, 7L, 8L)));
+  }
+
+  private static GenericRecord xyRecord(Schema schema, long x, long y) {
+    GenericRecord record = new GenericData.Record(schema);
+    record.put("x", x);
+    record.put("y", y);
+    return record;
   }
 
   @Test
