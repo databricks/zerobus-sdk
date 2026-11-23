@@ -118,24 +118,6 @@ async fn json_array_batches_are_ingested() {
 }
 
 #[tokio::test]
-async fn json_lines_batches_are_ingested() {
-    let live = live_or_skip!();
-    let sdk = live.sdk();
-    let client = live.client(&sdk, |b| b.json_lines()).await;
-
-    client
-        .ingest_records(readings("lines-batch", 10))
-        .await
-        .unwrap();
-    // A pretty-printed record: the client turns its line breaks into spaces.
-    let pretty = JsonString(
-        "{\n  \"device_name\": \"rust-unary-lines-pretty\",\n  \"temp\": 1,\n  \"humidity\": 2\n}"
-            .to_string(),
-    );
-    client.ingest_records(vec![pretty]).await.unwrap();
-}
-
-#[tokio::test]
 async fn ingest_record_sends_one_record() {
     let live = live_or_skip!();
     let sdk = live.sdk();

@@ -533,10 +533,8 @@ mod tests {
         // `[{"a":"é"}]` is 11 chars but 12 bytes: `é` is 2 bytes in UTF-8.
         let records =
             || -> Vec<PreparedInput> { vec![JsonString(r#"{"a":"é"}"#.to_string()).into()] };
-        assert!(build_request_body(records(), 12, UnaryBody::JsonArray)
-            .unwrap()
-            .is_some());
-        let msg = invalid_argument(build_request_body(records(), 11, UnaryBody::JsonArray));
+        assert!(build_request_body(records(), 12).unwrap().is_some());
+        let msg = invalid_argument(build_request_body(records(), 11));
         assert!(
             msg.contains("12 bytes") && msg.contains("limit of 11 bytes"),
             "{msg}"

@@ -476,38 +476,6 @@ async fn ingest_record_sends_a_batch_of_one() {
     assert_eq!(body(&requests[0]), r#"[{"id":7}]"#);
 }
 
-#[tokio::test]
-async fn json_lines_sends_one_record_per_line_with_the_same_values() {
-    setup_tracing();
-    let (server, url) = start_mock_server().await.unwrap();
-    let sdk = sdk(&url);
-    let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| b.json_lines()).await;
-    let batch = vec![
-        "{\n  \"msg\": \"a\\nb\",\n  \"id\": 1\n}".to_string(),
-        "{\r\n  \"id\": 2\r\n}".to_string(),
-        r#"{"id":3}"#.to_string(),
-    ];
-
-    client.ingest_records(batch.clone()).await.unwrap();
-
-    let requests = requests(&server).await;
-    let sent = body(&requests[0]);
-    assert!(!sent.starts_with('['), "{sent}");
-    assert!(!sent.contains('\r') && !sent.ends_with('\n'), "{sent:?}");
-    let lines: Vec<&str> = sent.split('\n').collect();
-    assert_eq!(lines.len(), batch.len(), "{sent:?}");
-    for (line, record) in lines.iter().zip(&batch) {
-        let sent_value: serde_json::Value = serde_json::from_str(line).unwrap();
-        let original: serde_json::Value = serde_json::from_str(record).unwrap();
-        assert_eq!(sent_value, original);
-    }
-    assert!(
-        lines[0].contains(r#""a\nb""#),
-        "escaped newline kept: {}",
-        lines[0]
-    );
-}
-
 // ─── Client-side validation ───────────────────────────────────────────────────
 
 #[tokio::test]
@@ -558,19 +526,14 @@ async fn payload_limit_counts_the_whole_body() {
     let (server, url) = start_mock_server().await.unwrap();
     let sdk = sdk(&url);
     let provider = TestProvider::new(TABLE_NAME);
-    // `[{"id":0},{"id":1}]` is 19 bytes; its JSON Lines form is 17.
-    let array = client(&sdk, &provider, |b| b.max_ingest_payload_bytes(19)).await;
-    let lines = client(&sdk, &provider, |b| {
-        b.json_lines().max_ingest_payload_bytes(17)
-    })
-    .await;
+    // `[{"id":0},{"id":1}]` is 19 bytes.
+    let exact = client(&sdk, &provider, |b| b.max_ingest_payload_bytes(19)).await;
     let too_small = client(&sdk, &provider, |b| b.max_ingest_payload_bytes(18)).await;
 
-    array.ingest_records(records(0..2)).await.unwrap();
-    lines.ingest_records(records(0..2)).await.unwrap();
+    exact.ingest_records(records(0..2)).await.unwrap();
     invalid_argument(too_small.ingest_records(records(0..2)).await.unwrap_err());
 
-    assert_eq!(requests(&server).await.len(), 2);
+    assert_eq!(requests(&server).await.len(), 1);
 }
 
 // ─── Retries ──────────────────────────────────────────────────────────────────
@@ -1183,10 +1146,7 @@ async fn unary_clients_of_one_sdk_share_one_connection() {
     let (server, url) = start_mock_server().await.unwrap();
     let sdk = sdk(&url);
     let first = client(&sdk, &TestProvider::new(TABLE_NAME), |b| b).await;
-    let second = client(&sdk, &TestProvider::new(OTHER_TABLE_NAME), |b| {
-        b.json_lines()
-    })
-    .await;
+    let second = client(&sdk, &TestProvider::new(OTHER_TABLE_NAME), |b| b).await;
 
     for id in 0..3 {
         first.ingest_records(records(id..id + 1)).await.unwrap();
