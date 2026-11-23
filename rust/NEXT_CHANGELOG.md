@@ -21,6 +21,7 @@
 
 ### Internal Changes
 
+- Added the `InsertRecords` RPC to the service proto.
 - The SDK build script now regenerates the gRPC code when
   `zerobus_service.proto` changes in builds with the `zeroparser` feature
   (such as `cargo test --workspace` and `--all-features` builds), and the test

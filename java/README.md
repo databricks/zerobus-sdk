@@ -39,6 +39,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
+- **External-IdP federation**: Authenticate with a token from an external identity provider such as Microsoft Entra ID, with no Databricks OAuth secret
 - **Framework compatible**: Works inside Spring Boot and other frameworks with isolated classloaders
 
 ## Architecture
@@ -98,6 +99,11 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 
 **When using the fat JAR** (standalone scripts or CLI tools without a build system):
 - No additional dependencies required - all dependencies are bundled
+
+**When shrinking or obfuscating with ProGuard or R8**: keep `com.databricks.zerobus.**`
+(for example `-keep class com.databricks.zerobus.** { *; }`). The native library binds the SDK's
+native methods and the classes it calls back by name, so renamed or removed members make it fail
+to load.
 
 **When using the regular JAR as a file on the classpath** (without Maven or Gradle):
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)
@@ -790,6 +796,58 @@ Providers may override `invalidate()` to clear cached credentials after an authe
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
 
+### External-IdP federation (e.g. Entra ID)
+
+Use `federatedAuth(FederatedToken)` to authenticate with a token from an external identity
+provider instead of a Databricks OAuth secret. You provide an `IdpTokenSupplier` that returns the
+current IdP token. The SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange), caches the exchanged token, and refreshes it before it expires. The federation policy
+must already be configured in Databricks.
+
+```java
+IdpTokenSupplier idpToken = () -> fetchEntraIdToken(); // return the current IdP access token
+
+// Account-level federation: no Databricks service principal. The identity is synced into
+// Databricks through automatic identity management.
+FederatedToken auth = FederatedToken.accountLevel(idpToken);
+
+// Workload identity federation: a Databricks service principal with a federation policy and no
+// secret, named by its client ID.
+FederatedToken workloadAuth = FederatedToken.workloadIdentity(idpToken, spClientId);
+
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .federatedAuth(auth)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
+```
+
+`federatedAuth` works with every format selector (`json()`, `compiledProto()`, `avro()`, and
+`arrow()`), and `recreateStream` reuses the stream's `FederatedToken`.
+
+- **Reuse one `FederatedToken` per identity.** Exchanged Databricks tokens are cached per table.
+  For account-level federation the cache is per `FederatedToken` instance, so a new instance, even
+  with the same supplier, mints its own token. For workload identity federation it is per service
+  principal client ID, so two instances with the same client ID share a token.
+- **The supplier is called only when a token must be minted** (on a cache miss or a proactive
+  refresh), not on every request. It runs on an SDK thread, so it may call the identity provider
+  over the network, but a slow supplier delays stream creation and recovery.
+- **Errors:** an exception from `getToken()` is treated as retryable. Throw
+  `NonRetriableException` for a permanent failure. Returning `null` or an empty string, or
+  throwing an `Error`, is also a non-retryable error.
+- **Set timeouts on the IdP request.** The SDK can't interrupt `getToken()`, and the recovery
+  timeout does not bound it. Set connect and read timeouts on the IdP request so a hung call can't
+  stall stream creation. While a call is stuck, the stream waits for it instead of starting
+  another one.
+- Implementations must be thread-safe: the SDK may call the supplier concurrently for streams on
+  different tables.
+
+See [`examples/json/FederatedAuthExample.java`](examples/json/FederatedAuthExample.java) for a
+complete example.
+
 ---
 
 ## API Styles
@@ -1224,6 +1282,7 @@ Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](
 StreamBuilder table(String tableName)
 StreamBuilder oauth(String clientId, String clientSecret)
 StreamBuilder headersProvider(HeadersProvider headersProvider)
+StreamBuilder federatedAuth(FederatedToken federatedToken)
 StreamBuilder recovery(boolean recovery)
 StreamBuilder recoveryTimeoutMs(int ms)
 StreamBuilder recoveryBackoffMs(int ms)
@@ -1676,6 +1735,27 @@ List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyDa
 
 ---
 
+### FederatedToken
+
+Authenticates a stream by federating an external IdP token. Pass it to `StreamBuilder.federatedAuth()`. Instances are immutable. Exchanged tokens are cached per table, and per instance for account-level federation or per client ID for workload identity federation. See [External-IdP federation](#external-idp-federation-eg-entra-id).
+
+```java
+static FederatedToken accountLevel(IdpTokenSupplier idpTokenSupplier)
+static FederatedToken workloadIdentity(IdpTokenSupplier idpTokenSupplier, String clientId)
+```
+
+---
+
+### IdpTokenSupplier (Functional Interface)
+
+Supplies the current external IdP token for `FederatedToken`. Called only when a Databricks token must be minted. Implementations must be thread-safe.
+
+```java
+String getToken() throws Exception  // throw NonRetriableException for permanent failures
+```
+
+---
+
 ### AckCallback (Interface)
 
 Callback interface for acknowledgment notifications. The callback is invoked once per logical
@@ -1723,6 +1803,19 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
 Implementations must be thread-safe and lightweight (callbacks run on internal
 processing threads). `close()` waits at most five seconds for in-flight
 callbacks; remaining callbacks may still be pending when it returns.
+
+**What a callback may do.** Keep callbacks to quick, non-blocking work such as logging,
+updating metrics, or incrementing counters, and hand anything else (I/O, retries,
+re-ingesting records) to another thread or executor. Streams are not thread-safe, so that
+thread must not call the stream concurrently with others: queue the work for the thread
+that owns the stream, or guard every call with your own lock. A callback must not call
+stream or SDK methods that block on native work: `ingestRecordOffset`,
+`ingestRecordsOffset`, the deprecated `ZerobusStream.ingestRecord`, `ingestBatch` (Arrow),
+`waitForOffset`, `flush`, `close`, `isClosed`, `getUnackedRecords`, `getUnackedBatches`,
+`ZerobusSdk.recreateStream`, and `recreateArrowStream`. Called from a callback, these
+throw `IllegalStateException`. A callback should not throw; if it does, the exception is
+normally logged at ERROR level through SLF4J (if logging itself fails, it is dropped) and
+later callbacks are still delivered.
 
 ## Best Practices
 

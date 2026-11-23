@@ -1,14 +1,21 @@
-//! Native test helpers for classloader isolation testing.
+//! Native test helpers for JNI integration testing.
 //!
 //! These JNI functions are used by `ClassLoaderIsolationTest` to verify that
 //! class references work correctly from daemon threads, even when the system
-//! classloader cannot see the SDK classes.
+//! classloader cannot see the SDK classes, and by the callback native tests to
+//! drive Java callbacks from SDK-owned threads.
 
+use crate::callbacks::JavaAckCallback;
 use crate::class_cache::{as_jclass, get_class_cache};
+use crate::errors::guard;
+use crate::federated_auth::{get_token_blocking, java_idp_token_supplier};
 use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
-use crate::runtime::{get_jvm, get_runtime};
-use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError};
+use crate::runtime::{block_on, get_jvm, get_runtime};
+use databricks_zerobus_ingest_sdk::{
+    AckCallback, FederatedTokenProvider, HeadersProvider, ZerobusError,
+};
 use jni::objects::{JClass, JObject, JString};
+use jni::sys::jint;
 use jni::JNIEnv;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +29,16 @@ use std::time::Duration;
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFindClassFromDaemonThread<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    class_name: JString<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_find_class_from_daemon_thread(env, _class, class_name)
+    })
+}
+
+fn native_test_find_class_from_daemon_thread<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     class_name: JString<'local>,
@@ -102,6 +119,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFindClassFromDaemonThreadCached<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    class_name: JString<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_find_class_from_daemon_thread_cached(env, _class, class_name)
+    })
+}
+
+fn native_test_find_class_from_daemon_thread_cached<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     class_name: JString<'local>,
@@ -170,6 +197,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderCallbacks<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_headers_provider_callbacks(env, _class, provider)
+    })
+}
+
+fn native_test_headers_provider_callbacks<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     provider: JObject<'local>,
@@ -239,6 +276,16 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
 pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderSerialization<
     'local,
 >(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_headers_provider_serialization(env, _class, provider)
+    })
+}
+
+fn native_test_headers_provider_serialization<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     provider: JObject<'local>,
@@ -272,8 +319,284 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
     test_result(&mut env, result)
 }
 
+/// Panics inside a JNI entry point.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestPanic<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    guard(env, |_env| panic!("test panic"))
+}
+
+/// Blocks on the SDK runtime, as the blocking stream methods (`flush`, `close`, ...) do.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestBlockOn<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) {
+    guard(env, |_env| block_on(async {}))
+}
+
+/// Runs `task.run()` on a Tokio worker thread, where the SDK invokes ack callbacks.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestRunOnRuntimeWorker<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    task: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_run_on_runtime_worker(env, _class, task)
+    })
+}
+
+fn native_test_run_on_runtime_worker<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    task: JObject<'local>,
+) -> JObject<'local> {
+    let task_ref = match env.new_global_ref(task) {
+        Ok(task_ref) => task_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        get_runtime()
+            .spawn(async move {
+                let mut env = match get_jvm().attach_current_thread_as_daemon() {
+                    Ok(env) => env,
+                    Err(error) => return format!("failed to attach thread: {error}"),
+                };
+                match env.call_method(task_ref.as_obj(), "run", "()V", &[]) {
+                    Ok(_) => "OK".to_string(),
+                    Err(error) => {
+                        let _ = env.exception_clear();
+                        format!("task failed: {error}")
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|error| format!("worker task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Drives `JavaAckCallback` from one SDK-owned thread, as the SDK's callback worker does.
+///
+/// Every Java callback may throw; each later call must still reach Java, and no
+/// exception may be left pending on the thread.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAckCallbackExceptions<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+    acks: jint,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_ack_callback_exceptions(env, _class, callback, acks)
+    })
+}
+
+fn native_test_ack_callback_exceptions<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+    acks: jint,
+) -> JObject<'local> {
+    let callback_ref = match env.new_global_ref(callback) {
+        Ok(callback_ref) => callback_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        tokio::task::spawn_blocking(move || {
+            let callback = JavaAckCallback::new(callback_ref);
+            for offset in 0..i64::from(acks) {
+                callback.on_ack(offset);
+            }
+            callback.on_error(i64::from(acks), "ack failed");
+
+            let env = match get_jvm().attach_current_thread_as_daemon() {
+                Ok(env) => env,
+                Err(error) => return format!("failed to attach thread: {error}"),
+            };
+            if env.exception_check().unwrap_or(true) {
+                return "a Java exception was left pending on the callback thread".to_string();
+            }
+            "OK".to_string()
+        })
+        .await
+        .unwrap_or_else(|error| format!("callback task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Invokes `callback.onAck` and then `callback.onError` through `JavaAckCallback`
+/// on a Tokio worker thread, exactly as the SDK delivers acknowledgments.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestAckCallbackOnRuntimeWorker<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_ack_callback_on_runtime_worker(env, _class, callback)
+    })
+}
+
+fn native_test_ack_callback_on_runtime_worker<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+) -> JObject<'local> {
+    let callback_ref = match env.new_global_ref(callback) {
+        Ok(callback_ref) => callback_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        get_runtime()
+            .spawn(async move {
+                let callback = JavaAckCallback::new(callback_ref);
+                callback.on_ack(0);
+                callback.on_error(1, "ack failed");
+                "OK".to_string()
+            })
+            .await
+            .unwrap_or_else(|error| format!("worker task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
 fn test_result<'local>(env: &mut JNIEnv<'local>, result: String) -> JObject<'local> {
     env.new_string(result)
         .map(Into::into)
         .unwrap_or_else(|_| JObject::null())
+}
+
+/// Exercises `IdpTokenSupplier.getToken()` error classification on one native
+/// blocking thread. The Java supplier must, in order: throw a plain exception,
+/// return `"idp-token"`, throw `NonRetriableException`, throw a `java.lang.Error`,
+/// and return `null`.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestIdpTokenSupplierCallbacks<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_idp_token_supplier_callbacks(env, _class, supplier)
+    })
+}
+
+fn native_test_idp_token_supplier_callbacks<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    let supplier_ref = match env.new_global_ref(supplier) {
+        Ok(supplier_ref) => supplier_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        tokio::task::spawn_blocking(move || {
+            let first = get_token_blocking(supplier_ref.clone());
+            if !first.is_err_and(|error| {
+                error.is_retryable()
+                    && matches!(&error, ZerobusError::TokenFetchError(message) if message.contains("Java IdpTokenSupplier error"))
+            }) {
+                return "supplier exception was not a retryable token-fetch error".to_string();
+            }
+
+            let second = get_token_blocking(supplier_ref.clone());
+            if !second.is_ok_and(|token| token == "idp-token") {
+                return "supplier token was not returned".to_string();
+            }
+
+            let third = get_token_blocking(supplier_ref.clone());
+            if !third.is_err_and(|error| !error.is_retryable()) {
+                return "NonRetriableException was retryable".to_string();
+            }
+
+            let fourth = get_token_blocking(supplier_ref.clone());
+            if !fourth.is_err_and(|error| !error.is_retryable()) {
+                return "Java Error was retryable".to_string();
+            }
+
+            let fifth = get_token_blocking(supplier_ref);
+            if !fifth.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("getToken returned null"))
+            }) {
+                return "null token was not rejected clearly".to_string();
+            }
+
+            "OK".to_string()
+        })
+        .await
+        .unwrap_or_else(|error| format!("callback task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+/// Drives a Java `IdpTokenSupplier` through the core's `FederatedTokenProvider`
+/// (the async bridge, not `get_token_blocking` directly). The supplier must throw
+/// `NonRetriableException("idp unavailable")`; the provider must surface that as a
+/// non-retryable error before attempting any token exchange.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFederatedProviderSupplierError<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_test_federated_provider_supplier_error(env, _class, supplier)
+    })
+}
+
+fn native_test_federated_provider_supplier_error<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    supplier: JObject<'local>,
+) -> JObject<'local> {
+    let supplier_ref = match env.new_global_ref(supplier) {
+        Ok(supplier_ref) => supplier_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        let provider = FederatedTokenProvider::new(
+            None,
+            java_idp_token_supplier(supplier_ref, "java:native-test".to_string()),
+            "catalog.schema.table".to_string(),
+            "1234567890".to_string(),
+            // Never contacted: the supplier fails before the exchange.
+            "http://127.0.0.1:9".to_string(),
+        );
+        match provider.get_headers().await {
+            Ok(_) => "provider returned headers despite supplier failure".to_string(),
+            Err(error) if error.is_retryable() => {
+                format!("supplier failure became retryable: {error}")
+            }
+            Err(error) if !error.to_string().contains("idp unavailable") => {
+                format!("supplier failure detail was lost: {error}")
+            }
+            Err(_) => "OK".to_string(),
+        }
+    });
+
+    test_result(&mut env, result)
 }

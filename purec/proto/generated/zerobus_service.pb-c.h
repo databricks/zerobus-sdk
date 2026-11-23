@@ -34,6 +34,8 @@ typedef struct _Databricks__Zerobus__PersistentStreamRequest Databricks__Zerobus
 typedef struct _Databricks__Zerobus__PersistentStreamResponse Databricks__Zerobus__PersistentStreamResponse;
 typedef struct _Databricks__Zerobus__RetireStreamRequest Databricks__Zerobus__RetireStreamRequest;
 typedef struct _Databricks__Zerobus__RetireStreamResponse Databricks__Zerobus__RetireStreamResponse;
+typedef struct _Databricks__Zerobus__InsertRecordsRequest Databricks__Zerobus__InsertRecordsRequest;
+typedef struct _Databricks__Zerobus__InsertRecordsResponse Databricks__Zerobus__InsertRecordsResponse;
 
 
 /* --- enums --- */
@@ -547,6 +549,50 @@ struct  _Databricks__Zerobus__RetireStreamResponse
      }
 
 
+/*
+ * A message in the InsertRecords unary rpc.
+ * This message type allows clients to ingest a batch of records.
+ */
+struct  _Databricks__Zerobus__InsertRecordsRequest
+{
+  ProtobufCMessage base;
+  /*
+   * Target managed table name in 3 part form (catalog.schema.table).
+   * Required.
+   */
+  char *table_name;
+  /*
+   * The raw JSON body: a JSON array of objects, or JSON Lines (one object per
+   * line, blank lines skipped). A first non-whitespace byte of `[` means an
+   * array; anything else is read as JSON Lines. Integers keep 64-bit precision.
+   * Required, but marked `optional` in proto. The server rejects a missing or
+   * empty body and any row that isn't an object. Size cap: 10 MB by default.
+   * Example body:
+   *   [
+   *     {"id": 1, "name": "Alice", "email": "alice@example.com"},
+   *     {"id": 3824212507853254558, "name": "Bob"}
+   *   ]
+   */
+  protobuf_c_boolean has_records_json;
+  ProtobufCBinaryData records_json;
+};
+#define DATABRICKS__ZEROBUS__INSERT_RECORDS_REQUEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&databricks__zerobus__insert_records_request__descriptor) \
+    , NULL, 0, {0,NULL} }
+
+
+/*
+ * Empty: success or failure is carried by the gRPC status code.
+ */
+struct  _Databricks__Zerobus__InsertRecordsResponse
+{
+  ProtobufCMessage base;
+};
+#define DATABRICKS__ZEROBUS__INSERT_RECORDS_RESPONSE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&databricks__zerobus__insert_records_response__descriptor) \
+     }
+
+
 /* Databricks__Zerobus__JsonRecordBatch methods */
 void   databricks__zerobus__json_record_batch__init
                      (Databricks__Zerobus__JsonRecordBatch         *message);
@@ -889,6 +935,44 @@ Databricks__Zerobus__RetireStreamResponse *
 void   databricks__zerobus__retire_stream_response__free_unpacked
                      (Databricks__Zerobus__RetireStreamResponse *message,
                       ProtobufCAllocator *allocator);
+/* Databricks__Zerobus__InsertRecordsRequest methods */
+void   databricks__zerobus__insert_records_request__init
+                     (Databricks__Zerobus__InsertRecordsRequest         *message);
+size_t databricks__zerobus__insert_records_request__get_packed_size
+                     (const Databricks__Zerobus__InsertRecordsRequest   *message);
+size_t databricks__zerobus__insert_records_request__pack
+                     (const Databricks__Zerobus__InsertRecordsRequest   *message,
+                      uint8_t             *out);
+size_t databricks__zerobus__insert_records_request__pack_to_buffer
+                     (const Databricks__Zerobus__InsertRecordsRequest   *message,
+                      ProtobufCBuffer     *buffer);
+Databricks__Zerobus__InsertRecordsRequest *
+       databricks__zerobus__insert_records_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   databricks__zerobus__insert_records_request__free_unpacked
+                     (Databricks__Zerobus__InsertRecordsRequest *message,
+                      ProtobufCAllocator *allocator);
+/* Databricks__Zerobus__InsertRecordsResponse methods */
+void   databricks__zerobus__insert_records_response__init
+                     (Databricks__Zerobus__InsertRecordsResponse         *message);
+size_t databricks__zerobus__insert_records_response__get_packed_size
+                     (const Databricks__Zerobus__InsertRecordsResponse   *message);
+size_t databricks__zerobus__insert_records_response__pack
+                     (const Databricks__Zerobus__InsertRecordsResponse   *message,
+                      uint8_t             *out);
+size_t databricks__zerobus__insert_records_response__pack_to_buffer
+                     (const Databricks__Zerobus__InsertRecordsResponse   *message,
+                      ProtobufCBuffer     *buffer);
+Databricks__Zerobus__InsertRecordsResponse *
+       databricks__zerobus__insert_records_response__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   databricks__zerobus__insert_records_response__free_unpacked
+                     (Databricks__Zerobus__InsertRecordsResponse *message,
+                      ProtobufCAllocator *allocator);
 /* --- per-message closures --- */
 
 typedef void (*Databricks__Zerobus__JsonRecordBatch_Closure)
@@ -945,6 +1029,12 @@ typedef void (*Databricks__Zerobus__RetireStreamRequest_Closure)
 typedef void (*Databricks__Zerobus__RetireStreamResponse_Closure)
                  (const Databricks__Zerobus__RetireStreamResponse *message,
                   void *closure_data);
+typedef void (*Databricks__Zerobus__InsertRecordsRequest_Closure)
+                 (const Databricks__Zerobus__InsertRecordsRequest *message,
+                  void *closure_data);
+typedef void (*Databricks__Zerobus__InsertRecordsResponse_Closure)
+                 (const Databricks__Zerobus__InsertRecordsResponse *message,
+                  void *closure_data);
 
 /* --- services --- */
 
@@ -964,6 +1054,10 @@ struct _Databricks__Zerobus__Zerobus_Service
                         const Databricks__Zerobus__RetireStreamRequest *input,
                         Databricks__Zerobus__RetireStreamResponse_Closure closure,
                         void *closure_data);
+  void (*insert_records)(Databricks__Zerobus__Zerobus_Service *service,
+                         const Databricks__Zerobus__InsertRecordsRequest *input,
+                         Databricks__Zerobus__InsertRecordsResponse_Closure closure,
+                         void *closure_data);
 };
 typedef void (*Databricks__Zerobus__Zerobus_ServiceDestroy)(Databricks__Zerobus__Zerobus_Service *);
 void databricks__zerobus__zerobus__init (Databricks__Zerobus__Zerobus_Service *service,
@@ -974,7 +1068,8 @@ void databricks__zerobus__zerobus__init (Databricks__Zerobus__Zerobus_Service *s
     { DATABRICKS__ZEROBUS__ZEROBUS__BASE_INIT,\
       function_prefix__ ## ephemeral_stream,\
       function_prefix__ ## persistent_stream,\
-      function_prefix__ ## retire_stream  }
+      function_prefix__ ## retire_stream,\
+      function_prefix__ ## insert_records  }
 void databricks__zerobus__zerobus__ephemeral_stream(ProtobufCService *service,
                                                     const Databricks__Zerobus__EphemeralStreamRequest *input,
                                                     Databricks__Zerobus__EphemeralStreamResponse_Closure closure,
@@ -987,6 +1082,10 @@ void databricks__zerobus__zerobus__retire_stream(ProtobufCService *service,
                                                  const Databricks__Zerobus__RetireStreamRequest *input,
                                                  Databricks__Zerobus__RetireStreamResponse_Closure closure,
                                                  void *closure_data);
+void databricks__zerobus__zerobus__insert_records(ProtobufCService *service,
+                                                  const Databricks__Zerobus__InsertRecordsRequest *input,
+                                                  Databricks__Zerobus__InsertRecordsResponse_Closure closure,
+                                                  void *closure_data);
 
 /* --- descriptors --- */
 
@@ -1009,6 +1108,8 @@ extern const ProtobufCMessageDescriptor databricks__zerobus__persistent_stream_r
 extern const ProtobufCMessageDescriptor databricks__zerobus__persistent_stream_response__descriptor;
 extern const ProtobufCMessageDescriptor databricks__zerobus__retire_stream_request__descriptor;
 extern const ProtobufCMessageDescriptor databricks__zerobus__retire_stream_response__descriptor;
+extern const ProtobufCMessageDescriptor databricks__zerobus__insert_records_request__descriptor;
+extern const ProtobufCMessageDescriptor databricks__zerobus__insert_records_response__descriptor;
 extern const ProtobufCServiceDescriptor databricks__zerobus__zerobus__descriptor;
 
 PROTOBUF_C__END_DECLS

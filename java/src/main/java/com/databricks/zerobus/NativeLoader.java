@@ -45,10 +45,15 @@ public final class NativeLoader {
   // Bumped with the Rust NATIVE_ABI_VERSION whenever native signatures change, to reject a stale
   // libzerobus_jni (natives bind by name only, so an old one would read arguments from wrong
   // slots).
-  static final int EXPECTED_NATIVE_ABI = 1;
+  static final int EXPECTED_NATIVE_ABI = 2;
 
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;
+
+  // Only native code uses this class, but the library fails to load without it, so reference it
+  // from Java to keep minimizeJar-style class removal from stripping it. ProGuard/R8 also rename
+  // and remove members, so they need keep rules instead (see the README).
+  private static final Class<?> NATIVE_CALLBACK_LOGGER = CallbackExceptionLogger.class;
 
   static {
     try {

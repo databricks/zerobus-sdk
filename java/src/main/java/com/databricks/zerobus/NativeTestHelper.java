@@ -46,4 +46,63 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
+
+  /**
+   * Invokes {@link AckCallback#onAck} {@code acks} times, then {@link AckCallback#onError} once,
+   * all on one native SDK thread.
+   *
+   * @param callback the callback used by the native test
+   * @param acks the number of {@code onAck} calls
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestAckCallbackExceptions(AckCallback callback, int acks);
+
+  /**
+   * Panics in native code.
+   *
+   * @throws ZerobusException always: a {@link NonRetriableException} carrying the panic message
+   */
+  public static native void nativeTestPanic() throws ZerobusException;
+
+  /**
+   * Blocks on the native runtime, as the blocking stream methods do.
+   *
+   * @throws ZerobusException a {@link NonRetriableException} on a native runtime worker thread
+   *     outside an ack callback. Called from an ack callback, it throws {@link
+   *     IllegalStateException} instead.
+   */
+  public static native void nativeTestBlockOn() throws ZerobusException;
+
+  /**
+   * Runs {@code task} on a native runtime worker thread, where the SDK invokes ack callbacks.
+   *
+   * @param task the task to run; it must not throw
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestRunOnRuntimeWorker(Runnable task);
+
+  /**
+   * Invokes {@link AckCallback#onAck} and then {@link AckCallback#onError} on a native runtime
+   * worker thread, as the SDK delivers acknowledgments.
+   *
+   * @param callback the callback to invoke; it must not throw
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestAckCallbackOnRuntimeWorker(AckCallback callback);
+
+  /**
+   * Exercises {@link IdpTokenSupplier} error classification on one native blocking thread.
+   *
+   * @param supplier the stateful supplier used by the native test
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestIdpTokenSupplierCallbacks(IdpTokenSupplier supplier);
+
+  /**
+   * Verifies that a supplier failure surfaces through the native federated token provider.
+   *
+   * @param supplier a supplier that throws {@code NonRetriableException("idp unavailable")}
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestFederatedProviderSupplierError(IdpTokenSupplier supplier);
 }
