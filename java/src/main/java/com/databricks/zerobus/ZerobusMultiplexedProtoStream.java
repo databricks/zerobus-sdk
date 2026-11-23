@@ -12,10 +12,32 @@ import java.util.Optional;
  *
  * <p>Distributes records round-robin across a fixed set of sub-streams. Use it when one stream is
  * the throughput bottleneck and global ordering is not required.
+ *
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
+ *
+ * <pre>{@code
+ * try (ZerobusMultiplexedProtoStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .compiledProto(MyProto.getDescriptor().toProto())
+ *         .multiplexed(4)
+ *         .build()
+ *         .join()) {
+ *     for (MyProto record : records) {
+ *         stream.ingestRecord(record);
+ *     }
+ *     stream.flush();
+ * }
+ * }</pre>
+ *
+ * <p>See {@link StreamBuilder.MultiplexedStreamBuilder} for message IDs, failures, resource
+ * management, and thread safety.
+ *
+ * @see ZerobusSdk#streamBuilder()
  */
-class ZerobusMultiplexedProtoStream extends BaseZerobusMultiplexedStream {
+public class ZerobusMultiplexedProtoStream extends BaseZerobusMultiplexedStream {
 
-  /** Wraps a native multiplexed stream handle. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusMultiplexedProtoStream(
       long nativeHandle, String tableName, StreamConfigurationOptions options) {
     super(nativeHandle, tableName, options);

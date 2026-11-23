@@ -5,6 +5,7 @@ import static com.databricks.zerobus.MockServerTestSupport.WAIT_SECONDS;
 import static com.databricks.zerobus.MockServerTestSupport.airQuality;
 import static com.databricks.zerobus.MockServerTestSupport.awaitWriteCount;
 import static com.databricks.zerobus.MockServerTestSupport.base64;
+import static com.databricks.zerobus.MockServerTestSupport.json;
 import static com.databricks.zerobus.MockServerTestSupport.neverAcked;
 import static com.databricks.zerobus.MockServerTestSupport.sorted;
 import static com.databricks.zerobus.MockServerTestSupport.writeCount;
@@ -15,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.databricks.test.table.AirQualityRow.AirQuality;
+import java.nio.charset.StandardCharsets;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -134,6 +136,53 @@ class MultiplexedStreamNativeTest {
       assertEquals(
           sorted(records.stream().map(AirQuality::toString)),
           sorted(stream.getUnackedRecords(AirQuality.parser()).stream().map(AirQuality::toString)));
+    }
+  }
+
+  @Test
+  void jsonRecordsCrossTheBridgeInBothDirections() throws Exception {
+    long before = writeCount(url);
+    List<String> records = new ArrayList<>();
+    for (int i = 0; i < 7; i++) {
+      records.add(json("json-" + i));
+    }
+
+    try (ZerobusSdk sdk = new ZerobusSdk(url, url)) {
+      ZerobusMultiplexedJsonStream stream = neverAcked(sdk).json().multiplexed(2).build().join();
+      long id = stream.ingestRecord(records.get(0));
+      stream.ingestRecord("json-1", MockServerTestSupport::json);
+      assertTrue(stream.ingestRecords(records.subList(2, 5)).isPresent());
+      assertTrue(
+          stream
+              .ingestRecords(Arrays.asList("json-5", "json-6"), MockServerTestSupport::json)
+              .isPresent());
+      assertFalse(stream.ingestRecords(Collections.<String>emptyList()).isPresent());
+      awaitWriteCount(url, before, records.size());
+
+      // On an open stream, getUnackedBatches() closes it first so the result is complete; reading
+      // again returns the same batches.
+      List<List<String>> expected = grouped(records.stream(), 1, 1, 3, 2);
+      assertEquals(
+          expected, batchContents(stream.getUnackedBatches(), MultiplexedStreamNativeTest::utf8));
+      assertTrue(stream.isClosed());
+      assertEquals(
+          expected, batchContents(stream.getUnackedBatches(), MultiplexedStreamNativeTest::utf8));
+
+      // The flush inside close() still fails, and the records stay recoverable afterwards.
+      assertThrows(ZerobusException.class, stream::close);
+      assertEquals(
+          sorted(records.stream().map(json -> "decoded " + json)),
+          sorted(stream.getUnackedRecords(json -> "decoded " + json).stream()));
+
+      // After close() the native stream is gone: calls throw without reaching it, and a second
+      // close() does nothing.
+      assertThrows(NonRetriableException.class, () -> stream.ingestRecord(json("after-close")));
+      assertThrows(
+          NonRetriableException.class, () -> stream.ingestRecords(Collections.<String>emptyList()));
+      assertThrows(NonRetriableException.class, stream::flush);
+      assertThrows(NonRetriableException.class, () -> stream.waitForMessageId(id));
+      stream.close();
+      assertEquals(sorted(records.stream()), sorted(stream.getUnackedRecords().stream()));
     }
   }
 
@@ -500,6 +549,10 @@ class MultiplexedStreamNativeTest {
     List<List<String>> sorted = new ArrayList<>(batches);
     sorted.sort(Comparator.comparing(List::toString));
     return sorted;
+  }
+
+  private static String utf8(byte[] bytes) {
+    return new String(bytes, StandardCharsets.UTF_8);
   }
 
   @FunctionalInterface

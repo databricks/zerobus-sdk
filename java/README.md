@@ -14,6 +14,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Protocol Buffers Examples](#protocol-buffers-examples)
   - [JSON Examples](#json-examples)
   - [Arrow Flight Examples](#arrow-flight-examples)
+  - [Multiplexed Streams (Beta)](#multiplexed-streams-beta)
 - [Authentication](#authentication)
   - [TLS Configuration](#tls-configuration)
   - [Binary Headers](#binary-headers)
@@ -38,6 +39,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
 - **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
 - **Avro** *(Beta)*: Ingest Avro record objects (need Java 11+) or pre-encoded datums (see [Avro Examples](#avro-examples))
+- **Multiplexed streams** *(Beta)*: Spread JSON or Protocol Buffer ingestion across up to 64 sub-streams (see [Multiplexed Streams](#multiplexed-streams-beta))
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
@@ -556,7 +558,8 @@ examples/
 ├── proto/                 # ZerobusProtoStream examples
 │   ├── README.md
 │   ├── SingleRecordExample.java
-│   └── BatchIngestionExample.java
+│   ├── BatchIngestionExample.java
+│   └── MultiplexedIngestionExample.java
 ├── json/                  # ZerobusJsonStream examples
 │   ├── README.md
 │   ├── SingleRecordExample.java
@@ -766,6 +769,63 @@ won't round) and must fit the precision. Schema defaults are **not** applied to 
 `GenericData.Record` — set every field, or use `GenericRecordBuilder`. Each record's schema (nested
 records included) must match the writer schema: field order matters and the namespace must match,
 though metadata such as `avro.java.string` or docs is ignored.
+
+### Multiplexed Streams (Beta)
+
+A single stream is ordered, which caps its throughput. When one stream is the bottleneck and you do
+not need a global order, a multiplexed stream opens several sub-streams and spreads records across
+them round-robin. Records keep their order within a sub-stream, but there is no order across
+sub-streams. JSON and Protocol Buffers are supported; for JSON, first migrate to Protocol
+Buffers and measure again before multiplexing.
+
+Select it with `multiplexed(streamCount)` after choosing the format:
+
+```java
+try (ZerobusMultiplexedProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .multiplexed(4)
+        .build()
+        .join()) {
+    for (AirQuality record : records) {
+        stream.ingestRecord(record);           // queues only; returns a message ID
+    }
+    stream.flush();                            // confirms every sub-stream once
+}
+```
+
+- Every authentication setter works with `multiplexed(n)`: `oauth(...)`, `headersProvider(...)`,
+  and `federatedAuth(...)`.
+- `streamCount` must be between 1 and 64. `maxInflightRecords` is a budget for the whole stream,
+  divided evenly across sub-streams, so it must be at least `streamCount`.
+- Ingest methods return a **message ID**: an opaque `long` that identifies the sub-stream and the
+  record's position in it. Message IDs are not ordered and may be negative. Pass one to
+  `waitForMessageId(id)` on the same stream; use `flush()` to confirm everything. The mux
+  `ingestRecord` and `ingestRecords` return a message ID (`long` / `Optional<Long>`), unlike the
+  deprecated `ZerobusStream.ingestRecord`, which returns a `CompletableFuture<Void>`.
+- A batch from `ingestRecords(...)` lands on one sub-stream, and one message ID covers it.
+- Register an ACK callback with `multiplexed(n).ackCallback(callback)`. The callback's `long`
+  argument is a message ID, and sub-streams may call it concurrently. It is called once per
+  record or batch, in no order; unlike an offset, a message ID says nothing about other records.
+  `StreamBuilder.ackCallback(...)` is rejected for multiplexed streams.
+- Multiplexed streams are thread-safe, unlike the other stream types: several threads can ingest,
+  wait, and flush on the same stream concurrently. Records from different threads have no order
+  relative to each other. `close()` waits for calls already in progress, and later ingest, wait,
+  and flush calls throw `NonRetriableException`.
+- When `close()` returns, all callbacks have run, unless `close()` waited longer than the callback
+  wait time (up to 5 seconds; sub-streams wait in parallel; not configurable in Java). After a
+  failed `close()` (the flush failed but the unacknowledged records were read), a second `close()`
+  returns without an error. If reading the unacknowledged records failed, the stream keeps its
+  native resources and `close()` can be called again.
+- Opening is atomic: when more than one sub-stream is requested, each opens after a random delay
+  of up to one second, and if any fails, the others are closed and the future fails.
+- After any exception, check `isClosed()`, not the exception class: a retryable error is also
+  terminal when recovery is off or exhausted. If `isClosed()` returns true, a sub-stream failed
+  terminally and the stream rejects new records: recover the unacknowledged ones with
+  `getUnackedRecords()` or `getUnackedBatches()`, call `close()`, and ingest them into a new
+  stream. If it returns false, only that call failed and the stream stays usable. There is no
+  `recreateStream` for multiplexed streams.
 
 ---
 
@@ -1241,6 +1301,10 @@ try {
 }
 ```
 
+On a multiplexed stream, a retryable error can still be terminal when recovery is off or
+exhausted. After any exception, check `isClosed()` to decide; see
+[Multiplexed Streams](#multiplexed-streams-beta).
+
 ## API Reference
 
 ### ZerobusSdk
@@ -1426,6 +1490,18 @@ CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()
 
 `ArrowStreamBuilder` additionally supports `maxInflightBatches(int)`, `connectionTimeoutMs(long)`, `ipcCompression(IPCCompressionType)`, and `streamPausedMaxWaitTimeMs(long)`.
 
+`JsonStreamBuilder` and `ProtoStreamBuilder` also select a multiplexed stream (Beta), built by a `MultiplexedStreamBuilder`:
+
+```java
+MultiplexedStreamBuilder<ZerobusMultiplexedJsonStream>  StreamBuilder.JsonStreamBuilder.multiplexed(int streamCount)
+MultiplexedStreamBuilder<ZerobusMultiplexedProtoStream> StreamBuilder.ProtoStreamBuilder.multiplexed(int streamCount)
+
+MultiplexedStreamBuilder<S> ackCallback(AckCallback callback)  // receives message IDs
+CompletableFuture<S>        build()
+```
+
+Configuring `StreamBuilder.ackCallback` before calling `MultiplexedStreamBuilder.build()` throws `IllegalStateException`; use `MultiplexedStreamBuilder.ackCallback` instead.
+
 Configuring `ackCallback` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException` because Arrow Flight streams do not support ACK callbacks.
 
 ---
@@ -1561,6 +1637,30 @@ List<EncodedBatch> getUnackedBatches() throws ZerobusException
 Returns unacknowledged records as raw Avro datums, or grouped by batch.
 
 **Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`, `getTableName()`, `getOptions()`
+
+---
+
+### ZerobusMultiplexedProtoStream / ZerobusMultiplexedJsonStream
+
+Multiplexed streams (Beta). Create them with `multiplexed(int)` on the `compiledProto(...)` or `json()` sub-builder; see [Multiplexed Streams](#multiplexed-streams-beta).
+
+**Ingest Methods:** the same inputs as the ordinary stream of that format, named `ingestRecord` and `ingestRecords`, returning message IDs instead of offsets:
+
+```java
+long ingestRecord(...) throws ZerobusException             // message ID
+Optional<Long> ingestRecords(...) throws ZerobusException  // batch message ID, empty for an empty batch
+```
+
+**Waiting and Lifecycle Methods:**
+
+```java
+void waitForMessageId(long messageId) throws ZerobusException
+void flush() throws ZerobusException
+void close() throws ZerobusException
+boolean isClosed()
+```
+
+**Recovery Methods:** `getUnackedRecords()` (typed as for the ordinary stream of that format) and `List<EncodedBatch> getUnackedBatches()`. If the stream is still open, they close it first so the result is complete, without reporting a close failure. You must still call `close()` to release native resources; it throws that failure. After `close()` they return the records cached at close.
 
 ---
 
@@ -1881,6 +1981,8 @@ ingest submission, so a batch ingest call produces one callback rather than one 
 void onAck(long offsetId)
 ```
 Called when a logical ingest submission is acknowledged. Records up to `offsetId` are durable.
+On a multiplexed stream the argument is instead a message ID that covers only that record or
+batch; see [Multiplexed Streams](#multiplexed-streams-beta).
 
 ```java
 void onError(long offsetId, String errorMessage)
@@ -1922,12 +2024,13 @@ callbacks; remaining callbacks may still be pending when it returns.
 
 **What a callback may do.** Keep callbacks to quick, non-blocking work such as logging,
 updating metrics, or incrementing counters, and hand anything else (I/O, retries,
-re-ingesting records) to another thread or executor. Streams are not thread-safe, so that
-thread must not call the stream concurrently with others: queue the work for the thread
-that owns the stream, or guard every call with your own lock. A callback must not call
-stream or SDK methods that block on native work: `ingestRecordOffset`,
+re-ingesting records) to another thread or executor. Streams other than multiplexed ones are
+not thread-safe, so that thread must not call the stream concurrently with others: queue the
+work for the thread that owns the stream, or guard every call with your own lock. A callback
+must not call stream or SDK methods that block on native work: `ingestRecordOffset`,
 `ingestRecordsOffset`, the deprecated `ZerobusStream.ingestRecord`, `ingestBatch` (Arrow),
 `waitForOffset`, `flush`, `close`, `isClosed`, `getUnackedRecords`, `getUnackedBatches`,
+the multiplexed `ingestRecord`, `ingestRecords`, and `waitForMessageId`,
 `ZerobusSdk.recreateStream`, and `recreateArrowStream`. Called from a callback, these
 throw `IllegalStateException`. A callback should not throw; if it does, the exception is
 normally logged at ERROR level through SLF4J (if logging itself fails, it is dropped) and
@@ -1948,7 +2051,7 @@ later callbacks are still delivered.
     - `ingestRecordOffset()` + final `flush()` / `waitForOffset(lastOffset)` → High throughput (recommended)
     - `ingestRecordOffset()` + `waitForOffset()` per record → When a specific record must be confirmed before continuing
     - `ingestRecord().join()` → Deprecated; prefer the offset-based API
-11. **Thread safety**: `ZerobusSdk` and streams are not thread-safe. Synchronize externally if more than one thread uses the same instance.
+11. **Thread safety**: `ZerobusSdk` and streams are not thread-safe. Synchronize externally if more than one thread uses the same instance. Multiplexed streams are the exception: several threads can use the same one concurrently (see [Multiplexed Streams](#multiplexed-streams-beta)).
 12. **Recovery**: Use `recreateStream()` on a closed stream to re-ingest unacknowledged records. Inspect `getUnackedBatches()` after close when you need the payloads yourself.
 
 ## Community and Contributing

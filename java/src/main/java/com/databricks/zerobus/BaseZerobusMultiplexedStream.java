@@ -12,7 +12,9 @@ import org.slf4j.LoggerFactory;
  * Base class for multiplexed streams (Beta), providing common native method declarations and
  * lifecycle management.
  *
- * <p>This class is not intended to be used directly. Use {@link ZerobusMultiplexedProtoStream}.
+ * <p>This class is not intended to be used directly. Use {@link ZerobusMultiplexedJsonStream} or
+ * {@link ZerobusMultiplexedProtoStream}, created with {@code multiplexed(int)} on the matching
+ * {@link StreamBuilder} format sub-builder.
  *
  * <p>Its {@code ingestRecord} and {@code ingestRecords} return a message ID ({@code long} or {@code
  * Optional<Long>}), unlike the deprecated {@code ZerobusStream.ingestRecord}, which returns a
@@ -23,36 +25,8 @@ import org.slf4j.LoggerFactory;
  * sub-stream, but there is no global record, message ID, acknowledgment, or callback order across
  * sub-streams.
  *
- * <h3>Message IDs</h3>
- *
- * <p>Ingest methods return a message ID: an opaque {@code long} that identifies the sub-stream and
- * the record's position in it. Message IDs are not ordered and may be negative. Pass one to {@link
- * #waitForMessageId(long)} on the stream that returned it; do not compare them or use them with
- * another stream.
- *
- * <h3>Failures</h3>
- *
- * <p>Once an operation observes a terminal sub-stream failure, the stream rejects new ingestion.
- * Recover records that were never acknowledged with {@code getUnackedRecords()} or {@link
- * #getUnackedBatches()} and ingest them into a new stream.
- *
- * <h3>Resource Management</h3>
- *
- * <p>Multiplexed streams hold native resources that are not automatically released by the garbage
- * collector. You <b>must</b> call {@link #close()} when done to avoid native memory leaks, even if
- * {@link #isClosed()} returns true or the unacknowledged records were already read. Use
- * try-with-resources for automatic cleanup.
- *
- * <h3>Thread Safety</h3>
- *
- * <p>Multiplexed streams are <b>thread-safe</b>, unlike the other stream types. Several threads can
- * ingest, wait for message IDs, and flush the same stream concurrently. Records from different
- * threads have no order relative to each other. {@link #close()} and the unacknowledged-record
- * getters can be called from any thread. {@link #close()} waits for calls already in progress to
- * return, and later ingest, wait, and flush calls throw {@link NonRetriableException}. When {@link
- * #close()} returns, all callbacks have run, unless it waited longer than the callback wait time
- * (up to 5 seconds; sub-streams wait in parallel; not configurable in Java). An {@link AckCallback}
- * must still not call the stream's blocking methods.
+ * <p>See {@link StreamBuilder.MultiplexedStreamBuilder} for message IDs, failures, resource
+ * management, and thread safety.
  */
 abstract class BaseZerobusMultiplexedStream implements AutoCloseable {
 
@@ -327,6 +301,18 @@ abstract class BaseZerobusMultiplexedStream implements AutoCloseable {
    */
   public StreamConfigurationOptions getOptions() {
     return options;
+  }
+
+  /**
+   * Ensures the native handle has not been released. A stream that is closed natively rejects the
+   * operation itself, so this avoids an extra native call per record.
+   *
+   * @throws NonRetriableException if the stream has been closed with {@link #close()}
+   */
+  protected void ensureOpen() throws ZerobusException {
+    if (nativeHandle == 0) {
+      throw new NonRetriableException("Stream is closed");
+    }
   }
 
   /**

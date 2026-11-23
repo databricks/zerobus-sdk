@@ -32,6 +32,7 @@ java/
 │   ├── ZerobusProtoStream.java  # Proto ingestion stream
 │   ├── ZerobusJsonStream.java   # JSON ingestion stream
 │   ├── ZerobusArrowStream.java  # Arrow Flight stream
+│   ├── ZerobusMultiplexed*Stream.java  # Multiplexed streams (Beta), thread-safe
 │   ├── NativeLoader.java        # Platform-specific JNI library loading
 │   └── ...                      # Config, exceptions, callbacks
 ├── src/test/                    # JUnit 5 + Mockito tests
@@ -71,7 +72,7 @@ JNI is the most manual of all the bindings. Key considerations:
 - **No finalizers**: Unlike Go/Python/TypeScript, Java streams do **not** have GC-triggered cleanup. Users **must** call `close()` explicitly or use try-with-resources. Forgetting this leaks native memory.
 - **AutoCloseable**: SDK and stream classes implement `AutoCloseable`. Always prefer try-with-resources.
 - **Async bridge**: `CompletableFuture` bridges Rust futures to Java. Stream creation and acknowledgment waiting return futures.
-- **Thread safety**: The Java SDK is **not thread-safe**. Do not share SDK or stream instances across threads without external synchronization.
+- **Thread safety**: The Java SDK is **not thread-safe**. Do not share SDK or stream instances across threads without external synchronization. The exception is multiplexed streams (`BaseZerobusMultiplexedStream`), which are thread-safe: every native call holds a Java read lock on the handle, and freeing it in `close()` takes the write lock. Keep that rule for any new native call on them.
 - **Native library loading** (`NativeLoader.java`): Detects OS + arch, extracts the correct `.so`/`.dylib`/`.dll` from the JAR classpath to a temp directory, loads via `System.load()`. Marked `deleteOnExit()`.
 - **Pending Java exceptions**: When Rust calls into Java (`call_method`, `new_object`, `new_string`, ...) and the call fails with `jni::errors::Error::JavaException`, clear it with `errors::take_java_exception` before making any other JNI call on that thread. SDK threads attached with `attach_current_thread_as_daemon` never return to Java, so nothing else clears the exception; left pending, it makes every later JNI call on that reused thread fail. Logging the `Err` is not enough. Report user-facing failures through Java (an exception, or `CallbackExceptionLogger` for user callbacks): nothing installs a subscriber for Rust's `tracing` output, so Java users never see it.
 - **Local references on SDK threads**: User callbacks invoked on an attached SDK thread (such as `JavaAckCallback`) must run inside `env.with_local_frame(...)`. Those threads never return to Java, so local references (strings, thrown exceptions, results) are otherwise never freed and keep their objects reachable until the thread exits. Pass objects that must outlive the call as `GlobalRef`s.

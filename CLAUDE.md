@@ -162,5 +162,5 @@ FFI, JNI, C++, and Go ship native archives on a GitHub Release, created by the p
 - **Never wait for an ack after every `ingest`** — it forces one server round-trip per record and collapses throughput. `ingest` only queues; ingest in a loop, then `flush()` once (periodically for unbounded streams, or register an ack callback). Reserve per-record `wait_for_offset` for low-volume must-be-durable cases. See `README.md` → "Acknowledgments and throughput".
 - Prefer the batch API in hot paths — it amortizes the per-call FFI crossing.
 - Methods: ingest `ingest_record_offset` / `ingestRecordOffset` / `IngestRecordOffset`; wait `wait_for_offset` / `waitForOffset` / `WaitForOffset`; batch `ingest_records_offset` / `ingestRecordsOffset` / `IngestRecordsOffset`.
-- Thread-safety differs: Go goroutines and Python-async/TS are safe; Java is not; Python sync is single-threaded — check the SDK's README before sharing a stream.
+- Thread-safety differs: Go goroutines and Python-async/TS are safe; Java is not, except multiplexed streams (Beta); Python sync is single-threaded — check the SDK's README before sharing a stream.
 - Java has no finalizer — use `close()` / try-with-resources or leak JNI resources. Python/TS free on GC (refcounting), which may not flush — prefer explicit `close()`.

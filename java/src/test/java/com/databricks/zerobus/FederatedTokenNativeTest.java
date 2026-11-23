@@ -81,6 +81,30 @@ class FederatedTokenNativeTest {
   }
 
   @Test
+  void federatedMultiplexedJsonStreamCallsSupplierThroughJni() throws Exception {
+    assumeTrue(NativeLoader.isLoaded(), "Native library not available");
+    AtomicInteger calls = new AtomicInteger();
+    FederatedToken token = FederatedToken.workloadIdentity(failingSupplier(calls), "sp-client-id");
+
+    try (ZerobusSdk sdk = new ZerobusSdk(UNREACHABLE, UNREACHABLE)) {
+      // One sub-stream opens without the jittered start delay.
+      ExecutionException ex =
+          assertThrows(
+              ExecutionException.class,
+              () ->
+                  sdk.streamBuilder()
+                      .table("catalog.schema.table")
+                      .federatedAuth(token)
+                      .recovery(false)
+                      .json()
+                      .multiplexed(1)
+                      .build()
+                      .get(30, TimeUnit.SECONDS));
+      assertSupplierFailure(ex, calls);
+    }
+  }
+
+  @Test
   void federatedArrowStreamCallsSupplierThroughJni() throws Exception {
     assumeTrue(NativeLoader.isLoaded(), "Native library not available");
     AtomicInteger calls = new AtomicInteger();
