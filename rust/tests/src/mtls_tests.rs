@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, TlsConfig, TlsSettings, UnaryClient, UnaryClientBuilder, ZerobusResult,
-    ZerobusSdk,
+    HeadersProvider, TlsConfig, TlsSettings, UnaryClient, UnaryClientBuilder, UnaryIngestResult,
+    ZerobusResult, ZerobusSdk,
 };
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tracing::info;
@@ -410,7 +410,7 @@ async fn unary_client(
 /// Sends one record on `client`, failing the test if the call hangs.
 async fn ingest_one_unary_record(
     client: &UnaryClient,
-) -> Result<ZerobusResult<()>, Box<dyn std::error::Error>> {
+) -> Result<ZerobusResult<UnaryIngestResult>, Box<dyn std::error::Error>> {
     tokio::time::timeout(
         Duration::from_secs(30),
         client.ingest_record(r#"{"id": 1, "message": "mtls unary test"}"#.to_string()),
