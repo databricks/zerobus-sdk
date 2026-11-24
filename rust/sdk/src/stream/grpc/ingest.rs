@@ -72,7 +72,11 @@ impl ZerobusStream {
     ///
     /// # Errors
     ///
-    /// * `InvalidArgument` - If record types don't match stream configuration
+    /// * `InvalidArgument` - If record types don't match stream configuration, or if
+    ///   the batch exceeds `max_ingest_payload_bytes`. The call then fails as a
+    ///   whole and queues no records. The message names the 0-based index of the
+    ///   first record over the limit and the total size up to it; don't resend
+    ///   only the records from that index on.
     /// * `StreamClosedError` - If the stream has been closed
     ///
     /// # Examples

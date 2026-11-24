@@ -202,6 +202,14 @@ impl MultiplexedStream {
     /// The whole batch lands on one sub-stream so a single returned id covers
     /// it. Returns `None` for an empty batch unless the mux is already closed
     /// or poisoned, in which case it returns an error.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidArgument` - If a record doesn't match the stream's format, or if
+    ///   the batch exceeds `max_ingest_payload_bytes`. The call then fails as a
+    ///   whole and queues no records. The message names the 0-based index of the
+    ///   first record over the limit and the total size up to it; don't resend
+    ///   only the records from that index on.
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
     pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where
@@ -209,8 +217,8 @@ impl MultiplexedStream {
         T: Into<PreparedInput>,
     {
         self.core.check_closed()?;
-        let records: Vec<T> = payload.into_iter().collect();
-        if records.is_empty() {
+        let mut records = payload.into_iter().peekable();
+        if records.peek().is_none() {
             return Ok(None);
         }
         self.core
