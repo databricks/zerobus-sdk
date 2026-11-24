@@ -17,6 +17,11 @@
 
 ### Bug Fixes
 
+- Batch ingest (`ingest_records_offset()`, and `ingest_records()` on multiplexed
+  streams) now checks `max_ingest_payload_bytes` while it builds the batch and
+  stops at the first record that exceeds the limit, instead of encoding the whole
+  batch first. The error now names the first record over the limit.
+
 ### Documentation
 
 ### Internal Changes

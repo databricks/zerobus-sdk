@@ -130,14 +130,13 @@ impl ZerobusStream {
         I: IntoIterator<Item = T>,
         T: Into<PreparedInput>,
     {
-        let encoded_batch = EncodedBatch::try_from_encoded_iter(
+        EncodedBatch::try_from_encoded_iter(
             payload
                 .into_iter()
                 .map(|rec| self.encode_prepared(rec.into())),
             self.options.record_type,
-        )?;
-        self.validate_ingest_payload(&encoded_batch)?;
-        Ok(encoded_batch)
+            self.options.max_ingest_payload_bytes,
+        )
     }
 
     /// Turns a [`PreparedInput`] into an [`EncodedRecord`]. Only the deferred Avro-object
