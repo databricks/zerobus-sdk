@@ -473,7 +473,8 @@ class TestValidate:
             _open(mode, target.build)
 
     def test_rejects_an_ack_callback_that_is_not_an_ack_callback(self, mode):
-        # The ordinary callback crosses in StreamSettings, as for build() (TestAckCallbackType).
+        # Multiplexed builder only: an ordinary callback crosses in StreamSettings, the same as for
+        # build(), which TestAckCallbackType checks.
         def target(callback):
             builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
             return builder.multiplexed(2).ack_callback(callback)
