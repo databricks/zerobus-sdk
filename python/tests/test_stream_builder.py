@@ -293,25 +293,12 @@ class TestValidConfiguration:
 class TestNativeValidation:
     """Checks the native layer enforces the same rules if called directly."""
 
-    def test_requires_exactly_one_auth_method(self):
-        props = core.TableProperties("c.s.t")
-        native = core.sync.ZerobusSdk(*SDK_ARGS)
-        for settings in (
-            core.StreamSettings(),
-            core.StreamSettings(client_id="id"),
-            core.StreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
-        ):
-            with pytest.raises(ValueError, match="exactly one authentication method"):
-                native.open_stream(props, settings)
-            with pytest.raises(ValueError, match="exactly one authentication method"):
-                native.open_multiplexed_stream(props, settings, 2)
-
-    def test_async_requires_exactly_one_auth_method(self):
+    def test_requires_exactly_one_auth_method(self, mode):
         # The async open calls check the settings before they return an awaitable.
         props = core.TableProperties("c.s.t")
 
         async def run():
-            native = core.aio.ZerobusSdk(*SDK_ARGS)
+            native = (core.sync if mode == "sync" else core.aio).ZerobusSdk(*SDK_ARGS)
             for settings in (
                 core.StreamSettings(),
                 core.StreamSettings(client_id="id"),
@@ -356,8 +343,9 @@ class TestPublicSurface:
         assert inspect.iscoroutinefunction(aio.StreamBuilder.build)
         assert inspect.iscoroutinefunction(aio.MultiplexedStreamBuilder.build)
 
-    def test_multiplexed_stream_exposes_its_api(self, mode):
-        cls = (sync if mode == "sync" else aio).MultiplexedStream
+    def test_multiplexed_stream_exposes_its_api(self):
+        # The async class is checked by test_async_methods_are_coroutine_functions.
+        cls = sync.MultiplexedStream
         for name in (
             "is_closed",
             "ingest_record",
