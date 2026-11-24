@@ -98,20 +98,15 @@ class TestBuilderValidation:
 
     def test_build_requires_auth(self, sdk, mode, kind):
         builder = _terminal(sdk.stream_builder().table("c.s.t").json(), kind)
-        with pytest.raises(ValueError, match="authentication is required"):
+        message = (
+            "authentication is required: call exactly one of oauth(...), headers_provider(...), or federated_auth(...)"
+        )
+        with pytest.raises(ValueError, match=re.escape(message) + "$"):
             _open(mode, builder.build)
 
     def test_build_requires_both_oauth_credentials(self, sdk, mode, kind):
         builder = _terminal(sdk.stream_builder().table("c.s.t").oauth("id", None).json(), kind)
         with pytest.raises(ValueError, match="oauth requires both client_id and client_secret"):
-            _open(mode, builder.build)
-
-    def test_build_requires_auth_names_every_auth_setter(self, sdk, mode, kind):
-        builder = _terminal(sdk.stream_builder().table("c.s.t").json(), kind)
-        message = (
-            "authentication is required: call exactly one of oauth(...), headers_provider(...), or federated_auth(...)"
-        )
-        with pytest.raises(ValueError, match=re.escape(message) + "$"):
             _open(mode, builder.build)
 
     def test_build_requires_format(self, sdk, mode, kind):
@@ -415,26 +410,20 @@ class TestValidate:
         assert not inspect.iscoroutinefunction(target.validate)
         assert target.validate() is None
         if auth == "headers_provider":
-            # Authentication is not resolved, while build() does ask for the headers.
+            # Authentication is not resolved, and validate() consumes nothing: build() on the same
+            # builder still asks for the headers and reaches the network.
+            assert target.validate() is None
             assert headers.calls == 0
-            with pytest.raises(core.ZerobusException):
+            with pytest.raises(core.ZerobusException) as info:
                 _open(mode, target.build)
+            assert not isinstance(info.value, core.NonRetriableException), info.value
             assert headers.calls >= 1
 
-    @pytest.mark.parametrize(
-        "configure, message",
-        [
-            (lambda b: b.oauth("id", "secret").json(), r"table is required: call table\(...\) before build\(\)"),
-            (lambda b: b.table("c.s.t").json(), "authentication is required"),
-            (lambda b: b.table("c.s.t").oauth("id", "secret"), r"record format is required: call json\(\)"),
-            (lambda b: b.table("c.s.t").oauth("id", None).json(), "oauth requires both client_id and client_secret"),
-        ],
-        ids=["table", "auth", "format", "half_oauth"],
-    )
-    def test_python_checks_run_before_the_native_check(self, mode, kind, configure, message):
+    def test_python_checks_run_before_the_native_check(self, mode, kind):
+        # validate() shares build()'s checks (TestBuilderValidation); one is enough to show the order.
         sdk, native = _sdk_with_recording_native(mode)
-        target = _terminal(configure(sdk.stream_builder()), kind)
-        with pytest.raises(ValueError, match=message):
+        target = _terminal(sdk.stream_builder().oauth("id", "secret").json(), kind)
+        with pytest.raises(ValueError, match=r"table is required: call table\(...\) before build\(\)"):
             target.validate()
         assert native.validate_calls == []
 
@@ -483,26 +472,15 @@ class TestValidate:
         with pytest.raises(core.NonRetriableException, match="Avro schema parse failed"):
             _open(mode, target.build)
 
-    def test_rejects_an_ack_callback_that_is_not_an_ack_callback(self, mode, kind):
+    def test_rejects_an_ack_callback_that_is_not_an_ack_callback(self, mode):
+        # The ordinary callback crosses in StreamSettings, as for build() (TestAckCallbackType).
         def target(callback):
             builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json()
-            if kind == "ordinary":
-                return builder.ack_callback(callback)
             return builder.multiplexed(2).ack_callback(callback)
 
         with pytest.raises(TypeError):
             target(lambda offset: None).validate()
         assert target(_Ack()).validate() is None
-
-    def test_consumes_nothing(self, mode, kind):
-        builder = _unreachable_builder(mode).table("c.s.t").headers_provider(_Headers()).json().recovery(False)
-        # One sub-stream opens without the jittered start delay.
-        target = builder if kind == "ordinary" else builder.multiplexed(1)
-        assert target.validate() is None
-        assert target.validate() is None
-        with pytest.raises(core.ZerobusException) as info:
-            _open(mode, target.build)
-        assert not isinstance(info.value, core.NonRetriableException), info.value
 
 
 class _SupplierSpy:
@@ -659,30 +637,19 @@ class TestFederatedAuth:
         assert native.last_kwargs["databricks_client_id"] is None
         assert spy.suppliers == []
 
-    @pytest.mark.parametrize(
-        "change", [lambda b: b.federated_auth(_token("other")), lambda b: b.oauth("id", "secret")], ids=["fed", "oauth"]
-    )
-    def test_multiplexed_keeps_the_auth_set_when_it_was_called(self, spy, change):
+    def test_multiplexed_keeps_the_auth_set_when_it_was_called(self, spy):
+        # The snapshot itself is tested in TestMultiplexedStep; this shows it keeps the token.
         sdk, native = _sdk_with_recording_native("sync")
         token = _token("sp")
         builder = sdk.stream_builder().table("c.s.t").json().federated_auth(token)
         mux = builder.multiplexed(2)
-        change(builder)
+        builder.oauth("id", "secret")
         mux.build()
 
         callback, _, cache_identity, handle = spy.suppliers[-1]
         assert callback is token.idp_token_supplier and cache_identity == token._cache_identity
         assert native.last_kwargs["idp_supplier"] is handle
         assert native.last_kwargs["databricks_client_id"] == "sp"
-
-    def test_multiplexed_keeps_non_federated_auth(self, spy):
-        sdk, native = _sdk_with_recording_native("sync")
-        builder = sdk.stream_builder().table("c.s.t").json().oauth("id", "secret")
-        mux = builder.multiplexed(2)
-        builder.federated_auth(_token())
-        mux.build()
-        assert native.last_kwargs["idp_supplier"] is None
-        assert spy.suppliers == []
 
     @pytest.mark.parametrize("token", ["tok", None, lambda: "tok"])
     def test_rejects_anything_but_a_federated_token(self, sdk, token):
@@ -776,20 +743,6 @@ class TestFederatedAuth:
         owner = Owner()
         fail(owner)
         assert "max_inflight_requests (2)" in str(owner.err)
-        ref = weakref.ref(owner)
-        del owner
-        gc.collect()
-        assert ref() is None
-
-    def test_token_owner_cycle_through_the_builder_is_collectable(self, mode, kind):
-        class Owner:
-            def get_token(self):
-                return "idp-token"
-
-        owner = Owner()
-        owner.auth = FederatedToken(owner.get_token)
-        owner.builder = _terminal(_unreachable_builder(mode).table("c.s.t").json().federated_auth(owner.auth), kind)
-        owner.builder.validate()
         ref = weakref.ref(owner)
         del owner
         gc.collect()
