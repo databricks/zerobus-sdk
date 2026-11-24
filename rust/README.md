@@ -1460,7 +1460,7 @@ let result = stream.ingest_record_offset(oversized).await;
 // Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10420224 bytes
 ```
 
-The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
+The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. For a batch, the SDK stops at the first record that takes the total over the limit, so an oversized batch is never built in full. The call then fails as a whole and queues no records; the error names the 0-based index of that record and the total size up to it, so resend the whole batch in smaller parts, not only the records from that index on. Split large payloads across multiple calls to stay within the limit.
 
 The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (JSON and Protocol Buffer streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
 

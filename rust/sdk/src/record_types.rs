@@ -392,6 +392,42 @@ pub enum EncodedBatch {
     Avro(BatchRecords<AvroEncodedRecord>),
 }
 
+/// Most records [`EncodedBatch::try_from_encoded_iter`] reserves room for up front.
+/// A lazy iterator can report a huge or unbounded size hint, and the batch stops at
+/// the payload limit anyway; past this, the batch grows as records arrive.
+const MAX_PREALLOCATED_RECORDS: usize = 1024;
+
+/// Adds up the size of a batch while it is built and fails at the first record
+/// that makes it exceed `max_bytes`.
+pub(crate) struct PayloadSizeLimit {
+    max_bytes: usize,
+    total_bytes: usize,
+}
+
+impl PayloadSizeLimit {
+    pub(crate) fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            total_bytes: 0,
+        }
+    }
+
+    /// Adds `bytes` for the record at `index`, or returns `InvalidArgument` if the
+    /// batch now exceeds the limit.
+    // `ZerobusError` is large, but the SDK returns it by value everywhere.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn add(&mut self, index: usize, bytes: usize) -> ZerobusResult<()> {
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        if self.total_bytes > self.max_bytes {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "Ingest payload too large: {} bytes after record {index} exceeds the configured limit of {} bytes",
+                self.total_bytes, self.max_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl EncodedBatch {
     /// Try to convert a single record into an encoded batch of the provided type.
     /// If the record type does not match the provided type, None is returned.
@@ -418,14 +454,21 @@ impl EncodedBatch {
     /// batch of the given type, in a single pass.
     ///
     /// Returns the first per-record error, or `InvalidArgument` if a record's encoding
-    /// does not match `record_type`. An empty iterator yields an empty batch.
-    pub(crate) fn try_from_encoded_iter<I>(iter: I, record_type: RecordType) -> ZerobusResult<Self>
+    /// does not match `record_type` or the batch grows past `max_payload_bytes`. It
+    /// stops at the first record that exceeds the limit, so an oversized batch is
+    /// never built in full. An empty iterator yields an empty batch.
+    pub(crate) fn try_from_encoded_iter<I>(
+        iter: I,
+        record_type: RecordType,
+        max_payload_bytes: usize,
+    ) -> ZerobusResult<Self>
     where
         I: IntoIterator<Item = ZerobusResult<EncodedRecord>>,
     {
-        let iter = iter.into_iter();
+        let iter = iter.into_iter().enumerate();
+        let mut limit = PayloadSizeLimit::new(max_payload_bytes);
         let (lower, upper) = iter.size_hint();
-        let size_hint = upper.unwrap_or(lower);
+        let size_hint = upper.unwrap_or(lower).min(MAX_PREALLOCATED_RECORDS);
         let mismatch = || {
             ZerobusError::InvalidArgument(
                 "Record type does not match stream configuration".to_string(),
@@ -435,9 +478,12 @@ impl EncodedBatch {
         match record_type {
             RecordType::Json => {
                 let mut vec = SmallVec::with_capacity(size_hint);
-                for record in iter {
+                for (index, record) in iter {
                     match record? {
-                        EncodedRecord::Json(value) => vec.push(value),
+                        EncodedRecord::Json(value) => {
+                            limit.add(index, value.len())?;
+                            vec.push(value)
+                        }
                         _ => return Err(mismatch()),
                     }
                 }
@@ -445,9 +491,12 @@ impl EncodedBatch {
             }
             RecordType::Proto => {
                 let mut vec = SmallVec::with_capacity(size_hint);
-                for record in iter {
+                for (index, record) in iter {
                     match record? {
-                        EncodedRecord::Proto(value) => vec.push(value),
+                        EncodedRecord::Proto(value) => {
+                            limit.add(index, value.len())?;
+                            vec.push(value)
+                        }
                         _ => return Err(mismatch()),
                     }
                 }
@@ -456,9 +505,12 @@ impl EncodedBatch {
             #[cfg(feature = "avro")]
             RecordType::Avro => {
                 let mut vec = SmallVec::with_capacity(size_hint);
-                for record in iter {
+                for (index, record) in iter {
                     match record? {
-                        EncodedRecord::Avro(value) => vec.push(value),
+                        EncodedRecord::Avro(value) => {
+                            limit.add(index, value.len())?;
+                            vec.push(value)
+                        }
                         _ => return Err(mismatch()),
                     }
                 }
@@ -862,7 +914,69 @@ mod tests {
             EncodedBatch::try_from_encoded_iter(
                 batch.into_iter().map(|r| Ok(r.into())),
                 record_type,
+                usize::MAX,
             )
+        }
+
+        #[test]
+        fn batch_over_the_limit_stops_at_the_first_record_that_exceeds_it() {
+            let pulled = std::cell::Cell::new(0);
+            let records = (0..1000).map(|_| {
+                pulled.set(pulled.get() + 1);
+                Ok(EncodedRecord::Json("x".repeat(10)))
+            });
+
+            let err =
+                EncodedBatch::try_from_encoded_iter(records, RecordType::Json, 25).unwrap_err();
+
+            assert_eq!(pulled.get(), 3, "records 0 and 1 fit, record 2 exceeds");
+            let ZerobusError::InvalidArgument(msg) = err else {
+                panic!("expected InvalidArgument, got {err:?}");
+            };
+            assert!(
+                msg.contains("record 2") && msg.contains("limit of 25 bytes"),
+                "{msg}"
+            );
+        }
+
+        /// Yields its count of empty JSON objects but reports an unbounded size
+        /// hint, as an endless lazy source does.
+        struct UnboundedHint(usize);
+
+        impl Iterator for UnboundedHint {
+            type Item = ZerobusResult<EncodedRecord>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.0 = self.0.checked_sub(1)?;
+                Some(Ok(EncodedRecord::Json("{}".to_string())))
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (usize::MAX, None)
+            }
+        }
+
+        #[test]
+        fn an_unbounded_size_hint_is_not_preallocated() {
+            let batch = EncodedBatch::try_from_encoded_iter(UnboundedHint(3), RecordType::Json, 64)
+                .unwrap();
+
+            let EncodedBatch::Json(BatchRecords(records)) = batch else {
+                panic!("expected a JSON batch");
+            };
+            assert_eq!(records.len(), 3);
+            assert!(records.capacity() <= MAX_PREALLOCATED_RECORDS);
+        }
+
+        #[test]
+        fn batch_of_exactly_the_limit_is_accepted() {
+            let records = (0..3).map(|_| Ok(EncodedRecord::Proto(vec![0u8; 10])));
+
+            let batch =
+                EncodedBatch::try_from_encoded_iter(records, RecordType::Proto, 30).unwrap();
+
+            assert_eq!(batch.get_record_count(), 3);
+            assert_eq!(batch.total_byte_size(), 30);
         }
 
         #[test]

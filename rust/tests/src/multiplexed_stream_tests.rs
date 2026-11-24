@@ -1,6 +1,7 @@
 mod utils;
 
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -91,6 +92,42 @@ mod construction_tests {
         assert!(
             matches!(&result, Err(ZerobusError::InvalidArgument(msg)) if *msg == expected),
             "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingest_records_stops_reading_at_the_first_record_over_the_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = create_test_sdk(&server_url).await?;
+        let mux = sdk
+            .stream_builder()
+            .table("builder.schema.lazy_batch")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_ingest_payload_bytes(25)
+            .multiplexed(2)
+            .build()
+            .await?;
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&pulled);
+        let records = (0..1000).map(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            JsonString("x".repeat(10))
+        });
+
+        let result = mux.ingest_records(records).await;
+
+        assert!(
+            matches!(&result, Err(ZerobusError::InvalidArgument(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            pulled.load(Ordering::SeqCst),
+            3,
+            "records 0 and 1 fit, record 2 exceeds the limit"
         );
         Ok(())
     }
