@@ -15,6 +15,7 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tracing::{debug, instrument, warn};
 
+use crate::builder::HeadersProviderFactory;
 use crate::databricks::zerobus::InsertRecordsRequest;
 use crate::errors::should_retry_initial_connection;
 use crate::grpc_channel::GrpcChannelSource;
@@ -69,7 +70,9 @@ pub(crate) struct UnaryOptions {
 pub struct UnaryClient {
     channel_source: Arc<GrpcChannelSource>,
     table_name: String,
-    headers_provider: Arc<dyn HeadersProvider>,
+    /// Gives each call its own provider, so a call's auth rejection invalidates
+    /// only the token that call was served.
+    headers_provider_factory: HeadersProviderFactory,
     options: UnaryOptions,
 }
 
@@ -85,13 +88,13 @@ impl UnaryClient {
     pub(crate) fn new(
         channel_source: Arc<GrpcChannelSource>,
         table_name: String,
-        headers_provider: Arc<dyn HeadersProvider>,
+        headers_provider_factory: HeadersProviderFactory,
         options: UnaryOptions,
     ) -> Self {
         Self {
             channel_source,
             table_name,
-            headers_provider,
+            headers_provider_factory,
             options,
         }
     }
@@ -193,10 +196,12 @@ impl UnaryClient {
     /// refresh its credential.
     async fn send_with_retries(&self, request: &InsertRecordsRequest) -> ZerobusResult<()> {
         let options = &self.options;
+        let headers_provider = (self.headers_provider_factory)();
+        let headers_provider = headers_provider.as_ref();
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
         let mut auth_retry_available =
-            options.recovery_retries > 0 && self.headers_provider.can_refresh();
+            options.recovery_retries > 0 && headers_provider.can_refresh();
         let max_attempts = if options.recovery {
             options.recovery_retries.saturating_add(1)
         } else {
@@ -207,7 +212,7 @@ impl UnaryClient {
             attempts += 1;
             let attempt_no = attempts;
             async move {
-                let result = self.send_attempt(request).await;
+                let result = self.send_attempt(request, headers_provider).await;
                 if let Err(e) = &result {
                     warn!(
                         attempt = attempt_no,
@@ -230,24 +235,31 @@ impl UnaryClient {
     /// One attempt, bounded by `server_lack_of_ack_timeout_ms`. After an auth
     /// rejection it invalidates the credential within the rest of that deadline,
     /// so a stalled provider cannot turn the rejection into a retryable timeout.
-    async fn send_attempt(&self, request: &InsertRecordsRequest) -> ZerobusResult<()> {
+    async fn send_attempt(
+        &self,
+        request: &InsertRecordsRequest,
+        headers_provider: &dyn HeadersProvider,
+    ) -> ZerobusResult<()> {
         let timeout_ms = self.options.server_lack_of_ack_timeout_ms;
         let attempt_timeout = Duration::from_millis(timeout_ms);
         let attempt_started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(attempt_timeout, self.send_once(request.clone()))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ZerobusError::UnaryIngestError(
-                    GrpcStatus::deadline_exceeded(format!(
-                        "InsertRecords attempt timed out after {timeout_ms} ms"
-                    )),
-                ))
-            });
+        let result = tokio::time::timeout(
+            attempt_timeout,
+            self.send_once(request.clone(), headers_provider),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(ZerobusError::UnaryIngestError(
+                GrpcStatus::deadline_exceeded(format!(
+                    "InsertRecords attempt timed out after {timeout_ms} ms"
+                )),
+            ))
+        });
 
         if let Err(err) = &result {
             let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
             if err.is_auth_rejection()
-                && tokio::time::timeout(invalidate_timeout, self.headers_provider.invalidate())
+                && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
                     .await
                     .is_err()
             {
@@ -260,8 +272,12 @@ impl UnaryClient {
         result
     }
 
-    async fn send_once(&self, request: InsertRecordsRequest) -> ZerobusResult<()> {
-        let headers = self.headers_provider.get_headers().await?;
+    async fn send_once(
+        &self,
+        request: InsertRecordsRequest,
+        headers_provider: &dyn HeadersProvider,
+    ) -> ZerobusResult<()> {
+        let headers = headers_provider.get_headers().await?;
         let mut request = tonic::Request::new(request);
         *request.metadata_mut() = grpc_metadata_from_headers(headers, &self.table_name)?;
         // Asking the source on every attempt picks up rotated TLS certificates.
@@ -353,6 +369,7 @@ fn validate_json_object(record: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::headers_provider::tests::MockTokenEndpoint;
     use crate::{JsonString, JsonValue, ProtoBytes};
 
     fn invalid_argument(result: ZerobusResult<Option<Vec<u8>>>) -> String {
@@ -438,6 +455,48 @@ mod tests {
             msg.contains("7 bytes") && msg.contains("limit of 6 bytes"),
             "{msg}"
         );
+    }
+
+    /// Two calls rejected with the same token: each call has its own provider,
+    /// so the second call's rejection doesn't drop the token that the first
+    /// call's retry already minted. One shared provider would reject that newer
+    /// token too and mint a third.
+    #[tokio::test]
+    async fn concurrent_rejections_of_one_token_mint_one_new_token() {
+        let mock = MockTokenEndpoint::start();
+        let sdk = crate::ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            mock.base_url.clone(),
+            "12345".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            true,
+        );
+        let client = sdk
+            .unary_client_builder()
+            .table("cat.sch.tbl")
+            .oauth("id", "secret")
+            .json()
+            .build()
+            .await
+            .unwrap();
+        let (first, second) = (
+            (client.headers_provider_factory)(),
+            (client.headers_provider_factory)(),
+        );
+
+        let sent = first.get_headers().await.unwrap();
+        assert_eq!(second.get_headers().await.unwrap(), sent);
+        first.invalidate().await;
+        let retried = first.get_headers().await.unwrap();
+        second.invalidate().await;
+
+        assert_eq!(second.get_headers().await.unwrap(), retried);
+        assert_ne!(retried, sent);
+        assert_eq!(mock.mint_count(), 2);
     }
 
     #[test]

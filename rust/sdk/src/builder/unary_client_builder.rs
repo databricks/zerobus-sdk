@@ -193,7 +193,7 @@ impl<'a> UnaryClientBuilder<'a> {
         // refresh gets half of it, as a stream's refresh gets half of its
         // recovery timeout.
         let refresh_timeout = Duration::from_millis(core.server_lack_of_ack_timeout_ms) / 2;
-        let headers_provider = core.resolve_headers_provider(refresh_timeout)?;
+        let headers_provider_factory = core.headers_provider_factory(refresh_timeout)?;
         // The channel itself opens inside the first attempt, so a TLS read that
         // fails mid-rotation is retried there, as on streams.
         base_endpoint(&core.sdk.zerobus_endpoint, &core.sdk.sdk_identifier)?;
@@ -201,7 +201,7 @@ impl<'a> UnaryClientBuilder<'a> {
         Ok(UnaryClient::new(
             core.sdk.unary_channel_source(),
             core.table_name,
-            headers_provider,
+            headers_provider_factory,
             UnaryOptions {
                 recovery: core.recovery,
                 recovery_retries: core.recovery_retries,

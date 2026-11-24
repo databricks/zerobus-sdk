@@ -708,7 +708,7 @@ pub(crate) fn grpc_metadata_from_headers(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -768,14 +768,14 @@ mod tests {
     /// reqwest-based exchange against it. Each request is answered with a fresh
     /// `dbx-token-<n>` so tests can tell a real mint from a cache hit, and every
     /// request body is captured for assertions on the request shape.
-    struct MockTokenEndpoint {
-        base_url: String,
+    pub(crate) struct MockTokenEndpoint {
+        pub(crate) base_url: String,
         request_bodies: Arc<std::sync::Mutex<Vec<String>>>,
         mint_count: Arc<AtomicUsize>,
     }
 
     impl MockTokenEndpoint {
-        fn start() -> Self {
+        pub(crate) fn start() -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -804,7 +804,7 @@ mod tests {
             }
         }
 
-        fn mint_count(&self) -> usize {
+        pub(crate) fn mint_count(&self) -> usize {
             self.mint_count.load(Ordering::SeqCst)
         }
 

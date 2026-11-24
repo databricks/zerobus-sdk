@@ -142,6 +142,9 @@ fn missing_auth_text(pat_hint: &str) -> String {
     }
 }
 
+/// Builds the headers provider for one unary call.
+pub(crate) type HeadersProviderFactory = Arc<dyn Fn() -> Arc<dyn HeadersProvider> + Send + Sync>;
+
 /// Target, format, and retry settings shared by the client builders.
 pub(super) struct ClientBuilderCore<'a> {
     pub(super) sdk: &'a ZerobusSdk,
@@ -263,43 +266,71 @@ impl<'a> ClientBuilderCore<'a> {
         &self,
         refresh_timeout: Duration,
     ) -> ZerobusResult<Arc<dyn HeadersProvider>> {
+        Ok(self.headers_provider_factory(refresh_timeout)?())
+    }
+
+    /// Like [`resolve_headers_provider`](Self::resolve_headers_provider), but
+    /// returns a factory that a unary client calls once per call. OAuth and
+    /// federation get a new provider each time, sharing the SDK's token cache,
+    /// so a call invalidates only the token it was served. Other providers are
+    /// shared by every call.
+    pub(super) fn headers_provider_factory(
+        &self,
+        refresh_timeout: Duration,
+    ) -> ZerobusResult<HeadersProviderFactory> {
+        let table_name = self.table_name.clone();
+        let workspace_id = self.sdk.workspace_id.clone();
+        let unity_catalog_url = self.sdk.unity_catalog_url.clone();
+        let token_cache = Arc::clone(&self.sdk.token_cache);
+        let shared = |provider: Arc<dyn HeadersProvider>| -> HeadersProviderFactory {
+            Arc::new(move || Arc::clone(&provider))
+        };
         match self.auth.as_ref() {
             Some(AuthConfig::OAuth {
                 client_id,
                 client_secret,
-            }) => Ok(Arc::new(OAuthHeadersProvider::with_cache(
-                client_id.clone(),
-                client_secret.clone(),
-                self.table_name.clone(),
-                self.sdk.workspace_id.clone(),
-                self.sdk.unity_catalog_url.clone(),
-                Arc::clone(&self.sdk.token_cache),
-                Some(refresh_timeout),
-            ))),
+            }) => {
+                let (client_id, client_secret) = (client_id.clone(), client_secret.clone());
+                Ok(Arc::new(move || {
+                    Arc::new(OAuthHeadersProvider::with_cache(
+                        client_id.clone(),
+                        client_secret.clone(),
+                        table_name.clone(),
+                        workspace_id.clone(),
+                        unity_catalog_url.clone(),
+                        Arc::clone(&token_cache),
+                        Some(refresh_timeout),
+                    ))
+                }))
+            }
             Some(AuthConfig::FederatedAuth {
                 idp_token_supplier,
                 client_id,
             }) => {
+                let (idp_token_supplier, client_id) =
+                    (idp_token_supplier.clone(), client_id.clone());
                 // Federation mirrors OAuth's proactive-refresh bound so a stalled
                 // token exchange falls back to the cached token before the setup
                 // deadline, keeping client-credentials and token-exchange at parity.
-                Ok(Arc::new(FederatedTokenProvider::with_cache(
-                    client_id.clone(),
-                    idp_token_supplier.clone(),
-                    self.table_name.clone(),
-                    self.sdk.workspace_id.clone(),
-                    self.sdk.unity_catalog_url.clone(),
-                    Arc::clone(&self.sdk.token_cache),
-                    Some(refresh_timeout),
-                )))
+                Ok(Arc::new(move || {
+                    Arc::new(FederatedTokenProvider::with_cache(
+                        client_id.clone(),
+                        idp_token_supplier.clone(),
+                        table_name.clone(),
+                        workspace_id.clone(),
+                        unity_catalog_url.clone(),
+                        Arc::clone(&token_cache),
+                        Some(refresh_timeout),
+                    ))
+                }))
             }
-            Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
+            Some(AuthConfig::HeadersProvider(p)) => Ok(shared(Arc::clone(p))),
             #[cfg(feature = "pat-auth")]
-            Some(AuthConfig::PersonalAccessToken { token }) => Ok(Arc::new(
-                PatHeadersProvider::new(token.clone(), self.table_name.clone()),
-            )),
+            Some(AuthConfig::PersonalAccessToken { token }) => Ok(shared(Arc::new(
+                PatHeadersProvider::new(token.clone(), table_name),
+            ))),
             #[cfg(feature = "testing")]
-            Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
+            Some(AuthConfig::NoAuth) => Ok(shared(Arc::new(NoAuthHeadersProvider))),
             None => Err(ZerobusError::InvalidArgument(missing_auth_error())),
         }
     }
