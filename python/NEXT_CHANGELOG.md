@@ -38,3 +38,9 @@
 - `create_stream(auth=...)` now accepts a `PersonalAccessToken` as well as a
   `FederatedToken`. As before, `auth=` cannot be combined with
   `client_id`/`client_secret` (Private Preview).
+- Added the **Beta**, testing-only `no_tls` parameter to the sync `ZerobusSdk` constructor
+  and the `no_auth` parameter to the sync `ZerobusSdk.create_stream`, for the Layer-1
+  conformance test harness. They disable TLS and auth and must never be used against a
+  real endpoint. The parameters ship in every wheel; the behavior is gated behind the
+  `testing` feature (`maturin build --features testing`). In a wheel built without that
+  feature, `no_tls=True` raises `ValueError`, and `no_auth=True` fails at call time.
