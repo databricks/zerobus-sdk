@@ -11,10 +11,10 @@ access token, or a custom headers provider for authentication. The Avro format a
 external-IdP federation are not supported.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import zerobus._zerobus_core as _core
-from zerobus.sdk.shared.auth import _require_non_empty_token
+from zerobus.sdk.shared.auth import PersonalAccessToken, _require_non_empty_token
 
 _MAX_U32 = 2**32 - 1
 _MAX_I64 = 2**63 - 1
@@ -63,7 +63,7 @@ class _PersistentStreamBuilderBase:
         self._headers_provider = provider
         return self
 
-    def personal_access_token(self, token: str):
+    def personal_access_token(self, token: Union[str, PersonalAccessToken]):
         """Authenticate with a Databricks personal access token (PAT).
 
         Private Preview: PAT authentication for Zerobus requires server-side
@@ -73,9 +73,18 @@ class _PersistentStreamBuilderBase:
         Zerobus endpoint belongs to; see ``PersonalAccessToken``. Replaces an earlier
         authentication setter.
 
+        The SDK cannot refresh the token. Once it expires, call ``resume(stream_id)``
+        on a new builder that has a fresh token.
+
+        Args:
+            token: The token string, or a ``PersonalAccessToken`` wrapping it.
+
         Raises:
-            ValueError: If ``token`` is empty or not a string.
+            ValueError: If ``token`` is empty, or neither a string nor a
+                ``PersonalAccessToken``.
         """
+        if isinstance(token, PersonalAccessToken):
+            token = token.token
         token = _require_non_empty_token(token)
         self._clear_auth()
         self._personal_access_token = token

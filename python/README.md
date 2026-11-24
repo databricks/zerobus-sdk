@@ -410,7 +410,8 @@ stream.close()
 
 `PersonalAccessToken` raises `ValueError` for an empty token, is immutable, and leaves
 the token out of its `repr()`. The async SDK takes the same `auth=` argument. Persistent
-streams use the builder method `personal_access_token(token)` instead.
+streams use the builder method `personal_access_token(token)` instead; it takes the token
+string or a `PersonalAccessToken`.
 
 See [`examples/sync_example_pat.py`](examples/sync_example_pat.py) for a complete example.
 
@@ -427,7 +428,8 @@ exactly-once.
 
 Persistent streams support JSON and protobuf records. They authenticate with OAuth, a
 personal access token (Private Preview), or a custom headers provider. They do not
-support Avro or external-IdP federation.
+support Avro or external-IdP federation. The SDK cannot refresh a PAT; once it expires,
+call `resume(stream_id)` on a new builder that has a fresh token.
 
 > **Experimental.** The persistent stream API in the Rust core is in development. It can
 > change in a minor release.
@@ -686,10 +688,10 @@ multiplexing is recommended there to reduce connection overhead.
 
 ```python
 # Sync
-stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
+stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, auth=None)
 # Async
 async def create_async_stream(sdk):
-    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
+    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, auth=None)
 ```
 
 ### `ZerobusStream`

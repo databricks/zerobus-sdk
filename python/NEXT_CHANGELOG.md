@@ -39,5 +39,6 @@
 - `create_stream(auth=...)` now accepts a `PersonalAccessToken` as well as a
   `FederatedToken`. As before, `auth=` cannot be combined with
   `client_id`/`client_secret` (Private Preview).
-- Added `PersistentStreamBuilder.personal_access_token(token)`. It replaces an earlier
-  `oauth()` or `headers_provider()` call, and they replace it (Private Preview).
+- Added `PersistentStreamBuilder.personal_access_token(token)`, taking the token string or
+  a `PersonalAccessToken`. It replaces an earlier `oauth()` or `headers_provider()` call,
+  and they replace it (Private Preview).
