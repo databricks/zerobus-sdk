@@ -937,6 +937,79 @@ async fn oauth_client_mints_once_and_remints_after_a_rejection() {
     assert_eq!(oauth.mint_count(), 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_calls_rejected_with_one_token_mint_one_new_token() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let (oauth, uc_url) = start_mock_oauth_server().await;
+    oauth
+        .set_responses(vec![
+            MockTokenResponse::ok("token-1"),
+            MockTokenResponse::ok("token-2"),
+            MockTokenResponse::ok("token-3"),
+        ])
+        .await;
+    // Both calls send token-1. The first call is rejected and retried with
+    // token-2 well before the second call's rejection arrives.
+    server
+        .inject_insert_responses(vec![
+            MockInsertResponse::Error {
+                status: Status::unauthenticated("expired"),
+                delay_ms: 500,
+            },
+            MockInsertResponse::Error {
+                status: Status::unauthenticated("expired"),
+                delay_ms: 3_000,
+            },
+        ])
+        .await;
+    let sdk = ZerobusSdk::builder()
+        .endpoint(&url)
+        .unity_catalog_url(uc_url)
+        .no_tls()
+        .build()
+        .unwrap();
+    let client = Arc::new(
+        sdk.unary_client_builder()
+            .table(TABLE_NAME)
+            .oauth("client-id", "client-secret")
+            .json()
+            .recovery_backoff_ms(10)
+            .server_lack_of_ack_timeout_ms(10_000)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let spawn_call = |ids: std::ops::Range<i32>| {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.ingest_records(records(ids)).await })
+    };
+
+    let first = spawn_call(0..1);
+    wait_for_requests(&server, 1, |_| true).await;
+    let second = spawn_call(1..2);
+    bounded(first).await.unwrap().unwrap();
+    bounded(second).await.unwrap().unwrap();
+
+    // The second rejection must not drop token-2, which the first call's retry
+    // was served after the same token-1 was rejected.
+    let tokens: Vec<_> = requests(&server)
+        .await
+        .iter()
+        .map(|r| header(r, "authorization").unwrap().to_string())
+        .collect();
+    assert_eq!(
+        tokens,
+        [
+            "Bearer token-1",
+            "Bearer token-1",
+            "Bearer token-2",
+            "Bearer token-2"
+        ]
+    );
+    assert_eq!(oauth.mint_count(), 2);
+}
+
 #[tokio::test]
 async fn hung_oauth_refresh_gets_half_the_attempt_timeout_and_falls_back_to_the_cached_token() {
     setup_tracing();
