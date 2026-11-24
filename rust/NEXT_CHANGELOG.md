@@ -53,8 +53,8 @@
   with a fixed credential returns `false` to skip the one-shot auth retry during stream
   creation or a unary call; `PatHeadersProvider` does. Existing implementations are
   unaffected.
-- Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, and
-  `UnaryClient`.
+- Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, `UnaryClient`,
+  and `UnaryIngestResult`.
 - Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
   `InsertRecords` call fails with a gRPC status. `ZerobusError` is
   `#[non_exhaustive]`, so this is not a breaking change.

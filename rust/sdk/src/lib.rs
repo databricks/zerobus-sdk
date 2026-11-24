@@ -134,7 +134,7 @@ pub use stream_configuration::{RecordType, StreamConfigurationOptions};
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig, TlsSettings};
-pub use unary_client::UnaryClient;
+pub use unary_client::{UnaryClient, UnaryIngestResult};
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;

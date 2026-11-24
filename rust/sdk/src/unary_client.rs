@@ -32,6 +32,15 @@ pub(crate) struct UnaryOptions {
     pub(crate) max_ingest_payload_bytes: usize,
 }
 
+/// The result of a successful unary ingest call.
+///
+/// It has no fields: the server returns no data for `InsertRecords`. It is
+/// `#[non_exhaustive]`, so fields can be added if the server starts returning
+/// data, without a breaking change.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct UnaryIngestResult {}
+
 /// A client that ingests JSON records into one table without opening a stream.
 ///
 /// Each [`ingest_records`](Self::ingest_records) call sends its batch in one
@@ -117,7 +126,10 @@ impl UnaryClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn ingest_record(&self, record: impl Into<PreparedInput>) -> ZerobusResult<()> {
+    pub async fn ingest_record(
+        &self,
+        record: impl Into<PreparedInput>,
+    ) -> ZerobusResult<UnaryIngestResult> {
         self.ingest_records([record]).await
     }
 
@@ -133,7 +145,7 @@ impl UnaryClient {
     /// it unknown whether the batch was written; only the client-side
     /// `InvalidArgument` errors below guarantee nothing was written.
     ///
-    /// An empty batch returns `Ok(())` without sending anything, like stream
+    /// An empty batch returns at once without sending anything, like stream
     /// ingest.
     ///
     /// # Arguments
@@ -172,7 +184,7 @@ impl UnaryClient {
     /// # }
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_name))]
-    pub async fn ingest_records<I, T>(&self, records: I) -> ZerobusResult<()>
+    pub async fn ingest_records<I, T>(&self, records: I) -> ZerobusResult<UnaryIngestResult>
     where
         I: IntoIterator<Item = T>,
         T: Into<PreparedInput>,
@@ -180,14 +192,15 @@ impl UnaryClient {
         let Some(records_json) =
             build_request_body(records, self.options.max_ingest_payload_bytes)?
         else {
-            return Ok(());
+            return Ok(UnaryIngestResult::default());
         };
         debug!(body_bytes = records_json.len(), "Sending InsertRecords");
         let request = InsertRecordsRequest {
             table_name: Some(self.table_name.clone()),
             records_json: Some(records_json.into()),
         };
-        self.send_with_retries(&request).await
+        self.send_with_retries(&request).await?;
+        Ok(UnaryIngestResult::default())
     }
 
     /// Sends the request, retrying retryable errors `recovery_backoff_ms` apart up

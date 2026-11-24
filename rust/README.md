@@ -1803,17 +1803,21 @@ A client that ingests JSON records into one table without opening a stream. See 
 
 **Methods:**
 ```rust
-pub async fn ingest_records<I, T>(&self, records: I) -> ZerobusResult<()>
+pub async fn ingest_records<I, T>(&self, records: I) -> ZerobusResult<UnaryIngestResult>
 where
     I: IntoIterator<Item = T>,
     T: Into<PreparedInput>,
 ```
-Sends all records in one call and returns once they are durable. An empty batch returns `Ok(())` without sending anything.
+Sends all records in one call and returns once they are durable. An empty batch returns at once without sending anything.
 
 ```rust
-pub async fn ingest_record(&self, record: impl Into<PreparedInput>) -> ZerobusResult<()>
+pub async fn ingest_record(&self, record: impl Into<PreparedInput>) -> ZerobusResult<UnaryIngestResult>
 ```
 The same as `ingest_records` with one record. For very sparse traffic only.
+
+### `UnaryIngestResult`
+
+The result of a successful unary ingest call. It has no fields: the server returns no data for `InsertRecords`. It is `#[non_exhaustive]`, so fields can be added later without a breaking change.
 
 ### `MultiplexedStream`
 
