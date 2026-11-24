@@ -114,11 +114,12 @@ impl fmt::Display for GrpcCode {
     }
 }
 
-/// A gRPC status that the Zerobus server or the SDK reports for a failed stream.
+/// A gRPC status that the Zerobus server or the SDK reports for a failed stream
+/// or unary call.
 ///
-/// `ZerobusError::CreateStreamError` and `ZerobusError::StreamClosedError`
-/// carry this type. Use [`code`](Self::code) to branch on the failure and
-/// [`message`](Self::message) to read the text.
+/// `ZerobusError::CreateStreamError`, `ZerobusError::StreamClosedError`, and
+/// `ZerobusError::UnaryIngestError` carry this type. Use [`code`](Self::code) to
+/// branch on the failure and [`message`](Self::message) to read the text.
 ///
 /// The `Display` output is the same text that `tonic::Status` prints:
 /// `code: '<description>'`, then `, message: "<message>"` when the message is

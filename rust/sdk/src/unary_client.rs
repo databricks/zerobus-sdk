@@ -158,10 +158,26 @@ impl UnaryClient {
     /// * `InvalidArgument` - A record that is not JSON (e.g. `ProtoMessage`), a
     ///   record that is not exactly one valid JSON object, or a batch whose
     ///   request body is larger than `max_ingest_payload_bytes`. For a bad record,
-    ///   the message names its 0-based index. Nothing is sent.
-    /// * `UnaryIngestError` - The server rejected the batch, the connection failed,
-    ///   or an attempt timed out (`DeadlineExceeded`), after retries are exhausted.
-    /// * Errors from the headers provider, such as `TokenFetchError`.
+    ///   the message names its 0-based index. It is also returned for settings
+    ///   the SDK can't use: on the first call, a TLS file that is missing or
+    ///   can't be read, TLS material passed as PEM data that the SDK can't use, or
+    ///   a proxy URL that can't be parsed; on any call, a custom header from the
+    ///   headers provider with an invalid name or value. Not retried, and nothing
+    ///   is sent.
+    /// * `UnaryIngestError` - The server rejected the batch, the server could not
+    ///   be reached (`Unavailable`, for example a DNS, connection or TLS handshake
+    ///   failure), or an attempt timed out (`DeadlineExceeded`), after retries are
+    ///   exhausted. The attempt timeout also covers getting the headers, so a
+    ///   headers provider that takes longer than `server_lack_of_ack_timeout_ms`
+    ///   gives `DeadlineExceeded` although that attempt sent nothing.
+    /// * `ChannelCreationError` - The SDK could not set up the channel: the
+    ///   content of a TLS file can't be used (for example a certificate that
+    ///   doesn't match the key while a rotation is in progress), or the proxy
+    ///   connector can't load its root certificates. Retried.
+    /// * `InvalidTableName` or `InvalidUCTokenError` - The headers provider returned
+    ///   a table name or `authorization` value that isn't a valid HTTP header
+    ///   value. Not retried.
+    /// * Other errors from the headers provider, such as `TokenFetchError`.
     ///
     /// # Examples
     ///
