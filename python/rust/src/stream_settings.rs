@@ -348,6 +348,7 @@ impl StreamConfig {
 /// `validate_stream` for the sync and async SDKs: resolve the settings, then run the Rust
 /// core's checks. Synchronous in both, as Rust's `validate()` is, so it never needs a
 /// runtime. Nothing takes the SDK's write lock, so `try_read` does not fail in practice.
+// Takes every argument of the sync and async validate_stream methods, which share it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_stream(
     py: Python<'_>,

@@ -775,6 +775,7 @@ impl ZerobusSdk {
         idp_supplier = None,
         databricks_client_id = None
     ))]
+    // Each Python argument is one Rust parameter, so the Python signature sets the count.
     #[allow(clippy::too_many_arguments)]
     fn open_multiplexed_stream(
         &self,
@@ -828,6 +829,7 @@ impl ZerobusSdk {
         idp_supplier = None,
         databricks_client_id = None
     ))]
+    // Each Python argument is one Rust parameter, so the Python signature sets the count.
     #[allow(clippy::too_many_arguments)]
     fn validate_stream(
         &self,
