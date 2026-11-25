@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, TlsConfig, TlsSettings, ZerobusResult, ZerobusSdk,
+    HeadersProvider, TlsConfig, TlsSettings, UnaryClient, UnaryClientBuilder, UnaryIngestResult,
+    ZerobusResult, ZerobusSdk,
 };
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tracing::info;
@@ -141,7 +142,7 @@ async fn client_identity_opens_a_stream_and_a_missing_identity_does_not(
 /// A mutual TLS mock server that trusts one client identity, and identity files
 /// that start out holding an identity the server doesn't trust.
 struct RotationFixture {
-    _mock_server: MockZerobusServer,
+    mock_server: MockZerobusServer,
     server_url: String,
     server_ca_pem: Vec<u8>,
     _dir: tempfile::TempDir,
@@ -182,7 +183,7 @@ impl RotationFixture {
         std::fs::write(&key_path, untrusted.key_pair.serialize_pem())?;
 
         Ok(Self {
-            _mock_server: mock_server,
+            mock_server,
             server_url,
             server_ca_pem,
             _dir: dir,
@@ -389,5 +390,139 @@ async fn stream_creation_retries_identity_files_caught_mid_rotation(
         .await?;
     stream.flush().await?;
     stream.close().await?;
+    Ok(())
+}
+
+/// A unary client for `TABLE_NAME` on `sdk`, adjusted by `configure`.
+async fn unary_client(
+    sdk: &ZerobusSdk,
+    headers_provider: Arc<dyn HeadersProvider>,
+    configure: impl FnOnce(UnaryClientBuilder<'_>) -> UnaryClientBuilder<'_>,
+) -> Result<UnaryClient, Box<dyn std::error::Error>> {
+    let builder = sdk
+        .unary_client_builder()
+        .table(TABLE_NAME)
+        .headers_provider(headers_provider)
+        .json();
+    Ok(configure(builder).build().await?)
+}
+
+/// Sends one record on `client`, failing the test if the call hangs.
+async fn ingest_one_unary_record(
+    client: &UnaryClient,
+) -> Result<ZerobusResult<UnaryIngestResult>, Box<dyn std::error::Error>> {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        client.ingest_record(r#"{"id": 1, "message": "mtls unary test"}"#.to_string()),
+    )
+    .await
+    .map_err(|_| "the unary call timed out".into())
+}
+
+/// Unary clients share one channel. Before each call the SDK reads the identity
+/// files again and opens a new channel when they changed.
+#[tokio::test]
+async fn unary_client_picks_up_replaced_identity_files_on_the_next_call(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!("Starting unary_client_picks_up_replaced_identity_files_on_the_next_call");
+
+    let fixture = RotationFixture::start("mtls_unary_rotation_stream").await?;
+    let sdk = sdk_over(&fixture.server_url, fixture.settings())?;
+    let client = unary_client(&sdk, Arc::new(TestHeadersProvider::default()), |b| {
+        b.recovery(false)
+    })
+    .await?;
+
+    let error = ingest_one_unary_record(&client)
+        .await?
+        .expect_err("the server must reject the identity in the original files");
+    assert_tls_rejection(&error);
+    info!("Unary call before rotation failed as expected: {error}");
+
+    fixture.rotate()?;
+
+    ingest_one_unary_record(&client).await??;
+    assert_eq!(fixture.mock_server.get_insert_requests().await.len(), 1);
+    Ok(())
+}
+
+/// Replaces the identity files on the second `get_headers` call. Whatever the
+/// order of headers and channel within an attempt, a later attempt of the same
+/// call presents the new identity.
+struct RotateOnSecondHeaders {
+    fixture: Arc<RotationFixture>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl HeadersProvider for RotateOnSecondHeaders {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.fixture
+                .rotate()
+                .expect("replacing the identity files must succeed");
+        }
+        TestHeadersProvider::default().get_headers().await
+    }
+}
+
+/// A unary call asks for its channel again on every attempt, so identity files
+/// that were replaced during a failed attempt are used by a later attempt.
+#[tokio::test]
+async fn unary_retry_picks_up_identity_files_replaced_during_a_failed_attempt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!("Starting unary_retry_picks_up_identity_files_replaced_during_a_failed_attempt");
+
+    let fixture = Arc::new(RotationFixture::start("mtls_unary_retry_stream").await?);
+    let sdk = sdk_over(&fixture.server_url, fixture.settings())?;
+    let headers_provider = Arc::new(RotateOnSecondHeaders {
+        fixture: Arc::clone(&fixture),
+        calls: AtomicUsize::new(0),
+    });
+    let client = unary_client(
+        &sdk,
+        Arc::clone(&headers_provider) as Arc<dyn HeadersProvider>,
+        |b| b.recovery_retries(3).recovery_backoff_ms(100),
+    )
+    .await?;
+
+    ingest_one_unary_record(&client).await??;
+
+    assert!(headers_provider.calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(fixture.mock_server.get_insert_requests().await.len(), 1);
+    Ok(())
+}
+
+/// A unary client opens its channel inside the first call's retry loop, so a
+/// certificate and key caught in the middle of a rotation are retried instead of
+/// failing the build or the call.
+#[tokio::test]
+async fn unary_client_retries_identity_files_caught_mid_rotation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    setup_tracing();
+    info!("Starting unary_client_retries_identity_files_caught_mid_rotation");
+
+    let fixture = Arc::new(RotationFixture::start("mtls_unary_mid_rotation_stream").await?);
+    // Only the certificate is replaced yet, so it doesn't match the key.
+    std::fs::write(&fixture.cert_path, &fixture.trusted_cert_pem)?;
+    let tls_config = Arc::new(RotateOnSecondTlsCall {
+        fixture: Arc::clone(&fixture),
+        calls: AtomicUsize::new(0),
+    });
+    let sdk = ZerobusSdk::builder()
+        .endpoint(&fixture.server_url)
+        .unity_catalog_url("https://mock-uc.com")
+        .tls_config(Arc::clone(&tls_config) as Arc<dyn TlsConfig>)
+        .build()?;
+    let client = unary_client(&sdk, Arc::new(TestHeadersProvider::default()), |b| {
+        b.recovery_retries(3).recovery_backoff_ms(100)
+    })
+    .await?;
+
+    ingest_one_unary_record(&client).await??;
+
+    assert!(tls_config.calls.load(Ordering::SeqCst) >= 2);
     Ok(())
 }

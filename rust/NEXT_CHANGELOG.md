@@ -35,6 +35,15 @@
   (such as `cargo test --workspace` and `--all-features` builds), and the test
   mock server's build script regenerates its code on any change to that proto.
   Both used to keep the stale generated code until the next clean build.
+- Added integration tests for the unary client against the mock server, which
+  now scripts `InsertRecords` replies and records each call. They cover the
+  request body and headers, client-side validation, retries and their backoff,
+  authentication and headers provider failures, timeouts, connection sharing,
+  reconnects, HTTP/2 keepalive through a black-holing proxy, and concurrent
+  calls from many tasks and OS threads.
+- Added live tests for the unary client against a real Zerobus server. Like
+  the Java and TypeScript integration tests, they run only when the
+  connection environment variables are set, including under `make test`.
 
 ### Breaking Changes
 
@@ -55,6 +64,9 @@
   unaffected.
 - Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, `UnaryClient`,
   and `UnaryIngestResult`.
+- Added `ZerobusSdkBuilder::unary_keepalive()` behind the `testing` feature, for
+  tests that need a dead unary connection detected quickly. Production unary
+  clients always use a 30 s keepalive interval and a 10 s timeout.
 - Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
   `InsertRecords` call fails with a gRPC status. `ZerobusError` is
   `#[non_exhaustive]`, so this is not a breaking change.
