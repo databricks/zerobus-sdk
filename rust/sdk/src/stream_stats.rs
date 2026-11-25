@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use tokio::sync::watch;
 
 use crate::offset_generator::OffsetId;
-use crate::ZerobusError;
+use crate::{GrpcCode, ZerobusError};
 
 /// Point-in-time view of a stream's counters.
 ///
@@ -21,13 +21,13 @@ use crate::ZerobusError;
 /// acknowledgment can mix values from slightly different moments. Multiplexed
 /// streams do not expose these counters.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct StreamStats {
     /// Records accepted by ingest and not yet acknowledged by the server. Counts
     /// records, not batches. Counting starts when a batch is admitted, not when it
-    /// reaches the wire. A record whose ingest call returned an error is not counted.
-    /// Records retained after a terminal failure, or left unacknowledged at close,
-    /// stay counted.
+    /// reaches the wire. A record whose ingest call returned an error is not counted,
+    /// unless its batch was already retained for replay or terminal handling. Records
+    /// retained after a terminal failure, or left unacknowledged at close, stay counted.
     pub records_in_flight: u64,
     /// Offset of the most recently acknowledged batch, or `None` before the first
     /// acknowledgment. Never decreases.
@@ -36,20 +36,24 @@ pub struct StreamStats {
     /// created. Initial stream creation is not counted.
     pub reconnects: u64,
     /// Most recent error the stream published, or `None` if none has occurred.
-    /// Kept after a successful recovery.
+    /// Kept after a successful recovery. A clean server close is not an error and is
+    /// not recorded.
     pub last_error: Option<LastStreamError>,
 }
 
 /// The most recent error a stream published.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct LastStreamError {
     /// Human-readable error message, the same text as the error's `Display` output.
+    /// Use `error` to tell error kinds apart; do not parse this text.
     pub message: String,
     /// Whether the error is retryable, as reported by `ZerobusError::is_retryable`.
     pub is_retryable: bool,
     /// When the stream recorded the error.
     pub timestamp: SystemTime,
+    /// The typed error the stream published.
+    pub error: ZerobusError,
 }
 
 /// Thread-safe handle that reads a stream's counters without a reference to the
@@ -64,7 +68,7 @@ pub struct StreamStatsReader {
 impl StreamStatsReader {
     /// Returns a snapshot of the stream's counters. Same semantics as
     /// `ZerobusStream::stats`.
-    pub fn snapshot(&self) -> StreamStats {
+    pub fn stats(&self) -> StreamStats {
         self.state.snapshot()
     }
 }
@@ -122,10 +126,14 @@ impl StreamStatsState {
     }
 
     pub(crate) fn record_error(&self, error: &ZerobusError) {
+        if is_clean_close(error) {
+            return;
+        }
         let entry = LastStreamError {
             message: error.to_string(),
             is_retryable: error.is_retryable(),
             timestamp: SystemTime::now(),
+            error: error.clone(),
         };
         *self
             .last_error
@@ -193,14 +201,6 @@ impl ServerErrorSender {
         self.tx.send(value)
     }
 
-    /// Publishes a value without recording it as the last error, for clean closes.
-    pub(crate) fn send_unrecorded(
-        &self,
-        value: Option<ZerobusError>,
-    ) -> Result<(), watch::error::SendError<Option<ZerobusError>>> {
-        self.tx.send(value)
-    }
-
     #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
     pub(crate) fn send_replace(&self, value: Option<ZerobusError>) -> Option<ZerobusError> {
         if let Some(error) = &value {
@@ -208,6 +208,19 @@ impl ServerErrorSender {
         }
         self.tx.send_replace(value)
     }
+
+    /// Publishes a routine stop, such as a graceful rotation, without recording it.
+    #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
+    pub(crate) fn send_replace_unrecorded(
+        &self,
+        value: Option<ZerobusError>,
+    ) -> Option<ZerobusError> {
+        self.tx.send_replace(value)
+    }
+}
+
+fn is_clean_close(error: &ZerobusError) -> bool {
+    matches!(error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Ok)
 }
 
 #[cfg(test)]
@@ -226,7 +239,7 @@ mod tests {
         state.record_admitted(2);
         state.record_acked_records(1);
         state.record_acked_offset(0);
-        let stats = reader.clone().snapshot();
+        let stats = reader.clone().stats();
         assert_eq!(stats.records_in_flight, 1);
         assert_eq!(stats.last_acked_offset, Some(0));
     }
@@ -304,12 +317,23 @@ mod tests {
         let first = state.snapshot().last_error.expect("error recorded");
         assert!(first.message.contains("transient"));
         assert!(first.is_retryable);
+        assert!(matches!(first.error, ZerobusError::StreamClosedError(_)));
 
         state.record_error(&ZerobusError::InvalidArgument("bad".into()));
         let second = state.snapshot().last_error.expect("error recorded");
         assert!(second.message.contains("bad"));
         assert!(!second.is_retryable);
+        assert!(matches!(second.error, ZerobusError::InvalidArgument(_)));
         assert!(second.timestamp >= first.timestamp);
+    }
+
+    #[test]
+    fn clean_close_is_not_recorded() {
+        let state = StreamStatsState::default();
+        state.record_error(&ZerobusError::StreamClosedError(GrpcStatus::ok(
+            "Stream closed by server without errors.",
+        )));
+        assert!(state.snapshot().last_error.is_none());
     }
 
     #[tokio::test]
@@ -329,5 +353,16 @@ mod tests {
         assert!(rx.borrow().is_none());
         // Clearing the watch value keeps the recorded error.
         assert!(stats.snapshot().last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn unrecorded_send_publishes_without_recording() {
+        let stats = Arc::new(StreamStatsState::default());
+        let (tx, rx) = watch::channel(None);
+        let sender = ServerErrorSender::new(tx, Arc::clone(&stats));
+
+        sender.send_replace_unrecorded(Some(retryable()));
+        assert!(rx.borrow().is_some());
+        assert!(stats.snapshot().last_error.is_none());
     }
 }

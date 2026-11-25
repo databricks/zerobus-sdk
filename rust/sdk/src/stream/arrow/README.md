@@ -200,6 +200,12 @@ Partial acknowledgments leave a `PendingBatch` in place. Recovery or terminal
 retrieval slices that batch to its unacknowledged suffix rather than replaying
 the already-durable prefix.
 
+The stream statistics count in-flight records with the same watermark. Each
+advance of `last_acked_records` subtracts only the newly durable rows, so a
+partially acknowledged batch is counted exactly. The watermark restarts at zero
+on each connection, so a replayed suffix is counted from the replacement
+connection's own watermark and is never subtracted twice.
+
 During normal active operation, the oldest submitted pending batch has an
 absolute ACK deadline. Responses and partial progress do not extend it. No ACK
 timer runs while there are no submitted pending batches. A completed replay

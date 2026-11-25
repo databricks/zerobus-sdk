@@ -183,8 +183,7 @@ impl ZerobusStream {
                         let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
                             "Stream closed by server without errors.",
                         ));
-                        // A clean close is not a failure, so it must not become `last_error`.
-                        let _ = server_error_tx.send_unrecorded(Some(error.clone()));
+                        let _ = server_error_tx.send(Some(error.clone()));
                         return Err(error);
                     }
                     Ok(Err(status)) => {

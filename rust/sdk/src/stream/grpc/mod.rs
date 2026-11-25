@@ -59,6 +59,10 @@ pub use callback_handler::CallbackHandlerHarness;
 /// for the receiver/sender tasks to finish during stream teardown.
 pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
+#[cfg(feature = "test-hooks")]
+type PreEnqueueBarrier =
+    tokio::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
 /// A `ZerobusStream` manages JSON or Protocol Buffer ingestion into
@@ -144,6 +148,8 @@ pub struct ZerobusStream {
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Counters returned by `stats()`, updated by the ingest, ack and recovery paths.
     stream_stats: Arc<StreamStatsState>,
+    #[cfg(feature = "test-hooks")]
+    pre_enqueue_barrier: Arc<PreEnqueueBarrier>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -373,6 +379,8 @@ impl ZerobusStream {
             terminal_token,
             server_error_rx,
             stream_stats,
+            #[cfg(feature = "test-hooks")]
+            pre_enqueue_barrier: Arc::default(),
             cancellation_token,
             callback_handler_task,
             callback_cancellation_token,
@@ -388,6 +396,19 @@ impl ZerobusStream {
     /// expose these counters.
     pub fn stats(&self) -> StreamStats {
         self.stream_stats.snapshot()
+    }
+
+    /// Test-only: pauses the next admitted batch before it is handed to the sender.
+    /// Returns `(reached, proceed)`: the hook notifies `reached`, then waits on `proceed`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_pre_enqueue_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        *self.pre_enqueue_barrier.lock().await = Some((Arc::clone(&reached), Arc::clone(&proceed)));
+        (reached, proceed)
     }
 
     /// Returns a handle that reads this stream's counters without borrowing the stream.

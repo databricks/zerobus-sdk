@@ -86,6 +86,9 @@ pub enum MockResponse {
     /// Error response
     #[allow(dead_code)]
     Error { status: Status, delay_ms: u64 },
+    /// Ends the response stream with no status, as a server closing it cleanly.
+    #[allow(dead_code)]
+    EndStream { delay_ms: u64 },
     /// Error response released explicitly by a test.
     #[allow(dead_code)]
     GatedError {
@@ -1008,6 +1011,12 @@ async fn handle_mock_response(
             gate.wait().await;
             let _ = tx.send(Err(status.clone())).await;
             sent.notify_waiters();
+            (false, current_index + 1)
+        }
+        MockResponse::EndStream { delay_ms } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
             (false, current_index + 1)
         }
         MockResponse::CreateStream { .. } => (true, current_index + 1),

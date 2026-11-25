@@ -284,6 +284,14 @@ impl ZerobusStream {
         // Count before the sender can see the batch: the receiver may apply its ack before
         // this thread resumes, and the in-flight count must never go below zero.
         self.stream_stats.record_admitted(record_count);
+        #[cfg(feature = "test-hooks")]
+        {
+            let barrier = self.pre_enqueue_barrier.lock().await.take();
+            if let Some((reached, proceed)) = barrier {
+                reached.notify_one();
+                proceed.notified().await;
+            }
+        }
         self.landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
                 payload: encoded_batch,

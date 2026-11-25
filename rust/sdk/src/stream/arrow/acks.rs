@@ -24,13 +24,14 @@ use super::{ArrowStreamConfigurationOptions, BatchSender, ZerobusArrowStream};
 #[cfg(feature = "test-hooks")]
 use super::{TestHooks, TestNotifyGate};
 use crate::errors::ZerobusError;
-use crate::grpc_status::GrpcStatus;
+use crate::grpc_status::{GrpcCode, GrpcStatus};
 use crate::offset_generator::OffsetId;
 use crate::stats::{ReconnectReason, StatsExporter, StreamStat};
 use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
+const ROTATION_MESSAGE: &str = "Server requested graceful stream rotation";
 const MAX_SERVER_ROTATION_GRACE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Owns the shared stream state and configuration used while processing ACKs.
@@ -439,9 +440,16 @@ impl AckProcessor {
     }
 
     pub(super) fn rotation_error() -> ZerobusError {
-        ZerobusError::StreamClosedError(GrpcStatus::unavailable(
-            "Server requested graceful stream rotation",
-        ))
+        ZerobusError::StreamClosedError(GrpcStatus::unavailable(ROTATION_MESSAGE))
+    }
+
+    /// Whether `error` is the rotation sentinel. It is routine, so it is never recorded.
+    pub(super) fn is_rotation_error(error: &ZerobusError) -> bool {
+        matches!(
+            error,
+            ZerobusError::StreamClosedError(status)
+                if status.code() == GrpcCode::Unavailable && status.message() == ROTATION_MESSAGE
+        )
     }
 
     /// The error value a recovery uses for control flow (retry gating, finalization).
