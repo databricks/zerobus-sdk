@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
-    GrpcCode, GrpcStatus, HeadersProvider, JsonString, JsonValue, ProtoBytes, UnaryClient,
-    UnaryClientBuilder, ZerobusError, ZerobusResult, ZerobusSdk,
+    GrpcCode, GrpcStatus, HeadersProvider, JsonString, JsonValue, ProtoBytes, TlsSettings,
+    UnaryClient, UnaryClientBuilder, ZerobusError, ZerobusResult, ZerobusSdk,
 };
 use mock_oauth::{start_mock_oauth_server, MockTokenResponse};
 use serde::Serialize;
@@ -1211,6 +1211,51 @@ async fn build_sends_nothing_and_the_first_call_connects() {
     client.ingest_records(records(0..1)).await.unwrap();
     assert_eq!(proxy.accepted(), 1);
     assert_eq!(requests(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn unreachable_server_is_a_retryable_unavailable_error() {
+    setup_tracing();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let sdk = sdk(&url);
+    let client = client(&sdk, &TestProvider::new(TABLE_NAME), |b| b.recovery(false)).await;
+
+    let error = bounded(client.ingest_records(records(0..1)))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_retryable());
+    assert_eq!(status_of(error).code(), GrpcCode::Unavailable);
+}
+
+#[tokio::test]
+async fn missing_tls_file_fails_the_first_call_without_sending_or_retrying() {
+    setup_tracing();
+    let (server, url) = start_mock_server().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = TlsSettings::new()
+        .without_native_roots()
+        .with_ca_certificate_file(dir.path().join("missing-ca.pem"))
+        .with_domain_name("localhost");
+    let sdk = ZerobusSdk::builder()
+        .endpoint(&url)
+        .unity_catalog_url("https://mock-uc.com")
+        .tls_config(Arc::new(settings))
+        .build()
+        .unwrap();
+    let provider = TestProvider::new(TABLE_NAME);
+    let client = client(&sdk, &provider, |b| b.recovery_retries(3)).await;
+
+    let error = bounded(client.ingest_records(records(0..1)))
+        .await
+        .unwrap_err();
+
+    assert!(!error.is_retryable());
+    invalid_argument(error);
+    assert_eq!(provider.get_headers_calls(), 1);
+    assert!(requests(&server).await.is_empty());
 }
 
 #[tokio::test]
