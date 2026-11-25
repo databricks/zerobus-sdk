@@ -22,8 +22,9 @@
   federation as a service principal. Works with JSON, protobuf, Avro, and Arrow
   streams, and `recreateStream` reuses the stream's `FederatedToken`. See
   `examples/json/FederatedAuthExample.java`.
-- The regular JAR now also works with a protobuf-java 3.25 runtime that the application declares
-  itself. The default runtime and the fat JAR still use protobuf-java 4.33.0.
+- The regular JAR now works with an application-supplied protobuf-java 3.25.x or 4.x runtime,
+  tested with 3.25.9 and 4.33.0. Declare `protobuf-java` and `slf4j-api` in your own build file;
+  the regular JAR's POM does not declare them. The fat JAR still bundles protobuf-java 4.33.0.
 - Add `ZerobusSdk.builder()` returning a `ZerobusSdkBuilder`, which sets the endpoints, application
   name, connection mode, and TLS options. The existing `ZerobusSdk` constructors still work and
   keep their defaults.
@@ -61,16 +62,6 @@
   `release-java.yml` imports through `macos-binaries-release`.
 
 ### Breaking Changes
-
-- The published POM now declares `protobuf-java` 4.33.0 and `slf4j-api` 2.0.17 as dependencies of
-  the regular JAR. Before, the POM left them out, so a Maven application that declared neither
-  library got `NoClassDefFoundError`s, and one that relied on a transitive `protobuf-java` got
-  whatever another dependency brought in. Now Maven's nearest-wins rule applies: a `protobuf-java`
-  or `slf4j-api` that your application declares directly wins, but a version that arrives at
-  depth 2 or deeper is replaced by the SDK's depth-1 version. Migration: if you need another
-  version, declare it directly in your build (for example `protobuf-java` 3.25.x), and confirm the
-  resolved version with `mvn dependency:tree`. Gradle does not apply nearest-wins and picks the
-  highest version, so Gradle users who need 3.25.x must force it.
 
 ### Deprecations
 

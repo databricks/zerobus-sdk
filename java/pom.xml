@@ -326,8 +326,6 @@
             <configuration>
               <shadedArtifactAttached>true</shadedArtifactAttached>
               <shadedClassifierName>jar-with-dependencies</shadedClassifierName>
-              <!-- Keep protobuf-java and slf4j-api in the published POM; the regular JAR relies on them. -->
-              <createDependencyReducedPom>false</createDependencyReducedPom>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <manifestEntries>
