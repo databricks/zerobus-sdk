@@ -129,6 +129,26 @@ class TlsOptionsTest {
   }
 
   @Test
+  void domainNameAcceptsOnlyHostNamesAndIpAddresses() {
+    TlsOptions.Builder builder = TlsOptions.builder();
+
+    builder.domainName("zerobus.example.com");
+    builder.domainName("10.0.0.1");
+    builder.domainName("::1");
+    for (String value :
+        new String[] {
+          "https://zerobus.example.com",
+          "zerobus.example.com:443",
+          "zerobus.example.com/path",
+          "[::1]",
+          "zerobus example.com",
+          "-----BEGIN CERTIFICATE-----\nMIIB",
+        }) {
+      assertThrows(IllegalArgumentException.class, () -> builder.domainName(value), value);
+    }
+  }
+
+  @Test
   void rejectedValuesLeaveTheBuilderUnchanged() {
     TlsOptions.Builder builder = TlsOptions.builder().clientIdentityPem("cert", "key");
 

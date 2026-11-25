@@ -9,7 +9,12 @@ import com.databricks.zerobus.ZerobusSdk;
  *
  * <p>When {@code ZEROBUS_CA_CERT_FILE} is set, only that CA certificate is trusted. When
  * {@code ZEROBUS_CLIENT_CERT_FILE} and {@code ZEROBUS_CLIENT_KEY_FILE} are set, the client presents
- * that identity for mutual TLS. Without them the SDK uses the operating system's CA certificates.
+ * that identity for mutual TLS. Set both or neither. Without them the SDK uses the operating
+ * system's CA certificates.
+ *
+ * <p>These settings apply to the Zerobus gRPC connection only. The OAuth token request to the
+ * workspace URL still uses the operating system's CA certificates and presents no client identity,
+ * so a workspace signed by a private CA needs that CA in the operating system's trust store.
  *
  * <p>Run with: {@code java -cp <classpath> com.databricks.zerobus.examples.tls.TlsConfigurationExample}
  */
@@ -70,7 +75,11 @@ public class TlsConfigurationExample {
         if (caCertFile != null) {
             builder.trustSystemRoots(false).addCaCertificateFile(caCertFile);
         }
-        if (clientCertFile != null && clientKeyFile != null) {
+        if ((clientCertFile == null) != (clientKeyFile == null)) {
+            throw new IllegalStateException(
+                    "Set both ZEROBUS_CLIENT_CERT_FILE and ZEROBUS_CLIENT_KEY_FILE, or neither");
+        }
+        if (clientCertFile != null) {
             builder.clientIdentityFiles(clientCertFile, clientKeyFile);
         }
         return builder.build();

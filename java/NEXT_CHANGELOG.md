@@ -29,9 +29,11 @@
   add CA certificates as PEM text or as files, present a client certificate for mutual TLS as PEM
   text or as files, and override the server domain name. Certificate files are read on each new
   connection, so rotated files take effect without a restart. Previously the SDK always used the
-  operating system's CA certificates.
+  operating system's CA certificates. These settings apply to the Zerobus gRPC connection only; the
+  OAuth and federated token requests still use the operating system's CA certificates.
 - `HeadersProvider` header names ending in `-bin` are now accepted. The value must be the standard
-  base64 encoding of the bytes, and the SDK sends the decoded bytes as binary gRPC metadata.
+  base64 encoding of the bytes, and the SDK sends the decoded bytes as binary gRPC metadata. Names
+  beginning with `grpc-` and ending in `-bin` are reserved and rejected.
 
 ### Bug Fixes
 

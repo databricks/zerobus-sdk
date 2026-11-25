@@ -87,19 +87,15 @@ public final class ZerobusSdkBuilder {
       this.applicationName = null;
       return this;
     }
-    String trimmed = applicationName.trim();
-    if (trimmed.isEmpty()) {
-      this.applicationName = null;
-      return this;
-    }
-    for (int i = 0; i < trimmed.length(); i++) {
-      char c = trimmed.charAt(i);
+    for (int i = 0; i < applicationName.length(); i++) {
+      char c = applicationName.charAt(i);
       if (c != '\t' && (c < 0x20 || c == 0x7f)) {
         throw new IllegalArgumentException(
             "applicationName must not contain control characters other than tab");
       }
     }
-    this.applicationName = trimmed;
+    String trimmed = applicationName.trim();
+    this.applicationName = trimmed.isEmpty() ? null : trimmed;
     return this;
   }
 

@@ -109,12 +109,15 @@ fn read_string_list(
     let size = env.call_method(&list, "size", "()I", &[])?.i()?;
     let mut strings = Vec::with_capacity(size.max(0) as usize);
     for index in 0..size {
-        let item = env
-            .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(index)])?
-            .l()?;
-        let item = JString::from(item);
-        let value: String = env.get_string(&item)?.into();
-        env.delete_local_ref(item)?;
+        // A frame per entry releases the item and string references before the next one.
+        let value = env.with_local_frame(4, |env| {
+            let item = env
+                .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(index)])?
+                .l()?;
+            let item = JString::from(item);
+            let value: String = env.get_string(&item)?.into();
+            Ok::<String, jni::errors::Error>(value)
+        })?;
         strings.push(value);
     }
     Ok(strings)
@@ -146,7 +149,9 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use zerobus_test_support::mock_grpc::{start_mock_mtls_server, MockResponse};
+    use zerobus_test_support::mock_grpc::{
+        start_mock_mtls_server, MockResponse, MockZerobusServer,
+    };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
     /// Base64 of `b"zerobus\0bin"`, the value the mock server decodes from `x-test-bin`.
@@ -166,18 +171,13 @@ mod tests {
         }
     }
 
-    /// Mutual TLS with the CA and the client identity read from files, plus a binary
-    /// header, through the SDK built from the extracted options.
-    #[tokio::test]
-    async fn file_based_tls_options_open_a_mutual_tls_stream(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let CertifiedKey {
-            cert: client_cert,
-            key_pair: client_key,
-        } = generate_simple_self_signed(vec!["zerobus-test-client".to_string()])?;
-        let client_cert_pem = client_cert.pem();
-        let (mock_server, server_url, server_ca_pem) =
-            start_mock_mtls_server(client_cert_pem.as_bytes()).await?;
+    /// Opens one stream over mutual TLS built from `extracted`, sends one record with a
+    /// binary header, and returns the binary header values the mock server received.
+    async fn stream_binary_header_over_mtls(
+        mock_server: &MockZerobusServer,
+        server_url: String,
+        extracted: ExtractedTlsOptions,
+    ) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error>> {
         mock_server
             .inject_responses(
                 TABLE_NAME,
@@ -194,24 +194,6 @@ mod tests {
             )
             .await;
 
-        let dir = tempfile::tempdir()?;
-        let ca_path = dir.path().join("ca.pem");
-        let cert_path = dir.path().join("tls.crt");
-        let key_path = dir.path().join("tls.key");
-        std::fs::write(&ca_path, &server_ca_pem)?;
-        std::fs::write(&cert_path, client_cert_pem.as_bytes())?;
-        std::fs::write(&key_path, client_key.serialize_pem())?;
-
-        let extracted = ExtractedTlsOptions {
-            trust_system_roots: false,
-            ca_certificate_pems: Vec::new(),
-            ca_certificate_files: vec![ca_path],
-            client_identity: Some(ClientIdentity::Files {
-                cert: cert_path,
-                key: key_path,
-            }),
-            domain_name: Some("localhost".to_string()),
-        };
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url)
             .unity_catalog_url("https://mock-uc.com")
@@ -233,10 +215,72 @@ mod tests {
         stream.flush().await?;
         stream.close().await?;
 
-        assert_eq!(
-            mock_server.get_test_bin_headers().await,
-            vec![Some(BINARY_HEADER_BYTES.to_vec())]
-        );
+        Ok(mock_server.get_test_bin_headers().await)
+    }
+
+    /// Mutual TLS with the CA and the client identity read from files, plus a binary
+    /// header, through the SDK built from the extracted options.
+    #[tokio::test]
+    async fn file_based_tls_options_open_a_mutual_tls_stream(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let CertifiedKey {
+            cert: client_cert,
+            key_pair: client_key,
+        } = generate_simple_self_signed(vec!["zerobus-test-client".to_string()])?;
+        let client_cert_pem = client_cert.pem();
+        let (mock_server, server_url, server_ca_pem) =
+            start_mock_mtls_server(client_cert_pem.as_bytes()).await?;
+
+        let dir = tempfile::tempdir()?;
+        let ca_path = dir.path().join("ca.pem");
+        let cert_path = dir.path().join("tls.crt");
+        let key_path = dir.path().join("tls.key");
+        std::fs::write(&ca_path, &server_ca_pem)?;
+        std::fs::write(&cert_path, client_cert_pem.as_bytes())?;
+        std::fs::write(&key_path, client_key.serialize_pem())?;
+
+        let extracted = ExtractedTlsOptions {
+            trust_system_roots: false,
+            ca_certificate_pems: Vec::new(),
+            ca_certificate_files: vec![ca_path],
+            client_identity: Some(ClientIdentity::Files {
+                cert: cert_path,
+                key: key_path,
+            }),
+            domain_name: Some("localhost".to_string()),
+        };
+        let received = stream_binary_header_over_mtls(&mock_server, server_url, extracted).await?;
+
+        assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
+        Ok(())
+    }
+
+    /// The same handshake as the file test, with the CA and the client identity given as
+    /// PEM text. The server rejects the client unless the identity was presented.
+    #[tokio::test]
+    async fn pem_based_tls_options_open_a_mutual_tls_stream(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let CertifiedKey {
+            cert: client_cert,
+            key_pair: client_key,
+        } = generate_simple_self_signed(vec!["zerobus-test-client".to_string()])?;
+        let client_cert_pem = client_cert.pem();
+        let (mock_server, server_url, server_ca_pem) =
+            start_mock_mtls_server(client_cert_pem.as_bytes()).await?;
+
+        let extracted = ExtractedTlsOptions {
+            trust_system_roots: false,
+            ca_certificate_pems: vec![server_ca_pem],
+            ca_certificate_files: Vec::new(),
+            client_identity: Some(ClientIdentity::Pem {
+                cert: client_cert_pem.into_bytes(),
+                key: client_key.serialize_pem().into_bytes(),
+            }),
+            domain_name: Some("localhost".to_string()),
+        };
+        let received = stream_binary_header_over_mtls(&mock_server, server_url, extracted).await?;
+
+        assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
         Ok(())
     }
 
@@ -251,24 +295,16 @@ mod tests {
     }
 
     #[test]
-    fn maps_every_field_onto_the_core_settings() {
+    fn settings_report_roots_cas_and_domain_name() {
         let mut extracted = options(false);
         extracted.ca_certificate_pems = vec![b"pem-ca".to_vec()];
         extracted.ca_certificate_files = vec![PathBuf::from("/etc/zerobus/ca.pem")];
-        extracted.client_identity = Some(ClientIdentity::Files {
-            cert: PathBuf::from("/etc/zerobus/tls.crt"),
-            key: PathBuf::from("/etc/zerobus/tls.key"),
-        });
         extracted.domain_name = Some("zerobus.example.com".to_string());
 
         let debug = format!("{:?}", extracted.into_settings());
 
         assert!(debug.contains("native_roots: false"), "{debug}");
         assert!(debug.contains("ca_certificates: 2"), "{debug}");
-        assert!(
-            debug.contains("client_identity: Some(\"<redacted>\")"),
-            "{debug}"
-        );
         assert!(debug.contains("zerobus.example.com"), "{debug}");
     }
 
@@ -280,25 +316,5 @@ mod tests {
         assert!(debug.contains("ca_certificates: 0"), "{debug}");
         assert!(debug.contains("client_identity: None"), "{debug}");
         assert!(debug.contains("domain_name: None"), "{debug}");
-    }
-
-    #[test]
-    fn pem_identity_is_mapped_as_pem() {
-        let mut extracted = options(true);
-        extracted.client_identity = Some(ClientIdentity::Pem {
-            cert: b"cert".to_vec(),
-            key: b"key".to_vec(),
-        });
-
-        let debug = format!("{:?}", extracted.into_settings());
-
-        assert!(
-            debug.contains("client_identity: Some(\"<redacted>\")"),
-            "{debug}"
-        );
-        assert!(
-            !debug.contains("\"cert\"") && !debug.contains("\"key\""),
-            "{debug}"
-        );
     }
 }

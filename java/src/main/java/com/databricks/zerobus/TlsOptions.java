@@ -19,6 +19,10 @@ import java.util.Objects;
  * opened. Replace a client certificate and its key together, for example by switching a symbolic
  * link to a directory that holds both new files.
  *
+ * <p>These settings apply to the gRPC connection to the Zerobus endpoint. The OAuth and federated
+ * token requests to the workspace URL still use the operating system's CA certificates and present
+ * no client certificate.
+ *
  * <p>Instances are immutable and safe to share between threads. {@link #toString()} never includes
  * certificate or key material.
  *
@@ -256,7 +260,13 @@ public final class TlsOptions {
      * @throws IllegalArgumentException if {@code domainName} is blank
      */
     public Builder domainName(String domainName) {
-      this.domainName = requireNonBlank(domainName, "domainName");
+      requireNonBlank(domainName, "domainName");
+      if (!isHostNameOrIpAddress(domainName)) {
+        throw new IllegalArgumentException(
+            "domainName must be a host name or IP address with no scheme, port or path, for"
+                + " example \"zerobus.example.com\"");
+      }
+      this.domainName = domainName;
       return this;
     }
 
@@ -274,6 +284,15 @@ public final class TlsOptions {
       }
       return new TlsOptions(this);
     }
+  }
+
+  // A single colon would be a port, so only a multi-colon value is treated as IPv6.
+  private static boolean isHostNameOrIpAddress(String value) {
+    boolean ipv6Candidate = value.indexOf(':') != value.lastIndexOf(':');
+    if (ipv6Candidate) {
+      return value.matches("[0-9A-Fa-f:.]+");
+    }
+    return value.indexOf(':') < 0 && value.matches("[A-Za-z0-9.-]+");
   }
 
   private static String requireNonBlank(String value, String name) {

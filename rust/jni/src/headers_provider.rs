@@ -219,6 +219,11 @@ fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
             "invalid gRPC metadata header name: {name}"
         )));
     }
+    if name.starts_with("grpc-") && name.ends_with("-bin") {
+        return Err(provider_invalid_argument(format!(
+            "binary header name {name} is reserved for gRPC"
+        )));
+    }
     Ok(name)
 }
 
@@ -265,6 +270,20 @@ mod tests {
         assert_eq!(
             normalize_header_name("x_trace-id-bin".to_string()).unwrap(),
             "x_trace-id-bin"
+        );
+    }
+
+    #[test]
+    fn rejects_grpc_reserved_binary_header_names() {
+        for name in ["grpc-status-details-bin", "Grpc-Trace-Bin"] {
+            assert!(
+                normalize_header_name(name.to_string()).is_err(),
+                "{name:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            normalize_header_name("x-grpc-trace-bin".to_string()).unwrap(),
+            "x-grpc-trace-bin"
         );
     }
 

@@ -854,7 +854,10 @@ complete example.
 
 By default the SDK trusts the operating system's CA certificates. To trust a private CA, present a
 client certificate for mutual TLS, or check the server certificate against a different name, pass
-`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`:
+`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`. These settings apply to the gRPC
+connection to the Zerobus endpoint only. The OAuth and federated token requests to the workspace URL
+still use the operating system's CA certificates and present no client certificate, so a workspace
+behind a private CA must be trusted by the operating system.
 
 ```java
 TlsOptions tls = TlsOptions.builder()
@@ -878,15 +881,26 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
 - `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
   paths. Use them when the certificates come from a secret store rather than the file system.
 - `domainName(...)` checks the server certificate against a name other than the endpoint host. The
-  value is a DNS name or an IP address, with no scheme and no port, for example
-  `zerobus.example.com`.
+  value is a DNS name or an IP address, with no scheme, port or path, for example
+  `zerobus.example.com`. `domainName` rejects other values with `IllegalArgumentException` when
+  the builder is called.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by
 writing both into a new directory and switching a symbolic link to it, as Kubernetes secret volumes
-do. Use absolute paths. A missing or unreadable file fails stream creation with a
-`NonRetriableException` that names the file. Content the SDK cannot use, such as a file with no
-certificate, fails with a `ZerobusException`, because a rotation may be in progress.
+do. Use absolute paths.
+
+A missing or unreadable file fails stream creation with a `NonRetriableException` that names the
+file, and the SDK does not retry it. Rotating by deleting a file and then writing its replacement can
+therefore fail a stream that is created or recovered during the gap. Switch to the new files with a
+single rename or symbolic link change instead. Content the SDK cannot use, such as a file with no
+certificate, fails with a `ZerobusException`, which is retried, because a rotation may be in
+progress.
+
+With `connectionPerStream(true)`, each new stream reads the files again and reports any failure.
+With `connectionPerStream(false)`, streams share one channel. When the files change, the SDK reads
+them again on the next stream. If they cannot be read or applied, the SDK keeps the channel it
+already has, so that stream opens on the previous settings and the failure is not reported to it.
 
 ### Binary Headers
 
@@ -904,7 +918,8 @@ HeadersProvider provider = () -> {
 };
 ```
 
-Any other header value is sent as ASCII text.
+Any other header value is sent as ASCII text. Names beginning with `grpc-` and ending in `-bin` are
+reserved for gRPC and are rejected.
 
 ---
 

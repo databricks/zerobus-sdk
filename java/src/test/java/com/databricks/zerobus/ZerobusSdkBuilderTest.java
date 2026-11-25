@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -55,7 +57,11 @@ class ZerobusSdkBuilderTest {
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\nname"));
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u0007name"));
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u007fname"));
+    // Trimming must not hide a control character at either end.
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("\u0007my-app"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("my-app\u0007"));
     // A tab is allowed, and a blank value counts as unset.
+    builder.applicationName("my-app\tname");
     builder.applicationName("my-app/1.0\t");
     builder.applicationName("   ");
     builder.applicationName(null);
@@ -81,7 +87,7 @@ class ZerobusSdkBuilderTest {
   }
 
   @Test
-  void preservesNativeCreationSignatures() throws Exception {
+  void nativeCreateWithOptionsHasExpectedSignature() throws Exception {
     assertNotNull(
         ZerobusSdk.class.getDeclaredMethod(
             "nativeCreateWithOptions",
@@ -175,6 +181,34 @@ class ZerobusSdkBuilderTest {
       assertTrue(
           error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
       assertTrue(error.getCause().getMessage().contains(missing), error.getCause().getMessage());
+    }
+  }
+
+  @Test
+  void invalidBinaryHeaderValueFailsStreamCreationNamingTheHeader() {
+    assumeNativeLibrary();
+    // The core decodes -bin values before it opens the RPC, so no server is contacted.
+    try (ZerobusSdk sdk = ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).build()) {
+      ExecutionException error =
+          assertThrows(
+              ExecutionException.class,
+              () ->
+                  sdk.streamBuilder()
+                      .table("catalog.schema.table")
+                      .headersProvider(
+                          () -> {
+                            Map<String, String> headers = new HashMap<>();
+                            headers.put("authorization", "Bearer t");
+                            headers.put("x-context-bin", "not base64!");
+                            return headers;
+                          })
+                      .json()
+                      .build()
+                      .get(60, TimeUnit.SECONDS));
+      assertTrue(
+          error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
+      assertTrue(
+          error.getCause().getMessage().contains("x-context-bin"), error.getCause().getMessage());
     }
   }
 
