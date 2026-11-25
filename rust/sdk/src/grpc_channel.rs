@@ -41,10 +41,14 @@ pub(crate) struct GrpcChannelSource {
 struct Channels {
     /// The channel opened with the newest TLS settings.
     current: OpenChannel,
-    /// A channel that reached the server, kept until `current` does too.
+    /// A channel that reached the server, or still has a call in flight, kept
+    /// until `current` reaches the server too.
     previous: Option<OpenChannel>,
     /// Whether the switch back to `previous` was logged.
     fallback_logged: bool,
+    /// Counts the changes to `current` and `previous`, so a TLS snapshot read
+    /// before a change is not applied after it.
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -64,6 +68,8 @@ struct ChannelHealth {
     /// calls, if it failed without a response. 0 if it got one, or before any
     /// call finished.
     last_failure: AtomicU64,
+    /// Calls that were started and have not finished yet.
+    pending_calls: AtomicU64,
 }
 
 impl ChannelHealth {
@@ -72,7 +78,21 @@ impl ChannelHealth {
             failures,
             reached_server: AtomicBool::new(false),
             last_failure: AtomicU64::new(0),
+            pending_calls: AtomicU64::new(0),
         }
+    }
+
+    fn start(&self) {
+        self.pending_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish(&self, reached_server: bool) {
+        self.pending_calls.fetch_sub(1, Ordering::Relaxed);
+        self.record(reached_server);
+    }
+
+    fn has_pending_calls(&self) -> bool {
+        self.pending_calls.load(Ordering::Relaxed) > 0
     }
 
     fn record(&self, reached_server: bool) {
@@ -96,14 +116,48 @@ impl ChannelHealth {
 
 /// A channel that records whether each call got a response from the server.
 ///
-/// A response with an error status still counts: the server answered, so the
-/// TLS handshake worked. Under TLS 1.3 the server checks the client certificate
-/// after the client considers the handshake done, so connecting alone doesn't
-/// show that the server accepts the certificate. The first call does.
+/// A gRPC response with an error status still counts: the server answered, so
+/// the TLS handshake worked. Under TLS 1.3 the server checks the client
+/// certificate after the client considers the handshake done, so connecting
+/// alone doesn't show that the server accepts the certificate. The first call does.
 #[derive(Clone, Debug)]
 pub(crate) struct TrackedChannel {
     channel: Channel,
     health: Arc<ChannelHealth>,
+}
+
+/// Reports a call's outcome when it finishes. A call dropped before a response,
+/// such as an attempt that timed out, counts as a failure.
+struct CallOutcome(Option<Arc<ChannelHealth>>);
+
+impl CallOutcome {
+    fn start(health: Arc<ChannelHealth>) -> Self {
+        health.start();
+        Self(Some(health))
+    }
+
+    fn finish(mut self, reached_server: bool) {
+        if let Some(health) = self.0.take() {
+            health.finish(reached_server);
+        }
+    }
+}
+
+impl Drop for CallOutcome {
+    fn drop(&mut self) {
+        if let Some(health) = self.0.take() {
+            health.finish(false);
+        }
+    }
+}
+
+/// Whether `response` came from the gRPC server, rather than from a proxy or an
+/// error page in front of it.
+fn is_grpc_response(response: &http::Response<Body>) -> bool {
+    response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .is_some_and(|value| value.as_bytes().starts_with(b"application/grpc"))
 }
 
 impl Service<http::Request<Body>> for TrackedChannel {
@@ -116,11 +170,11 @@ impl Service<http::Request<Body>> for TrackedChannel {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        let outcome = CallOutcome::start(Arc::clone(&self.health));
         let response = self.channel.call(request);
-        let health = Arc::clone(&self.health);
         Box::pin(async move {
             let response = response.await;
-            health.record(response.is_ok());
+            outcome.finish(response.as_ref().is_ok_and(is_grpc_response));
             response
         })
     }
@@ -134,6 +188,7 @@ impl Channels {
             if self.current.health.reached_server() {
                 info!("The gRPC channel with the new TLS settings reached the server; dropping the previous channel");
                 self.previous = None;
+                self.generation += 1;
             } else if self.current.health.last_failure() > previous.health.last_failure() {
                 if !self.fallback_logged {
                     warn!("The gRPC channel with the new TLS settings failed before reaching the server; using the previous channel until the TLS settings change or the previous channel fails too");
@@ -153,20 +208,29 @@ impl Channels {
             }
             // The settings went back to the material of the channel that reached the server.
             self.current = self.previous.take()?;
+            self.generation += 1;
         }
         Some(self.choose())
     }
 
-    /// Makes `opened` the current channel, unless another call already opened a
-    /// channel with the same material.
+    /// Makes `opened` the current channel, unless the current one already has
+    /// the same material.
     fn replace(&mut self, opened: OpenChannel) -> OpenChannel {
         if self.current.tls != opened.tls {
             info!("TLS settings changed; opened a new gRPC channel");
             let replaced = std::mem::replace(&mut self.current, opened);
-            // A channel that never reached the server is no better than the new one.
-            if replaced.health.reached_server() {
+            // A channel that never reached the server is kept only while a call on it is
+            // in flight, and never in place of one that did.
+            let known_good = self
+                .previous
+                .as_ref()
+                .is_some_and(|previous| previous.health.reached_server());
+            if replaced.health.reached_server()
+                || (replaced.health.has_pending_calls() && !known_good)
+            {
                 self.previous = Some(replaced);
             }
+            self.generation += 1;
             self.fallback_logged = false;
         }
         self.choose()
@@ -226,31 +290,42 @@ impl GrpcChannelSource {
 
     // The settings are read before taking the lock, so a slow certificate
     // volume doesn't hold up other streams that share this source.
+    // A call that publishes a channel while this one reads the files makes the
+    // snapshot stale, so the files are read again.
     async fn open_if_changed(&self) -> ZerobusResult<OpenChannel> {
-        let settings = self.tls_config.tls_settings()?;
-        let resolved = settings.resolve_off_runtime().await?;
-        let tls = resolved.fingerprint();
-        if let Some(open) = self
-            .lock()
-            .as_mut()
-            .and_then(|channels| channels.reuse(tls))
-        {
-            return Ok(open);
-        }
-
-        let opened = self.open(&resolved, tls)?;
-        let mut channels = self.lock();
-        Ok(match channels.as_mut() {
-            Some(channels) => channels.replace(opened),
-            None => {
-                *channels = Some(Channels {
-                    current: opened.clone(),
-                    previous: None,
-                    fallback_logged: false,
-                });
-                opened
+        loop {
+            let seen = self.lock().as_ref().map(|channels| channels.generation);
+            let settings = self.tls_config.tls_settings()?;
+            let resolved = settings.resolve_off_runtime().await?;
+            let tls = resolved.fingerprint();
+            {
+                let mut channels = self.lock();
+                if let Some(channels) = channels.as_mut() {
+                    if Some(channels.generation) != seen {
+                        continue;
+                    }
+                    if let Some(open) = channels.reuse(tls) {
+                        return Ok(open);
+                    }
+                }
             }
-        })
+
+            let opened = self.open(&resolved, tls)?;
+            let mut channels = self.lock();
+            if let Some(channels) = channels.as_mut() {
+                if Some(channels.generation) != seen {
+                    continue;
+                }
+                return Ok(channels.replace(opened));
+            }
+            *channels = Some(Channels {
+                current: opened.clone(),
+                previous: None,
+                fallback_logged: false,
+                generation: 0,
+            });
+            return Ok(opened);
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Channels>> {
@@ -300,14 +375,19 @@ pub(crate) fn base_endpoint(endpoint: &str, sdk_identifier: &str) -> ZerobusResu
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     use super::*;
     use crate::TlsSettings;
 
-    /// Returns whatever settings the test last set, and counts the calls.
+    type OnRead = Box<dyn FnOnce() + Send>;
+
+    /// Returns whatever settings the test last set, and counts the calls. A
+    /// hook set with `on_next_read` runs right after the next read.
     struct SwitchableTlsConfig {
         settings: Mutex<ZerobusResult<TlsSettings>>,
         calls: AtomicUsize,
+        on_read: Mutex<Option<OnRead>>,
     }
 
     impl SwitchableTlsConfig {
@@ -315,19 +395,82 @@ mod tests {
             Arc::new(Self {
                 settings: Mutex::new(Ok(settings)),
                 calls: AtomicUsize::new(0),
+                on_read: Mutex::new(None),
             })
         }
 
         fn set(&self, settings: ZerobusResult<TlsSettings>) {
             *self.settings.lock().unwrap() = settings;
         }
+
+        fn on_next_read(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.on_read.lock().unwrap() = Some(Box::new(hook));
+        }
     }
 
     impl TlsConfig for SwitchableTlsConfig {
         fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.settings.lock().unwrap().clone()
+            let settings = self.settings.lock().unwrap().clone();
+            let hook = self.on_read.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            settings
         }
+    }
+
+    /// Answers every call with a gRPC error status, as the server does when it
+    /// rejects a request.
+    #[derive(Clone)]
+    struct RejectingServer;
+
+    impl tonic::server::NamedService for RejectingServer {
+        const NAME: &'static str = "zerobus.test.Rejecting";
+    }
+
+    impl Service<http::Request<Body>> for RejectingServer {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: http::Request<Body>) -> Self::Future {
+            Box::pin(async {
+                Ok(tonic::Status::permission_denied("rejected by the test server").into_http())
+            })
+        }
+    }
+
+    /// Starts a plaintext gRPC server on a free local port and returns its URL.
+    async fn serve_rejecting_server() -> String {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(RejectingServer)
+                .serve(addr),
+        );
+        while std::net::TcpStream::connect(addr).is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        format!("http://{addr}")
+    }
+
+    /// Makes one call on `channel`, waiting until it is ready first.
+    async fn call_channel(
+        channel: &mut TrackedChannel,
+        uri: String,
+    ) -> Result<http::Response<Body>, tonic::transport::Error> {
+        std::future::poll_fn(|cx| channel.poll_ready(cx)).await?;
+        channel
+            .call(http::Request::post(uri).body(Body::empty()).unwrap())
+            .await
     }
 
     // The domain name is part of the fingerprint, so changing it stands in for
@@ -523,6 +666,130 @@ mod tests {
 
         assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
         assert!(!has_previous(&source));
+    }
+
+    #[tokio::test]
+    async fn client_keeps_a_replaced_channel_whose_call_is_still_in_flight() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let first = source.acquire().await.unwrap();
+        let pending = CallOutcome::start(Arc::clone(&first.health));
+
+        tls.set(Ok(settings_for("b.example.com")));
+        let rotated = source.acquire().await.unwrap();
+        rotated.health.record(false);
+
+        assert_eq!(source.acquire().await.unwrap().tls, first.tls);
+
+        pending.finish(true);
+        assert_eq!(source.acquire().await.unwrap().tls, first.tls);
+    }
+
+    #[tokio::test]
+    async fn a_call_dropped_before_a_response_counts_as_a_failure() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        // Dropped without a response, the way a timed-out attempt drops it.
+        let mut channel = TrackedChannel {
+            channel: base_endpoint("http://127.0.0.1:1", "zerobus-test")
+                .unwrap()
+                .connect_lazy(),
+            health: Arc::clone(&rotated.health),
+        };
+        std::future::poll_fn(|cx| channel.poll_ready(cx))
+            .await
+            .unwrap();
+        drop(channel.call(http::Request::new(Body::empty())));
+
+        assert!(!rotated.health.reached_server());
+        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+    }
+
+    #[tokio::test]
+    async fn client_rereads_the_settings_when_a_channel_was_published_while_they_were_read() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = Arc::new(source(Arc::clone(&tls)));
+        let working = source.acquire().await.unwrap();
+        working.health.record(true);
+
+        let hook_source = Arc::clone(&source);
+        let hook_tls = Arc::clone(&tls);
+        tls.on_next_read(move || {
+            // Another call publishes the rotated channel after this call read the old settings.
+            hook_tls.set(Ok(settings_for("b.example.com")));
+            let settings = settings_for("b.example.com");
+            let resolved = settings.resolve().unwrap();
+            let opened = hook_source.open(&resolved, resolved.fingerprint()).unwrap();
+            hook_source.lock().as_mut().unwrap().replace(opened);
+        });
+
+        let rotated_tls = settings_for("b.example.com")
+            .resolve()
+            .unwrap()
+            .fingerprint();
+        let stale_read = source.acquire().await.unwrap();
+
+        assert_eq!(stale_read.tls, rotated_tls);
+        assert_eq!(current_fingerprint(&source), rotated_tls);
+        assert!(has_previous(&source));
+    }
+
+    #[tokio::test]
+    async fn a_grpc_error_status_counts_as_reaching_the_server() {
+        let url = serve_rejecting_server().await;
+        let health = Arc::new(ChannelHealth::new(Arc::new(AtomicU64::new(0))));
+        let mut channel = TrackedChannel {
+            channel: base_endpoint(&url, "zerobus-test").unwrap().connect_lazy(),
+            health: Arc::clone(&health),
+        };
+
+        let response = call_channel(&mut channel, format!("{url}/zerobus.test.Rejecting/Call"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers().get("grpc-status").unwrap(), "7");
+        assert!(health.reached_server());
+        assert_eq!(health.last_failure(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_transport_call_does_not_count_as_reaching_the_server() {
+        // Nothing listens on this port, so the connection is refused.
+        let url = "http://127.0.0.1:1";
+        let health = Arc::new(ChannelHealth::new(Arc::new(AtomicU64::new(0))));
+        let mut channel = TrackedChannel {
+            channel: base_endpoint(url, "zerobus-test").unwrap().connect_lazy(),
+            health: Arc::clone(&health),
+        };
+
+        let result = call_channel(&mut channel, format!("{url}/zerobus.test.Rejecting/Call")).await;
+
+        assert!(result.is_err());
+        assert!(!health.reached_server());
+        assert!(health.last_failure() > 0);
+    }
+
+    #[test]
+    fn only_a_grpc_response_counts_as_reaching_the_server() {
+        let grpc = http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::empty())
+            .unwrap();
+        let proxy_error = http::Response::builder()
+            .status(503)
+            .header(http::header::CONTENT_TYPE, "text/html")
+            .body(Body::empty())
+            .unwrap();
+        let bare_error = http::Response::builder()
+            .status(503)
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(is_grpc_response(&grpc));
+        assert!(!is_grpc_response(&proxy_error));
+        assert!(!is_grpc_response(&bare_error));
     }
 
     #[tokio::test]

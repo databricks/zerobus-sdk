@@ -107,8 +107,10 @@ pub trait TlsConfig: Send + Sync {
 /// server rejects the new client certificate or the new CA doesn't trust the
 /// server, the SDK goes back to the replaced channel and logs a warning. It tries
 /// the new channel again when the files change again or when the replaced
-/// channel fails too. The first channel of a stream and every Arrow Flight
-/// connection have no channel to go back to, so they use the files as they are.
+/// channel fails too. A channel that a stream opens for itself has no channel to
+/// go back to on the stream's first open, and neither does an Arrow Flight
+/// connection, so they use the files as they are. On a shared channel, a
+/// stream's first open can go back to the replaced channel too.
 ///
 /// The SDK reads the files on a blocking thread, so a slow volume doesn't stall
 /// the async runtime.
