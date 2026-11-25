@@ -589,15 +589,18 @@ impl HeadersProvider for FederatedTokenProvider {
 /// Available behind the `pat-auth` feature.
 ///
 /// Sends the token as a bearer credential, together with the table name, on every
-/// stream creation. It holds no cache and makes no network calls. The PAT must be
-/// created with the `zerobus` API scope in the workspace that the Zerobus endpoint
-/// belongs to. The SDK cannot refresh a PAT: once it expires or is revoked, creating
-/// or recovering a stream fails with an authentication error.
+/// stream creation or unary call attempt. It holds no cache and makes no network
+/// calls. The PAT must be created with the `zerobus` API scope in the workspace that
+/// the Zerobus endpoint belongs to. The SDK cannot refresh a PAT: once it expires or
+/// is revoked, creating or recovering a stream, or a unary call, fails with an
+/// authentication error.
 ///
-/// Usually created for you by [`StreamBuilder::personal_access_token`]. The `Debug`
-/// output redacts the token.
+/// Usually created for you by [`StreamBuilder::personal_access_token`] or
+/// [`UnaryClientBuilder::personal_access_token`]. The `Debug` output redacts the
+/// token.
 ///
 /// [`StreamBuilder::personal_access_token`]: crate::StreamBuilder::personal_access_token
+/// [`UnaryClientBuilder::personal_access_token`]: crate::UnaryClientBuilder::personal_access_token
 ///
 /// # Examples
 ///
@@ -619,7 +622,7 @@ pub struct PatHeadersProvider {
 
 #[cfg(feature = "pat-auth")]
 impl PatHeadersProvider {
-    /// Creates a provider that sends `token` for streams on `table_name`.
+    /// Creates a provider that sends `token` for streams and unary calls on `table_name`.
     pub fn new(token: String, table_name: String) -> Self {
         Self { token, table_name }
     }
