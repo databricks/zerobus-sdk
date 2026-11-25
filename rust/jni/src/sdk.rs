@@ -4,7 +4,7 @@
 
 use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
-use crate::errors::{guard, throw_from_zerobus_error, throw_zerobus_exception};
+use crate::errors::{guard, guard_or, throw_from_zerobus_error, throw_zerobus_exception};
 use crate::federated_auth::java_idp_token_supplier;
 use crate::headers_provider::JavaHeadersProvider;
 use crate::options::{
@@ -337,6 +337,28 @@ fn native_create_with_connection_per_stream<'local>(
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithOptions<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+    tls_options: JObject<'local>,
+) -> jlong {
+    guard_or(env, 0, |env| {
+        native_create_with_options(
+            env,
+            _class,
+            server_endpoint,
+            unity_catalog_endpoint,
+            application_name,
+            connection_per_stream,
+            tls_options,
+        )
+    })
+}
+
+fn native_create_with_options<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     server_endpoint: JString<'local>,
