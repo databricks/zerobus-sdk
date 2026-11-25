@@ -65,11 +65,28 @@ jobs:
           set -euo pipefail
           jar=$(ls target/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
           slf4j=$(find ~/.m2/repository/org/slf4j/slf4j-api/2.0.17 -name 'slf4j-api-2.0.17.jar')
+          [ -n "$slf4j" ] || { echo "slf4j-api 2.0.17 not found"; exit 1; }
           for version in 3.25.9 4.33.0; do
             protobuf=$(find ~/.m2/repository/com/google/protobuf/protobuf-java/$version -name "protobuf-java-$version.jar")
+            [ -n "$protobuf" ] || { echo "protobuf-java $version not found"; exit 1; }
             echo "protobuf-java $version"
             java -cp "$jar:$protobuf:$slf4j" scripts/RegularJarCheck.java
           done
+      - name: Check incremental package drops stale generated classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          stale=StaleGeneratedProbe.class
+          staleTest=StaleGeneratedProbeTest.class
+          mkdir -p target/generated-classes-3/com/databricks/zerobus target/generated-test-classes-3/com/databricks/zerobus
+          cp target/classes/com/databricks/zerobus/IngestRecordResponse.class target/generated-classes-3/com/databricks/zerobus/$stale
+          cp target/classes/com/databricks/zerobus/IngestRecordResponse.class target/generated-test-classes-3/com/databricks/zerobus/$staleTest
+          mvn --batch-mode -DskipTests=true package -Dzerobus.skipNativeLibCheck=true
+          jar=$(ls target/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
+          if [ -e target/classes/com/databricks/zerobus/$stale ] || [ -e target/test-classes/com/databricks/zerobus/$staleTest ] || unzip -l "$jar" | grep -q "$stale"; then
+            echo "stale generated classes survived an incremental package"
+            exit 1
+          fi
 
   test:
     strategy:

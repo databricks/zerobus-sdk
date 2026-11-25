@@ -140,7 +140,7 @@
         </executions>
       </plugin>
       <!-- Generated classes compiled against protobuf-java 4.x carry a bridge method that fails
-           verification on 3.25.x, so the generated sources are recompiled against 3.25.9 here. -->
+           verification on 3.25.x, so the generated sources are recompiled against the protoc version's runtime here. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-dependency-plugin</artifactId>
@@ -157,7 +157,7 @@
                 <artifactItem>
                   <groupId>com.google.protobuf</groupId>
                   <artifactId>protobuf-java</artifactId>
-                  <version>3.25.9</version>
+                  <version>${protoc.version}</version>
                 </artifactItem>
               </artifactItems>
               <outputDirectory>${project.build.directory}/protobuf-3-compile</outputDirectory>
@@ -178,10 +178,11 @@
             <phase>process-classes</phase>
             <configuration>
               <target>
+                <delete dir="${project.build.directory}/generated-classes-3"/>
                 <mkdir dir="${project.build.directory}/generated-classes-3"/>
                 <javac debug="true" destdir="${project.build.directory}/generated-classes-3" encoding="UTF-8" includeantruntime="false" release="8" srcdir="${project.build.directory}/generated-sources/protobuf/java">
                   <classpath>
-                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-3.25.9.jar"/>
+                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-${protoc.version}.jar"/>
                   </classpath>
                 </javac>
                 <copy overwrite="true" todir="${project.build.outputDirectory}">
@@ -198,10 +199,11 @@
             <phase>process-test-classes</phase>
             <configuration>
               <target>
+                <delete dir="${project.build.directory}/generated-test-classes-3"/>
                 <mkdir dir="${project.build.directory}/generated-test-classes-3"/>
                 <javac debug="true" destdir="${project.build.directory}/generated-test-classes-3" encoding="UTF-8" includeantruntime="false" release="8" srcdir="${project.build.directory}/generated-test-sources/protobuf/java">
                   <classpath>
-                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-3.25.9.jar"/>
+                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-${protoc.version}.jar"/>
                   </classpath>
                 </javac>
                 <copy overwrite="true" todir="${project.build.testOutputDirectory}">
