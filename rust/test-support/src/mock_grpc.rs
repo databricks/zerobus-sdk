@@ -184,6 +184,8 @@ pub struct MockZerobusServer {
     ingest_record_requests: Arc<Mutex<Vec<IngestRecordRequest>>>,
     /// Delay before the server acknowledges what it received once the client half-closes.
     half_close_ack_delay_ms: Arc<Mutex<Option<u64>>>,
+    /// Gate that holds the server's end of stream after the client half-closes.
+    half_close_hold: Arc<Mutex<Option<Arc<MockResponseGate>>>>,
     /// Durable offset retained across persistent-stream connections.
     persistent_offsets: Arc<Mutex<HashMap<String, Option<i64>>>>,
     /// Record configuration retained and validated when a stream resumes.
@@ -215,6 +217,7 @@ impl MockZerobusServer {
             auth_headers: Arc::new(Mutex::new(Vec::new())),
             ingest_record_requests: Arc::new(Mutex::new(Vec::new())),
             half_close_ack_delay_ms: Arc::new(Mutex::new(None)),
+            half_close_hold: Arc::new(Mutex::new(None)),
             persistent_offsets: Arc::new(Mutex::new(HashMap::new())),
             persistent_configs: Arc::new(Mutex::new(HashMap::new())),
             persistent_open_fault: Arc::new(Mutex::new(None)),
@@ -234,6 +237,12 @@ impl MockZerobusServer {
     #[allow(dead_code)]
     pub async fn ack_on_half_close(&self, delay_ms: u64) {
         *self.half_close_ack_delay_ms.lock().await = Some(delay_ms);
+    }
+
+    /// Holds the server's end of stream after the client half-closes until `gate` is released.
+    #[allow(dead_code)]
+    pub async fn hold_end_of_stream_after_half_close(&self, gate: Arc<MockResponseGate>) {
+        *self.half_close_hold.lock().await = Some(gate);
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)
@@ -328,6 +337,7 @@ impl MockZerobusServer {
         self.auth_headers.lock().await.clear();
         self.ingest_record_requests.lock().await.clear();
         *self.half_close_ack_delay_ms.lock().await = None;
+        *self.half_close_hold.lock().await = None;
         self.persistent_offsets.lock().await.clear();
         self.persistent_configs.lock().await.clear();
         *self.persistent_open_fault.lock().await = None;
@@ -368,6 +378,7 @@ impl Zerobus for MockZerobusServer {
         let create_requests = Arc::clone(&self.create_requests);
         let ingest_record_requests = Arc::clone(&self.ingest_record_requests);
         let half_close_ack_delay_ms = Arc::clone(&self.half_close_ack_delay_ms);
+        let half_close_hold = Arc::clone(&self.half_close_hold);
 
         tokio::spawn(async move {
             let mut table_name = String::new();
@@ -626,6 +637,10 @@ impl Zerobus for MockZerobusServer {
             }
 
             // The client half-closed. Like the real server, ack what it received.
+            let hold = half_close_hold.lock().await.clone();
+            if let Some(gate) = hold {
+                gate.wait().await;
+            }
             let ack_delay_ms = *half_close_ack_delay_ms.lock().await;
             if let (Some(delay_ms), Some(offset)) = (ack_delay_ms, last_offset_received) {
                 if delay_ms > 0 {
@@ -896,6 +911,7 @@ async fn start_mock_server_inner(
         auth_headers: Arc::clone(&mock_server.auth_headers),
         ingest_record_requests: Arc::clone(&mock_server.ingest_record_requests),
         half_close_ack_delay_ms: Arc::clone(&mock_server.half_close_ack_delay_ms),
+        half_close_hold: Arc::clone(&mock_server.half_close_hold),
         persistent_offsets: Arc::clone(&mock_server.persistent_offsets),
         persistent_configs: Arc::clone(&mock_server.persistent_configs),
         persistent_open_fault: Arc::clone(&mock_server.persistent_open_fault),

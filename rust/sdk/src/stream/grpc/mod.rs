@@ -151,7 +151,7 @@ pub struct ZerobusStream {
     #[cfg(feature = "test-hooks")]
     pre_enqueue_barrier: Arc<PreEnqueueBarrier>,
     #[cfg(feature = "test-hooks")]
-    sender_exit_hook: sender::SenderHooks,
+    sender_exit_hook: Arc<sender::TeardownPauses>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -305,7 +305,7 @@ impl ZerobusStream {
             (None, None)
         };
 
-        let sender_hooks: sender::SenderHooks = Default::default();
+        let sender_hooks: sender::TeardownHooks = Default::default();
         #[cfg(feature = "test-hooks")]
         let sender_exit_hook = Arc::clone(&sender_hooks);
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
@@ -424,6 +424,16 @@ impl ZerobusStream {
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         self.sender_exit_hook.arm_after_half_close().await
+    }
+
+    /// Test-only: pauses the receiver after the request is half-closed, before it drains the
+    /// final acks. Returns `(reached, proceed)` as the other teardown barriers do.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_before_drain_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.sender_exit_hook.arm_before_drain().await
     }
 
     /// Test-only: pauses the next admitted batch before it is handed to the sender.

@@ -39,6 +39,8 @@ pub struct StreamStats {
     /// Kept after a successful recovery. A server close the SDK expects, such as the end
     /// of a graceful rotation, or the end of stream that answers the caller's close when every
     /// record was acknowledged, is not an error and is not recorded.
+    /// An end of stream during a close that the server sends on its own, after every record was
+    /// acknowledged, cannot be told apart from that answer and is not recorded either.
     pub last_error: Option<LastStreamError>,
 }
 

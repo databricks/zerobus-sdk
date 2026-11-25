@@ -12,6 +12,7 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, span, warn, Level};
 
+use super::sender::TeardownHooks;
 use super::transport::{InboundMessage, InboundStream};
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
@@ -50,6 +51,7 @@ impl ZerobusStream {
         stream_stats: Arc<StreamStatsState>,
         expected_close: Arc<AtomicBool>,
         request_half_closed: Arc<AtomicBool>,
+        #[cfg_attr(not(feature = "test-hooks"), allow(unused_variables))] hooks: TeardownHooks,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -240,7 +242,9 @@ impl ZerobusStream {
                 // Half-close so the server sends its final acks, then apply them before the
                 // supervisor resends the rest. On close the sender has already stopped.
                 half_close_token.cancel();
-                drain_applying_acks(
+                #[cfg(feature = "test-hooks")]
+                super::sender::TeardownPauses::park(&hooks.before_drain).await;
+                let ended_by_eof = drain_applying_acks(
                     &mut inbound,
                     drain_window,
                     &landing_zone,
@@ -251,6 +255,14 @@ impl ZerobusStream {
                     &mut last_acked_offset,
                 )
                 .await;
+                // An end of stream that leaves records unacknowledged is a failure, as it is in the
+                // receive loop. An announced rotation is expected.
+                if ended_by_eof && !close_announced && landing_zone.len() > 0 {
+                    let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
+                        "Stream closed by server without errors.",
+                    ));
+                    let _ = server_error_tx.send(Some(error));
+                }
             } else if close_initiated {
                 // Drain remaining server messages so the server sees END_STREAM instead of
                 // the client RST_STREAM-ing the response.
@@ -306,7 +318,7 @@ async fn drain_applying_acks(
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
-) {
+) -> bool {
     let deadline = tokio::time::Instant::now() + window;
     loop {
         match tokio::time::timeout_at(deadline, inbound.message()).await {
@@ -326,13 +338,14 @@ async fn drain_applying_acks(
                 {
                     // An invalid ack ends the read. The rest is sent again.
                     warn!("Stopped reading final acks after an invalid ack: {error}");
-                    return;
+                    return false;
                 }
             }
             // Nothing to apply.
             Ok(Ok(Some(_))) => {}
-            // Stream ended, transport failed, or the window elapsed.
-            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => return,
+            Ok(Ok(None)) => return true,
+            // Transport failed, or the window elapsed.
+            Ok(Err(_)) | Err(_) => return false,
         }
     }
 }

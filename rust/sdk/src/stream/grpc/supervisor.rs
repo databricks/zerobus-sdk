@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::sender::SenderHooks;
+use super::sender::TeardownHooks;
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
@@ -70,7 +70,7 @@ impl ZerobusStream {
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         stream_stats: Arc<StreamStatsState>,
-        sender_hooks: SenderHooks,
+        sender_hooks: TeardownHooks,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -308,6 +308,7 @@ impl ZerobusStream {
                 Arc::clone(&stream_stats),
                 Arc::clone(&expected_close),
                 Arc::clone(&request_half_closed),
+                Clone::clone(&sender_hooks),
             ));
             let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 connection.sink,

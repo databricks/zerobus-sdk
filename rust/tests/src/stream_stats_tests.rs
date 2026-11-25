@@ -440,6 +440,60 @@ mod grpc_stream_stats {
         Ok(())
     }
 
+    // The flush times out with a record unacknowledged, and the sender finishes before the receiver
+    // reaches its drain. The server ends the stream only after the drain has started, so the end is
+    // read by the drain, which must record it as well.
+    #[tokio::test]
+    async fn flush_timeout_then_server_eof_during_drain_is_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        let eof_gate = Arc::new(MockResponseGate::new());
+        mock_server
+            .hold_end_of_stream_after_half_close(Arc::clone(&eof_gate))
+            .await;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "stats_drain_eof".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .flush_timeout_ms(200)
+            .build()
+            .await?;
+
+        stream.ingest_record_offset(b"unacked".to_vec()).await?;
+        let (reached, proceed) = stream.arm_before_drain_barrier().await;
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(10), reached.notified())
+                .await
+                .expect("receiver must reach the drain");
+            proceed.notify_one();
+            eof_gate.release();
+        };
+        let (close_result, ()) = tokio::join!(stream.close(), release);
+        assert!(close_result.is_err(), "flush must time out");
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 1);
+        let error = stats
+            .last_error
+            .expect("end of stream read by the drain with records outstanding must be recorded");
+        assert!(error.message.contains("closed by server without errors"));
+        Ok(())
+    }
+
     // The server ends the stream on its own after acknowledging everything, before the caller's
     // request is half-closed. The end is not the answer to the caller's close, so it is recorded.
     #[tokio::test]
