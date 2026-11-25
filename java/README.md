@@ -96,7 +96,7 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 ### Dependencies
 
 **When using Maven or Gradle** (regular JAR, recommended):
-- The regular JAR does not bring in `protobuf-java` or `slf4j-api`. Declare both in your build file. The SDK is tested with protobuf-java 3.25.9 and 4.33.0, so use either one. Maven uses the version your project declares directly. Gradle picks the highest version in the graph, so Gradle users who need 3.25.x must force it (for example with `resolutionStrategy.force`) and can confirm it with `dependencies`.
+- The regular JAR does not bring in `protobuf-java` or `slf4j-api`. Declare both in your build file. The SDK is built and tested against protobuf-java 4.33.0, which the fat JAR bundles, and it is also tested with protobuf-java 3.25.9. Maven uses the version your project declares directly. Gradle picks the highest version in the graph, so if another dependency in your graph brings a newer protobuf-java, force the 3.25.x version you declare (for example with `resolutionStrategy.force`). Check the resolved version with `dependencies`.
 - Add an SLF4J implementation such as [`slf4j-simple` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-simple/2.0.17) or [`logback-classic` 1.4.14](https://mvnrepository.com/artifact/ch.qos.logback/logback-classic/1.4.14). The SDK depends on the SLF4J API only.
 
 **When using the fat JAR** (standalone scripts or CLI tools without a build system):
@@ -145,7 +145,7 @@ to load.
 
 - **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Maven**: 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
-- **Protocol Buffers Compiler** (`protoc`): 33.0 for compiling your own `.proto` schemas against the default 4.33.0 runtime. For a protobuf-java 3.25.x runtime, use protoc 25.x, the compiler from the same release line. [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
+- **Protocol Buffers Compiler** (`protoc`): 33.0 for compiling your own `.proto` schemas against protobuf-java 4.33.0, the runtime the SDK is built against. If your application declares protobuf-java 3.25.x, use protoc 25.x, the compiler from the same release line. [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
 
 ## Quick Start User Guide
 
@@ -168,6 +168,11 @@ Add the SDK as a dependency in your `pom.xml`:
         <artifactId>zerobus-ingest-sdk</artifactId>
         <version>1.4.0</version>
     </dependency>
+    <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>4.33.0</version>
+    </dependency>
 </dependencies>
 ```
 
@@ -176,10 +181,11 @@ Or with Gradle (`build.gradle`):
 ```groovy
 dependencies {
     implementation 'com.databricks:zerobus-ingest-sdk:1.4.0'
+    implementation 'com.google.protobuf:protobuf-java:4.33.0'
 }
 ```
 
-Add an SLF4J implementation (the SDK depends on `slf4j-api` only):
+Add an SLF4J implementation. It brings in `slf4j-api`, which the SDK uses:
 
 ```xml
 <dependency>
@@ -282,7 +288,14 @@ Create `pom.xml`:
             <version>1.4.0</version>
         </dependency>
 
-        <!-- SLF4J implementation (the SDK depends on slf4j-api only) -->
+        <!-- protobuf-java runtime the SDK is built against; declare 3.25.x instead if your schemas use it -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>4.33.0</version>
+        </dependency>
+
+        <!-- SLF4J implementation (brings in slf4j-api, which the SDK uses) -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
@@ -326,7 +339,7 @@ protoc --java_out=src/main/java src/main/proto/record.proto
 
 This generates `src/main/java/com/example/proto/Record.java`.
 
-**Note**: Use the `protoc` release that matches the protobuf-java runtime in your application. The SDK's default runtime is `protobuf-java` 4.33.0, which pairs with `protoc` 33.0. If your application uses protobuf-java 3.25.x, use protoc 25.x instead. [Download protoc](https://github.com/protocolbuffers/protobuf/releases).
+**Note**: Use the `protoc` release that matches the protobuf-java runtime your application declares. The SDK is built against `protobuf-java` 4.33.0, which pairs with `protoc` 33.0, and the fat JAR bundles that runtime. If your application declares `protobuf-java` 3.25.x, use `protoc` 25.x instead. [Download protoc](https://github.com/protocolbuffers/protobuf/releases).
 
 ### Generate Protocol Buffer Schema from Unity Catalog (Alternative)
 
@@ -1113,7 +1126,7 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 
 ## Logging
 
-The Databricks Zerobus Ingest SDK for Java uses the standard [SLF4J logging framework](https://www.slf4j.org/). The SDK only depends on `slf4j-api`, which means **you need to add an SLF4J implementation** to your classpath to see log output.
+The Databricks Zerobus Ingest SDK for Java uses the standard [SLF4J logging framework](https://www.slf4j.org/). The SDK uses `slf4j-api`, which your build must declare alongside an SLF4J implementation. **You need to add an SLF4J implementation** to your classpath to see log output.
 
 ### Adding a Logging Implementation
 
