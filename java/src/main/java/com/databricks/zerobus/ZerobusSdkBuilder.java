@@ -75,7 +75,8 @@ public final class ZerobusSdkBuilder {
   /**
    * Sets an application identifier appended to the HTTP {@code user-agent} header, conventionally
    * {@code "<product>/<version>"} (for example {@code "my-app/1.0"}). Pass {@code null}, or a value
-   * that is blank after trimming, to omit it. Leading and trailing whitespace is removed.
+   * that is blank after trimming, to omit it. Leading and trailing spaces and tabs are removed. A
+   * control character anywhere in the value, including a line break at either end, is rejected.
    *
    * @param applicationName the application identifier, or {@code null}
    * @return this builder for method chaining

@@ -7,10 +7,12 @@ import com.databricks.zerobus.ZerobusSdk;
 /**
  * Connects with custom TLS settings and ingests JSON records.
  *
- * <p>When {@code ZEROBUS_CA_CERT_FILE} is set, only that CA certificate is trusted. When
- * {@code ZEROBUS_CLIENT_CERT_FILE} and {@code ZEROBUS_CLIENT_KEY_FILE} are set, the client presents
- * that identity for mutual TLS. Set both or neither. Without them the SDK uses the operating
- * system's CA certificates.
+ * <p>Server trust depends only on {@code ZEROBUS_CA_CERT_FILE}. When it is set, only that CA
+ * certificate is trusted. When it is unset, the SDK trusts the operating system's CA certificates.
+ *
+ * <p>The client identity is separate and optional. When {@code ZEROBUS_CLIENT_CERT_FILE} and
+ * {@code ZEROBUS_CLIENT_KEY_FILE} are both set, the client presents that identity for mutual TLS.
+ * Set both or neither.
  *
  * <p>These settings apply to the Zerobus gRPC connection only. The OAuth token request to the
  * workspace URL still uses the operating system's CA certificates and presents no client identity,

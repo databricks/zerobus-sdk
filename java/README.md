@@ -882,8 +882,10 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
   paths. Use them when the certificates come from a secret store rather than the file system.
 - `domainName(...)` checks the server certificate against a name other than the endpoint host. The
   value is a DNS name or an IP address, with no scheme, port or path, for example
-  `zerobus.example.com`. `domainName` rejects other values with `IllegalArgumentException` when
-  the builder is called.
+  `zerobus.example.com`. `domainName` rejects an obvious mistake, such as a scheme, a port, a path or
+  whitespace, with `IllegalArgumentException` when the builder is called. It does not check the
+  syntax of a DNS name or an IP literal, so a malformed name passes this check and fails when the
+  connection is made.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by
@@ -898,9 +900,13 @@ certificate, fails with a `ZerobusException`, which is retried, because a rotati
 progress.
 
 With `connectionPerStream(true)`, each new stream reads the files again and reports any failure.
-With `connectionPerStream(false)`, streams share one channel. When the files change, the SDK reads
-them again on the next stream. If they cannot be read or applied, the SDK keeps the channel it
-already has, so that stream opens on the previous settings and the failure is not reported to it.
+With `connectionPerStream(false)`, JSON, protobuf and Avro streams share one channel. When the files
+change, the next stream of those formats reads them again. If the SDK cannot read or apply the new
+settings locally, it keeps the channel it already has, so that stream opens on the previous settings
+and the failure is not reported to it. This fallback ends once the local TLS setup succeeds. If the
+new certificate or key is readable but the server rejects it in the TLS handshake, the replacement
+channel is used and the stream fails. Arrow streams open their own channel for each stream, whatever
+`connectionPerStream` is set to, so they always read and apply the files themselves.
 
 ### Binary Headers
 

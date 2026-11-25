@@ -20,8 +20,10 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
-# Optional: trust only a private CA and present a client certificate
+# Optional: trust only a private CA. Unset, the operating system's CA certificates are used.
 export ZEROBUS_CA_CERT_FILE="/etc/zerobus/ca.pem"
+
+# Optional: present a client certificate for mutual TLS. Set both or neither.
 export ZEROBUS_CLIENT_CERT_FILE="/etc/zerobus/tls.crt"
 export ZEROBUS_CLIENT_KEY_FILE="/etc/zerobus/tls.key"
 

@@ -252,12 +252,15 @@ public final class TlsOptions {
      * the server endpoint is used.
      *
      * <p>The value is a DNS name or an IP address, with no scheme and no port, for example {@code
-     * "zerobus.example.com"} rather than {@code "https://zerobus.example.com:443"}.
+     * "zerobus.example.com"} rather than {@code "https://zerobus.example.com:443"}. This check only
+     * catches obvious mistakes, such as a scheme, a port, a path, whitespace, or PEM text. It does
+     * not validate the syntax of a DNS name or an IP literal.
      *
      * @param domainName the expected server certificate name
      * @return this builder for method chaining
      * @throws NullPointerException if {@code domainName} is null
-     * @throws IllegalArgumentException if {@code domainName} is blank
+     * @throws IllegalArgumentException if {@code domainName} is blank or contains one of the
+     *     obvious mistakes above
      */
     public Builder domainName(String domainName) {
       requireNonBlank(domainName, "domainName");

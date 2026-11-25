@@ -1,6 +1,7 @@
 package com.databricks.zerobus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -57,9 +58,12 @@ class ZerobusSdkBuilderTest {
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\nname"));
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u0007name"));
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("bad\u007fname"));
-    // Trimming must not hide a control character at either end.
+    // Trimming must not hide a control character at either end, including a line break.
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("\u0007my-app"));
     assertThrows(IllegalArgumentException.class, () -> builder.applicationName("my-app\u0007"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("\n"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("my-app\n"));
+    assertThrows(IllegalArgumentException.class, () -> builder.applicationName("my-app\r\n"));
     // A tab is allowed, and a blank value counts as unset.
     builder.applicationName("my-app\tname");
     builder.applicationName("my-app/1.0\t");
@@ -185,30 +189,47 @@ class ZerobusSdkBuilderTest {
   }
 
   @Test
-  void invalidBinaryHeaderValueFailsStreamCreationNamingTheHeader() {
+  void invalidBinaryHeaderValueIsRejectedByTheCoreDecoder() {
     assumeNativeLibrary();
-    // The core decodes -bin values before it opens the RPC, so no server is contacted.
-    try (ZerobusSdk sdk = ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).build()) {
-      ExecutionException error =
-          assertThrows(
-              ExecutionException.class,
-              () ->
-                  sdk.streamBuilder()
-                      .table("catalog.schema.table")
-                      .headersProvider(
-                          () -> {
-                            Map<String, String> headers = new HashMap<>();
-                            headers.put("authorization", "Bearer t");
-                            headers.put("x-context-bin", "not base64!");
-                            return headers;
-                          })
-                      .json()
-                      .build()
-                      .get(60, TimeUnit.SECONDS));
-      assertTrue(
-          error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
-      assertTrue(
-          error.getCause().getMessage().contains("x-context-bin"), error.getCause().getMessage());
+    // The core decodes -bin values before it opens the RPC, so no server is contacted. The
+    // diagnostic comes from the core's decoder, not from the JNI name check.
+    ExecutionException error = createStreamWithBinaryHeader(SERVER_ENDPOINT, "not base64!");
+    assertTrue(error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
+    assertTrue(
+        error.getCause().getMessage().contains("Invalid metadata for header 'x-context-bin'"),
+        error.getCause().getMessage());
+  }
+
+  @Test
+  void validBinaryHeaderValuePassesHeaderHandling() {
+    assumeNativeLibrary();
+    // Nothing listens on port 1, so the stream fails at connect. Reaching connect means the
+    // value was decoded and the header was accepted.
+    ExecutionException error = createStreamWithBinaryHeader("https://127.0.0.1:1", "AAE=");
+    String message = String.valueOf(error.getCause().getMessage());
+    assertTrue(message.contains("tcp connect error"), message);
+    assertFalse(message.contains("Invalid metadata"), message);
+  }
+
+  private static ExecutionException createStreamWithBinaryHeader(
+      String serverEndpoint, String value) {
+    try (ZerobusSdk sdk = ZerobusSdk.builder().serverEndpoint(serverEndpoint).build()) {
+      return assertThrows(
+          ExecutionException.class,
+          () ->
+              sdk.streamBuilder()
+                  .table("catalog.schema.table")
+                  .headersProvider(
+                      () -> {
+                        Map<String, String> headers = new HashMap<>();
+                        headers.put("authorization", "Bearer t");
+                        headers.put("x-context-bin", value);
+                        return headers;
+                      })
+                  .recovery(false)
+                  .json()
+                  .build()
+                  .get(60, TimeUnit.SECONDS));
     }
   }
 

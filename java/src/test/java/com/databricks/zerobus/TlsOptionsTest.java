@@ -129,7 +129,7 @@ class TlsOptionsTest {
   }
 
   @Test
-  void domainNameAcceptsOnlyHostNamesAndIpAddresses() {
+  void domainNameRejectsObviousMistakes() {
     TlsOptions.Builder builder = TlsOptions.builder();
 
     builder.domainName("zerobus.example.com");
