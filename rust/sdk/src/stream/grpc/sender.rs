@@ -17,30 +17,47 @@ use super::types::RecordLandingZone;
 use super::ZerobusStream;
 use crate::ZerobusResult;
 
-/// Test-only pause point reached after a sender has half-closed its request on cancellation.
+/// Barrier pair `(reached, proceed)` for a sender pause point.
+#[cfg(feature = "test-hooks")]
+type SenderBarrierGate = tokio::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>;
+
+/// Test-only pause points around the sender's half-close on cancellation.
+#[cfg(feature = "test-hooks")]
 #[derive(Default)]
 pub(crate) struct SenderExitHook {
-    #[cfg(feature = "test-hooks")]
-    barrier: tokio::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    before_half_close: SenderBarrierGate,
+    after_half_close: SenderBarrierGate,
 }
 
+/// What the sender task receives for its test pause points. Zero-sized without `test-hooks`.
+#[cfg(feature = "test-hooks")]
+pub(crate) type SenderHooks = Arc<SenderExitHook>;
+#[cfg(not(feature = "test-hooks"))]
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SenderHooks;
+
+#[cfg(feature = "test-hooks")]
 impl SenderExitHook {
-    #[cfg(feature = "test-hooks")]
-    pub(crate) async fn arm(&self) -> (Arc<Notify>, Arc<Notify>) {
+    pub(crate) async fn arm_before_half_close(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm(&self.before_half_close).await
+    }
+
+    pub(crate) async fn arm_after_half_close(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm(&self.after_half_close).await
+    }
+
+    async fn arm(gate: &SenderBarrierGate) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
         let proceed = Arc::new(Notify::new());
-        *self.barrier.lock().await = Some((Arc::clone(&reached), Arc::clone(&proceed)));
+        *gate.lock().await = Some((Arc::clone(&reached), Arc::clone(&proceed)));
         (reached, proceed)
     }
 
-    async fn park(&self) {
-        #[cfg(feature = "test-hooks")]
-        {
-            let barrier = self.barrier.lock().await.take();
-            if let Some((reached, proceed)) = barrier {
-                reached.notify_one();
-                proceed.notified().await;
-            }
+    async fn park(gate: &SenderBarrierGate) {
+        let barrier = gate.lock().await.take();
+        if let Some((reached, proceed)) = barrier {
+            reached.notify_one();
+            proceed.notified().await;
         }
     }
 }
@@ -54,16 +71,21 @@ impl ZerobusStream {
         is_paused: Arc<AtomicBool>,
         server_error_tx: crate::stream_stats::ServerErrorSender,
         cancellation_token: CancellationToken,
-        exit_hook: Arc<SenderExitHook>,
+        request_half_closed: Arc<AtomicBool>,
+        #[cfg_attr(not(feature = "test-hooks"), allow(unused_variables))] hooks: SenderHooks,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             loop {
                 let item = tokio::select! {
                     biased;
                     _ = cancellation_token.cancelled() => {
+                        #[cfg(feature = "test-hooks")]
+                        SenderExitHook::park(&hooks.before_half_close).await;
                         // Dropping the sink half-closes the request, so the server's EOF follows.
+                        request_half_closed.store(true, Ordering::Release);
                         drop(sink);
-                        exit_hook.park().await;
+                        #[cfg(feature = "test-hooks")]
+                        SenderExitHook::park(&hooks.after_half_close).await;
                         return Ok(());
                     }
                     item = async {

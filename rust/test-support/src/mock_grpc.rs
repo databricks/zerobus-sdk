@@ -89,6 +89,13 @@ pub enum MockResponse {
     /// Ends the response stream with no status, as a server closing it cleanly.
     #[allow(dead_code)]
     EndStream { delay_ms: u64 },
+    /// Acknowledges the offset, then holds the response stream until `gate` is released
+    /// and ends it with no status.
+    #[allow(dead_code)]
+    GatedAckThenEnd {
+        ack_up_to_offset: i64,
+        gate: Arc<MockResponseGate>,
+    },
     /// Sends a close signal and then ends the response stream with no status, as a
     /// server that rotates and closes in the same breath.
     #[allow(dead_code)]
@@ -1025,6 +1032,27 @@ async fn handle_mock_response(
                 sleep(Duration::from_millis(*delay_ms)).await;
             }
             (false, current_index + 1)
+        }
+        MockResponse::GatedAckThenEnd {
+            ack_up_to_offset,
+            gate,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                gate.wait().await;
+                (false, current_index + 1)
+            } else {
+                (true, current_index)
+            }
         }
         MockResponse::CloseStreamSignalAndEnd {
             duration_seconds,

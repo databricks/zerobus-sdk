@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::sender::SenderExitHook;
+use super::sender::SenderHooks;
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
@@ -70,7 +70,7 @@ impl ZerobusStream {
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         stream_stats: Arc<StreamStatsState>,
-        sender_exit_hook: Arc<SenderExitHook>,
+        sender_hooks: SenderHooks,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -285,6 +285,8 @@ impl ZerobusStream {
             let is_paused = Arc::new(AtomicBool::new(false));
             // Set by the receiver when the server announced its close and then ended the stream.
             let expected_close = Arc::new(AtomicBool::new(false));
+            // Set by the sender just before it half-closes the request.
+            let request_half_closed = Arc::new(AtomicBool::new(false));
 
             // Per-stream child token
             let per_stream_token = cancellation_token.child_token();
@@ -305,6 +307,7 @@ impl ZerobusStream {
                 initial_last_acked_offset,
                 Arc::clone(&stream_stats),
                 Arc::clone(&expected_close),
+                Arc::clone(&request_half_closed),
             ));
             let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 connection.sink,
@@ -312,7 +315,8 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
-                Arc::clone(&sender_exit_hook),
+                Arc::clone(&request_half_closed),
+                Clone::clone(&sender_hooks),
             ));
 
             // 4. Wait for any of the two tasks to end.

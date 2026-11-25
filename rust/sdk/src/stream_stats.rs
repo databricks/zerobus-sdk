@@ -37,8 +37,8 @@ pub struct StreamStats {
     pub reconnects: u64,
     /// Most recent error the stream published, or `None` if none has occurred.
     /// Kept after a successful recovery. A server close the SDK expects, such as the end
-    /// of a graceful rotation or the end of stream that answers the caller's close, is not
-    /// an error and is not recorded.
+    /// of a graceful rotation, or the end of stream that answers the caller's close when every
+    /// record was acknowledged, is not an error and is not recorded.
     pub last_error: Option<LastStreamError>,
 }
 

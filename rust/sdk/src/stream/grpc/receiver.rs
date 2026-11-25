@@ -49,6 +49,7 @@ impl ZerobusStream {
         initial_last_acked_offset: OffsetId,
         stream_stats: Arc<StreamStatsState>,
         expected_close: Arc<AtomicBool>,
+        request_half_closed: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -183,8 +184,12 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Ok(Ok(None)) => {
-                        // The server answers the caller's half-close with EOF. The caller asked for it.
-                        if half_close_token.is_cancelled() {
+                        // The server answers the caller's half-close with EOF. That is expected only
+                        // when the request was half-closed and every record was acknowledged.
+                        if half_close_token.is_cancelled()
+                            && request_half_closed.load(Ordering::Acquire)
+                            && landing_zone.len() == 0
+                        {
                             close_initiated = true;
                             break 'recv_loop;
                         }

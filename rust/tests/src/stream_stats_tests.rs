@@ -5,7 +5,7 @@ mod utils;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{GrpcCode, NoTlsConfig, ZerobusError, ZerobusSdk};
 use tracing::info;
 use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 
@@ -375,7 +375,16 @@ mod grpc_stream_stats {
         let first = stream.ingest_record_offset(b"first".to_vec()).await?;
         stream.wait_for_offset(first).await?;
         let second = stream.ingest_record_offset(b"second".to_vec()).await?;
-        assert!(stream.wait_for_offset(second).await.is_err());
+        let err = stream
+            .wait_for_offset(second)
+            .await
+            .expect_err("the terminal end of stream must fail the waiter");
+        assert!(
+            matches!(&err, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Ok),
+            "waiter got {err}"
+        );
+        let unacked = stream.get_unacked_records().await?.count();
+        assert_eq!(unacked, 1);
 
         let stats = stream.stats();
         assert_eq!(stats.reconnects, 0);
@@ -384,6 +393,104 @@ mod grpc_stream_stats {
             stats.last_error.is_none(),
             "announced close recorded {:?}",
             stats.last_error
+        );
+        Ok(())
+    }
+
+    // The caller's flush times out with a record unacknowledged. The server's end of stream during
+    // the close is not the answer to a clean close, so it is recorded.
+    #[tokio::test]
+    async fn flush_timeout_then_server_eof_is_recorded() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "stats_flush_timeout_eof".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .flush_timeout_ms(200)
+            .build()
+            .await?;
+
+        stream.ingest_record_offset(b"unacked".to_vec()).await?;
+        let (reached, _proceed) = stream.arm_after_half_close_barrier().await;
+        assert!(stream.close().await.is_err(), "flush must time out");
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("sender must reach its exit point");
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 1);
+        let error = stats
+            .last_error
+            .expect("end of stream with records outstanding must be recorded");
+        assert!(error.message.contains("closed by server without errors"));
+        Ok(())
+    }
+
+    // The server ends the stream on its own after acknowledging everything, before the caller's
+    // request is half-closed. The end is not the answer to the caller's close, so it is recorded.
+    #[tokio::test]
+    async fn caller_close_with_independent_server_eof_is_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        let gate = Arc::new(MockResponseGate::new());
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stats_independent_eof".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedAckThenEnd {
+                        ack_up_to_offset: 0,
+                        gate: Arc::clone(&gate),
+                    },
+                ],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let offset = stream.ingest_record_offset(b"only".to_vec()).await?;
+        stream.wait_for_offset(offset).await?;
+
+        let (reached, _proceed) = stream.arm_before_half_close_barrier().await;
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(10), reached.notified())
+                .await
+                .expect("sender must reach its exit point");
+            gate.release();
+        };
+        let (close_result, ()) = tokio::join!(stream.close(), release);
+        close_result?;
+
+        let stats = stream.stats();
+        assert!(
+            stats.last_error.is_some(),
+            "independent server end of stream must be recorded"
         );
         Ok(())
     }
@@ -424,7 +531,7 @@ mod grpc_stream_stats {
         let offset = stream.ingest_record_offset(b"only".to_vec()).await?;
         stream.wait_for_offset(offset).await?;
 
-        let (reached, _proceed) = stream.arm_sender_exit_barrier().await;
+        let (reached, _proceed) = stream.arm_after_half_close_barrier().await;
         stream.close().await?;
         tokio::time::timeout(Duration::from_secs(10), reached.notified())
             .await

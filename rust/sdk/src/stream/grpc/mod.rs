@@ -151,7 +151,7 @@ pub struct ZerobusStream {
     #[cfg(feature = "test-hooks")]
     pre_enqueue_barrier: Arc<PreEnqueueBarrier>,
     #[cfg(feature = "test-hooks")]
-    sender_exit_hook: Arc<sender::SenderExitHook>,
+    sender_exit_hook: sender::SenderHooks,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -305,7 +305,9 @@ impl ZerobusStream {
             (None, None)
         };
 
-        let sender_exit_hook = Arc::new(sender::SenderExitHook::default());
+        let sender_hooks: sender::SenderHooks = Default::default();
+        #[cfg(feature = "test-hooks")]
+        let sender_exit_hook = Arc::clone(&sender_hooks);
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
@@ -324,7 +326,7 @@ impl ZerobusStream {
             cancellation_token.clone(),
             callback_tx.clone(),
             Arc::clone(&stream_stats),
-            Arc::clone(&sender_exit_hook),
+            sender_hooks,
         ));
         let initialization_guard = StreamInitializationGuard::new(
             cancellation_token.clone(),
@@ -404,14 +406,24 @@ impl ZerobusStream {
         self.stream_stats.snapshot()
     }
 
-    /// Test-only: pauses the sender after it half-closes on cancellation. Returns `(reached,
-    /// proceed)`: the sender notifies `reached`, then waits on `proceed`.
+    /// Test-only: pauses the sender on cancellation before it half-closes the request.
+    /// Returns `(reached, proceed)`: the sender notifies `reached`, then waits on `proceed`.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
-    pub async fn arm_sender_exit_barrier(
+    pub async fn arm_before_half_close_barrier(
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.sender_exit_hook.arm().await
+        self.sender_exit_hook.arm_before_half_close().await
+    }
+
+    /// Test-only: pauses the sender after it half-closes its request on cancellation.
+    /// Returns `(reached, proceed)` as `arm_before_half_close_barrier` does.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_after_half_close_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.sender_exit_hook.arm_after_half_close().await
     }
 
     /// Test-only: pauses the next admitted batch before it is handed to the sender.
