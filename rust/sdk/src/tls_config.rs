@@ -30,8 +30,10 @@ use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 /// new channel, and before it reuses a gRPC channel for a new stream or a
 /// recovery attempt. When the settings differ from the ones the channel was
 /// opened with, the SDK opens a new channel. It keeps the gRPC channel it
-/// replaced until a call on the new one reaches the server, and goes back to it
-/// if the new one fails first. An implementation can return different settings
+/// replaced until a call on the new one reaches the server, if the replaced
+/// channel had reached the server before, and goes back to it if the new one
+/// fails first. A replaced channel whose first call has not answered yet is not
+/// kept, and its later success is not used. An implementation can return different settings
 /// on each call, for example to rotate certificates.
 ///
 /// # Examples
@@ -103,7 +105,9 @@ pub trait TlsConfig: Send + Sync {
 /// keeps the channel it has and logs a warning.
 ///
 /// It also keeps the gRPC channel it replaced until a call on the new channel
-/// reaches the server. If the new channel fails first, for example because the
+/// reaches the server, if the replaced channel had reached the server before.
+/// A replaced channel whose first call has not answered yet is not kept, and its
+/// later success is not used. If the new channel fails first, for example because the
 /// server rejects the new client certificate or the new CA doesn't trust the
 /// server, the SDK goes back to the replaced channel and logs a warning. It tries
 /// the new channel again when the files change again or when the replaced

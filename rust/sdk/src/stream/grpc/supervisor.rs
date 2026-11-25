@@ -24,7 +24,7 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::errors::should_retry_initial_connection;
 use crate::grpc_channel::GrpcChannelSource;
-use crate::grpc_status::{GrpcCode, GrpcStatus};
+use crate::grpc_status::GrpcCode;
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -139,26 +139,18 @@ impl ZerobusStream {
                             .await
                         }
                         Ok((channel, channel_timeout)) => {
-                            match tokio::time::timeout(
-                                Duration::from_millis(options.recovery_timeout_ms),
-                                Self::create_stream_connection(
-                                    channel,
-                                    &table_properties,
-                                    &headers_provider,
-                                    record_type,
-                                    kind,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(_) => {
-                                    channel_timeout.record();
-                                    Err(ZerobusError::CreateStreamError(
-                                        GrpcStatus::deadline_exceeded("Stream creation timed out"),
-                                    ))
-                                }
-                            }
+                            channel_timeout
+                                .bounded(
+                                    options.recovery_timeout_ms,
+                                    Self::create_stream_connection(
+                                        channel,
+                                        &table_properties,
+                                        &headers_provider,
+                                        record_type,
+                                        kind,
+                                    ),
+                                )
+                                .await
                         }
                     };
                     if let Err(ref e) = result {

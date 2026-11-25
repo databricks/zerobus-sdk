@@ -7,6 +7,7 @@
 //! Until a call on the new channel reaches the server, the source keeps the
 //! channel it replaced, and goes back to it when the new channel fails first.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -18,6 +19,7 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_status::GrpcStatus;
 use crate::proxy::{self, ConnectorFactory};
 use crate::tls_config::{ResolvedTls, TlsFingerprint};
 use crate::{TlsConfig, ZerobusError, ZerobusResult};
@@ -110,14 +112,35 @@ pub(crate) struct TrackedChannel {
 }
 
 /// Reports that an attempt on a channel timed out before the server answered.
-/// Only the supervisor's own attempt timeout calls this: a call dropped by its
-/// caller says nothing about the channel.
-#[derive(Clone, Debug)]
+/// Only an attempt's own timeout calls this: a call dropped by its caller says
+/// nothing about the channel.
+#[derive(Debug)]
 pub(crate) struct ChannelTimeout(Arc<ChannelHealth>);
 
 impl ChannelTimeout {
-    pub(crate) fn record(&self) {
+    /// Records a failed attempt on the channel, for a timeout that the caller
+    /// handles itself instead of through [`ChannelTimeout::bounded`].
+    pub(crate) fn record_timeout(&self) {
         self.0.record(false);
+    }
+
+    /// Runs one attempt on the channel, bounded by `timeout_ms`. If the attempt
+    /// times out, the channel records a failure and the attempt fails with a
+    /// deadline error.
+    pub(crate) async fn bounded<T>(
+        &self,
+        timeout_ms: u64,
+        attempt: impl Future<Output = ZerobusResult<T>>,
+    ) -> ZerobusResult<T> {
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), attempt).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.record_timeout();
+                Err(ZerobusError::CreateStreamError(
+                    GrpcStatus::deadline_exceeded("Stream creation timed out"),
+                ))
+            }
+        }
     }
 }
 
@@ -225,7 +248,9 @@ impl GrpcChannelSource {
         self
     }
 
-    /// Returns the channel for the next stream, recovery or unary attempt.
+    /// Returns the channel for the next stream, recovery or unary attempt, and
+    /// the handle that reports a timeout of that attempt on it. Call `bounded` on the
+    /// handle only for the attempt's own timeout, not when the caller cancels.
     ///
     /// The first call opens the channel and returns any error. Later calls read
     /// the TLS settings again and open a new channel if they changed. If the
@@ -648,10 +673,26 @@ mod tests {
         let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
 
         let (_, timeout) = source.client().await.unwrap();
-        timeout.record();
+        let attempt = timeout
+            .bounded(10, std::future::pending::<ZerobusResult<()>>())
+            .await;
 
+        assert!(attempt.is_err());
         assert_eq!(source.acquire().await.unwrap().tls, working.tls);
         assert_ne!(rotated.tls, working.tls);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_finishes_in_time_records_nothing() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        let (_, timeout) = source.client().await.unwrap();
+        let attempt = timeout.bounded(1_000, async { Ok(()) }).await;
+
+        assert!(attempt.is_ok());
+        assert_eq!(rotated.health.last_failure(), 0);
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use tracing::{debug, instrument, warn};
 use crate::builder::HeadersProviderFactory;
 use crate::databricks::zerobus::InsertRecordsRequest;
 use crate::errors::should_retry_initial_connection;
-use crate::grpc_channel::GrpcChannelSource;
+use crate::grpc_channel::{GrpcChannelSource, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::{EncodedRecord, HeadersProvider, PreparedInput, ZerobusError, ZerobusResult};
@@ -272,18 +272,24 @@ impl UnaryClient {
         let timeout_ms = self.options.server_lack_of_ack_timeout_ms;
         let attempt_timeout = Duration::from_millis(timeout_ms);
         let attempt_started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
-            attempt_timeout,
-            self.send_once(request.clone(), headers_provider),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ZerobusError::UnaryIngestError(
-                GrpcStatus::deadline_exceeded(format!(
-                    "InsertRecords attempt timed out after {timeout_ms} ms"
-                )),
-            ))
-        });
+        // Asking the source on every attempt picks up rotated TLS certificates.
+        // As on streams, the channel is taken before the attempt's timeout starts.
+        let result = match self.channel_source.client().await {
+            Err(err) => Err(err),
+            Ok((channel, channel_timeout)) => tokio::time::timeout(
+                attempt_timeout,
+                self.send_once(channel, request.clone(), headers_provider),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                channel_timeout.record_timeout();
+                Err(ZerobusError::UnaryIngestError(
+                    GrpcStatus::deadline_exceeded(format!(
+                        "InsertRecords attempt timed out after {timeout_ms} ms"
+                    )),
+                ))
+            }),
+        };
 
         if let Err(err) = &result {
             let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
@@ -303,14 +309,13 @@ impl UnaryClient {
 
     async fn send_once(
         &self,
+        mut channel: GrpcClient,
         request: InsertRecordsRequest,
         headers_provider: &dyn HeadersProvider,
     ) -> ZerobusResult<()> {
         let headers = headers_provider.get_headers().await?;
         let mut request = tonic::Request::new(request);
         *request.metadata_mut() = grpc_metadata_from_headers(headers, &self.table_name)?;
-        // Asking the source on every attempt picks up rotated TLS certificates.
-        let mut channel = self.channel_source.client().await?;
         channel
             .insert_records(request)
             .await

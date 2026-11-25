@@ -81,26 +81,18 @@ impl super::ZerobusStream {
     ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
         let attempt_started = tokio::time::Instant::now();
-        let result = match tokio::time::timeout(
-            attempt_timeout,
-            Self::create_stream_connection_inner(
-                channel,
-                table_properties,
-                headers_provider,
-                record_type,
-                kind,
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                channel_timeout.record();
-                return Err(ZerobusError::CreateStreamError(
-                    GrpcStatus::deadline_exceeded("Stream creation timed out"),
-                ));
-            }
-        };
+        let result = channel_timeout
+            .bounded(
+                recovery_timeout_ms,
+                Self::create_stream_connection_inner(
+                    channel,
+                    table_properties,
+                    headers_provider,
+                    record_type,
+                    kind,
+                ),
+            )
+            .await;
 
         if let Err(err) = &result {
             let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
