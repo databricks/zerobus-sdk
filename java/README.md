@@ -96,7 +96,7 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 ### Dependencies
 
 **When using Maven or Gradle** (regular JAR, recommended):
-- `protobuf-java` and `slf4j-api` are pulled transitively from the published POM. The SDK's default is `protobuf-java` 4.33.0. The SDK works with protobuf-java 3.25.x or later. To use 3.x, declare protobuf-java 3.25.x in your own build file; Maven uses the version your project declares directly.
+- `protobuf-java` and `slf4j-api` are pulled transitively from the published POM. The SDK's default is `protobuf-java` 4.33.0. The SDK is tested with protobuf-java 4.33.0 and 3.25.9. To use 3.25.x, declare it in your own build file and use the regular JAR. Maven uses the version your project declares directly. Gradle picks the highest version in the graph, so Gradle users must force the version (for example with `resolutionStrategy.force`) and can confirm it with `dependencies`.
 - Add an SLF4J implementation such as [`slf4j-simple` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-simple/2.0.17) or [`logback-classic` 1.4.14](https://mvnrepository.com/artifact/ch.qos.logback/logback-classic/1.4.14). The SDK depends on the SLF4J API only.
 
 **When using the fat JAR** (standalone scripts or CLI tools without a build system):
@@ -145,7 +145,7 @@ to load.
 
 - **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Maven**: 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
-- **Protocol Buffers Compiler** (`protoc`): 33.0, for compiling your own `.proto` schemas. Match the protoc release to your application's protobuf-java runtime: 33.0 pairs with 4.33.0, and 3.25.x pairs with 3.25.x. [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
+- **Protocol Buffers Compiler** (`protoc`): 33.0 for compiling your own `.proto` schemas against the default 4.33.0 runtime. For a protobuf-java 3.25.x runtime, use protoc 25.x, the compiler from the same release line. [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
 
 ## Quick Start User Guide
 
@@ -326,7 +326,7 @@ protoc --java_out=src/main/java src/main/proto/record.proto
 
 This generates `src/main/java/com/example/proto/Record.java`.
 
-**Note**: Use the `protoc` release that matches the protobuf-java runtime in your application. The SDK's default runtime is `protobuf-java` 4.33.0, which pairs with `protoc` 33.0. If your application uses protobuf-java 3.25.x, use `protoc` 3.25.x instead. [Download protoc](https://github.com/protocolbuffers/protobuf/releases).
+**Note**: Use the `protoc` release that matches the protobuf-java runtime in your application. The SDK's default runtime is `protobuf-java` 4.33.0, which pairs with `protoc` 33.0. If your application uses protobuf-java 3.25.x, use protoc 25.x instead. [Download protoc](https://github.com/protocolbuffers/protobuf/releases).
 
 ### Generate Protocol Buffer Schema from Unity Catalog (Alternative)
 

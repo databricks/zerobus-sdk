@@ -22,8 +22,8 @@
   federation as a service principal. Works with JSON, protobuf, Avro, and Arrow
   streams, and `recreateStream` reuses the stream's `FederatedToken`. See
   `examples/json/FederatedAuthExample.java`.
-- The SDK now also works with the protobuf-java 3.25 runtime. Applications that declare
-  `protobuf-java` 3.25.x themselves can use the regular JAR. The default runtime is unchanged.
+- The regular JAR now also works with a protobuf-java 3.25 runtime that the application declares
+  itself. The default runtime and the fat JAR still use protobuf-java 4.33.0.
 - Add `ZerobusSdk.builder()` returning a `ZerobusSdkBuilder`, which sets the endpoints, application
   name, connection mode, and TLS options. The existing `ZerobusSdk` constructors still work and
   keep their defaults.

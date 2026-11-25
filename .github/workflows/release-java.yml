@@ -79,9 +79,9 @@ jobs:
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-maven.sh"
 
-      - name: Build JAR
+      - name: Build JARs
         working-directory: java
-        run: mvn -DskipTests=true --batch-mode package
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/build-java-jars.sh"
 
       - name: Verify JAR bundles JNI libraries
         working-directory: java
@@ -101,7 +101,7 @@ jobs:
           fi
 
           shopt -s nullglob
-          jars=(target/zerobus-ingest-sdk-*.jar)
+          jars=(dist/zerobus-ingest-sdk-*.jar)
           checked=0
           for jar in "${jars[@]}"; do
             case "$jar" in
@@ -129,6 +129,6 @@ jobs:
         with:
           name: java-jar
           path: |
-            java/target/*.jar
+            java/dist/*.jar
             java/target/*.pom
           if-no-files-found: error
