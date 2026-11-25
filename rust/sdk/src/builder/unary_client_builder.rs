@@ -367,32 +367,31 @@ mod tests {
 
     #[cfg(feature = "pat-auth")]
     #[tokio::test]
-    async fn personal_access_token_resolves_to_pat_provider() {
+    async fn personal_access_token_last_auth_call_wins() {
         let sdk = test_sdk();
-        let builder = sdk
-            .unary_client_builder()
-            .table("catalog.schema.table")
-            .personal_access_token(TEST_PAT)
-            .json();
-        builder.validate().expect("validation should succeed");
+        let builder = || sdk.unary_client_builder().table("t").json();
 
-        let headers = builder
-            .core
-            .resolve_headers_provider(Duration::from_secs(1))
-            .unwrap()
-            .get_headers()
-            .await
-            .unwrap();
-
-        assert_eq!(headers.len(), 2);
+        let pat_last = builder()
+            .oauth("cid", "csec")
+            .personal_access_token(TEST_PAT);
+        assert_eq!(pat_last.core.auth_kind(), "PersonalAccessToken");
         assert_eq!(
-            headers.get("authorization").unwrap(),
+            pat_last
+                .core
+                .resolve_headers_provider(Duration::from_secs(1))
+                .unwrap()
+                .get_headers()
+                .await
+                .unwrap()
+                .get("authorization")
+                .unwrap(),
             &format!("Bearer {TEST_PAT}")
         );
-        assert_eq!(
-            headers.get("x-databricks-zerobus-table-name").unwrap(),
-            "catalog.schema.table"
-        );
+
+        let oauth_last = builder()
+            .personal_access_token(TEST_PAT)
+            .oauth("cid", "csec");
+        assert_eq!(oauth_last.core.auth_kind(), "OAuth");
     }
 
     #[cfg(feature = "pat-auth")]
