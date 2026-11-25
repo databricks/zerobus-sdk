@@ -126,7 +126,7 @@ impl ZerobusStream {
                     // open, and lets recovery pick up rotated TLS certificates.
                     let result = match channel_source.client().await {
                         Err(e) => Err(e),
-                        Ok(channel) if is_initial => {
+                        Ok((channel, channel_timeout)) if is_initial => {
                             Self::create_initial_stream_connection(
                                 channel,
                                 &table_properties,
@@ -134,26 +134,32 @@ impl ZerobusStream {
                                 record_type,
                                 kind,
                                 options.recovery_timeout_ms,
+                                &channel_timeout,
                             )
                             .await
                         }
-                        Ok(channel) => tokio::time::timeout(
-                            Duration::from_millis(options.recovery_timeout_ms),
-                            Self::create_stream_connection(
-                                channel,
-                                &table_properties,
-                                &headers_provider,
-                                record_type,
-                                kind,
-                            ),
-                        )
-                        .await
-                        .map_err(|_| {
-                            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
-                                "Stream creation timed out",
-                            ))
-                        })
-                        .and_then(|res| res),
+                        Ok((channel, channel_timeout)) => {
+                            match tokio::time::timeout(
+                                Duration::from_millis(options.recovery_timeout_ms),
+                                Self::create_stream_connection(
+                                    channel,
+                                    &table_properties,
+                                    &headers_provider,
+                                    record_type,
+                                    kind,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    channel_timeout.record();
+                                    Err(ZerobusError::CreateStreamError(
+                                        GrpcStatus::deadline_exceeded("Stream creation timed out"),
+                                    ))
+                                }
+                            }
+                        }
                     };
                     if let Err(ref e) = result {
                         warn!(

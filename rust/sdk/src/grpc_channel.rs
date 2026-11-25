@@ -41,8 +41,7 @@ pub(crate) struct GrpcChannelSource {
 struct Channels {
     /// The channel opened with the newest TLS settings.
     current: OpenChannel,
-    /// A channel that reached the server, or still has a call in flight, kept
-    /// until `current` reaches the server too.
+    /// A channel that reached the server, kept until `current` does too.
     previous: Option<OpenChannel>,
     /// Whether the switch back to `previous` was logged.
     fallback_logged: bool,
@@ -68,8 +67,6 @@ struct ChannelHealth {
     /// calls, if it failed without a response. 0 if it got one, or before any
     /// call finished.
     last_failure: AtomicU64,
-    /// Calls that were started and have not finished yet.
-    pending_calls: AtomicU64,
 }
 
 impl ChannelHealth {
@@ -78,21 +75,7 @@ impl ChannelHealth {
             failures,
             reached_server: AtomicBool::new(false),
             last_failure: AtomicU64::new(0),
-            pending_calls: AtomicU64::new(0),
         }
-    }
-
-    fn start(&self) {
-        self.pending_calls.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn finish(&self, reached_server: bool) {
-        self.pending_calls.fetch_sub(1, Ordering::Relaxed);
-        self.record(reached_server);
-    }
-
-    fn has_pending_calls(&self) -> bool {
-        self.pending_calls.load(Ordering::Relaxed) > 0
     }
 
     fn record(&self, reached_server: bool) {
@@ -126,28 +109,15 @@ pub(crate) struct TrackedChannel {
     health: Arc<ChannelHealth>,
 }
 
-/// Reports a call's outcome when it finishes. A call dropped before a response,
-/// such as an attempt that timed out, counts as a failure.
-struct CallOutcome(Option<Arc<ChannelHealth>>);
+/// Reports that an attempt on a channel timed out before the server answered.
+/// Only the supervisor's own attempt timeout calls this: a call dropped by its
+/// caller says nothing about the channel.
+#[derive(Clone, Debug)]
+pub(crate) struct ChannelTimeout(Arc<ChannelHealth>);
 
-impl CallOutcome {
-    fn start(health: Arc<ChannelHealth>) -> Self {
-        health.start();
-        Self(Some(health))
-    }
-
-    fn finish(mut self, reached_server: bool) {
-        if let Some(health) = self.0.take() {
-            health.finish(reached_server);
-        }
-    }
-}
-
-impl Drop for CallOutcome {
-    fn drop(&mut self) {
-        if let Some(health) = self.0.take() {
-            health.finish(false);
-        }
+impl ChannelTimeout {
+    pub(crate) fn record(&self) {
+        self.0.record(false);
     }
 }
 
@@ -170,11 +140,11 @@ impl Service<http::Request<Body>> for TrackedChannel {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let outcome = CallOutcome::start(Arc::clone(&self.health));
         let response = self.channel.call(request);
+        let health = Arc::clone(&self.health);
         Box::pin(async move {
             let response = response.await;
-            outcome.finish(response.as_ref().is_ok_and(is_grpc_response));
+            health.record(response.as_ref().is_ok_and(is_grpc_response));
             response
         })
     }
@@ -219,15 +189,7 @@ impl Channels {
         if self.current.tls != opened.tls {
             info!("TLS settings changed; opened a new gRPC channel");
             let replaced = std::mem::replace(&mut self.current, opened);
-            // A channel that never reached the server is kept only while a call on it is
-            // in flight, and never in place of one that did.
-            let known_good = self
-                .previous
-                .as_ref()
-                .is_some_and(|previous| previous.health.reached_server());
-            if replaced.health.reached_server()
-                || (replaced.health.has_pending_calls() && !known_good)
-            {
+            if replaced.health.reached_server() {
                 self.previous = Some(replaced);
             }
             self.generation += 1;
@@ -271,8 +233,10 @@ impl GrpcChannelSource {
     /// kept, so a broken rotation doesn't take down a channel that still works.
     /// A new channel replaces one that reached the server only once a call on
     /// it reaches the server too.
-    pub(crate) async fn client(&self) -> ZerobusResult<GrpcClient> {
-        self.acquire().await.map(|open| open.client)
+    pub(crate) async fn client(&self) -> ZerobusResult<(GrpcClient, ChannelTimeout)> {
+        self.acquire()
+            .await
+            .map(|open| (open.client, ChannelTimeout(open.health)))
     }
 
     async fn acquire(&self) -> ZerobusResult<OpenChannel> {
@@ -459,6 +423,15 @@ mod tests {
         while std::net::TcpStream::connect(addr).is_err() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        format!("http://{addr}")
+    }
+
+    /// A local URL with nothing listening on it, so a connection to it is refused.
+    fn unused_local_url() -> String {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
         format!("http://{addr}")
     }
 
@@ -669,31 +642,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_keeps_a_replaced_channel_whose_call_is_still_in_flight() {
-        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
-        let source = source(Arc::clone(&tls));
-        let first = source.acquire().await.unwrap();
-        let pending = CallOutcome::start(Arc::clone(&first.health));
-
-        tls.set(Ok(settings_for("b.example.com")));
-        let rotated = source.acquire().await.unwrap();
-        rotated.health.record(false);
-
-        assert_eq!(source.acquire().await.unwrap().tls, first.tls);
-
-        pending.finish(true);
-        assert_eq!(source.acquire().await.unwrap().tls, first.tls);
-    }
-
-    #[tokio::test]
-    async fn a_call_dropped_before_a_response_counts_as_a_failure() {
+    async fn a_timed_out_attempt_falls_back_to_the_previous_channel() {
         let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
         let source = source(Arc::clone(&tls));
         let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
 
-        // Dropped without a response, the way a timed-out attempt drops it.
+        let (_, timeout) = source.client().await.unwrap();
+        timeout.record();
+
+        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+        assert_ne!(rotated.tls, working.tls);
+    }
+
+    #[tokio::test]
+    async fn a_call_dropped_before_a_response_leaves_the_channel_unchanged() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        // Dropped without a response, as when the caller cancels stream creation.
         let mut channel = TrackedChannel {
-            channel: base_endpoint("http://127.0.0.1:1", "zerobus-test")
+            channel: base_endpoint(&unused_local_url(), "zerobus-test")
                 .unwrap()
                 .connect_lazy(),
             health: Arc::clone(&rotated.health),
@@ -703,8 +672,8 @@ mod tests {
             .unwrap();
         drop(channel.call(http::Request::new(Body::empty())));
 
-        assert!(!rotated.health.reached_server());
-        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
+        assert_eq!(rotated.health.last_failure(), 0);
+        assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
     }
 
     #[tokio::test]
@@ -756,11 +725,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_transport_call_does_not_count_as_reaching_the_server() {
-        // Nothing listens on this port, so the connection is refused.
-        let url = "http://127.0.0.1:1";
+        let url = unused_local_url();
         let health = Arc::new(ChannelHealth::new(Arc::new(AtomicU64::new(0))));
         let mut channel = TrackedChannel {
-            channel: base_endpoint(url, "zerobus-test").unwrap().connect_lazy(),
+            channel: base_endpoint(&url, "zerobus-test").unwrap().connect_lazy(),
             health: Arc::clone(&health),
         };
 

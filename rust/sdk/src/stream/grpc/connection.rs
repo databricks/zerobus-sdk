@@ -16,7 +16,7 @@ use super::supervisor::StreamInitInfo;
 use super::transport::{
     self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
 };
-use crate::grpc_channel::GrpcClient;
+use crate::grpc_channel::{ChannelTimeout, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::RecordType;
@@ -77,10 +77,11 @@ impl super::ZerobusStream {
         record_type: RecordType,
         kind: &GrpcConnectionMode,
         recovery_timeout_ms: u64,
+        channel_timeout: &ChannelTimeout,
     ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
         let attempt_started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
+        let result = match tokio::time::timeout(
             attempt_timeout,
             Self::create_stream_connection_inner(
                 channel,
@@ -91,11 +92,15 @@ impl super::ZerobusStream {
             ),
         )
         .await
-        .map_err(|_| {
-            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
-                "Stream creation timed out",
-            ))
-        })?;
+        {
+            Ok(result) => result,
+            Err(_) => {
+                channel_timeout.record();
+                return Err(ZerobusError::CreateStreamError(
+                    GrpcStatus::deadline_exceeded("Stream creation timed out"),
+                ));
+            }
+        };
 
         if let Err(err) = &result {
             let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
