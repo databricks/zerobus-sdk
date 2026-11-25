@@ -4,8 +4,9 @@
 //! clients. Before it reuses a channel, it reads the TLS settings again and
 //! opens a new channel if they changed, so rotated certificates reach a shared
 //! channel, recovery attempts and unary calls, not only new dedicated channels.
-//! Until a call on the new channel reaches the server, the source keeps the
-//! channel it replaced, and goes back to it when the new channel fails first.
+//! If the replaced channel had reached the server, the source keeps it until a
+//! call on the new channel reaches the server too, and goes back to it when the
+//! new channel fails first.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

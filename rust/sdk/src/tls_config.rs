@@ -33,8 +33,8 @@ use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 /// replaced until a call on the new one reaches the server, if the replaced
 /// channel had reached the server before, and goes back to it if the new one
 /// fails first. A replaced channel whose first call has not answered yet is not
-/// kept, and its later success is not used. An implementation can return different settings
-/// on each call, for example to rotate certificates.
+/// kept, and its later success is not used. An implementation can return
+/// different settings on each call, for example to rotate certificates.
 ///
 /// # Examples
 ///
@@ -107,14 +107,14 @@ pub trait TlsConfig: Send + Sync {
 /// It also keeps the gRPC channel it replaced until a call on the new channel
 /// reaches the server, if the replaced channel had reached the server before.
 /// A replaced channel whose first call has not answered yet is not kept, and its
-/// later success is not used. If the new channel fails first, for example because the
-/// server rejects the new client certificate or the new CA doesn't trust the
-/// server, the SDK goes back to the replaced channel and logs a warning. It tries
-/// the new channel again when the files change again or when the replaced
-/// channel fails too. A channel that a stream opens for itself has no channel to
-/// go back to on the stream's first open, and neither does an Arrow Flight
-/// connection, so they use the files as they are. On a shared channel, a
-/// stream's first open can go back to the replaced channel too.
+/// later success is not used. If the new channel fails first, for example
+/// because the server rejects the new client certificate or the new CA doesn't
+/// trust the server, the SDK goes back to the replaced channel and logs a
+/// warning. It tries the new channel again when the files change again or when
+/// the replaced channel fails too. A channel that a stream opens for itself has
+/// no channel to go back to on the stream's first open, and neither does an
+/// Arrow Flight connection, so they use the files as they are. On a shared
+/// channel, a stream's first open can go back to the replaced channel too.
 ///
 /// The SDK reads the files on a blocking thread, so a slow volume doesn't stall
 /// the async runtime.
