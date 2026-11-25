@@ -11,10 +11,12 @@ import json
 
 import pytest
 
+from zerobus import PersonalAccessToken
 from zerobus import _zerobus_core as core
 from zerobus.sdk import aio, sync
 
 SDK_ARGS = ("https://localhost", "https://localhost")
+PAT = "dapi-test-secret"
 
 
 class _Headers(core.HeadersProvider):
@@ -58,8 +60,29 @@ class TestBuilderValidation:
         assert builder._headers_provider is not None
         builder._native_args()  # passes validation
 
-        builder.oauth("id", "secret")
+        builder.personal_access_token(PAT)
         assert builder._headers_provider is None
+        assert builder._personal_access_token == PAT
+        builder._native_args()
+
+        builder.oauth("id", "secret")
+        assert builder._personal_access_token is None
+        builder._native_args()
+
+    @pytest.mark.parametrize("token", [PAT, PersonalAccessToken(PAT)])
+    def test_personal_access_token_accepts_str_or_wrapper(self, sdk, token):
+        builder = sdk.persistent_stream_builder().table("c.s.t").json()
+        assert builder.personal_access_token(token) is builder
+        assert builder._personal_access_token == PAT
+        builder._native_args()
+
+    @pytest.mark.parametrize("bad", ["", None, 42])
+    def test_personal_access_token_rejects_empty_or_non_string(self, sdk, bad):
+        builder = sdk.persistent_stream_builder().table("c.s.t").json().oauth("id", "secret")
+        with pytest.raises(ValueError, match="non-empty string"):
+            builder.personal_access_token(bad)
+        # A rejected token leaves the earlier auth setting in place.
+        assert builder._client_id == "id"
         builder._native_args()
 
     @pytest.mark.parametrize("value", ["false", 0, 1, None])
@@ -147,11 +170,17 @@ class TestValidConfiguration:
     mis-forwarded a setting.
     """
 
-    @staticmethod
-    def _configured(builder):
+    # Each auth setter runs build() and resume() against the refused port, so a token
+    # that never reached the core would surface here as a different exception type.
+    AUTH_SETTERS = {
+        "headers_provider": lambda builder: builder.headers_provider(_Headers()),
+        "personal_access_token": lambda builder: builder.personal_access_token(PAT),
+    }
+
+    @classmethod
+    def _configured(cls, builder, auth):
         return (
-            builder.table("c.s.t")
-            .headers_provider(_Headers())
+            cls.AUTH_SETTERS[auth](builder.table("c.s.t"))
             .json()
             .recovery(False)
             .recovery_timeout_ms(1)
@@ -165,21 +194,28 @@ class TestValidConfiguration:
             .callback_max_wait_time_ms(None)
         )
 
+    @pytest.mark.parametrize("auth", list(AUTH_SETTERS))
     @pytest.mark.parametrize("resume_id", [None, "stream-1"])
-    def test_sync_reaches_network(self, resume_id):
+    def test_sync_reaches_network(self, auth, resume_id):
         builder = self._configured(
-            sync.ZerobusSdk("http://127.0.0.1:1", "http://127.0.0.1:1").persistent_stream_builder()
+            sync.ZerobusSdk("http://127.0.0.1:1", "http://127.0.0.1:1").persistent_stream_builder(), auth
         )
-        with pytest.raises(core.ZerobusException):
+        with pytest.raises(core.ZerobusException) as info:
             builder.build() if resume_id is None else builder.resume(resume_id)
+        # The refused port raises the plain class; a rejected setting raises a subclass.
+        assert type(info.value) is core.ZerobusException
+        assert PAT not in str(info.value)
 
+    @pytest.mark.parametrize("auth", list(AUTH_SETTERS))
     @pytest.mark.parametrize("resume_id", [None, "stream-1"])
-    def test_async_reaches_network(self, resume_id):
+    def test_async_reaches_network(self, auth, resume_id):
         builder = self._configured(
-            aio.ZerobusSdk("http://127.0.0.1:1", "http://127.0.0.1:1").persistent_stream_builder()
+            aio.ZerobusSdk("http://127.0.0.1:1", "http://127.0.0.1:1").persistent_stream_builder(), auth
         )
-        with pytest.raises(core.ZerobusException):
+        with pytest.raises(core.ZerobusException) as info:
             asyncio.run(builder.build() if resume_id is None else builder.resume(resume_id))
+        assert type(info.value) is core.ZerobusException
+        assert PAT not in str(info.value)
 
     def test_proto_descriptor_reaches_network(self):
         from tests import row_pb2
@@ -215,6 +251,8 @@ class TestNativeValidation:
             core.PersistentStreamSettings(),
             core.PersistentStreamSettings(client_id="id"),
             core.PersistentStreamSettings(client_id="id", client_secret="s", headers_provider=_Headers()),
+            core.PersistentStreamSettings(personal_access_token=PAT, client_id="id", client_secret="s"),
+            core.PersistentStreamSettings(personal_access_token=PAT, headers_provider=_Headers()),
         ):
             with pytest.raises(ValueError, match="exactly one authentication method"):
                 sdk.open_persistent_stream(props, settings)

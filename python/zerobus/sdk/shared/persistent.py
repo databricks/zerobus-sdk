@@ -6,14 +6,15 @@ restart, ``resume(stream_id)`` reconnects to the same stream and delivery into D
 exactly-once. The sync and async builders in ``zerobus.sdk.sync`` and ``zerobus.sdk.aio``
 add the ``build()`` and ``resume()`` methods.
 
-Persistent streams support the JSON and protobuf record formats, with OAuth or a custom
-headers provider for authentication. The Avro format and external-IdP federation are not
-supported.
+Persistent streams support the JSON and protobuf record formats, with OAuth, a personal
+access token, or a custom headers provider for authentication. The Avro format and
+external-IdP federation are not supported.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared.auth import PersonalAccessToken, _require_non_empty_token
 
 _MAX_U32 = 2**32 - 1
 _MAX_I64 = 2**63 - 1
@@ -34,6 +35,7 @@ class _PersistentStreamBuilderBase:
         self._client_id: Optional[str] = None
         self._client_secret: Optional[str] = None
         self._headers_provider = None
+        self._personal_access_token: Optional[str] = None
         self._descriptor: Any = None
         self._json = False
         self._settings = {}
@@ -43,17 +45,49 @@ class _PersistentStreamBuilderBase:
         self._table_name = table_name
         return self
 
+    def _clear_auth(self) -> None:
+        self._client_id = self._client_secret = None
+        self._headers_provider = None
+        self._personal_access_token = None
+
     def oauth(self, client_id: str, client_secret: str):
-        """Authenticate with OAuth client credentials. Replaces an earlier ``headers_provider()``."""
+        """Authenticate with OAuth client credentials. Replaces an earlier authentication setter."""
+        self._clear_auth()
         self._client_id = client_id
         self._client_secret = client_secret
-        self._headers_provider = None
         return self
 
     def headers_provider(self, provider):
-        """Authenticate with a custom ``HeadersProvider``. Replaces an earlier ``oauth()``."""
+        """Authenticate with a custom ``HeadersProvider``. Replaces an earlier authentication setter."""
+        self._clear_auth()
         self._headers_provider = provider
-        self._client_id = self._client_secret = None
+        return self
+
+    def personal_access_token(self, token: Union[str, PersonalAccessToken]):
+        """Authenticate with a Databricks personal access token (PAT).
+
+        Private Preview: PAT authentication for Zerobus requires server-side
+        enablement.
+
+        The PAT must be created with the ``zerobus`` API scope in the workspace that the
+        Zerobus endpoint belongs to; see ``PersonalAccessToken``. Replaces an earlier
+        authentication setter.
+
+        The SDK cannot refresh the token. Once it expires, call ``resume(stream_id)``
+        on a new builder that has a fresh token.
+
+        Args:
+            token: The token string, or a ``PersonalAccessToken`` wrapping it.
+
+        Raises:
+            ValueError: If ``token`` is empty, or neither a string nor a
+                ``PersonalAccessToken``.
+        """
+        if isinstance(token, PersonalAccessToken):
+            token = token.token
+        token = _require_non_empty_token(token)
+        self._clear_auth()
+        self._personal_access_token = token
         return self
 
     def json(self):
@@ -135,8 +169,12 @@ class _PersistentStreamBuilderBase:
         has_oauth = self._client_id is not None or self._client_secret is not None
         if has_oauth and (self._client_id is None or self._client_secret is None):
             raise ValueError("oauth requires both client_id and client_secret")
-        if has_oauth == (self._headers_provider is not None):
-            raise ValueError("authentication is required: call exactly one of oauth(...) or headers_provider(...)")
+        auth_methods = (has_oauth, self._headers_provider is not None, self._personal_access_token is not None)
+        if sum(auth_methods) != 1:
+            raise ValueError(
+                "authentication is required: call exactly one of oauth(...), headers_provider(...), "
+                "or personal_access_token(...)"
+            )
         if self._descriptor is None and not self._json:
             raise ValueError("record format is required: call json() or compiled_proto(...)")
 
@@ -145,6 +183,7 @@ class _PersistentStreamBuilderBase:
             client_id=self._client_id,
             client_secret=self._client_secret,
             headers_provider=self._headers_provider,
+            personal_access_token=self._personal_access_token,
             **self._settings,
         )
         return table_properties, settings
