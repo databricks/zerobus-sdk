@@ -48,6 +48,7 @@ impl ZerobusStream {
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         initial_last_acked_offset: OffsetId,
         stream_stats: Arc<StreamStatsState>,
+        expected_close: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -59,6 +60,8 @@ impl ZerobusStream {
             // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
             // still up, so a detached drain is used to avoid blocking recovery.
             let mut close_initiated = false;
+            // Set once the server has sent a close signal, whether or not recovery is enabled.
+            let mut close_announced = false;
 
             'recv_loop: loop {
                 if let Some(deadline) = pause_deadline {
@@ -134,6 +137,7 @@ impl ZerobusStream {
                         }
                     }
                     Ok(Ok(Some(InboundMessage::Close(CloseStreamSignal { duration })))) => {
+                        close_announced = true;
                         if options.recovery {
                             let server_duration_ms = duration
                                 .as_ref()
@@ -179,16 +183,26 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Ok(Ok(None)) => {
-                        // The end of a graceful rotation is expected, so it recovers like the
-                        // rotation deadline does and is not recorded.
-                        if pause_deadline.is_some() {
-                            info!("Server closed the stream after its close signal.");
+                        // The server answers the caller's half-close with EOF. The caller asked for it.
+                        if half_close_token.is_cancelled() {
+                            close_initiated = true;
                             break 'recv_loop;
                         }
-                        info!("Server closed the stream without errors.");
                         let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
                             "Stream closed by server without errors.",
                         ));
+                        if close_announced {
+                            // An announced end is a rotation: it recovers like the rotation
+                            // deadline does, and without recovery the supervisor fails the stream
+                            // without recording it.
+                            info!("Server closed the stream after its close signal.");
+                            if options.recovery {
+                                break 'recv_loop;
+                            }
+                            expected_close.store(true, Ordering::Relaxed);
+                            return Err(error);
+                        }
+                        info!("Server closed the stream without errors.");
                         let _ = server_error_tx.send(Some(error.clone()));
                         return Err(error);
                     }

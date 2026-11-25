@@ -338,6 +338,109 @@ mod grpc_stream_stats {
     }
 
     #[tokio::test]
+    async fn announced_server_close_without_recovery_is_not_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stats_announced_terminal".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    MockResponse::CloseStreamSignalAndEnd {
+                        duration_seconds: 5,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let first = stream.ingest_record_offset(b"first".to_vec()).await?;
+        stream.wait_for_offset(first).await?;
+        let second = stream.ingest_record_offset(b"second".to_vec()).await?;
+        assert!(stream.wait_for_offset(second).await.is_err());
+
+        let stats = stream.stats();
+        assert_eq!(stats.reconnects, 0);
+        assert_eq!(stats.records_in_flight, 1);
+        assert!(
+            stats.last_error.is_none(),
+            "announced close recorded {:?}",
+            stats.last_error
+        );
+        Ok(())
+    }
+
+    // The caller closes while the sender is parked after its half-close, so the server's
+    // EOF reaches the receiver before the sender finishes. That EOF belongs to the caller's close.
+    #[tokio::test]
+    async fn caller_close_with_server_eof_is_not_recorded() -> Result<(), Box<dyn std::error::Error>>
+    {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stats_caller_close_eof".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let offset = stream.ingest_record_offset(b"only".to_vec()).await?;
+        stream.wait_for_offset(offset).await?;
+
+        let (reached, _proceed) = stream.arm_sender_exit_barrier().await;
+        stream.close().await?;
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("sender must reach its exit point");
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 0);
+        assert!(
+            stats.last_error.is_none(),
+            "caller close recorded {:?}",
+            stats.last_error
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unrequested_server_close_with_recovery_is_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
@@ -705,7 +808,12 @@ mod arrow_stream_stats {
             .await
             .expect("close signal ack must be applied");
 
-        let _ = stream.close().await;
+        let result = stream.close().await;
+        let error = result.expect_err("close must be interrupted by the rotation");
+        assert!(
+            error.to_string().contains("graceful stream rotation"),
+            "close returned {error}"
+        );
         let stats = stream.stats();
         assert_eq!(stats.records_in_flight, 1);
         assert!(

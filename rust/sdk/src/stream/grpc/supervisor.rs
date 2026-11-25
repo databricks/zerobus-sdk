@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, instrument, warn};
 
+use super::sender::SenderExitHook;
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
@@ -69,6 +70,7 @@ impl ZerobusStream {
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         stream_stats: Arc<StreamStatsState>,
+        sender_exit_hook: Arc<SenderExitHook>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -208,6 +210,7 @@ impl ZerobusStream {
                             failed_records.clone(),
                             &e,
                             &callback_tx,
+                            true,
                         )
                         .await;
                     }
@@ -280,6 +283,8 @@ impl ZerobusStream {
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
+            // Set by the receiver when the server announced its close and then ended the stream.
+            let expected_close = Arc::new(AtomicBool::new(false));
 
             // Per-stream child token
             let per_stream_token = cancellation_token.child_token();
@@ -299,6 +304,7 @@ impl ZerobusStream {
                 callback_tx.clone(),
                 initial_last_acked_offset,
                 Arc::clone(&stream_stats),
+                Arc::clone(&expected_close),
             ));
             let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 connection.sink,
@@ -306,6 +312,7 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
+                Arc::clone(&sender_exit_hook),
             ));
 
             // 4. Wait for any of the two tasks to end.
@@ -357,6 +364,7 @@ impl ZerobusStream {
             };
 
             // 5. Handle errors.
+            let expected = expected_close.load(Ordering::Relaxed);
             if let Err(error) = result {
                 error!(stream_id = %stream_id, "Stream failure detected: {}", error);
                 let error = match &error {
@@ -380,6 +388,7 @@ impl ZerobusStream {
                         failed_records.clone(),
                         &error,
                         &callback_tx,
+                        !expected,
                     )
                     .await;
                     // A mid-stream auth rejection means the cached token is no
@@ -468,6 +477,7 @@ impl ZerobusStream {
         failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
         error: &ZerobusError,
         callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+        record_error: bool,
     ) {
         // Acquire every async lock before publishing the terminal state. This
         // prevents `get_unacked_batches` from observing `is_closed` and
@@ -479,7 +489,11 @@ impl ZerobusStream {
         let mut map = oneshot_map.lock().await;
 
         is_closed.store(true, Ordering::Relaxed);
-        let _ = server_error_tx.send(Some(error.clone()));
+        if record_error {
+            let _ = server_error_tx.send(Some(error.clone()));
+        } else {
+            let _ = server_error_tx.send_unrecorded(Some(error.clone()));
+        }
         terminal_token.cancel();
         Self::drain_pending_records(landing_zone, &mut map, &mut failed, error, callback_tx);
     }
@@ -571,6 +585,7 @@ mod tests {
             Arc::clone(&failed_records),
             &error,
             &callback_tx,
+            true,
         ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);
@@ -623,6 +638,7 @@ mod tests {
             Arc::clone(&failed_records),
             &error,
             &callback_tx,
+            true,
         ));
         let waker = Waker::from(Arc::new(NoopWake));
         let mut context = Context::from_waker(&waker);

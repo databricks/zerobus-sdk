@@ -150,6 +150,8 @@ pub struct ZerobusStream {
     stream_stats: Arc<StreamStatsState>,
     #[cfg(feature = "test-hooks")]
     pre_enqueue_barrier: Arc<PreEnqueueBarrier>,
+    #[cfg(feature = "test-hooks")]
+    sender_exit_hook: Arc<sender::SenderExitHook>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -303,6 +305,7 @@ impl ZerobusStream {
             (None, None)
         };
 
+        let sender_exit_hook = Arc::new(sender::SenderExitHook::default());
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
@@ -321,6 +324,7 @@ impl ZerobusStream {
             cancellation_token.clone(),
             callback_tx.clone(),
             Arc::clone(&stream_stats),
+            Arc::clone(&sender_exit_hook),
         ));
         let initialization_guard = StreamInitializationGuard::new(
             cancellation_token.clone(),
@@ -381,6 +385,8 @@ impl ZerobusStream {
             stream_stats,
             #[cfg(feature = "test-hooks")]
             pre_enqueue_barrier: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            sender_exit_hook,
             cancellation_token,
             callback_handler_task,
             callback_cancellation_token,
@@ -396,6 +402,16 @@ impl ZerobusStream {
     /// expose these counters.
     pub fn stats(&self) -> StreamStats {
         self.stream_stats.snapshot()
+    }
+
+    /// Test-only: pauses the sender after it half-closes on cancellation. Returns `(reached,
+    /// proceed)`: the sender notifies `reached`, then waits on `proceed`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_sender_exit_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.sender_exit_hook.arm().await
     }
 
     /// Test-only: pauses the next admitted batch before it is handed to the sender.

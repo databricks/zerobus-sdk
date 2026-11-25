@@ -37,7 +37,8 @@ pub struct StreamStats {
     pub reconnects: u64,
     /// Most recent error the stream published, or `None` if none has occurred.
     /// Kept after a successful recovery. A server close the SDK expects, such as the end
-    /// of a graceful rotation, is not an error and is not recorded.
+    /// of a graceful rotation or the end of stream that answers the caller's close, is not
+    /// an error and is not recorded.
     pub last_error: Option<LastStreamError>,
 }
 
@@ -195,6 +196,14 @@ impl ServerErrorSender {
         if let Some(error) = &value {
             self.stats.record_error(error);
         }
+        self.tx.send(value)
+    }
+
+    /// Publishes a routine stop without recording it.
+    pub(crate) fn send_unrecorded(
+        &self,
+        value: Option<ZerobusError>,
+    ) -> Result<(), watch::error::SendError<Option<ZerobusError>>> {
         self.tx.send(value)
     }
 

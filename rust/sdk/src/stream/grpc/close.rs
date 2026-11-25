@@ -210,6 +210,8 @@ mod tests {
             stream_stats: Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
             pre_enqueue_barrier: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            sender_exit_hook: Arc::default(),
             cancellation_token: CancellationToken::new(),
             callback_handler_task: callback,
             callback_cancellation_token: CancellationToken::new(),
