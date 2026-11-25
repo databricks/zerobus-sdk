@@ -253,6 +253,7 @@ impl ZerobusStream {
                     &callback_tx,
                     &stream_stats,
                     &mut last_acked_offset,
+                    &mut close_announced,
                 )
                 .await;
                 // An end of stream that leaves records unacknowledged is a failure, as it is in the
@@ -318,6 +319,7 @@ async fn drain_applying_acks(
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
+    close_announced: &mut bool,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + window;
     loop {
@@ -341,6 +343,7 @@ async fn drain_applying_acks(
                     return false;
                 }
             }
+            Ok(Ok(Some(InboundMessage::Close(_)))) => *close_announced = true,
             // Nothing to apply.
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => return true,

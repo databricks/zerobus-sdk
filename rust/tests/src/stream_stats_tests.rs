@@ -494,6 +494,61 @@ mod grpc_stream_stats {
         Ok(())
     }
 
+    // As the drain test above, but the server first sends a close signal, which the drain must
+    // honor, so the end of stream that follows is the announced rotation and is not recorded.
+    #[tokio::test]
+    async fn flush_timeout_then_close_signal_and_eof_during_drain_is_not_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        let eof_gate = Arc::new(MockResponseGate::new());
+        mock_server
+            .hold_end_of_stream_after_half_close(Arc::clone(&eof_gate))
+            .await;
+        mock_server.send_close_signal_on_half_close(5).await;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "stats_drain_close_signal".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let mut stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .flush_timeout_ms(200)
+            .build()
+            .await?;
+
+        stream.ingest_record_offset(b"unacked".to_vec()).await?;
+        let (reached, proceed) = stream.arm_before_drain_barrier().await;
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(10), reached.notified())
+                .await
+                .expect("receiver must reach the drain");
+            proceed.notify_one();
+            eof_gate.release();
+        };
+        let (close_result, ()) = tokio::join!(stream.close(), release);
+        assert!(close_result.is_err(), "flush must time out");
+
+        let stats = stream.stats();
+        assert_eq!(stats.records_in_flight, 1);
+        assert!(
+            stats.last_error.is_none(),
+            "announced close during drain recorded {:?}",
+            stats.last_error
+        );
+        Ok(())
+    }
+
     // The server ends the stream on its own after acknowledging everything, before the caller's
     // request is half-closed. The end is not the answer to the caller's close, so it is recorded.
     #[tokio::test]
