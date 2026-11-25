@@ -35,7 +35,7 @@ pub(crate) struct TeardownPauses {
 #[cfg(feature = "test-hooks")]
 pub(crate) type TeardownHooks = Arc<TeardownPauses>;
 #[cfg(not(feature = "test-hooks"))]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub(crate) struct TeardownHooks;
 
 #[cfg(feature = "test-hooks")]
