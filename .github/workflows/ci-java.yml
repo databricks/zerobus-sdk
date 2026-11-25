@@ -36,7 +36,7 @@ jobs:
           echo "Code formatting issues detected. Run 'mvn spotless:apply' to fix."
           exit 1
 
-  release-jars:
+  release-jar:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
@@ -57,14 +57,13 @@ jobs:
       - name: Configure Maven registry
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-maven.sh"
-      - name: Build release JARs
-        shell: bash
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/build-java-jars.sh" -Dzerobus.skipNativeLibCheck=true
+      - name: Package JAR
+        run: mvn --batch-mode -DskipTests=true package -Dzerobus.skipNativeLibCheck=true
       - name: Load regular JAR on each protobuf runtime
         shell: bash
         run: |
           set -euo pipefail
-          jar=$(ls dist/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
+          jar=$(ls target/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
           slf4j=$(find ~/.m2/repository/org/slf4j/slf4j-api/2.0.17 -name 'slf4j-api-2.0.17.jar')
           for version in 3.25.9 4.33.0; do
             protobuf=$(find ~/.m2/repository/com/google/protobuf/protobuf-java/$version -name "protobuf-java-$version.jar")
