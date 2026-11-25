@@ -51,7 +51,7 @@ impl MockResponseGate {
         self.semaphore.add_permits(1);
     }
 
-    async fn wait(&self) {
+    pub async fn wait(&self) {
         self.semaphore
             .acquire()
             .await
@@ -89,6 +89,13 @@ pub enum MockResponse {
     /// Ends the response stream with no status, as a server closing it cleanly.
     #[allow(dead_code)]
     EndStream { delay_ms: u64 },
+    /// Sends a close signal and then ends the response stream with no status, as a
+    /// server that rotates and closes in the same breath.
+    #[allow(dead_code)]
+    CloseStreamSignalAndEnd {
+        duration_seconds: i64,
+        delay_ms: u64,
+    },
     /// Error response released explicitly by a test.
     #[allow(dead_code)]
     GatedError {
@@ -1017,6 +1024,24 @@ async fn handle_mock_response(
             if *delay_ms > 0 {
                 sleep(Duration::from_millis(*delay_ms)).await;
             }
+            (false, current_index + 1)
+        }
+        MockResponse::CloseStreamSignalAndEnd {
+            duration_seconds,
+            delay_ms,
+        } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            let response = EphemeralStreamResponse {
+                payload: Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
+                    duration: Some(ProtobufDuration {
+                        seconds: *duration_seconds,
+                        nanos: 0,
+                    }),
+                })),
+            };
+            let _ = tx.send(Ok(response)).await;
             (false, current_index + 1)
         }
         MockResponse::CreateStream { .. } => (true, current_index + 1),

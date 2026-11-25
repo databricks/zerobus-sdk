@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use tokio::sync::watch;
 
 use crate::offset_generator::OffsetId;
-use crate::{GrpcCode, ZerobusError};
+use crate::ZerobusError;
 
 /// Point-in-time view of a stream's counters.
 ///
@@ -36,8 +36,8 @@ pub struct StreamStats {
     /// created. Initial stream creation is not counted.
     pub reconnects: u64,
     /// Most recent error the stream published, or `None` if none has occurred.
-    /// Kept after a successful recovery. A clean server close is not an error and is
-    /// not recorded.
+    /// Kept after a successful recovery. A server close the SDK expects, such as the end
+    /// of a graceful rotation, is not an error and is not recorded.
     pub last_error: Option<LastStreamError>,
 }
 
@@ -126,9 +126,6 @@ impl StreamStatsState {
     }
 
     pub(crate) fn record_error(&self, error: &ZerobusError) {
-        if is_clean_close(error) {
-            return;
-        }
         let entry = LastStreamError {
             message: error.to_string(),
             is_retryable: error.is_retryable(),
@@ -217,10 +214,6 @@ impl ServerErrorSender {
     ) -> Option<ZerobusError> {
         self.tx.send_replace(value)
     }
-}
-
-fn is_clean_close(error: &ZerobusError) -> bool {
-    matches!(error, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Ok)
 }
 
 #[cfg(test)]
@@ -325,15 +318,6 @@ mod tests {
         assert!(!second.is_retryable);
         assert!(matches!(second.error, ZerobusError::InvalidArgument(_)));
         assert!(second.timestamp >= first.timestamp);
-    }
-
-    #[test]
-    fn clean_close_is_not_recorded() {
-        let state = StreamStatsState::default();
-        state.record_error(&ZerobusError::StreamClosedError(GrpcStatus::ok(
-            "Stream closed by server without errors.",
-        )));
-        assert!(state.snapshot().last_error.is_none());
     }
 
     #[tokio::test]

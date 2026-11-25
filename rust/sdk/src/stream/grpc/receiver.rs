@@ -179,6 +179,12 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Ok(Ok(None)) => {
+                        // The end of a graceful rotation is expected, so it recovers like the
+                        // rotation deadline does and is not recorded.
+                        if pause_deadline.is_some() {
+                            info!("Server closed the stream after its close signal.");
+                            break 'recv_loop;
+                        }
                         info!("Server closed the stream without errors.");
                         let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
                             "Stream closed by server without errors.",

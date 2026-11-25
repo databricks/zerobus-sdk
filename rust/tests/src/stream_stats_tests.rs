@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
 use tracing::info;
-use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
+use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 
 use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
 use crate::utils::{
@@ -274,7 +274,71 @@ mod grpc_stream_stats {
     }
 
     #[tokio::test]
-    async fn clean_server_close_with_recovery_does_not_record_last_error(
+    async fn graceful_rotation_then_server_eof_is_not_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stats_rotation_first".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                    // The server announces a rotation and ends the stream straight after it.
+                    MockResponse::CloseStreamSignalAndEnd {
+                        duration_seconds: 5,
+                        delay_ms: 0,
+                    },
+                    // Wire offsets restart on the new connection, so the replayed record is 0.
+                    MockResponse::CreateStream {
+                        stream_id: "stats_rotation_second".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let stream = sdk_for(&server_url)?
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .recovery_timeout_ms(5000)
+            .recovery_backoff_ms(100)
+            .build()
+            .await?;
+
+        let first = stream.ingest_record_offset(b"first".to_vec()).await?;
+        stream.wait_for_offset(first).await?;
+        let second = stream.ingest_record_offset(b"second".to_vec()).await?;
+        stream.wait_for_offset(second).await?;
+
+        let stats = stream.stats();
+        assert_eq!(stats.reconnects, 1);
+        assert_eq!(stats.records_in_flight, 0);
+        assert_eq!(stats.last_acked_offset, Some(second));
+        assert!(
+            stats.last_error.is_none(),
+            "graceful rotation recorded {:?}",
+            stats.last_error
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unrequested_server_close_with_recovery_is_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         let (mock_server, server_url) = start_mock_server().await?;
@@ -325,20 +389,19 @@ mod grpc_stream_stats {
         let stats = stream.stats();
         assert_eq!(
             stats.reconnects, 1,
-            "the clean close must trigger a recovery"
+            "the unrequested close must trigger a recovery"
         );
         assert_eq!(stats.records_in_flight, 0);
         assert_eq!(stats.last_acked_offset, Some(second));
-        assert!(
-            stats.last_error.is_none(),
-            "clean server close recorded {:?}",
-            stats.last_error
-        );
+        let error = stats
+            .last_error
+            .expect("unrequested server close must be recorded");
+        assert!(error.message.contains("closed by server without errors"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn clean_server_close_without_recovery_does_not_record_last_error(
+    async fn unrequested_server_close_without_recovery_is_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         let (mock_server, server_url) = start_mock_server().await?;
@@ -379,11 +442,10 @@ mod grpc_stream_stats {
         assert_eq!(stats.last_acked_offset, Some(first));
         // The unacknowledged record is retained after the terminal close.
         assert_eq!(stats.records_in_flight, 1);
-        assert!(
-            stats.last_error.is_none(),
-            "clean server close recorded {:?}",
-            stats.last_error
-        );
+        let error = stats
+            .last_error
+            .expect("unrequested server close must be recorded");
+        assert!(error.message.contains("closed by server without errors"));
         Ok(())
     }
 
@@ -643,8 +705,7 @@ mod arrow_stream_stats {
             .await
             .expect("close signal ack must be applied");
 
-        let result = stream.close().await;
-        assert!(result.is_err(), "close must be interrupted by the rotation");
+        let _ = stream.close().await;
         let stats = stream.stats();
         assert_eq!(stats.records_in_flight, 1);
         assert!(
@@ -753,6 +814,7 @@ mod arrow_stream_stats {
         setup_tracing();
         let (mock_server, server_url) = start_mock_flight_server().await?;
         let schema = create_test_arrow_schema();
+        let replay_gate = Arc::new(MockResponseGate::new());
         mock_server
             .inject_responses(
                 TABLE_NAME,
@@ -766,11 +828,11 @@ mod arrow_stream_stats {
                     },
                     MockFlightResponse::CloseStream { delay_ms: 0 },
                     // Replay sends the 6-row suffix of batch 0 as wire offset 0, then batch 1.
-                    // The ack for the suffix is delayed so the replayed count can be observed.
-                    MockFlightResponse::BatchAck {
+                    // The suffix ack is held until the test releases the gate.
+                    MockFlightResponse::GatedBatchAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 500,
                         ack_up_to_records: 6,
+                        gate: Arc::clone(&replay_gate),
                     },
                     MockFlightResponse::BatchAck {
                         ack_up_to_offset: 1,
@@ -815,6 +877,7 @@ mod arrow_stream_stats {
             "the 6-row suffix and the new batch are in flight after replay"
         );
 
+        replay_gate.release();
         stream.wait_for_offset(second).await?;
         let stats = stream.stats();
         assert_eq!(stats.records_in_flight, 0);
