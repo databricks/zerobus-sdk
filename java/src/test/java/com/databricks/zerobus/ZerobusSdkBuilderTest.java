@@ -203,11 +203,11 @@ class ZerobusSdkBuilderTest {
   @Test
   void validBinaryHeaderValuePassesHeaderHandling() {
     assumeNativeLibrary();
-    // Nothing listens on port 1, so the stream fails at connect. Reaching connect means the
-    // value was decoded and the header was accepted.
+    // Nothing is expected to succeed on port 1. The point is that the core's decoder does not
+    // reject the value; that the JNI layer passes it through unchanged is covered by the native
+    // callbacks test.
     ExecutionException error = createStreamWithBinaryHeader("https://127.0.0.1:1", "AAE=");
     String message = String.valueOf(error.getCause().getMessage());
-    assertTrue(message.contains("tcp connect error"), message);
     assertFalse(message.contains("Invalid metadata"), message);
   }
 

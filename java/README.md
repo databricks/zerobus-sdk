@@ -884,8 +884,8 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
   value is a DNS name or an IP address, with no scheme, port or path, for example
   `zerobus.example.com`. `domainName` rejects an obvious mistake, such as a scheme, a port, a path or
   whitespace, with `IllegalArgumentException` when the builder is called. It does not check the
-  syntax of a DNS name or an IP literal, so a malformed name passes this check and fails when the
-  connection is made.
+  syntax of a DNS name or an IP literal, so a malformed name passes this check, fails when the
+  connection is made, and is retried by automatic recovery.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by

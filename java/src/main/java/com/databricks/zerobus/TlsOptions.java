@@ -295,7 +295,7 @@ public final class TlsOptions {
     if (ipv6Candidate) {
       return value.matches("[0-9A-Fa-f:.]+");
     }
-    return value.indexOf(':') < 0 && value.matches("[A-Za-z0-9.-]+");
+    return value.indexOf(':') < 0 && value.matches("[A-Za-z0-9._-]+");
   }
 
   private static String requireNonBlank(String value, String name) {

@@ -133,6 +133,7 @@ class TlsOptionsTest {
     TlsOptions.Builder builder = TlsOptions.builder();
 
     builder.domainName("zerobus.example.com");
+    builder.domainName("zerobus_internal.example.com");
     builder.domainName("10.0.0.1");
     builder.domainName("::1");
     for (String value :
