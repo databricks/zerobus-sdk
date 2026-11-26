@@ -789,12 +789,15 @@ mod multi_stream_tests {
     // clean completion, which only happens when the supervisor task is not
     // polled promptly after the sender completes. On an idle runtime the
     // sender's completion wakes the supervisor first every time, so this
-    // loop is an end-to-end guard of the close path under load rather
-    // than a deterministic reproducer: the race itself is pinned by the
-    // `is_clean_shutdown_error` unit test in supervisor.rs. (Verified
-    // empirically: 200 sequential closes and 3x200 concurrent closes all
-    // pass with the fix reverted on an idle runtime — the 1-in-15 rate in
-    // the issue was observed under load against the real server.)
+    // loop is an end-to-end guard of the close path under load, NOT a
+    // deterministic reproducer of #1125: it passes with the fix reverted
+    // (200 sequential closes and 3x200 concurrent closes all pass on an
+    // idle runtime — the 1-in-15 rate in the issue was observed under load
+    // against the real server). The `is_clean_shutdown_error` unit test in
+    // supervisor.rs pins the clean-shutdown decision (OK status + cancelled
+    // token only), but no test pins the scheduling race itself: pinning it
+    // needs the supervisor's `select!` outcome to be driven directly, which
+    // the current structure does not allow (see the review thread on #1187).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_close_idle_mux_stream_with_recovery_disabled_succeeds(
     ) -> Result<(), Box<dyn std::error::Error>> {
