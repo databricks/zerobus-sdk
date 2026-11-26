@@ -418,9 +418,10 @@ impl<'a> StreamBuilder<'a> {
     /// is required because those tasks outlive this call. Pass an `Arc` clone when
     /// you need to keep a handle (e.g. the [`channel_exporter`](crate::channel_exporter) pair).
     ///
-    /// Supported only by standalone Arrow Flight streams. Non-Arrow streams and
-    /// multiplexed Arrow streams reject this option. Use
-    /// [`build_arrow`](Self::build_arrow) without `.multiplexed(...)`.
+    /// Supported by standalone and multiplexed Arrow Flight streams. Multiplexed
+    /// event offsets are packed [`MessageId::raw`](crate::MessageId::raw) values;
+    /// decode them with [`MessageId::from_raw`](crate::MessageId::from_raw).
+    /// Non-Arrow streams reject this option.
     #[cfg(feature = "arrow-flight")]
     pub fn stats_exporter<E>(mut self, exporter: E) -> Self
     where

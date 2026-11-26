@@ -1,8 +1,47 @@
 use arrow_array::RecordBatch;
 use bytes::Bytes;
+use std::sync::Arc;
 
 use super::{MessageId, MuxCore};
+use crate::stats::{StatsExporter, StreamStat};
 use crate::{ZerobusArrowStream, ZerobusResult};
+
+struct MultiplexedStatsExporter {
+    stream_index: usize,
+    exporter: Arc<dyn StatsExporter>,
+}
+
+impl StatsExporter for MultiplexedStatsExporter {
+    fn record(&self, stat: StreamStat) {
+        // Lane-local offsets collide, so expose the same opaque ID as ingest_batch.
+        let stat = match stat {
+            StreamStat::BatchSent {
+                offset,
+                attempt,
+                stats,
+            } => StreamStat::BatchSent {
+                offset: MessageId::new(self.stream_index, offset).raw(),
+                attempt,
+                stats,
+            },
+            StreamStat::BatchAcked { offset } => StreamStat::BatchAcked {
+                offset: MessageId::new(self.stream_index, offset).raw(),
+            },
+            StreamStat::Reconnected { reason } => StreamStat::Reconnected { reason },
+        };
+        self.exporter.record(stat);
+    }
+}
+
+pub(crate) fn multiplexed_stats_exporter(
+    stream_index: usize,
+    exporter: Arc<dyn StatsExporter>,
+) -> Arc<dyn StatsExporter> {
+    Arc::new(MultiplexedStatsExporter {
+        stream_index,
+        exporter,
+    })
+}
 
 /// Distributes whole Arrow batches round-robin across Arrow Flight streams.
 ///
@@ -14,8 +53,8 @@ use crate::{ZerobusArrowStream, ZerobusResult};
 /// Each lane retains Arrow's recovery and close behavior. Once an operation
 /// observes a terminal lane failure, ingestion is rejected across the mux.
 /// Healthy lanes remain alive until close or drop; their message waits remain
-/// independent of sibling failures. Acknowledgment callbacks and stats exporters
-/// are unsupported.
+/// independent of sibling failures. Acknowledgment callbacks are unsupported.
+/// Stats exporters receive packed [`MessageId::raw`] offsets, preserving lane identity.
 ///
 /// ```no_run
 /// # use databricks_zerobus_ingest_sdk::{MultiplexedArrowStream, ZerobusError};

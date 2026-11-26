@@ -946,7 +946,10 @@ rows. Results are grouped by lane, without global submission order.
 
 Construction opens all lanes concurrently with the same bounded startup jitter
 and atomic cleanup as the gRPC mux. Arrow mux streams reject both callback
-setters and `stats_exporter`. See the runnable
+setters and accept `stats_exporter`. Batch send and acknowledgment event offsets
+are packed `MessageId::raw()` values; decode them with `MessageId::from_raw(offset)`
+to identify the lane and local batch offset. Reconnect events do not identify the lane.
+See the runnable
 [`arrow_multiplexed`](examples/arrow/multiplexed.rs) example.
 
 #### Avro Stream (Beta, opt-in)

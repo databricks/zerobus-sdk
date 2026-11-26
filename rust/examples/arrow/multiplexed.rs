@@ -5,7 +5,9 @@ use std::error::Error;
 use std::sync::Arc;
 
 use arrow_array::{Int64Array, LargeStringArray, RecordBatch};
-use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    channel_exporter, ArrowSchema, DataType, Field, MessageId, StreamStat, ZerobusSdk,
+};
 
 #[path = "../config.rs"]
 mod config;
@@ -22,11 +24,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Field::new("id", DataType::Int64, true),
         Field::new("customer_name", DataType::LargeUtf8, true),
     ]));
+    let (exporter, mut stats) = channel_exporter(std::num::NonZeroUsize::new(1_024).unwrap());
+    let telemetry = tokio::spawn(async move {
+        while let Some(stat) = stats.recv().await {
+            if let StreamStat::BatchSent { offset, stats, .. } = stat {
+                let id = MessageId::from_raw(offset);
+                println!("{id}: {} payload bytes", stats.approximate_wire_bytes);
+            }
+        }
+    });
     let mut stream = sdk
         .stream_builder()
         .table(&config.table_name)
         .oauth(&config.client_id, &config.client_secret)
         .arrow(schema.clone())
+        .stats_exporter(exporter)
         .max_inflight_batches(100) // Mux-wide budget: 25 pending batches per lane.
         .multiplexed(4)
         .build_arrow()
@@ -48,5 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     stream.flush().await?;
     stream.close().await?;
+    drop(stream);
+    telemetry.await?;
     Ok(())
 }

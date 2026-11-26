@@ -32,6 +32,10 @@
 
 ### Bug Fixes
 
+- Support Arrow Flight stats exporters on multiplexed streams. Batch event offsets
+  use packed message IDs so byte statistics and acknowledgments from different
+  lanes cannot collide.
+
 ### Documentation
 
 - Documented the unary client in the Rust README, with a usage section, API
