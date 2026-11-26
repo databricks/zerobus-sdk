@@ -242,7 +242,9 @@ impl super::ZerobusStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc_channel::test_support::{rotated_source, ReadyHeaders, StalledHeaders};
+    use crate::grpc_channel::test_support::{
+        is_deadline, rotated_source, stalled_endpoint, ReadyHeaders, StalledHeaders,
+    };
     use crate::grpc_channel::GrpcChannelSource;
     use crate::ZerobusStream;
 
@@ -275,16 +277,13 @@ mod tests {
     /// sent and went unanswered: the stream setup falls back to the previous channel.
     #[tokio::test]
     async fn a_stalled_stream_setup_on_a_rotated_channel_falls_back() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!(
-            "https://127.0.0.1:{}",
-            listener.local_addr().unwrap().port()
-        );
+        let (listener, endpoint) = stalled_endpoint();
         let (source, _, previous, rotated) = rotated_source(&endpoint).await;
 
-        assert!(initial_setup(&source, Arc::new(ReadyHeaders))
-            .await
-            .is_err());
+        let Err(err) = initial_setup(&source, Arc::new(ReadyHeaders)).await else {
+            panic!("a stalled handshake must fail the stream setup");
+        };
+        assert!(is_deadline(&err), "{err:?}");
 
         assert_eq!(source.next_channel_fingerprint_for_test().await, previous);
         assert_ne!(previous, rotated);

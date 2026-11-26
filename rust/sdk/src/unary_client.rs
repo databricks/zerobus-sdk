@@ -428,7 +428,9 @@ fn validate_json_object(record: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc_channel::test_support::{rotated_source, ReadyHeaders, StalledHeaders};
+    use crate::grpc_channel::test_support::{
+        is_deadline, rotated_source, stalled_endpoint, ReadyHeaders, StalledHeaders,
+    };
     use crate::headers_provider::tests::MockTokenEndpoint;
     use crate::{JsonString, JsonValue, ProtoBytes};
 
@@ -574,21 +576,11 @@ mod tests {
         )
     }
 
-    fn is_deadline(err: &ZerobusError) -> bool {
-        matches!(err, ZerobusError::UnaryIngestError(status)
-            if status.code() == crate::GrpcCode::DeadlineExceeded)
-    }
-
     /// The RPC is sent on the rotated channel and never answers, so the attempt
     /// times out after the request was sent, and the source falls back.
     #[tokio::test]
     async fn a_stalled_call_on_a_rotated_channel_falls_back_to_the_previous_channel() {
-        // Bound but never accepted: the connection stalls in the TLS handshake.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!(
-            "https://127.0.0.1:{}",
-            listener.local_addr().unwrap().port()
-        );
+        let (listener, endpoint) = stalled_endpoint();
         let (source, _, previous, rotated) = rotated_source(&endpoint).await;
         let client = unary_client(Arc::clone(&source));
 

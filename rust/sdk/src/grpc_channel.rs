@@ -410,16 +410,50 @@ impl GrpcChannelSource {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
     use super::*;
+    use crate::proxy::ConnectorFactory;
     use crate::{HeadersProvider, TlsSettings};
 
-    /// TLS settings that a test can replace, to rotate the channel.
-    pub(crate) struct RotatingTls(pub(crate) std::sync::Mutex<TlsSettings>);
+    type OnRead = Box<dyn FnOnce() + Send>;
 
-    impl TlsConfig for RotatingTls {
+    /// Returns whatever settings the test last set, and counts the calls. A
+    /// hook set with `on_next_read` runs right after the next read.
+    pub(crate) struct SwitchableTlsConfig {
+        settings: Mutex<ZerobusResult<TlsSettings>>,
+        pub(crate) calls: AtomicUsize,
+        on_read: Mutex<Option<OnRead>>,
+    }
+
+    impl SwitchableTlsConfig {
+        pub(crate) fn new(settings: TlsSettings) -> Arc<Self> {
+            Arc::new(Self {
+                settings: Mutex::new(Ok(settings)),
+                calls: AtomicUsize::new(0),
+                on_read: Mutex::new(None),
+            })
+        }
+
+        pub(crate) fn set(&self, settings: ZerobusResult<TlsSettings>) {
+            *self.settings.lock().unwrap() = settings;
+        }
+
+        pub(crate) fn on_next_read(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.on_read.lock().unwrap() = Some(Box::new(hook));
+        }
+    }
+
+    impl TlsConfig for SwitchableTlsConfig {
         fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
-            Ok(self.0.lock().unwrap().clone())
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let settings = self.settings.lock().unwrap().clone();
+            let hook = self.on_read.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            settings
         }
     }
 
@@ -441,28 +475,48 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A listener that is bound but never accepts, so a connection to it stalls in
+    /// the TLS handshake. The test keeps it alive for as long as it needs the stall.
+    pub(crate) fn stalled_endpoint() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "https://127.0.0.1:{}",
+            listener.local_addr().unwrap().port()
+        );
+        (listener, endpoint)
+    }
+
+    /// Whether `err` is the deadline error of a unary or stream attempt.
+    pub(crate) fn is_deadline(err: &ZerobusError) -> bool {
+        matches!(
+            err,
+            ZerobusError::UnaryIngestError(status) | ZerobusError::CreateStreamError(status)
+                if status.code() == crate::GrpcCode::DeadlineExceeded
+        )
+    }
+
     /// A source whose previous channel reached the server, rotated to a channel
     /// that has not. Returns the source, the settings, and the two fingerprints.
     pub(crate) async fn rotated_source(
         endpoint: &str,
     ) -> (
         Arc<GrpcChannelSource>,
-        Arc<RotatingTls>,
+        Arc<SwitchableTlsConfig>,
         TlsFingerprint,
         TlsFingerprint,
     ) {
-        let tls = Arc::new(RotatingTls(std::sync::Mutex::new(
-            TlsSettings::new().with_domain_name("a.example.com"),
-        )));
+        let tls = SwitchableTlsConfig::new(TlsSettings::new().with_domain_name("a.example.com"));
+        // A direct connection, so an environment proxy cannot answer for the stalled endpoint.
+        let direct: ConnectorFactory = Arc::new(|_: &str| None);
         let source = Arc::new(GrpcChannelSource::new(
             endpoint.to_string(),
             Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
             Arc::clone(&tls) as Arc<dyn TlsConfig>,
-            None,
+            Some(direct),
         ));
         let previous = source.next_channel_fingerprint_for_test().await;
         source.mark_current_reached_for_test().await;
-        *tls.0.lock().unwrap() = TlsSettings::new().with_domain_name("b.example.com");
+        tls.set(Ok(TlsSettings::new().with_domain_name("b.example.com")));
         let rotated = source.next_channel_fingerprint_for_test().await;
         assert_ne!(previous, rotated);
         (source, tls, previous, rotated)
@@ -471,51 +525,11 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
+    use super::test_support::SwitchableTlsConfig;
     use super::*;
     use crate::TlsSettings;
-
-    type OnRead = Box<dyn FnOnce() + Send>;
-
-    /// Returns whatever settings the test last set, and counts the calls. A
-    /// hook set with `on_next_read` runs right after the next read.
-    struct SwitchableTlsConfig {
-        settings: Mutex<ZerobusResult<TlsSettings>>,
-        calls: AtomicUsize,
-        on_read: Mutex<Option<OnRead>>,
-    }
-
-    impl SwitchableTlsConfig {
-        fn new(settings: TlsSettings) -> Arc<Self> {
-            Arc::new(Self {
-                settings: Mutex::new(Ok(settings)),
-                calls: AtomicUsize::new(0),
-                on_read: Mutex::new(None),
-            })
-        }
-
-        fn set(&self, settings: ZerobusResult<TlsSettings>) {
-            *self.settings.lock().unwrap() = settings;
-        }
-
-        fn on_next_read(&self, hook: impl FnOnce() + Send + 'static) {
-            *self.on_read.lock().unwrap() = Some(Box::new(hook));
-        }
-    }
-
-    impl TlsConfig for SwitchableTlsConfig {
-        fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let settings = self.settings.lock().unwrap().clone();
-            let hook = self.on_read.lock().unwrap().take();
-            if let Some(hook) = hook {
-                hook();
-            }
-            settings
-        }
-    }
 
     /// Answers every call with a gRPC error status, as the server does when it
     /// rejects a request.
