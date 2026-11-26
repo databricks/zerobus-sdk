@@ -183,3 +183,10 @@ jobs:
             java/target/surefire-reports/
             java/target/test-classes/
           retention-days: 7
+      # No protobuf override in the first command: hand-written classes must compile against the default 4.33.0.
+      - name: Run tests on the shipped class mix with protobuf-java 3.25.9
+        if: matrix.protobufVersion == '3.25.9'
+        shell: bash
+        run: |
+          mvn --batch-mode clean test -DskipTests
+          mvn --batch-mode surefire:test "-Dprotobuf.version=3.25.9"
