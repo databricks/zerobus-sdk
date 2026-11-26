@@ -136,6 +136,7 @@ class TlsOptionsTest {
     builder.domainName("zerobus_internal.example.com");
     builder.domainName("10.0.0.1");
     builder.domainName("::1");
+    builder.domainName("2001:db8::1");
     for (String value :
         new String[] {
           "https://zerobus.example.com",
@@ -144,6 +145,12 @@ class TlsOptionsTest {
           "zerobus.example.com?region=us",
           "zerobus example.com",
           "zerobus.example.com\n",
+          "zerobus.example.com\u00a0",
+          "zerobus.example.com\u3000",
+          "zerobus.example.com\u0080",
+          "[::1]",
+          "[::1]:443",
+          "[2001:db8::1]:443",
         }) {
       assertThrows(IllegalArgumentException.class, () -> builder.domainName(value), value);
     }

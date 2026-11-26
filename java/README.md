@@ -882,7 +882,7 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
   paths. Use them when the certificates come from a secret store rather than the file system.
 - `domainName(...)` checks the server certificate against a name other than the endpoint host. Pass
   a DNS name or an IP address, for example `zerobus.example.com`, not a URL. A value with a scheme, a
-  port, a path or query, whitespace, or a control character fails with `IllegalArgumentException`
+  port, a path or query, brackets, whitespace, or a control character fails with `IllegalArgumentException`
   when the builder is called. Another malformed name passes this check and fails when the SDK sets up
   TLS for the connection. Whether recovery retries that failure depends on the rest of the TLS
   configuration.

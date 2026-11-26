@@ -12,6 +12,10 @@ import java.util.regex.Pattern;
  * against a different domain name. The TLS Configuration section of the README describes how
  * certificate files are read and rotated.
  *
+ * <p>These settings apply to the gRPC connection to the Zerobus endpoint only. The OAuth and
+ * federated token requests to the workspace URL use the operating system's CA certificates and
+ * present no client certificate.
+ *
  * <pre>{@code
  * TlsOptions tls = TlsOptions.builder()
  *     .trustSystemRoots(false)
@@ -27,9 +31,9 @@ import java.util.regex.Pattern;
  */
 public final class TlsOptions {
 
-  // A single colon would be a port; several colons are an IPv6 literal.
+  // Brackets are URL syntax for IPv6. A single colon is a port; several colons are an IPv6 literal.
   private static final Pattern PASTED_URL_MISTAKE =
-      Pattern.compile("[/?#\\s\\p{Cntrl}]|^[^:]*:[^:]*$");
+      Pattern.compile("[/?#\\[\\]\\p{Z}\\p{Cc}]|^[^:]*:[^:]*$");
 
   private final boolean trustSystemRoots;
   private final List<String> caCertificatePems;
@@ -243,8 +247,10 @@ public final class TlsOptions {
     /**
      * Sets the domain name the server certificate is checked against. By default the host name of
      * the endpoint is used. Pass a host name or IP address, for example {@code
-     * "zerobus.example.com"}, not a URL: a value with a scheme, a port, a path or query,
-     * whitespace, or a control character is rejected.
+     * "zerobus.example.com"}, not a URL: a value with a scheme, a port, a path or query, brackets,
+     * whitespace, or a control character is rejected. Other malformed names can pass this check and
+     * fail when the SDK sets up TLS for the connection; whether recovery retries that failure
+     * depends on the rest of the TLS configuration.
      *
      * @param domainName the expected server certificate name
      * @return this builder for method chaining
@@ -255,7 +261,7 @@ public final class TlsOptions {
       ArgumentChecks.requireNonBlank(domainName, "domainName");
       if (PASTED_URL_MISTAKE.matcher(domainName).find()) {
         throw new IllegalArgumentException(
-            "domainName must be a host name or IP address with no scheme, port, path or"
+            "domainName must be a host name or IP address with no scheme, port, path, brackets or"
                 + " whitespace, for example \"zerobus.example.com\"");
       }
       this.domainName = domainName;

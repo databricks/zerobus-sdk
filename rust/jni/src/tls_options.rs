@@ -236,7 +236,9 @@ mod tests {
     }
 
     /// The same handshake as the file test, with the CA and the client identity given as
-    /// PEM text. The server rejects the client unless the identity was presented.
+    /// PEM text. The endpoint is dialed by IP address, so the handshake succeeds only when the
+    /// domain name override names the certificate host. The server rejects a client without
+    /// the identity.
     #[tokio::test]
     async fn pem_based_tls_options_open_a_mutual_tls_stream(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -259,9 +261,42 @@ mod tests {
             None,
             Some("localhost".to_string()),
         );
+        let server_url = server_url.replace("https://localhost:", "https://127.0.0.1:");
         let received = stream_binary_header_over_mtls(&mock_server, server_url, settings).await?;
 
         assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
         Ok(())
+    }
+
+    #[test]
+    fn default_settings_keep_system_roots_and_no_identity() {
+        let debug = format!(
+            "{:?}",
+            tls_settings(true, Vec::new(), Vec::new(), None, None, None)
+        );
+
+        assert!(debug.contains("native_roots: true"), "{debug}");
+        assert!(debug.contains("ca_certificates: 0"), "{debug}");
+        assert!(debug.contains("client_identity: None"), "{debug}");
+        assert!(debug.contains("domain_name: None"), "{debug}");
+    }
+
+    #[test]
+    fn private_ca_settings_disable_system_roots_and_set_the_domain() {
+        let debug = format!(
+            "{:?}",
+            tls_settings(
+                false,
+                vec![b"pem-ca".to_vec()],
+                Vec::new(),
+                None,
+                None,
+                Some("zerobus.example.com".to_string()),
+            )
+        );
+
+        assert!(debug.contains("native_roots: false"), "{debug}");
+        assert!(debug.contains("ca_certificates: 1"), "{debug}");
+        assert!(debug.contains("zerobus.example.com"), "{debug}");
     }
 }
