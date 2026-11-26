@@ -1,13 +1,14 @@
 //! Builder state shared by every client kind that targets one table.
 //!
-//! [`StreamBuilder`](super::StreamBuilder) wraps a [`ClientBuilderCore`], and
-//! its public setters write the core's fields. The core holds the SDK, the
-//! table name, the authentication choice, the record format, recovery on or
-//! off, the retry count and backoff, the server acknowledgement timeout, and
-//! the payload limit, which Arrow Flight streams ignore. Each wrapper decides
-//! which formats it exposes and how it reports a missing one. Settings that
-//! only streams have (in-flight limits, flush and recovery-attempt timeouts,
-//! callbacks) stay in the stream builder.
+//! [`StreamBuilder`](super::StreamBuilder) and
+//! [`UnaryClientBuilder`](super::UnaryClientBuilder) each wrap a
+//! [`ClientBuilderCore`], and their public setters write the core's fields. The
+//! core holds the SDK, the table name, the authentication choice, the record
+//! format, recovery on or off, the retry count and backoff, the server
+//! acknowledgement timeout, and the payload limit, which Arrow Flight streams
+//! ignore. Each wrapper decides which formats it exposes and how it reports a
+//! missing one. Settings that only streams have (in-flight limits, flush and
+//! recovery-attempt timeouts, callbacks) stay in the stream builder.
 //!
 //! Authentication is private: set it through the `set_*` auth methods.
 //! `resolve_headers_provider()` turns it into a headers provider.
@@ -122,15 +123,27 @@ const PAT_AUTH_HINT: &str = ".personal_access_token(), ";
 const PAT_AUTH_HINT: &str = "";
 
 pub(super) fn missing_auth_error() -> String {
+    missing_auth_text(PAT_AUTH_HINT)
+}
+
+/// The missing-auth error of a builder that has no `.personal_access_token()`.
+pub(super) fn missing_auth_error_without_pat() -> String {
+    missing_auth_text("")
+}
+
+fn missing_auth_text(pat_hint: &str) -> String {
     #[cfg(feature = "testing")]
     {
-        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}.headers_provider(), or .no_auth()")
+        format!("authentication is required: call .oauth(), .federated_auth(), {pat_hint}.headers_provider(), or .no_auth()")
     }
     #[cfg(not(feature = "testing"))]
     {
-        format!("authentication is required: call .oauth(), .federated_auth(), {PAT_AUTH_HINT}or .headers_provider()")
+        format!("authentication is required: call .oauth(), .federated_auth(), {pat_hint}or .headers_provider()")
     }
 }
+
+/// Builds the headers provider for one unary call.
+pub(crate) type HeadersProviderFactory = Arc<dyn Fn() -> Arc<dyn HeadersProvider> + Send + Sync>;
 
 /// Target, format, and retry settings shared by the client builders.
 pub(super) struct ClientBuilderCore<'a> {
@@ -223,13 +236,19 @@ impl<'a> ClientBuilderCore<'a> {
 
     /// Checks that the table name and authentication are set, in that order.
     pub(super) fn validate_target(&self) -> ZerobusResult<()> {
+        self.validate_target_with(missing_auth_error)
+    }
+
+    /// Like [`validate_target`](Self::validate_target), with `missing_auth`
+    /// giving the error text when no authentication is set.
+    pub(super) fn validate_target_with(&self, missing_auth: fn() -> String) -> ZerobusResult<()> {
         if self.table_name.is_empty() {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
             ));
         }
         if self.auth.is_none() {
-            return Err(ZerobusError::InvalidArgument(missing_auth_error()));
+            return Err(ZerobusError::InvalidArgument(missing_auth()));
         }
         #[cfg(feature = "pat-auth")]
         if matches!(&self.auth, Some(AuthConfig::PersonalAccessToken { token }) if token.is_empty())
@@ -247,43 +266,71 @@ impl<'a> ClientBuilderCore<'a> {
         &self,
         refresh_timeout: Duration,
     ) -> ZerobusResult<Arc<dyn HeadersProvider>> {
+        Ok(self.headers_provider_factory(refresh_timeout)?())
+    }
+
+    /// Like [`resolve_headers_provider`](Self::resolve_headers_provider), but
+    /// returns a factory that a unary client calls once per call. OAuth and
+    /// federation get a new provider each time, sharing the SDK's token cache,
+    /// so a call invalidates only the token it was served. Other providers are
+    /// shared by every call.
+    pub(super) fn headers_provider_factory(
+        &self,
+        refresh_timeout: Duration,
+    ) -> ZerobusResult<HeadersProviderFactory> {
+        let table_name = self.table_name.clone();
+        let workspace_id = self.sdk.workspace_id.clone();
+        let unity_catalog_url = self.sdk.unity_catalog_url.clone();
+        let token_cache = Arc::clone(&self.sdk.token_cache);
+        let shared = |provider: Arc<dyn HeadersProvider>| -> HeadersProviderFactory {
+            Arc::new(move || Arc::clone(&provider))
+        };
         match self.auth.as_ref() {
             Some(AuthConfig::OAuth {
                 client_id,
                 client_secret,
-            }) => Ok(Arc::new(OAuthHeadersProvider::with_cache(
-                client_id.clone(),
-                client_secret.clone(),
-                self.table_name.clone(),
-                self.sdk.workspace_id.clone(),
-                self.sdk.unity_catalog_url.clone(),
-                Arc::clone(&self.sdk.token_cache),
-                Some(refresh_timeout),
-            ))),
+            }) => {
+                let (client_id, client_secret) = (client_id.clone(), client_secret.clone());
+                Ok(Arc::new(move || {
+                    Arc::new(OAuthHeadersProvider::with_cache(
+                        client_id.clone(),
+                        client_secret.clone(),
+                        table_name.clone(),
+                        workspace_id.clone(),
+                        unity_catalog_url.clone(),
+                        Arc::clone(&token_cache),
+                        Some(refresh_timeout),
+                    ))
+                }))
+            }
             Some(AuthConfig::FederatedAuth {
                 idp_token_supplier,
                 client_id,
             }) => {
+                let (idp_token_supplier, client_id) =
+                    (idp_token_supplier.clone(), client_id.clone());
                 // Federation mirrors OAuth's proactive-refresh bound so a stalled
                 // token exchange falls back to the cached token before the setup
                 // deadline, keeping client-credentials and token-exchange at parity.
-                Ok(Arc::new(FederatedTokenProvider::with_cache(
-                    client_id.clone(),
-                    idp_token_supplier.clone(),
-                    self.table_name.clone(),
-                    self.sdk.workspace_id.clone(),
-                    self.sdk.unity_catalog_url.clone(),
-                    Arc::clone(&self.sdk.token_cache),
-                    Some(refresh_timeout),
-                )))
+                Ok(Arc::new(move || {
+                    Arc::new(FederatedTokenProvider::with_cache(
+                        client_id.clone(),
+                        idp_token_supplier.clone(),
+                        table_name.clone(),
+                        workspace_id.clone(),
+                        unity_catalog_url.clone(),
+                        Arc::clone(&token_cache),
+                        Some(refresh_timeout),
+                    ))
+                }))
             }
-            Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
+            Some(AuthConfig::HeadersProvider(p)) => Ok(shared(Arc::clone(p))),
             #[cfg(feature = "pat-auth")]
-            Some(AuthConfig::PersonalAccessToken { token }) => Ok(Arc::new(
-                PatHeadersProvider::new(token.clone(), self.table_name.clone()),
-            )),
+            Some(AuthConfig::PersonalAccessToken { token }) => Ok(shared(Arc::new(
+                PatHeadersProvider::new(token.clone(), table_name),
+            ))),
             #[cfg(feature = "testing")]
-            Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
+            Some(AuthConfig::NoAuth) => Ok(shared(Arc::new(NoAuthHeadersProvider))),
             None => Err(ZerobusError::InvalidArgument(missing_auth_error())),
         }
     }

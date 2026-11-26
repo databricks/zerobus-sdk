@@ -14,10 +14,18 @@
   sends the token as given and never refreshes it, and never includes it in `Debug`
   output. An authentication rejection while creating the stream fails immediately
   instead of spending the one-shot credential-refresh retry.
+- Added a unary ingestion client for sparse traffic:
+  `ZerobusSdk::unary_client_builder()` builds a `UnaryClient` whose
+  `ingest_records()` sends one batch per `InsertRecords` call and returns once it
+  is durable. JSON only. Retries are on by default, so a batch can be written
+  twice after a timeout; `.recovery(false)` sends each batch at most once.
 
 ### Bug Fixes
 
 ### Documentation
+
+- Documented the unary client in the Rust README, with a usage section, API
+  reference entries, and a runnable example (`examples/json/unary.rs`).
 
 ### Internal Changes
 
@@ -43,4 +51,11 @@
   personal access token (Private Preview).
 - Added `HeadersProvider::can_refresh`, a defaulted method returning `true`. A provider
   with a fixed credential returns `false` to skip the one-shot auth retry during stream
-  creation; `PatHeadersProvider` does. Existing implementations are unaffected.
+  creation or a unary call; `PatHeadersProvider` does. Existing implementations are
+  unaffected.
+- Added `ZerobusSdk::unary_client_builder()`, `UnaryClientBuilder`, `UnaryClient`,
+  and `UnaryIngestResult`.
+- Added `ZerobusError::UnaryIngestError(GrpcStatus)`, returned when an
+  `InsertRecords` call fails with a gRPC status. `ZerobusError` is
+  `#[non_exhaustive]`, so this is not a breaking change.
+

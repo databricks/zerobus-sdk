@@ -21,7 +21,7 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 
 ## Overview
 
-The SDK supports four ingestion formats and two ingestion methods:
+The SDK supports four ingestion formats and four ingestion methods:
 
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
@@ -32,6 +32,7 @@ The SDK supports four ingestion formats and two ingestion methods:
 **Ingestion Methods:**
 - **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers / Avro)
 - **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers / Avro)
+- **Unary** (`UnaryClient::ingest_records`) - Send one batch per call without a stream, for sparse traffic (JSON)
 - **Arrow batch** (`ingest_batch` / `ingest_ipc_batch`) - Ingest an Arrow `RecordBatch` (one or many rows) over Arrow Flight
 
 **Available Examples:**
@@ -41,6 +42,7 @@ The SDK supports four ingestion formats and two ingestion methods:
 | [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | [JSON Persistent](json/README.md#persistent-stream-example) | JSON | Persistent create/resume | `cargo run -p rust-examples-json --example json_persistent` |
+| [JSON Unary](json/README.md#unary-example) | JSON | Unary batch (sparse traffic) | `cargo run -p rust-examples-json --example json_unary` |
 | [Proto Compiled Single](proto/README.md#compiled-single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
 | [Proto Compiled Batch](proto/README.md#compiled-batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | [Proto Multiplexed](proto/README.md#multiplexed-stream-example) | Protocol Buffers | Multiplexed | `cargo run -p rust-examples-proto --example proto_compiled_multiplexed` |

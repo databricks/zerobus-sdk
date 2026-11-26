@@ -18,6 +18,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [5. Ingest Data](#5-ingest-data)
   - [6. Handle Acknowledgments](#6-handle-acknowledgments)
   - [7. Close the Stream](#7-close-the-stream)
+- [Unary Ingestion (sparse traffic)](#unary-ingestion-sparse-traffic)
 - [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
 - [Proxy Configuration](#proxy-configuration)
@@ -54,6 +55,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Build records as `AvroValue` and let the stream encode them against the writer schema (`AvroRecord`), or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Note: the `avro` feature requires Rust 1.88 (via `apache-avro`); default builds are unaffected. Feature in development.
 - **Personal Access Token Authentication** *(Private Preview, opt-in)* — Authenticate with a Databricks personal access token via `.personal_access_token(token)`. Enable with `features = ["pat-auth"]`; see [Personal access token](#personal-access-token-private-preview-opt-in). Requires server-side enablement; not available for Arrow Flight streams yet; default builds are unaffected.
 - **Persistent Streams** *(opt-in, in development)* — Create a durable stream, save its `stream_id()`, and resume it later from the server's committed offset, even from a new process. Enable with `features = ["eos"]`; see [Persistent Stream](#persistent-stream-in-development-opt-in) and [`examples/json/persistent.rs`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/json/persistent.rs). JSON and compiled Protocol Buffers only. Default builds are unaffected.
+- **Unary Ingestion** — For sparse traffic, send a batch in one request and get back once it is durable, without opening a stream. Create a client with `unary_client_builder()`; see [Unary Ingestion](#unary-ingestion-sparse-traffic).
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -207,7 +209,8 @@ zerobus_rust_sdk/
 │   │   ├── README.md
 │   │   ├── Cargo.toml
 │   │   ├── single.rs                   # JSON single-record example
-│   │   └── batch.rs                    # JSON batch ingestion example
+│   │   ├── batch.rs                    # JSON batch ingestion example
+│   │   └── unary.rs                    # JSON unary (sparse traffic) example
 │   ├── proto/                          # Protocol Buffers examples (single Cargo package)
 │   │   ├── README.md
 │   │   ├── Cargo.toml
@@ -619,6 +622,7 @@ The SDK reads the files each time it opens a channel, and before it reuses a gRP
 
 - A gRPC stream gets its channel when it is created and before each recovery attempt. This holds for a dedicated channel per stream (the `connection_per_stream` default) and for a shared channel. A stream that doesn't reconnect keeps its connection, because certificates are only checked when a connection is set up.
 - An Arrow Flight stream opens a channel on every connection and reconnection.
+- A unary client gets its channel before each call attempt, so the next call after a rotation uses the new files.
 
 If the SDK can't read or use the files before it reuses a gRPC channel, it keeps the channel it has and logs a warning.
 
@@ -626,7 +630,7 @@ Replace the certificate and the key together: write both into a new directory, t
 
 A path that is missing, unreadable, not a regular file, or larger than 1 MiB gives a non-retryable `ZerobusError::InvalidArgument` with the path. Content read from a file that the SDK can't use, such as a file with no certificate or a certificate that doesn't match the key, gives a retryable `ZerobusError::ChannelCreationError`, because a rotation may be in progress. When the settings mix files and PEM data and the SDK can't tell which input it can't use, the error is retryable.
 
-For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream and every recovery attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
+For certificates from another source, implement the `TlsConfig` trait. The SDK calls `tls_settings()` every time it opens a channel and before it reuses a gRPC channel, and opens a new channel when the settings changed. An implementation can return different settings on each call. Because the SDK calls it before every new stream, every recovery attempt, and every unary call attempt, `tls_settings()` should return quickly and not block, for example on a network call. Cache settings that are slow to produce.
 
 A `TlsConfig` describes TLS only. It cannot change other settings of the gRPC endpoint, such as timeouts.
 
@@ -1216,9 +1220,50 @@ Multiplexed streams use `multiplexed_ack_callback` with
 so implementations must be thread-safe and must not rely on global ordering. See the complete
 [`proto_compiled_multiplexed`](examples/proto/compiled/multiplexed.rs) example.
 
+## Unary Ingestion (sparse traffic)
+
+A unary client sends each batch in one `InsertRecords` request and returns once the batch is durable. It opens no stream, so there is nothing to flush or close.
+
+**Choose by traffic pattern:**
+
+- **Use a stream** when records arrive continuously or at high volume. A stream keeps many records in flight, so its throughput does not depend on the round-trip time. This is the right default.
+- **Use a unary client** only for sparse traffic, such as a few batches per minute, where keeping a stream open is not worth it. Each call waits for the server, so a loop of unary calls sends one batch per round trip.
+- Never send one record per unary call in a loop. Collect the records you have and send them in one `ingest_records()` call.
+
+```rust,ignore
+let client = sdk
+    .unary_client_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .build()
+    .await?;
+
+// One call for the whole batch; it returns once every record is durable.
+client.ingest_records(batch).await?;
+```
+
+Build the client once per table and reuse it. `build()` sends nothing; the connection opens on the first call. An endpoint that can't be parsed fails `build()` with `InvalidZerobusEndpointError`. The client is `Send + Sync`, so you can share it across tasks with an `Arc`, and concurrent calls run in parallel.
+
+How a call behaves:
+
+- **All-or-nothing:** one invalid record rejects the whole batch.
+- **Validation:** every record must be exactly one JSON object. Otherwise the call fails with `InvalidArgument`, names the 0-based index of a bad record, and sends nothing. Field names and types are checked by the server.
+- **Size limit:** `max_ingest_payload_bytes` applies to the whole request body, including the brackets and commas. A larger batch fails with `InvalidArgument` before any network I/O.
+- **Retries:** a retryable error is retried `recovery_retries` times, `recovery_backoff_ms` apart. A retried batch can be written twice if an earlier attempt reached the server (at-least-once). With `recovery(false)`, nothing is retried, so the SDK never writes a batch twice.
+- **Timeout:** `server_lack_of_ack_timeout_ms` bounds each attempt, from getting the headers until the server confirms the batch.
+- **Errors:** a failed call returns `ZerobusError::UnaryIngestError` with the gRPC status. An attempt that timed out has `GrpcCode::DeadlineExceeded`. If getting the headers fails, the call returns the headers provider's error instead, such as `TokenFetchError`, after retrying it if it is retryable. A server that can't be reached, for example after a DNS, connection or TLS handshake failure, returns `UnaryIngestError` with `GrpcCode::Unavailable`, which is retried. TLS file content that the SDK can't use, such as a certificate that doesn't match the key during a rotation, or a proxy connector that can't be set up returns `ChannelCreationError`, which is retried. Settings the SDK can't use return `InvalidArgument`, are not retried and send nothing: a missing or unreadable TLS file, unusable TLS material passed as PEM data, or an unparsable proxy URL (on the first call), or a custom header with an invalid name or value. A table name or `authorization` value from the headers provider that isn't a valid HTTP header value returns `InvalidTableName` or `InvalidUCTokenError`, which is not retried.
+- **Records:** the same JSON record types as streams: `JsonValue`, `JsonString`, or `String`.
+
+**Connection:** all unary clients of one SDK share one HTTP/2 connection, separate from streams and unaffected by `connection_per_stream`. While a call is in flight, the connection sends keepalive pings, so a connection that dropped silently between calls is detected and the retry opens a new one. Many threads writing many tables through their own unary clients share that one connection; for that much traffic, use streams.
+
+**Settings:** the builder offers `table()`, the authentication setters, `json()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, with the same defaults as streams. Stream-only settings are not offered.
+
+See [`examples/json/unary.rs`](examples/json/unary.rs) for a complete program.
+
 ## Client-side warnings
 
-The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern. The warning fires again if the rate drops below the threshold and later surges again.
+The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern; for sparse traffic, a [unary client](#unary-ingestion-sparse-traffic) needs no stream. The warning fires again if the rate drops below the threshold and later surges again.
 
 To suppress, set the environment variable before starting the process:
 
@@ -1391,7 +1436,7 @@ require manual intervention. During initial stream setup only, if recovery is en
 and at least one configured retry remains, the SDK may invalidate the rejected
 credentials and spend at most one recovery retry on another setup attempt. A second
 authentication rejection is terminal. This one-shot setup exception does not change
-reconnect behavior.
+reconnect behavior. A unary call applies the same rule to each call.
 
 ### Schema Mismatch (Arrow Flight)
 
@@ -1460,7 +1505,7 @@ let result = stream.ingest_record_offset(oversized).await;
 // Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10420224 bytes
 ```
 
-The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
+The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit. For a [unary client](#unary-ingestion-sparse-traffic), the limit applies to the whole request body, including the JSON array brackets and commas.
 
 The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (JSON and Protocol Buffer streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
 
@@ -1503,6 +1548,7 @@ The `examples/` directory contains working examples covering different serializa
 | `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | `json/persistent.rs` | JSON | Persistent create/resume | `cargo run -p rust-examples-json --example json_persistent` |
+| `json/unary.rs` | JSON | Unary batch | `cargo run -p rust-examples-json --example json_unary` |
 | `proto/compiled/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
 | `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
@@ -1570,6 +1616,7 @@ cargo test -p tests -- --nocapture
 10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 11. **Test Recovery** - Simulate failures to verify your error handling logic
 12. **Use Multiplexing for Stream Bottlenecks** - When you need more throughput than one gRPC stream can provide and do not require global ordering, select `.multiplexed(n)`
+13. **Use Unary Clients Only for Sparse Traffic** - Send batches with `ingest_records()`, never one record per call in a loop; for continuous ingestion, use a stream
 
 ## API Reference
 
@@ -1597,6 +1644,11 @@ Returns a fluent builder for creating ingestion streams. All setters can be call
 pub fn persistent_stream_builder(&self) -> PersistentStreamBuilder<'_>
 ```
 Returns a fluent builder for persistent streams. Requires `features = ["eos"]`; the API is in development. See [Persistent Stream](#persistent-stream-in-development-opt-in) for usage.
+
+```rust
+pub fn unary_client_builder(&self) -> UnaryClientBuilder<'_>
+```
+Returns a fluent builder for a unary client bound to one table. See [Unary Ingestion](#unary-ingestion-sparse-traffic) for usage.
 
 ```rust
 pub async fn recreate_stream(
@@ -1731,6 +1783,42 @@ pub fn is_closed(&self) -> bool
 ```
 Flush and end the connection, or check whether the stream is closed. A closed stream can be resumed with `resume()`.
 
+### `UnaryClientBuilder`
+
+Returned by `ZerobusSdk::unary_client_builder()`. Its setters have the same names and defaults as the matching `StreamBuilder` setters: `table()`, `oauth()`, `federated_auth()`, `headers_provider()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`. The format setter is `json()`.
+
+```rust
+pub fn validate(&self) -> ZerobusResult<()>
+```
+Checks that the table, authentication, and format are set, without network I/O.
+
+```rust
+pub async fn build(self) -> ZerobusResult<UnaryClient>
+```
+Validates the configuration and returns the client. Sends nothing; the connection opens on the first call. An endpoint that can't be parsed fails here with `ZerobusError::InvalidZerobusEndpointError`.
+
+### `UnaryClient`
+
+A client that ingests JSON records into one table without opening a stream. See [Unary Ingestion](#unary-ingestion-sparse-traffic) for usage.
+
+**Methods:**
+```rust
+pub async fn ingest_records<I, T>(&self, records: I) -> ZerobusResult<UnaryIngestResult>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<PreparedInput>,
+```
+Sends all records in one call and returns once they are durable. An empty batch returns at once without sending anything.
+
+```rust
+pub async fn ingest_record(&self, record: impl Into<PreparedInput>) -> ZerobusResult<UnaryIngestResult>
+```
+The same as `ingest_records` with one record. For very sparse traffic only.
+
+### `UnaryIngestResult`
+
+The result of a successful unary ingest call. It has no fields: the server returns no data for `InsertRecords`. It is `#[non_exhaustive]`, so fields can be added later without a breaking change.
+
 ### `MultiplexedStream`
 
 A managed group of 1–64 homogeneous gRPC sub-streams. Its `ingest_record()`
@@ -1823,7 +1911,7 @@ pub fn is_retryable(&self) -> bool
 ```
 Returns `true` if the error can be automatically recovered by the SDK.
 
-`ZerobusError::CreateStreamError` and `ZerobusError::StreamClosedError` carry a `GrpcStatus`. Use `code()` to read the gRPC status code as a `GrpcCode`, and `message()` to read the message:
+`ZerobusError::CreateStreamError`, `ZerobusError::StreamClosedError`, and `ZerobusError::UnaryIngestError` carry a `GrpcStatus`. Use `code()` to read the gRPC status code as a `GrpcCode`, and `message()` to read the message:
 
 ```rust
 use databricks_zerobus_ingest_sdk::{GrpcCode, ZerobusError};
@@ -1910,6 +1998,9 @@ cargo run -p rust-examples-json --example json_single
 
 # Build and run JSON batch example
 cargo run -p rust-examples-json --example json_batch
+
+# Build and run JSON unary example
+cargo run -p rust-examples-json --example json_unary
 
 # Build and run Protocol Buffers single-record example (compiled schema)
 cargo run -p rust-examples-proto --example proto_compiled_single
