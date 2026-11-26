@@ -827,6 +827,23 @@ stream.flush().await?; // wait once for all pending acknowledgments
 
 `.dynamic_proto()` takes a resolved `MessageDescriptor`. Get one from `message_descriptor(&proto)` or build it against your own `prost_reflect::DescriptorPool`.
 
+To resolve the schema at runtime from Unity Catalog instead of hand-building columns, fetch it with `schema::fetch_uc_table_schema` and feed the result into `descriptor_from_uc_schema`:
+
+```rust
+use databricks_zerobus_ingest_sdk::message_descriptor;
+use databricks_zerobus_ingest_sdk::schema::{
+    descriptor_from_uc_schema, fetch_uc_read_token, fetch_uc_table_schema, SchemaFetchOptions,
+};
+
+let table = "catalog.schema.orders";
+let options = SchemaFetchOptions::default(); // 30-second timeout per request
+let token = fetch_uc_read_token(workspace_url, table, client_id, client_secret, &options).await?;
+let schema = fetch_uc_table_schema(workspace_url, table, &token, &options).await?;
+let descriptor = message_descriptor(&descriptor_from_uc_schema(&schema)?)?;
+```
+
+The token needs permission to read the table's metadata (`USE CATALOG`, `USE SCHEMA`, and `SELECT`). The token a stream authenticates with is scoped to Zerobus writes and is rejected, so `fetch_uc_read_token` mints one from your client credentials that can only read this table; any other token with those privileges works too. The workspace URL must use `https`. The same `UcTableSchema` also drives `arrow_schema_from_uc_schema` for Arrow Flight streams. See the `proto_dynamic_uc_schema` example.
+
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
 #### Multiplexed gRPC Stream
@@ -1437,6 +1454,8 @@ and at least one configured retry remains, the SDK may invalidate the rejected
 credentials and spend at most one recovery retry on another setup attempt. A second
 authentication rejection is terminal. This one-shot setup exception does not change
 reconnect behavior. A unary call applies the same rule to each call.
+
+`SchemaFetchError`, from [fetching a schema from Unity Catalog](#dynamic-protobuf-stream), is never retried by the SDK. Its `retryable` flag marks a transient failure (a network error, 408, 429, or 5xx), but the caller owns retry and backoff. `status` holds the HTTP status when Unity Catalog responded, so a 401 (refresh the token) can be told apart from a 403 or a 404.
 
 ### Schema Mismatch (Arrow Flight)
 

@@ -5,6 +5,13 @@
 //! [`descriptor_from_uc_columns`] or [`descriptor_from_uc_schema`] to build that
 //! descriptor on the fly instead of pre-generating a `.proto` file offline.
 //!
+//! Callers that do not already have the metadata can fetch it from the Unity
+//! Catalog REST API with [`fetch_uc_table_schema`] (minting a token for it with
+//! [`fetch_uc_read_token`]), then feed the returned [`UcTableSchema`] into
+//! [`descriptor_from_uc_schema`] (for dynamic protobuf ingestion) or
+//! `arrow_schema_from_uc_schema` (for Arrow Flight; requires the `arrow-flight`
+//! feature).
+//!
 //! # Example
 //!
 //! ```no_run
@@ -78,6 +85,10 @@ use prost_types::{DescriptorProto, FieldDescriptorProto, MessageOptions};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
+
+mod fetch;
+
+pub use fetch::{fetch_uc_read_token, fetch_uc_table_schema, SchemaFetchOptions};
 
 /// A single column from a Unity Catalog table.
 ///

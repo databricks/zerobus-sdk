@@ -350,9 +350,64 @@ impl DefaultTokenFactory {
         table_name: &str,
         workspace_id: &str,
     ) -> ZerobusResult<Vec<(&'static str, String)>> {
+        let authorization_details = Self::table_authorization_details(
+            table_name,
+            &["SELECT", "MODIFY"],
+            Some("zerobuswrite"),
+        )?;
+
+        Ok(vec![
+            ("scope", "all-apis".to_string()),
+            (
+                "resource",
+                format!(
+                    "api://databricks/workspaces/{}/zerobusDirectWriteApi",
+                    workspace_id
+                ),
+            ),
+            ("authorization_details", authorization_details),
+        ])
+    }
+
+    /// Builds the client-credentials form parameters for a token that can only
+    /// read `table_name` through the Unity Catalog REST API: `USE CATALOG`,
+    /// `USE SCHEMA`, and `SELECT`, with no Zerobus resource or operation.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn table_read_form_params(
+        table_name: &str,
+    ) -> ZerobusResult<Vec<(&'static str, String)>> {
+        Ok(vec![
+            ("grant_type", "client_credentials".to_string()),
+            ("scope", "all-apis".to_string()),
+            (
+                "authorization_details",
+                Self::table_authorization_details(table_name, &["SELECT"], None)?,
+            ),
+        ])
+    }
+
+    /// Serializes the Unity Catalog `authorization_details` that downscope a
+    /// token to one table: `USE CATALOG` and `USE SCHEMA` on its parents, plus
+    /// `table_privileges` (restricted to `operation`, if given) on the table.
+    #[allow(clippy::result_large_err)]
+    fn table_authorization_details(
+        table_name: &str,
+        table_privileges: &[&str],
+        operation: Option<&str>,
+    ) -> ZerobusResult<String> {
         let (catalog, schema, table) = Self::parse_table_name(table_name)?;
 
-        let authorization_details = serde_json::json!([
+        let mut table_entry = serde_json::json!({
+            "type": "unity_catalog_privileges",
+            "privileges": table_privileges,
+            "object_type": "TABLE",
+            "object_full_path": format!("{}.{}.{}", catalog, schema, table),
+        });
+        if let Some(operation) = operation {
+            table_entry["operations"] = serde_json::json!([operation]);
+        }
+
+        Ok(serde_json::json!([
             {
                 "type": "unity_catalog_privileges",
                 "privileges": ["USE CATALOG"],
@@ -365,26 +420,9 @@ impl DefaultTokenFactory {
                 "object_type": "SCHEMA",
                 "object_full_path": format!("{}.{}", catalog, schema)
             },
-            {
-                "type": "unity_catalog_privileges",
-                "privileges": ["SELECT", "MODIFY"],
-                "object_type": "TABLE",
-                "object_full_path": format!("{}.{}.{}", catalog, schema, table),
-                "operations": ["zerobuswrite"]
-            }
-        ]);
-
-        Ok(vec![
-            ("scope", "all-apis".to_string()),
-            (
-                "resource",
-                format!(
-                    "api://databricks/workspaces/{}/zerobusDirectWriteApi",
-                    workspace_id
-                ),
-            ),
-            ("authorization_details", authorization_details.to_string()),
+            table_entry
         ])
+        .to_string())
     }
 
     /// Posts a token request to the UC OIDC endpoint and parses the response.
@@ -395,10 +433,19 @@ impl DefaultTokenFactory {
         params: &[(&str, String)],
         basic_auth: Option<(&str, &str)>,
     ) -> ZerobusResult<FetchedToken> {
-        let client = reqwest::Client::new();
         let token_endpoint = format!("{}/oidc/v1/token", uc_endpoint);
+        Self::send_token_request(&reqwest::Client::new(), &token_endpoint, params, basic_auth).await
+    }
 
-        let mut request = client.post(&token_endpoint);
+    /// Posts `params` to the full `token_endpoint` URL with `client` and parses
+    /// the token response.
+    pub(crate) async fn send_token_request(
+        client: &reqwest::Client,
+        token_endpoint: &str,
+        params: &[(&str, String)],
+        basic_auth: Option<(&str, &str)>,
+    ) -> ZerobusResult<FetchedToken> {
+        let mut request = client.post(token_endpoint);
         if let Some((client_id, client_secret)) = basic_auth {
             request = request.basic_auth(client_id, Some(client_secret));
         }
@@ -525,7 +572,9 @@ impl DefaultTokenFactory {
     ///
     /// * `InvalidTableName` - If the table name doesn't have exactly 3 non-empty parts.
     #[allow(clippy::result_large_err)]
-    fn parse_table_name(table_name: &str) -> Result<(String, String, String), ZerobusError> {
+    pub(crate) fn parse_table_name(
+        table_name: &str,
+    ) -> Result<(String, String, String), ZerobusError> {
         let parts: Vec<&str> = table_name.split('.').collect();
 
         if parts.len() != 3 {
@@ -692,6 +741,26 @@ mod tests {
             serde_json::from_str(param(&params, "authorization_details")).unwrap();
         assert_eq!(details[2]["object_full_path"], "cat.sch.tbl");
         assert_eq!(details[2]["operations"][0], "zerobuswrite");
+    }
+
+    #[test]
+    fn table_read_form_params_shape() {
+        let params = DefaultTokenFactory::table_read_form_params("cat.sch.tbl").unwrap();
+
+        assert_eq!(param(&params, "grant_type"), "client_credentials");
+        assert_eq!(param(&params, "scope"), "all-apis");
+        // Not scoped to Zerobus: the token is for the Unity Catalog REST API.
+        assert!(!has_param(&params, "resource"));
+
+        let details: serde_json::Value =
+            serde_json::from_str(param(&params, "authorization_details")).unwrap();
+        assert_eq!(details[0]["privileges"], serde_json::json!(["USE CATALOG"]));
+        assert_eq!(details[0]["object_full_path"], "cat");
+        assert_eq!(details[1]["privileges"], serde_json::json!(["USE SCHEMA"]));
+        assert_eq!(details[1]["object_full_path"], "cat.sch");
+        assert_eq!(details[2]["privileges"], serde_json::json!(["SELECT"]));
+        assert_eq!(details[2]["object_full_path"], "cat.sch.tbl");
+        assert!(details[2].get("operations").is_none());
     }
 
     #[test]
