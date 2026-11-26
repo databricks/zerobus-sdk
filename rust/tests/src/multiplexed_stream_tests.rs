@@ -789,15 +789,13 @@ mod multi_stream_tests {
     // clean completion, which only happens when the supervisor task is not
     // polled promptly after the sender completes. On an idle runtime the
     // sender's completion wakes the supervisor first every time, so this
-    // loop is an end-to-end guard of the close path under load, NOT a
-    // deterministic reproducer of #1125: it passes with the fix reverted
-    // (200 sequential closes and 3x200 concurrent closes all pass on an
-    // idle runtime — the 1-in-15 rate in the issue was observed under load
-    // against the real server). The `is_clean_shutdown_error` unit test in
-    // supervisor.rs pins the clean-shutdown decision (OK status + cancelled
-    // token only), but no test pins the scheduling race itself: pinning it
-    // needs the supervisor's `select!` outcome to be driven directly, which
-    // the current structure does not allow (see the review thread on #1187).
+    // loop is an end-to-end guard of the close path under load rather
+    // than a deterministic reproducer: the race itself is pinned by
+    // `test_close_clean_eos_during_shutdown_succeeds` below, which forces
+    // the receiver arm to win. (Verified empirically: 200 sequential closes
+    // and 3x200 concurrent closes all pass with the fix reverted on an idle
+    // runtime — the 1-in-15 rate in the issue was observed under load
+    // against the real server.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_close_idle_mux_stream_with_recovery_disabled_succeeds(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -846,6 +844,109 @@ mod multi_stream_tests {
         for worker in workers {
             worker.await??;
         }
+
+        Ok(())
+    }
+
+    // Deterministic regression test for databricks/zerobus-sdk#1125: the
+    // supervisor's unbiased `select!` must treat a clean end-of-stream
+    // (status OK) that arrives after shutdown started as a clean exit,
+    // instead of failing the stream. Unlike the loop test above, this test
+    // forces the receiver arm to win:
+    //
+    // - The mock server blocks on a gated error for the first record, so it
+    //   stops reading the request stream. The sender keeps sending the
+    //   flood of records until the outbound channel (2048) plus the HTTP/2
+    //   flow-control window fill, then blocks inside `send_ingest` — so it
+    //   cannot observe the shutdown cancellation and complete first.
+    // - `mux.close()` is started while the sender is blocked. Its flush
+    //   times out on the unacked flood, then it cancels the shutdown token
+    //   while the supervisor is still parked in its `select!`.
+    // - Releasing the gate ends the RPC with status OK. The receiver
+    //   reports `StreamClosedError(OK)` and the supervisor must return
+    //   `Ok(())`; without the fix it calls `fail_stream` and `close()`
+    //   fails with "closed by server without errors" instead of the
+    //   expected flush timeout.
+    #[tokio::test]
+    async fn test_close_clean_eos_during_shutdown_succeeds(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_close_clean_eos_during_shutdown_succeeds");
+
+        const TABLE_CLEAN_EOS: &str = "clean.eos.shutdown";
+        // Outbound channel (2048) + HTTP/2 flow-control windows (~2 MB
+        // each, tens of thousands of small records): flood past both so
+        // the sender blocks in `send_ingest` while the server is parked
+        // on the gate.
+        const FLOOD_RECORDS: usize = 100_000;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        let clean_eos_gate = Arc::new(MockResponseGate::new());
+        let clean_eos_sent = Arc::new(tokio::sync::Notify::new());
+        mock_server
+            .inject_responses(
+                TABLE_CLEAN_EOS,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "mux_clean_eos".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedError {
+                        status: tonic::Status::new(
+                            tonic::Code::Ok,
+                            "Stream closed by server without errors.",
+                        ),
+                        gate: Arc::clone(&clean_eos_gate),
+                        sent: Arc::clone(&clean_eos_sent),
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let s1 = create_test_stream(
+            &sdk,
+            TABLE_CLEAN_EOS,
+            TestOpts {
+                max_inflight_requests: 120_000,
+                flush_timeout_ms: Some(50),
+            },
+        )
+        .await?;
+        let mut mux = MultiplexedStream::new(vec![s1]);
+
+        for _ in 0..FLOOD_RECORDS {
+            mux.ingest_record(b"data".to_vec()).await?;
+        }
+        // Let the sender drain the landing zone and block in `send_ingest`.
+        // The server processes only the first record, then parks on the gate.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            mock_server.get_write_count().await,
+            1,
+            "Expected the server to be parked on the gated error after the first record"
+        );
+
+        let mut close_task = tokio::spawn(async move { mux.close().await });
+        // Give close() time to time out its flush (50ms) and cancel the
+        // shutdown token, so the supervisor is parked in its `select!` with
+        // the sender blocked when the clean end-of-stream arrives.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let clean_eos_was_sent = clean_eos_sent.notified();
+        tokio::pin!(clean_eos_was_sent);
+        clean_eos_gate.release();
+        tokio::time::timeout(Duration::from_secs(5), &mut clean_eos_was_sent)
+            .await
+            .expect("clean end-of-stream should be sent after releasing its gate");
+
+        let close_result = tokio::time::timeout(Duration::from_secs(5), &mut close_task)
+            .await
+            .expect("close should finish after the clean end-of-stream")
+            .expect("close task should not panic");
+        assert!(
+            matches!(&close_result, Err(ZerobusError::StreamClosedError(status)) if status.code() == GrpcCode::DeadlineExceeded),
+            "Expected close() to fail only with the flush timeout, got {close_result:?}"
+        );
 
         Ok(())
     }
