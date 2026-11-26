@@ -12,9 +12,9 @@ import java.util.regex.Pattern;
  * against a different domain name. The TLS Configuration section of the README describes how
  * certificate files are read and rotated.
  *
- * <p>These settings apply to the gRPC connection to the Zerobus endpoint only. The OAuth and
- * federated token requests to the workspace URL use the operating system's CA certificates and
- * present no client certificate.
+ * <p>These settings apply to the gRPC connection to the Zerobus endpoint only. OAuth and federated
+ * token requests to the workspace URL trust the operating system's CA certificates and the SDK's
+ * bundled public roots, ignore TlsOptions, and present no client certificate.
  *
  * <pre>{@code
  * TlsOptions tls = TlsOptions.builder()

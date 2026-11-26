@@ -6,10 +6,11 @@ import com.databricks.zerobus.ZerobusSdk;
 
 /**
  * Connects with custom TLS settings and ingests JSON records. {@code ZEROBUS_CA_CERT_FILE}, when
- * set, is the only CA certificate trusted; when unset, the operating system's CA certificates are used.
- * {@code ZEROBUS_CLIENT_CERT_FILE} and {@code ZEROBUS_CLIENT_KEY_FILE}, set together, give the client
- * identity for mutual TLS. The OAuth token request to the workspace URL still uses the operating
- * system's CA certificates.
+ * set, is the only CA certificate trusted; when unset, the operating system's CA certificates are
+ * used. {@code ZEROBUS_CLIENT_CERT_FILE} and {@code ZEROBUS_CLIENT_KEY_FILE}, set together, give
+ * the client identity for mutual TLS. OAuth and federated token requests to the workspace URL
+ * trust the operating system's CA certificates and the SDK's bundled public roots, ignore
+ * TlsOptions, and present no client certificate.
  *
  * <p>Run with: {@code java -cp <classpath> com.databricks.zerobus.examples.tls.TlsConfigurationExample}
  */

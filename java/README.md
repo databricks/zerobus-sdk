@@ -854,10 +854,10 @@ complete example.
 
 By default the SDK trusts the operating system's CA certificates. To trust a private CA, present a
 client certificate for mutual TLS, or check the server certificate against a different name, pass
-`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`. These settings apply to the gRPC
-connection to the Zerobus endpoint only. The OAuth and federated token requests to the workspace URL
-still use the operating system's CA certificates and present no client certificate, so a workspace
-behind a private CA must be trusted by the operating system.
+`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`. These settings apply to the gRPC connection to the Zerobus endpoint only. OAuth and federated token
+requests to the workspace URL trust the operating system's CA certificates and the SDK's bundled
+public roots, ignore TlsOptions, and present no client certificate. A workspace behind a private CA
+must therefore be trusted by the operating system.
 
 ```java
 TlsOptions tls = TlsOptions.builder()
@@ -881,11 +881,11 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
 - `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
   paths. Use them when the certificates come from a secret store rather than the file system.
 - `domainName(...)` checks the server certificate against a name other than the endpoint host. Pass
-  a DNS name or an IP address, for example `zerobus.example.com`, not a URL. A value with a scheme, a
-  port, a path or query, brackets, whitespace, or a control character fails with `IllegalArgumentException`
-  when the builder is called. Another malformed name passes this check and fails when the SDK sets up
-  TLS for the connection. Whether recovery retries that failure depends on the rest of the TLS
-  configuration.
+  a DNS name or an IP address, for example `zerobus.example.com`, not a URL. A value with a scheme,
+  a port, a path or query, brackets, whitespace, or a control character fails with
+  `IllegalArgumentException` when the builder is called. Another malformed name passes this check
+  and fails when the SDK sets up TLS for the connection. Whether recovery retries that failure
+  depends on the rest of the TLS configuration.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by
