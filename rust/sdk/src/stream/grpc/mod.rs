@@ -59,10 +59,6 @@ pub use callback_handler::CallbackHandlerHarness;
 /// for the receiver/sender tasks to finish during stream teardown.
 pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
-#[cfg(feature = "test-hooks")]
-type PreEnqueueBarrier =
-    tokio::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
-
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
 /// A `ZerobusStream` manages JSON or Protocol Buffer ingestion into
@@ -149,9 +145,7 @@ pub struct ZerobusStream {
     /// Counters returned by `stats()`, updated by the ingest, ack and recovery paths.
     stream_stats: Arc<StreamStatsState>,
     #[cfg(feature = "test-hooks")]
-    pre_enqueue_barrier: Arc<PreEnqueueBarrier>,
-    #[cfg(feature = "test-hooks")]
-    sender_exit_hook: Arc<sender::TeardownPauses>,
+    teardown_hooks: sender::TeardownHooks,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -307,7 +301,7 @@ impl ZerobusStream {
 
         let sender_hooks: sender::TeardownHooks = Default::default();
         #[cfg(feature = "test-hooks")]
-        let sender_exit_hook = Arc::clone(&sender_hooks);
+        let teardown_hooks = Arc::clone(&sender_hooks);
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
@@ -386,9 +380,7 @@ impl ZerobusStream {
             server_error_rx,
             stream_stats,
             #[cfg(feature = "test-hooks")]
-            pre_enqueue_barrier: Arc::default(),
-            #[cfg(feature = "test-hooks")]
-            sender_exit_hook,
+            teardown_hooks,
             cancellation_token,
             callback_handler_task,
             callback_cancellation_token,
@@ -413,7 +405,7 @@ impl ZerobusStream {
     pub async fn arm_before_half_close_barrier(
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.sender_exit_hook.arm_before_half_close().await
+        self.teardown_hooks.arm_before_half_close().await
     }
 
     /// Test-only: pauses the sender after it half-closes its request on cancellation.
@@ -423,7 +415,7 @@ impl ZerobusStream {
     pub async fn arm_after_half_close_barrier(
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.sender_exit_hook.arm_after_half_close().await
+        self.teardown_hooks.arm_after_half_close().await
     }
 
     /// Test-only: pauses the receiver after the request is half-closed, before it drains the
@@ -433,7 +425,7 @@ impl ZerobusStream {
     pub async fn arm_before_drain_barrier(
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.sender_exit_hook.arm_before_drain().await
+        self.teardown_hooks.arm_before_drain().await
     }
 
     /// Test-only: pauses the next admitted batch before it is handed to the sender.
@@ -443,10 +435,7 @@ impl ZerobusStream {
     pub async fn arm_pre_enqueue_barrier(
         &self,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let reached = Arc::new(tokio::sync::Notify::new());
-        let proceed = Arc::new(tokio::sync::Notify::new());
-        *self.pre_enqueue_barrier.lock().await = Some((Arc::clone(&reached), Arc::clone(&proceed)));
-        (reached, proceed)
+        self.teardown_hooks.arm_pre_enqueue().await
     }
 
     /// Returns a handle that reads this stream's counters without borrowing the stream.

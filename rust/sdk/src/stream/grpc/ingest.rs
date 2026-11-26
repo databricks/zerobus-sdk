@@ -285,13 +285,7 @@ impl ZerobusStream {
         // this thread resumes, and the in-flight count must never go below zero.
         self.stream_stats.record_admitted(record_count);
         #[cfg(feature = "test-hooks")]
-        {
-            let barrier = self.pre_enqueue_barrier.lock().await.take();
-            if let Some((reached, proceed)) = barrier {
-                reached.notify_one();
-                proceed.notified().await;
-            }
-        }
+        super::sender::TeardownPauses::park(&self.teardown_hooks.pre_enqueue).await;
         self.landing_zone.enqueue_reserved(
             Box::new(IngestRequest {
                 payload: encoded_batch,

@@ -5,7 +5,10 @@ mod utils;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use databricks_zerobus_ingest_sdk::{GrpcCode, NoTlsConfig, ZerobusError, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    GrpcCode, NoTlsConfig, OffsetId, StreamStats, ZerobusError, ZerobusResult, ZerobusSdk,
+    ZerobusStream,
+};
 use tracing::info;
 use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 
@@ -273,40 +276,45 @@ mod grpc_stream_stats {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn graceful_rotation_then_server_eof_is_not_recorded(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
+    // Acknowledges the first record, then the server ends the response stream, announced by a
+    // close signal or not. Returns the stream, both offsets, and the second wait's result.
+    async fn end_after_first_ack(
+        announced: bool,
+        recovery: bool,
+    ) -> Result<(ZerobusStream, OffsetId, OffsetId, ZerobusResult<()>), Box<dyn std::error::Error>>
+    {
         let (mock_server, server_url) = start_mock_server().await?;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "stats_rotation_first".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                    // The server announces a rotation and ends the stream straight after it.
-                    MockResponse::CloseStreamSignalAndEnd {
-                        duration_seconds: 5,
-                        delay_ms: 0,
-                    },
-                    // Wire offsets restart on the new connection, so the replayed record is 0.
-                    MockResponse::CreateStream {
-                        stream_id: "stats_rotation_second".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
+        let end = if announced {
+            MockResponse::CloseStreamSignalAndEnd {
+                duration_seconds: 5,
+                delay_ms: 0,
+            }
+        } else {
+            MockResponse::EndStream { delay_ms: 0 }
+        };
+        let mut responses = vec![
+            MockResponse::CreateStream {
+                stream_id: "stats_eos_first".to_string(),
+                delay_ms: 0,
+            },
+            MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            },
+            end,
+        ];
+        if recovery {
+            // Wire offsets restart on the new connection, so the replayed record is 0.
+            responses.push(MockResponse::CreateStream {
+                stream_id: "stats_eos_second".to_string(),
+                delay_ms: 0,
+            });
+            responses.push(MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+            });
+        }
+        mock_server.inject_responses(TABLE_NAME, responses).await;
 
         let stream = sdk_for(&server_url)?
             .stream_builder()
@@ -314,7 +322,7 @@ mod grpc_stream_stats {
             .headers_provider(Arc::new(TestHeadersProvider::default()))
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .max_inflight_requests(100)
-            .recovery(true)
+            .recovery(recovery)
             .recovery_timeout_ms(5000)
             .recovery_backoff_ms(100)
             .build()
@@ -323,7 +331,17 @@ mod grpc_stream_stats {
         let first = stream.ingest_record_offset(b"first".to_vec()).await?;
         stream.wait_for_offset(first).await?;
         let second = stream.ingest_record_offset(b"second".to_vec()).await?;
-        stream.wait_for_offset(second).await?;
+        let second_result = stream.wait_for_offset(second).await;
+        Ok((stream, first, second, second_result))
+    }
+
+    // A graceful rotation announced by a close signal, then the end of stream, with recovery on.
+    #[tokio::test]
+    async fn graceful_rotation_then_server_eof_is_not_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let (stream, _first, second, second_result) = end_after_first_ack(true, true).await?;
+        second_result?;
 
         let stats = stream.stats();
         assert_eq!(stats.reconnects, 1);
@@ -337,48 +355,13 @@ mod grpc_stream_stats {
         Ok(())
     }
 
+    // The same announced end with recovery off fails the waiter without recording it.
     #[tokio::test]
     async fn announced_server_close_without_recovery_is_not_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        let (mock_server, server_url) = start_mock_server().await?;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "stats_announced_terminal".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                    MockResponse::CloseStreamSignalAndEnd {
-                        duration_seconds: 5,
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
-
-        let stream = sdk_for(&server_url)?
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(false)
-            .build()
-            .await?;
-
-        let first = stream.ingest_record_offset(b"first".to_vec()).await?;
-        stream.wait_for_offset(first).await?;
-        let second = stream.ingest_record_offset(b"second".to_vec()).await?;
-        let err = stream
-            .wait_for_offset(second)
-            .await
-            .expect_err("the terminal end of stream must fail the waiter");
+        let (stream, _first, _second, second_result) = end_after_first_ack(true, false).await?;
+        let err = second_result.expect_err("the terminal end of stream must fail the waiter");
         assert!(
             matches!(&err, ZerobusError::StreamClosedError(status) if status.code() == GrpcCode::Ok),
             "waiter got {err}"
@@ -440,23 +423,21 @@ mod grpc_stream_stats {
         Ok(())
     }
 
-    // The flush times out with a record unacknowledged, and the sender finishes before the receiver
-    // reaches its drain. The server ends the stream only after the drain has started, so the end is
-    // read by the drain, which must record it as well.
-    #[tokio::test]
-    async fn flush_timeout_then_server_eof_during_drain_is_recorded(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
+    // The flush times out with a record unacknowledged, and the server ends the stream only after
+    // the receiver's drain has started, so the drain reads the end.
+    async fn drain_after_flush_timeout(
+        send_close_signal: bool,
+    ) -> Result<StreamStats, Box<dyn std::error::Error>> {
         let (mock_server, server_url) = start_mock_server().await?;
         let eof_gate = Arc::new(MockResponseGate::new());
         mock_server
-            .hold_end_of_stream_after_half_close(Arc::clone(&eof_gate))
+            .script_half_close(Some(Arc::clone(&eof_gate)), send_close_signal.then_some(5))
             .await;
         mock_server
             .inject_responses(
                 TABLE_NAME,
                 vec![MockResponse::CreateStream {
-                    stream_id: "stats_drain_eof".to_string(),
+                    stream_id: "stats_drain".to_string(),
                     delay_ms: 0,
                 }],
             )
@@ -484,8 +465,14 @@ mod grpc_stream_stats {
         };
         let (close_result, ()) = tokio::join!(stream.close(), release);
         assert!(close_result.is_err(), "flush must time out");
+        Ok(stream.stats())
+    }
 
-        let stats = stream.stats();
+    #[tokio::test]
+    async fn flush_timeout_then_server_eof_during_drain_is_recorded(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        let stats = drain_after_flush_timeout(false).await?;
         assert_eq!(stats.records_in_flight, 1);
         let error = stats
             .last_error
@@ -494,52 +481,13 @@ mod grpc_stream_stats {
         Ok(())
     }
 
-    // As the drain test above, but the server first sends a close signal, which the drain must
-    // honor, so the end of stream that follows is the announced rotation and is not recorded.
+    // The server first sends a close signal, which the drain must honor, so the end of stream that
+    // follows is the announced rotation and is not recorded.
     #[tokio::test]
     async fn flush_timeout_then_close_signal_and_eof_during_drain_is_not_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        let (mock_server, server_url) = start_mock_server().await?;
-        let eof_gate = Arc::new(MockResponseGate::new());
-        mock_server
-            .hold_end_of_stream_after_half_close(Arc::clone(&eof_gate))
-            .await;
-        mock_server.send_close_signal_on_half_close(5).await;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![MockResponse::CreateStream {
-                    stream_id: "stats_drain_close_signal".to_string(),
-                    delay_ms: 0,
-                }],
-            )
-            .await;
-
-        let mut stream = sdk_for(&server_url)?
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(false)
-            .flush_timeout_ms(200)
-            .build()
-            .await?;
-
-        stream.ingest_record_offset(b"unacked".to_vec()).await?;
-        let (reached, proceed) = stream.arm_before_drain_barrier().await;
-        let release = async {
-            tokio::time::timeout(Duration::from_secs(10), reached.notified())
-                .await
-                .expect("receiver must reach the drain");
-            proceed.notify_one();
-            eof_gate.release();
-        };
-        let (close_result, ()) = tokio::join!(stream.close(), release);
-        assert!(close_result.is_err(), "flush must time out");
-
-        let stats = stream.stats();
+        let stats = drain_after_flush_timeout(true).await?;
         assert_eq!(stats.records_in_flight, 1);
         assert!(
             stats.last_error.is_none(),
@@ -660,50 +608,8 @@ mod grpc_stream_stats {
     async fn unrequested_server_close_with_recovery_is_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        let (mock_server, server_url) = start_mock_server().await?;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "stats_eos_first".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                    // The server ends the response stream with OK status.
-                    MockResponse::EndStream { delay_ms: 0 },
-                    // Wire offsets restart on the new connection, so the replayed record is 0.
-                    MockResponse::CreateStream {
-                        stream_id: "stats_eos_second".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                ],
-            )
-            .await;
-
-        let stream = sdk_for(&server_url)?
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(true)
-            .recovery_timeout_ms(5000)
-            .recovery_backoff_ms(100)
-            .build()
-            .await?;
-
-        let first = stream.ingest_record_offset(b"first".to_vec()).await?;
-        stream.wait_for_offset(first).await?;
-        let second = stream.ingest_record_offset(b"second".to_vec()).await?;
-        stream.wait_for_offset(second).await?;
+        let (stream, _first, second, second_result) = end_after_first_ack(false, true).await?;
+        second_result?;
 
         let stats = stream.stats();
         assert_eq!(
@@ -723,38 +629,8 @@ mod grpc_stream_stats {
     async fn unrequested_server_close_without_recovery_is_recorded(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
-        let (mock_server, server_url) = start_mock_server().await?;
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "stats_eos_terminal".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 0,
-                    },
-                    MockResponse::EndStream { delay_ms: 0 },
-                ],
-            )
-            .await;
-
-        let stream = sdk_for(&server_url)?
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
-            .max_inflight_requests(100)
-            .recovery(false)
-            .build()
-            .await?;
-
-        let first = stream.ingest_record_offset(b"first".to_vec()).await?;
-        stream.wait_for_offset(first).await?;
-        let second = stream.ingest_record_offset(b"second".to_vec()).await?;
-        assert!(stream.wait_for_offset(second).await.is_err());
+        let (stream, first, _second, second_result) = end_after_first_ack(false, false).await?;
+        assert!(second_result.is_err());
 
         let stats = stream.stats();
         assert_eq!(stats.reconnects, 0);
@@ -1041,43 +917,6 @@ mod arrow_stream_stats {
     }
 
     #[tokio::test]
-    async fn partial_batch_ack_counts_records_exactly() -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-        info!("Starting arrow partial_batch_ack_counts_records_exactly");
-
-        let (mock_server, server_url) = start_mock_flight_server().await?;
-        let schema = create_test_arrow_schema();
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![MockFlightResponse::BatchAck {
-                    ack_up_to_offset: 0,
-                    delay_ms: 0,
-                    ack_up_to_records: 4,
-                }],
-            )
-            .await;
-
-        let stream = sdk_for(&server_url)?
-            .stream_builder()
-            .table(TABLE_NAME)
-            .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .arrow(schema.clone())
-            .recovery(false)
-            .build_arrow()
-            .await?;
-
-        let batch = create_test_record_batch(schema.clone(), ids_ten(), names_ten());
-        stream.ingest_batch(batch).await?;
-
-        // Four of the ten records are acknowledged; the batch is not complete, so no
-        // offset is reported as acknowledged.
-        wait_until(|| stream.stats().records_in_flight == 6).await;
-        assert_eq!(stream.stats().last_acked_offset, None);
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn forced_drop_counts_reconnect_and_records_last_error(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
@@ -1186,6 +1025,8 @@ mod arrow_stream_stats {
             ))
             .await?;
         wait_until(|| stream.stats().records_in_flight == 6).await;
+        // Four of ten rows are acknowledged, so the batch is incomplete and no offset is reported.
+        assert_eq!(stream.stats().last_acked_offset, None);
 
         let second = stream
             .ingest_batch(create_test_record_batch(

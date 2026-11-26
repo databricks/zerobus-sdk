@@ -23,11 +23,8 @@ use crate::ZerobusError;
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct StreamStats {
-    /// Records accepted by ingest and not yet acknowledged by the server. Counts
-    /// records, not batches. Counting starts when a batch is admitted, not when it
-    /// reaches the wire. A record whose ingest call returned an error is not counted,
-    /// unless its batch was already retained for replay or terminal handling. Records
-    /// retained after a terminal failure, or left unacknowledged at close, stay counted.
+    /// Records accepted by ingest and not yet acknowledged, counted per record rather than
+    /// per batch. See the crate README's Stream Statistics section for the counting rules.
     pub records_in_flight: u64,
     /// Offset of the most recently acknowledged batch, or `None` before the first
     /// acknowledgment. Never decreases.
@@ -35,12 +32,8 @@ pub struct StreamStats {
     /// Automatic recoveries that completed successfully since the stream was
     /// created. Initial stream creation is not counted.
     pub reconnects: u64,
-    /// Most recent error the stream published, or `None` if none has occurred.
-    /// Kept after a successful recovery. A server close the SDK expects, such as the end
-    /// of a graceful rotation, or the end of stream that answers the caller's close when every
-    /// record was acknowledged, is not an error and is not recorded.
-    /// An end of stream during a close that the server sends on its own, after every record was
-    /// acknowledged, cannot be told apart from that answer and is not recorded either.
+    /// Most recent error the stream published, kept after a successful recovery. Server closes
+    /// the SDK expects are not recorded; see the crate README's Stream Statistics section.
     pub last_error: Option<LastStreamError>,
 }
 
@@ -155,9 +148,7 @@ impl StreamStatsState {
         }
     }
 
-    // Saturates instead of wrapping so release builds cannot report a huge count.
-    // `fetch_update` is deprecated on newer toolchains and its replacement is too
-    // new for the supported minimum, so this is the same loop written out.
+    // Written out by hand: newest-stable clippy flags `AtomicU64::fetch_update` as deprecated.
     fn subtract_in_flight(&self, records: u64) {
         let mut previous = self.records_in_flight.load(Ordering::Relaxed);
         while let Err(actual) = self.records_in_flight.compare_exchange_weak(
@@ -207,23 +198,6 @@ impl ServerErrorSender {
         value: Option<ZerobusError>,
     ) -> Result<(), watch::error::SendError<Option<ZerobusError>>> {
         self.tx.send(value)
-    }
-
-    #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
-    pub(crate) fn send_replace(&self, value: Option<ZerobusError>) -> Option<ZerobusError> {
-        if let Some(error) = &value {
-            self.stats.record_error(error);
-        }
-        self.tx.send_replace(value)
-    }
-
-    /// Publishes a routine stop, such as a graceful rotation, without recording it.
-    #[cfg_attr(not(feature = "arrow-flight"), allow(dead_code))]
-    pub(crate) fn send_replace_unrecorded(
-        &self,
-        value: Option<ZerobusError>,
-    ) -> Option<ZerobusError> {
-        self.tx.send_replace(value)
     }
 }
 
@@ -332,10 +306,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_error_sender_records_some_but_not_none() {
+    async fn server_error_sender_records_only_published_errors() {
         let stats = Arc::new(StreamStatsState::default());
         let (tx, rx) = watch::channel(None);
         let sender = ServerErrorSender::new(tx, Arc::clone(&stats));
+
+        sender.send_unrecorded(Some(retryable())).unwrap();
+        assert!(rx.borrow().is_some());
+        assert!(stats.snapshot().last_error.is_none());
 
         sender.send(None).unwrap();
         assert!(stats.snapshot().last_error.is_none());
@@ -344,20 +322,9 @@ mod tests {
         assert!(stats.snapshot().last_error.is_some());
         assert!(rx.borrow().is_some());
 
-        sender.send_replace(None);
+        sender.send(None).unwrap();
         assert!(rx.borrow().is_none());
         // Clearing the watch value keeps the recorded error.
         assert!(stats.snapshot().last_error.is_some());
-    }
-
-    #[tokio::test]
-    async fn unrecorded_send_publishes_without_recording() {
-        let stats = Arc::new(StreamStatsState::default());
-        let (tx, rx) = watch::channel(None);
-        let sender = ServerErrorSender::new(tx, Arc::clone(&stats));
-
-        sender.send_replace_unrecorded(Some(retryable()));
-        assert!(rx.borrow().is_some());
-        assert!(stats.snapshot().last_error.is_none());
     }
 }

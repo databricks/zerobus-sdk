@@ -242,16 +242,16 @@ impl MockZerobusServer {
         *self.half_close_ack_delay_ms.lock().await = Some(delay_ms);
     }
 
-    /// Holds the server's end of stream after the client half-closes until `gate` is released.
+    /// Scripts the steps after the client half-closes: `hold` delays the server's end of stream
+    /// until it is released, and `close_signal_seconds` sends a close signal before the end.
     #[allow(dead_code)]
-    pub async fn hold_end_of_stream_after_half_close(&self, gate: Arc<MockResponseGate>) {
-        *self.half_close_hold.lock().await = Some(gate);
-    }
-
-    /// Sends a close signal with this duration after the client half-closes, before the end.
-    #[allow(dead_code)]
-    pub async fn send_close_signal_on_half_close(&self, duration_seconds: i64) {
-        *self.half_close_close_signal.lock().await = Some(duration_seconds);
+    pub async fn script_half_close(
+        &self,
+        hold: Option<Arc<MockResponseGate>>,
+        close_signal_seconds: Option<i64>,
+    ) {
+        *self.half_close_hold.lock().await = hold;
+        *self.half_close_close_signal.lock().await = close_signal_seconds;
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)

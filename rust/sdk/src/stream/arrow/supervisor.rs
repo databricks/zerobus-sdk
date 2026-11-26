@@ -347,7 +347,7 @@ impl Supervisor {
                         return self.finalized_result();
                     }
 
-                    self.server_error_tx.send_replace(None);
+                    let _ = self.server_error_tx.send(None);
                     let recovery_deadline = match configured_deadline(
                         Instant::now(),
                         Duration::from_millis(self.options.recovery_timeout_ms),

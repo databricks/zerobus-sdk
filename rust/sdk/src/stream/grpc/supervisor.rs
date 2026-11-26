@@ -308,7 +308,7 @@ impl ZerobusStream {
                 Arc::clone(&stream_stats),
                 Arc::clone(&expected_close),
                 Arc::clone(&request_half_closed),
-                Clone::clone(&sender_hooks),
+                sender_hooks.clone(),
             ));
             let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 connection.sink,
@@ -317,7 +317,7 @@ impl ZerobusStream {
                 server_error_tx.clone(),
                 per_stream_token.clone(),
                 Arc::clone(&request_half_closed),
-                Clone::clone(&sender_hooks),
+                sender_hooks.clone(),
             ));
 
             // 4. Wait for any of the two tasks to end.

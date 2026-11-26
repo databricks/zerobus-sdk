@@ -21,14 +21,15 @@ use crate::ZerobusResult;
 #[cfg(feature = "test-hooks")]
 type TeardownBarrierGate = tokio::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>;
 
-/// Test-only pause points in teardown: around the sender's half-close on cancellation, and
-/// before the receiver drains its final acks.
+/// Test-only pause points: around the sender's half-close on cancellation, before the receiver
+/// drains its final acks, and before an admitted batch is enqueued.
 #[cfg(feature = "test-hooks")]
 #[derive(Default)]
 pub(crate) struct TeardownPauses {
     pub(super) before_half_close: TeardownBarrierGate,
     pub(super) after_half_close: TeardownBarrierGate,
     pub(super) before_drain: TeardownBarrierGate,
+    pub(super) pre_enqueue: TeardownBarrierGate,
 }
 
 /// The pause points the teardown tasks receive. Zero-sized without `test-hooks`.
@@ -50,6 +51,10 @@ impl TeardownPauses {
 
     pub(crate) async fn arm_before_drain(&self) -> (Arc<Notify>, Arc<Notify>) {
         Self::arm(&self.before_drain).await
+    }
+
+    pub(crate) async fn arm_pre_enqueue(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm(&self.pre_enqueue).await
     }
 
     async fn arm(gate: &TeardownBarrierGate) -> (Arc<Notify>, Arc<Notify>) {

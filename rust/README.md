@@ -1260,6 +1260,7 @@ How a call behaves:
 **Settings:** the builder offers `table()`, the authentication setters, `json()`, `recovery()`, `recovery_retries()`, `recovery_backoff_ms()`, `server_lack_of_ack_timeout_ms()`, and `max_ingest_payload_bytes()`, with the same defaults as streams. Stream-only settings are not offered.
 
 See [`examples/json/unary.rs`](examples/json/unary.rs) for a complete program.
+
 ### Stream Statistics
 
 `stats()` returns a point-in-time snapshot of a stream's counters. It reads atomics and does not wait on the stream's tasks.
@@ -1744,9 +1745,7 @@ for record in stream.get_unacked_records().await? {
 }
 ```
 
-**`stats()`** returns a `StreamStats` snapshot with `records_in_flight`, `last_acked_offset`, `reconnects` and `last_error`. It reads atomics and does not wait on the stream's tasks.
-
-**`stats_reader()`** returns a cloneable `StreamStatsReader` that reads the same counters without borrowing the stream.
+`stats()` and `stats_reader()` return the counters described in [Stream Statistics](#stream-statistics).
 
 ### `StreamBuilder`
 
@@ -1847,12 +1846,7 @@ The result of a successful unary ingest call. It has no fields: the server retur
 
 ### `ZerobusArrowStream`
 
-`PersistentStream` and `ZerobusArrowStream` have the same statistics accessors as `ZerobusStream`:
-
-- `stats() -> StreamStats` returns a snapshot of `records_in_flight`, `last_acked_offset`, `reconnects` and `last_error`. It reads atomics and does not wait on the stream's tasks.
-- `stats_reader() -> StreamStatsReader` returns a cloneable reader for the same counters, for use when the stream is held behind a lock.
-
-See [Stream Statistics](#stream-statistics) for the field semantics.
+`PersistentStream` and `ZerobusArrowStream` have the same `stats()` and `stats_reader()` accessors. See [Stream Statistics](#stream-statistics).
 
 ### `MultiplexedStream`
 

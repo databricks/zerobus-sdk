@@ -196,9 +196,9 @@ impl CloseFinalizer {
     fn publish_outcome(&self, outcome: &ZerobusResult<()>) {
         let error = outcome.as_ref().err().cloned();
         if error.as_ref().is_some_and(AckProcessor::is_rotation_error) {
-            self.server_error_tx.send_replace_unrecorded(error);
+            let _ = self.server_error_tx.send_unrecorded(error);
         } else {
-            self.server_error_tx.send_replace(error);
+            let _ = self.server_error_tx.send(error);
         }
     }
 
