@@ -23,7 +23,7 @@ use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::errors::should_retry_initial_connection;
-use crate::grpc_channel::GrpcChannelSource;
+use crate::grpc_channel::{GrpcChannelSource, RequestSent};
 use crate::grpc_status::GrpcCode;
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
@@ -139,15 +139,18 @@ impl ZerobusStream {
                             .await
                         }
                         Ok((channel, channel_timeout)) => {
+                            let sent = RequestSent::default();
                             channel_timeout
                                 .bounded(
                                     options.recovery_timeout_ms,
+                                    &sent,
                                     Self::create_stream_connection(
                                         channel,
                                         &table_properties,
                                         &headers_provider,
                                         record_type,
                                         kind,
+                                        &sent,
                                     ),
                                 )
                                 .await

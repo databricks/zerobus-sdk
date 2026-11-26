@@ -812,6 +812,7 @@ OXAXnIE7l91w/88HcoR0
 
         let off_runtime = settings.resolve_off_runtime().await.unwrap();
 
+        assert_eq!(off_runtime.ca_certificates.len(), 2);
         assert!(off_runtime.apply(endpoint()).is_ok());
     }
 

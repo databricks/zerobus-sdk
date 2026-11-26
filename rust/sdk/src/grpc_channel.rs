@@ -108,6 +108,21 @@ pub(crate) struct TrackedChannel {
     health: Arc<ChannelHealth>,
 }
 
+/// Set once an attempt hands its request to the channel. A timeout before that
+/// says nothing about the channel, for example when the headers provider stalls.
+#[derive(Debug, Default)]
+pub(crate) struct RequestSent(AtomicBool);
+
+impl RequestSent {
+    pub(crate) fn mark(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// Reports that an attempt on a channel timed out before the server answered.
 /// Only an attempt's own timeout calls this: a call dropped by its caller says
 /// nothing about the channel.
@@ -115,24 +130,26 @@ pub(crate) struct TrackedChannel {
 pub(crate) struct ChannelTimeout(Arc<ChannelHealth>);
 
 impl ChannelTimeout {
-    /// Records a failed attempt on the channel, for a timeout that the caller
-    /// handles itself instead of through [`ChannelTimeout::bounded`].
-    pub(crate) fn record_timeout(&self) {
-        self.0.record(false);
+    /// Records a failed attempt on the channel if the attempt's request was sent.
+    pub(crate) fn record_timeout(&self, sent: &RequestSent) {
+        if sent.is_set() {
+            self.0.record(false);
+        }
     }
 
     /// Runs one attempt on the channel, bounded by `timeout_ms`. If the attempt
-    /// times out, the channel records a failure and the attempt fails with a
-    /// deadline error.
+    /// times out after its request was sent, the channel records a failure and
+    /// the attempt fails with a deadline error.
     pub(crate) async fn bounded<T>(
         &self,
         timeout_ms: u64,
+        sent: &RequestSent,
         attempt: impl Future<Output = ZerobusResult<T>>,
     ) -> ZerobusResult<T> {
         match tokio::time::timeout(Duration::from_millis(timeout_ms), attempt).await {
             Ok(result) => result,
             Err(_) => {
-                self.record_timeout();
+                self.record_timeout(sent);
                 Err(ZerobusError::CreateStreamError(
                     GrpcStatus::deadline_exceeded("Stream creation timed out"),
                 ))
@@ -354,6 +371,20 @@ pub(crate) fn base_endpoint(endpoint: &str, sdk_identifier: &str) -> ZerobusResu
         .map_err(|err| ZerobusError::InvalidZerobusEndpointError(format!("{endpoint}: {err}")))?
         .user_agent(sdk_identifier)
         .map_err(|err| ZerobusError::InvalidArgument(err.to_string()))
+}
+
+#[cfg(test)]
+impl GrpcChannelSource {
+    /// Records that the current channel reached the server, without a call.
+    pub(crate) async fn mark_current_reached_for_test(&self) {
+        let open = self.acquire().await.unwrap();
+        open.health.record(true);
+    }
+
+    /// The TLS fingerprint of the channel a call would get now.
+    pub(crate) async fn next_channel_fingerprint_for_test(&self) -> TlsFingerprint {
+        self.acquire().await.unwrap().tls
+    }
 }
 
 #[cfg(test)]
@@ -668,13 +699,37 @@ mod tests {
         let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
 
         let (_, timeout) = source.client().await.unwrap();
+        let sent = RequestSent::default();
+        sent.mark();
         let attempt = timeout
-            .bounded(10, std::future::pending::<ZerobusResult<()>>())
+            .bounded(10, &sent, std::future::pending::<ZerobusResult<()>>())
             .await;
 
         assert!(attempt.is_err());
         assert_eq!(source.acquire().await.unwrap().tls, working.tls);
         assert_ne!(rotated.tls, working.tls);
+    }
+
+    /// A stream's headers provider can stall before the request is sent. That
+    /// timeout says nothing about the channel.
+    #[tokio::test]
+    async fn a_timeout_before_the_request_is_sent_records_nothing() {
+        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
+        let source = source(Arc::clone(&tls));
+        let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
+
+        let (_, timeout) = source.client().await.unwrap();
+        let attempt = timeout
+            .bounded(
+                10,
+                &RequestSent::default(),
+                std::future::pending::<ZerobusResult<()>>(),
+            )
+            .await;
+
+        assert!(attempt.is_err());
+        assert_eq!(rotated.health.last_failure(), 0);
+        assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
     }
 
     #[tokio::test]
@@ -684,7 +739,9 @@ mod tests {
         let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
 
         let (_, timeout) = source.client().await.unwrap();
-        let attempt = timeout.bounded(1_000, async { Ok(()) }).await;
+        let attempt = timeout
+            .bounded(1_000, &RequestSent::default(), async { Ok(()) })
+            .await;
 
         assert!(attempt.is_ok());
         assert_eq!(rotated.health.last_failure(), 0);

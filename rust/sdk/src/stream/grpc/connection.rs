@@ -16,7 +16,7 @@ use super::supervisor::StreamInitInfo;
 use super::transport::{
     self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
 };
-use crate::grpc_channel::{ChannelTimeout, GrpcClient};
+use crate::grpc_channel::{ChannelTimeout, GrpcClient, RequestSent};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::RecordType;
@@ -45,6 +45,7 @@ impl super::ZerobusStream {
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
         kind: &GrpcConnectionMode,
+        sent: &RequestSent,
     ) -> ZerobusResult<StreamConnection> {
         let result = Self::create_stream_connection_inner(
             channel,
@@ -52,6 +53,7 @@ impl super::ZerobusStream {
             headers_provider,
             record_type,
             kind,
+            sent,
         )
         .await;
         if let Err(err) = &result {
@@ -81,15 +83,18 @@ impl super::ZerobusStream {
     ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
         let attempt_started = tokio::time::Instant::now();
+        let sent = RequestSent::default();
         let result = channel_timeout
             .bounded(
                 recovery_timeout_ms,
+                &sent,
                 Self::create_stream_connection_inner(
                     channel,
                     table_properties,
                     headers_provider,
                     record_type,
                     kind,
+                    &sent,
                 ),
             )
             .await;
@@ -117,11 +122,13 @@ impl super::ZerobusStream {
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
         kind: &GrpcConnectionMode,
+        sent: &RequestSent,
     ) -> ZerobusResult<StreamConnection> {
         let outbound = transport::make_outbound(kind);
         let headers = headers_provider.get_headers().await?;
         let stream_metadata = grpc_metadata_from_headers(headers, &table_properties.table_name)?;
 
+        sent.mark();
         let (sink, mut inbound) =
             transport::open_rpc(outbound, &mut channel, stream_metadata).await?;
 
