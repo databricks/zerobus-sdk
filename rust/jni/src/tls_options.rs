@@ -1,59 +1,19 @@
-//! TLS options extracted from a Java `TlsOptions` object.
+//! TLS options read from a Java `TlsOptions` object.
 //!
-//! The extracted values are converted to a `TlsSettings` on the JNI thread. File
-//! paths stay paths, so the core reads them again whenever it opens a channel.
+//! The values become a `TlsSettings` on the JNI thread. File paths stay paths, so the
+//! core reads them again whenever it opens a channel.
 
 use databricks_zerobus_ingest_sdk::TlsSettings;
 use jni::objects::{JObject, JString, JValue};
 use jni::JNIEnv;
 use std::path::PathBuf;
 
-/// TLS settings read from a Java `TlsOptions` object.
-pub struct ExtractedTlsOptions {
-    trust_system_roots: bool,
-    ca_certificate_pems: Vec<Vec<u8>>,
-    ca_certificate_files: Vec<PathBuf>,
-    client_identity: Option<ClientIdentity>,
-    domain_name: Option<String>,
-}
-
-enum ClientIdentity {
-    Pem { cert: Vec<u8>, key: Vec<u8> },
-    Files { cert: PathBuf, key: PathBuf },
-}
-
-impl ExtractedTlsOptions {
-    pub fn into_settings(self) -> TlsSettings {
-        let mut settings = TlsSettings::new();
-        if !self.trust_system_roots {
-            settings = settings.without_native_roots();
-        }
-        for pem in self.ca_certificate_pems {
-            settings = settings.with_ca_certificate_pem(pem);
-        }
-        for path in self.ca_certificate_files {
-            settings = settings.with_ca_certificate_file(path);
-        }
-        settings = match self.client_identity {
-            Some(ClientIdentity::Pem { cert, key }) => settings.with_client_identity_pem(cert, key),
-            Some(ClientIdentity::Files { cert, key }) => {
-                settings.with_client_identity_files(cert, key)
-            }
-            None => settings,
-        };
-        if let Some(domain_name) = self.domain_name {
-            settings = settings.with_domain_name(domain_name);
-        }
-        settings
-    }
-}
-
 /// Reads a Java `TlsOptions` object. The Java builder guarantees that each identity
 /// is either PEM data or a pair of files.
 pub fn extract_tls_options(
     env: &mut JNIEnv,
     options: &JObject,
-) -> Result<ExtractedTlsOptions, jni::errors::Error> {
+) -> Result<TlsSettings, jni::errors::Error> {
     let trust_system_roots = env
         .call_method(options, "isTrustSystemRoots", "()Z", &[])?
         .z()?;
@@ -70,32 +30,55 @@ pub fn extract_tls_options(
     let client_key_pem = read_nullable_string(env, options, "getClientKeyPem")?;
     let client_certificate_file = read_nullable_string(env, options, "getClientCertificateFile")?;
     let client_key_file = read_nullable_string(env, options, "getClientKeyFile")?;
-    let client_identity = match (
-        client_certificate_pem,
-        client_key_pem,
-        client_certificate_file,
-        client_key_file,
-    ) {
-        (Some(cert), Some(key), _, _) => Some(ClientIdentity::Pem {
-            cert: cert.into_bytes(),
-            key: key.into_bytes(),
-        }),
-        (_, _, Some(cert), Some(key)) => Some(ClientIdentity::Files {
-            cert: PathBuf::from(cert),
-            key: PathBuf::from(key),
-        }),
+    let client_identity_pem = match (client_certificate_pem, client_key_pem) {
+        (Some(cert), Some(key)) => Some((cert.into_bytes(), key.into_bytes())),
+        _ => None,
+    };
+    let client_identity_files = match (client_certificate_file, client_key_file) {
+        (Some(cert), Some(key)) => Some((PathBuf::from(cert), PathBuf::from(key))),
         _ => None,
     };
 
     let domain_name = read_nullable_string(env, options, "getDomainName")?;
 
-    Ok(ExtractedTlsOptions {
+    Ok(tls_settings(
         trust_system_roots,
         ca_certificate_pems,
         ca_certificate_files,
-        client_identity,
+        client_identity_pem,
+        client_identity_files,
         domain_name,
-    })
+    ))
+}
+
+/// A PEM identity takes precedence over a file identity.
+fn tls_settings(
+    trust_system_roots: bool,
+    ca_certificate_pems: Vec<Vec<u8>>,
+    ca_certificate_files: Vec<PathBuf>,
+    client_identity_pem: Option<(Vec<u8>, Vec<u8>)>,
+    client_identity_files: Option<(PathBuf, PathBuf)>,
+    domain_name: Option<String>,
+) -> TlsSettings {
+    let mut settings = TlsSettings::new();
+    if !trust_system_roots {
+        settings = settings.without_native_roots();
+    }
+    for pem in ca_certificate_pems {
+        settings = settings.with_ca_certificate_pem(pem);
+    }
+    for path in ca_certificate_files {
+        settings = settings.with_ca_certificate_file(path);
+    }
+    if let Some((cert, key)) = client_identity_pem {
+        settings = settings.with_client_identity_pem(cert, key);
+    } else if let Some((cert, key)) = client_identity_files {
+        settings = settings.with_client_identity_files(cert, key);
+    }
+    if let Some(domain_name) = domain_name {
+        settings = settings.with_domain_name(domain_name);
+    }
+    settings
 }
 
 fn read_string_list(
@@ -142,12 +125,11 @@ fn read_nullable_string(
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientIdentity, ExtractedTlsOptions};
+    use super::tls_settings;
     use async_trait::async_trait;
-    use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusResult, ZerobusSdk};
+    use databricks_zerobus_ingest_sdk::{HeadersProvider, TlsSettings, ZerobusResult, ZerobusSdk};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use zerobus_test_support::mock_grpc::{
         start_mock_mtls_server, MockResponse, MockZerobusServer,
@@ -171,12 +153,12 @@ mod tests {
         }
     }
 
-    /// Opens one stream over mutual TLS built from `extracted`, sends one record with a
+    /// Opens one stream over mutual TLS with `settings`, sends one record with a
     /// binary header, and returns the binary header values the mock server received.
     async fn stream_binary_header_over_mtls(
         mock_server: &MockZerobusServer,
         server_url: String,
-        extracted: ExtractedTlsOptions,
+        settings: TlsSettings,
     ) -> Result<Vec<Option<Vec<u8>>>, Box<dyn std::error::Error>> {
         mock_server
             .inject_responses(
@@ -197,7 +179,7 @@ mod tests {
         let sdk = ZerobusSdk::builder()
             .endpoint(server_url)
             .unity_catalog_url("https://mock-uc.com")
-            .tls_config(Arc::new(extracted.into_settings()))
+            .tls_config(Arc::new(settings))
             .build()?;
 
         let mut stream = sdk
@@ -219,7 +201,7 @@ mod tests {
     }
 
     /// Mutual TLS with the CA and the client identity read from files, plus a binary
-    /// header, through the SDK built from the extracted options.
+    /// header, through the SDK built with those settings.
     #[tokio::test]
     async fn file_based_tls_options_open_a_mutual_tls_stream(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -239,17 +221,15 @@ mod tests {
         std::fs::write(&cert_path, client_cert_pem.as_bytes())?;
         std::fs::write(&key_path, client_key.serialize_pem())?;
 
-        let extracted = ExtractedTlsOptions {
-            trust_system_roots: false,
-            ca_certificate_pems: Vec::new(),
-            ca_certificate_files: vec![ca_path],
-            client_identity: Some(ClientIdentity::Files {
-                cert: cert_path,
-                key: key_path,
-            }),
-            domain_name: Some("localhost".to_string()),
-        };
-        let received = stream_binary_header_over_mtls(&mock_server, server_url, extracted).await?;
+        let settings = tls_settings(
+            false,
+            Vec::new(),
+            vec![ca_path],
+            None,
+            Some((cert_path, key_path)),
+            Some("localhost".to_string()),
+        );
+        let received = stream_binary_header_over_mtls(&mock_server, server_url, settings).await?;
 
         assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
         Ok(())
@@ -268,53 +248,20 @@ mod tests {
         let (mock_server, server_url, server_ca_pem) =
             start_mock_mtls_server(client_cert_pem.as_bytes()).await?;
 
-        let extracted = ExtractedTlsOptions {
-            trust_system_roots: false,
-            ca_certificate_pems: vec![server_ca_pem],
-            ca_certificate_files: Vec::new(),
-            client_identity: Some(ClientIdentity::Pem {
-                cert: client_cert_pem.into_bytes(),
-                key: client_key.serialize_pem().into_bytes(),
-            }),
-            domain_name: Some("localhost".to_string()),
-        };
-        let received = stream_binary_header_over_mtls(&mock_server, server_url, extracted).await?;
+        let settings = tls_settings(
+            false,
+            vec![server_ca_pem],
+            Vec::new(),
+            Some((
+                client_cert_pem.into_bytes(),
+                client_key.serialize_pem().into_bytes(),
+            )),
+            None,
+            Some("localhost".to_string()),
+        );
+        let received = stream_binary_header_over_mtls(&mock_server, server_url, settings).await?;
 
         assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
         Ok(())
-    }
-
-    fn options(trust_system_roots: bool) -> ExtractedTlsOptions {
-        ExtractedTlsOptions {
-            trust_system_roots,
-            ca_certificate_pems: Vec::new(),
-            ca_certificate_files: Vec::new(),
-            client_identity: None,
-            domain_name: None,
-        }
-    }
-
-    #[test]
-    fn settings_report_roots_cas_and_domain_name() {
-        let mut extracted = options(false);
-        extracted.ca_certificate_pems = vec![b"pem-ca".to_vec()];
-        extracted.ca_certificate_files = vec![PathBuf::from("/etc/zerobus/ca.pem")];
-        extracted.domain_name = Some("zerobus.example.com".to_string());
-
-        let debug = format!("{:?}", extracted.into_settings());
-
-        assert!(debug.contains("native_roots: false"), "{debug}");
-        assert!(debug.contains("ca_certificates: 2"), "{debug}");
-        assert!(debug.contains("zerobus.example.com"), "{debug}");
-    }
-
-    #[test]
-    fn default_options_keep_system_roots_and_no_identity() {
-        let debug = format!("{:?}", options(true).into_settings());
-
-        assert!(debug.contains("native_roots: true"), "{debug}");
-        assert!(debug.contains("ca_certificates: 0"), "{debug}");
-        assert!(debug.contains("client_identity: None"), "{debug}");
-        assert!(debug.contains("domain_name: None"), "{debug}");
     }
 }

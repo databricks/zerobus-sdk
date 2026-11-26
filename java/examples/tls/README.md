@@ -33,24 +33,7 @@ java -cp ".:$SDK_JAR" com.databricks.zerobus.examples.tls.TlsConfigurationExampl
 Leave the `ZEROBUS_CA_CERT_FILE`, `ZEROBUS_CLIENT_CERT_FILE`, and `ZEROBUS_CLIENT_KEY_FILE`
 variables unset to use the operating system's CA certificates.
 
-## API Overview
+## API
 
-```java
-TlsOptions tls = TlsOptions.builder()
-    .trustSystemRoots(false)
-    .addCaCertificateFile("/etc/zerobus/ca.pem")
-    .clientIdentityFiles("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key")
-    .build();
-
-try (ZerobusSdk sdk = ZerobusSdk.builder()
-        .serverEndpoint(serverEndpoint)
-        .unityCatalogEndpoint(workspaceUrl)
-        .tlsOptions(tls)
-        .build()) {
-    // Create streams with sdk.streamBuilder()
-}
-```
-
-Certificate files are read each time the SDK opens a connection, so rotated files take effect
-without a restart. See the [TLS Configuration](../../README.md#tls-configuration) section of the
-SDK README.
+See the [TLS Configuration](../../README.md#tls-configuration) section of the SDK README for the
+`TlsOptions` API and how certificate files are reloaded.

@@ -3,28 +3,14 @@ package com.databricks.zerobus;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
- * TLS settings for the connection to the Zerobus endpoint.
- *
- * <p>By default the SDK trusts the operating system's CA certificates. Use {@link #builder()} to
- * trust additional CA certificates, to trust only the CA certificates you supply, to present a
- * client certificate for mutual TLS, or to check the server certificate against a different domain
- * name. Pass the result to {@link ZerobusSdkBuilder#tlsOptions(TlsOptions)}.
- *
- * <p>Certificate and key material can be given as PEM text or as paths to PEM files. When you pass
- * paths, the SDK reads the files each time it opens a connection, so replaced files take effect
- * without a restart. Use absolute paths, because a relative path is resolved when the connection is
- * opened. Replace a client certificate and its key together, for example by switching a symbolic
- * link to a directory that holds both new files.
- *
- * <p>These settings apply to the gRPC connection to the Zerobus endpoint. The OAuth and federated
- * token requests to the workspace URL still use the operating system's CA certificates and present
- * no client certificate.
- *
- * <p>Instances are immutable and safe to share between threads. {@link #toString()} never includes
- * certificate or key material.
+ * TLS settings for the connection to the Zerobus endpoint. By default the SDK trusts the operating
+ * system's CA certificates. Use {@link #builder()} to trust additional or only supplied CA
+ * certificates, present a client certificate for mutual TLS, or check the server certificate
+ * against a different domain name. The TLS Configuration section of the README describes how
+ * certificate files are read and rotated.
  *
  * <pre>{@code
  * TlsOptions tls = TlsOptions.builder()
@@ -34,9 +20,16 @@ import java.util.Objects;
  *     .build();
  * }</pre>
  *
+ * <p>Instances are immutable and safe to share between threads. {@link #toString()} never includes
+ * certificate or key material.
+ *
  * @see ZerobusSdkBuilder#tlsOptions(TlsOptions)
  */
 public final class TlsOptions {
+
+  // A single colon would be a port; several colons are an IPv6 literal.
+  private static final Pattern PASTED_URL_MISTAKE =
+      Pattern.compile("[/?#\\s\\p{Cntrl}]|^[^:]*:[^:]*$");
 
   private final boolean trustSystemRoots;
   private final List<String> caCertificatePems;
@@ -188,7 +181,7 @@ public final class TlsOptions {
      * @throws IllegalArgumentException if {@code caCertificatePem} is blank
      */
     public Builder addCaCertificatePem(String caCertificatePem) {
-      caPems.add(requireNonBlank(caCertificatePem, "caCertificatePem"));
+      caPems.add(ArgumentChecks.requireNonBlank(caCertificatePem, "caCertificatePem"));
       return this;
     }
 
@@ -202,7 +195,7 @@ public final class TlsOptions {
      * @throws IllegalArgumentException if {@code caCertificateFile} is blank
      */
     public Builder addCaCertificateFile(String caCertificateFile) {
-      caFiles.add(requireNonBlank(caCertificateFile, "caCertificateFile"));
+      caFiles.add(ArgumentChecks.requireNonBlank(caCertificateFile, "caCertificateFile"));
       return this;
     }
 
@@ -217,8 +210,8 @@ public final class TlsOptions {
      * @throws IllegalArgumentException if either argument is blank
      */
     public Builder clientIdentityPem(String certificatePem, String keyPem) {
-      String cert = requireNonBlank(certificatePem, "certificatePem");
-      String key = requireNonBlank(keyPem, "keyPem");
+      String cert = ArgumentChecks.requireNonBlank(certificatePem, "certificatePem");
+      String key = ArgumentChecks.requireNonBlank(keyPem, "keyPem");
       this.clientCertificatePem = cert;
       this.clientKeyPem = key;
       this.clientCertificateFile = null;
@@ -238,8 +231,8 @@ public final class TlsOptions {
      * @throws IllegalArgumentException if either argument is blank
      */
     public Builder clientIdentityFiles(String certificateFile, String keyFile) {
-      String cert = requireNonBlank(certificateFile, "certificateFile");
-      String key = requireNonBlank(keyFile, "keyFile");
+      String cert = ArgumentChecks.requireNonBlank(certificateFile, "certificateFile");
+      String key = ArgumentChecks.requireNonBlank(keyFile, "keyFile");
       this.clientCertificateFile = cert;
       this.clientKeyFile = key;
       this.clientCertificatePem = null;
@@ -249,25 +242,21 @@ public final class TlsOptions {
 
     /**
      * Sets the domain name the server certificate is checked against. By default the host name of
-     * the server endpoint is used.
-     *
-     * <p>The value is a DNS name or an IP address, with no scheme and no port, for example {@code
-     * "zerobus.example.com"} rather than {@code "https://zerobus.example.com:443"}. This check only
-     * catches obvious mistakes, such as a scheme, a port, a path, whitespace, or PEM text. It does
-     * not validate the syntax of a DNS name or an IP literal.
+     * the endpoint is used. Pass a host name or IP address, for example {@code
+     * "zerobus.example.com"}, not a URL: a value with a scheme, a port, a path or query,
+     * whitespace, or a control character is rejected.
      *
      * @param domainName the expected server certificate name
      * @return this builder for method chaining
      * @throws NullPointerException if {@code domainName} is null
-     * @throws IllegalArgumentException if {@code domainName} is blank or contains one of the
-     *     obvious mistakes above
+     * @throws IllegalArgumentException if {@code domainName} is blank or looks like a URL
      */
     public Builder domainName(String domainName) {
-      requireNonBlank(domainName, "domainName");
-      if (!isHostNameOrIpAddress(domainName)) {
+      ArgumentChecks.requireNonBlank(domainName, "domainName");
+      if (PASTED_URL_MISTAKE.matcher(domainName).find()) {
         throw new IllegalArgumentException(
-            "domainName must be a host name or IP address with no scheme, port or path, for"
-                + " example \"zerobus.example.com\"");
+            "domainName must be a host name or IP address with no scheme, port, path or"
+                + " whitespace, for example \"zerobus.example.com\"");
       }
       this.domainName = domainName;
       return this;
@@ -287,22 +276,5 @@ public final class TlsOptions {
       }
       return new TlsOptions(this);
     }
-  }
-
-  // A single colon would be a port, so only a multi-colon value is treated as IPv6.
-  private static boolean isHostNameOrIpAddress(String value) {
-    boolean ipv6Candidate = value.indexOf(':') != value.lastIndexOf(':');
-    if (ipv6Candidate) {
-      return value.matches("[0-9A-Fa-f:.]+");
-    }
-    return value.indexOf(':') < 0 && value.matches("[A-Za-z0-9._-]+");
-  }
-
-  private static String requireNonBlank(String value, String name) {
-    Objects.requireNonNull(value, name);
-    if (value.trim().isEmpty()) {
-      throw new IllegalArgumentException(name + " must not be blank");
-    }
-    return value;
   }
 }

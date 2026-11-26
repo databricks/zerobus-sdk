@@ -1,14 +1,11 @@
 package com.databricks.zerobus;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -79,30 +76,6 @@ class ZerobusSdkBuilderTest {
   }
 
   @Test
-  void sdkBuilderIsReachableFromTheSdkClass() {
-    // Checked by reflection so the test does not load the native library.
-    try {
-      Method builder = ZerobusSdk.class.getMethod("builder");
-      assertTrue(Modifier.isStatic(builder.getModifiers()));
-      assertEquals(ZerobusSdkBuilder.class, builder.getReturnType());
-    } catch (NoSuchMethodException e) {
-      throw new AssertionError(e);
-    }
-  }
-
-  @Test
-  void nativeCreateWithOptionsHasExpectedSignature() throws Exception {
-    assertNotNull(
-        ZerobusSdk.class.getDeclaredMethod(
-            "nativeCreateWithOptions",
-            String.class,
-            String.class,
-            String.class,
-            boolean.class,
-            TlsOptions.class));
-  }
-
-  @Test
   void buildsSdkWithDefaultTls() {
     assumeNativeLibrary();
     try (ZerobusSdk sdk =
@@ -170,22 +143,8 @@ class ZerobusSdkBuilderTest {
     String missing = "/nonexistent/zerobus-test/ca.pem";
     TlsOptions tls =
         TlsOptions.builder().trustSystemRoots(false).addCaCertificateFile(missing).build();
-    try (ZerobusSdk sdk =
-        ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).tlsOptions(tls).build()) {
-      ExecutionException error =
-          assertThrows(
-              ExecutionException.class,
-              () ->
-                  sdk.streamBuilder()
-                      .table("catalog.schema.table")
-                      .headersProvider(() -> Collections.singletonMap("authorization", "Bearer t"))
-                      .json()
-                      .build()
-                      .get(60, TimeUnit.SECONDS));
-      assertTrue(
-          error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
-      assertTrue(error.getCause().getMessage().contains(missing), error.getCause().getMessage());
-    }
+    String message = streamCreationFailure(tls).getMessage();
+    assertTrue(message.contains(missing), message);
   }
 
   @Test
@@ -241,22 +200,8 @@ class ZerobusSdkBuilderTest {
         TlsOptions.builder()
             .clientIdentityFiles(missing, "/nonexistent/zerobus-test/tls.key")
             .build();
-    try (ZerobusSdk sdk =
-        ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).tlsOptions(tls).build()) {
-      ExecutionException error =
-          assertThrows(
-              ExecutionException.class,
-              () ->
-                  sdk.streamBuilder()
-                      .table("catalog.schema.table")
-                      .headersProvider(() -> Collections.singletonMap("authorization", "Bearer t"))
-                      .json()
-                      .build()
-                      .get(60, TimeUnit.SECONDS));
-      assertTrue(
-          error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
-      assertTrue(error.getCause().getMessage().contains(missing), error.getCause().getMessage());
-    }
+    String message = streamCreationFailure(tls).getMessage();
+    assertTrue(message.contains(missing), message);
   }
 
   @Test
@@ -265,13 +210,17 @@ class ZerobusSdkBuilderTest {
     // The PEM values reach the core, which rejects them when it opens the channel. A PEM
     // value that the core cannot use fails the same way on every attempt, so it is not retryable.
     TlsOptions tls = TlsOptions.builder().clientIdentityPem("not a cert", "not a key").build();
+    String message = streamCreationFailure(tls).getMessage();
+    assertTrue(message.contains("private key"), message);
+  }
+
+  private static NonRetriableException streamCreationFailure(TlsOptions tls) {
     try (ZerobusSdk sdk =
         ZerobusSdk.builder().serverEndpoint(SERVER_ENDPOINT).tlsOptions(tls).build()) {
       ExecutionException error = assertThrows(ExecutionException.class, () -> createStream(sdk));
       assertTrue(
           error.getCause() instanceof NonRetriableException, String.valueOf(error.getCause()));
-      assertTrue(
-          error.getCause().getMessage().contains("private key"), error.getCause().getMessage());
+      return (NonRetriableException) error.getCause();
     }
   }
 

@@ -54,7 +54,7 @@ public final class ZerobusSdkBuilder {
    * @throws IllegalArgumentException if {@code serverEndpoint} is blank
    */
   public ZerobusSdkBuilder serverEndpoint(String serverEndpoint) {
-    this.serverEndpoint = requireNonBlank(serverEndpoint, "serverEndpoint");
+    this.serverEndpoint = ArgumentChecks.requireNonBlank(serverEndpoint, "serverEndpoint");
     return this;
   }
 
@@ -68,7 +68,8 @@ public final class ZerobusSdkBuilder {
    * @throws IllegalArgumentException if {@code unityCatalogEndpoint} is blank
    */
   public ZerobusSdkBuilder unityCatalogEndpoint(String unityCatalogEndpoint) {
-    this.unityCatalogEndpoint = requireNonBlank(unityCatalogEndpoint, "unityCatalogEndpoint");
+    this.unityCatalogEndpoint =
+        ArgumentChecks.requireNonBlank(unityCatalogEndpoint, "unityCatalogEndpoint");
     return this;
   }
 
@@ -88,15 +89,16 @@ public final class ZerobusSdkBuilder {
       this.applicationName = null;
       return this;
     }
-    for (int i = 0; i < applicationName.length(); i++) {
-      char c = applicationName.charAt(i);
-      if (c != '\t' && (c < 0x20 || c == 0x7f)) {
-        throw new IllegalArgumentException(
-            "applicationName must not contain control characters other than tab");
+    if (applicationName != null) {
+      for (int i = 0; i < applicationName.length(); i++) {
+        char c = applicationName.charAt(i);
+        if (c != '\t' && (c < 0x20 || c == 0x7f)) {
+          throw new IllegalArgumentException(
+              "applicationName must not contain control characters other than tab");
+        }
       }
     }
-    String trimmed = applicationName.trim();
-    this.applicationName = trimmed.isEmpty() ? null : trimmed;
+    this.applicationName = applicationName;
     return this;
   }
 
@@ -138,13 +140,5 @@ public final class ZerobusSdkBuilder {
     String workspaceUrl = unityCatalogEndpoint == null ? "" : unityCatalogEndpoint;
     return new ZerobusSdk(
         serverEndpoint, workspaceUrl, applicationName, connectionPerStream, tlsOptions);
-  }
-
-  private static String requireNonBlank(String value, String name) {
-    Objects.requireNonNull(value, name);
-    if (value.trim().isEmpty()) {
-      throw new IllegalArgumentException(name + " must not be blank");
-    }
-    return value;
   }
 }

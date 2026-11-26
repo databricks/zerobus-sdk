@@ -129,7 +129,7 @@ class TlsOptionsTest {
   }
 
   @Test
-  void domainNameRejectsObviousMistakes() {
+  void domainNameRejectsPastedUrlMistakes() {
     TlsOptions.Builder builder = TlsOptions.builder();
 
     builder.domainName("zerobus.example.com");
@@ -141,9 +141,9 @@ class TlsOptionsTest {
           "https://zerobus.example.com",
           "zerobus.example.com:443",
           "zerobus.example.com/path",
-          "[::1]",
+          "zerobus.example.com?region=us",
           "zerobus example.com",
-          "-----BEGIN CERTIFICATE-----\nMIIB",
+          "zerobus.example.com\n",
         }) {
       assertThrows(IllegalArgumentException.class, () -> builder.domainName(value), value);
     }

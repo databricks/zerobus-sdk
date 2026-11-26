@@ -880,13 +880,12 @@ try (ZerobusSdk sdk = ZerobusSdk.builder()
   is required in that case.
 - `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
   paths. Use them when the certificates come from a secret store rather than the file system.
-- `domainName(...)` checks the server certificate against a name other than the endpoint host. The
-  value is a DNS name or an IP address, with no scheme, port or path, for example
-  `zerobus.example.com`. `domainName` rejects an obvious mistake, such as a scheme, a port, a path or
-  whitespace, with `IllegalArgumentException` when the builder is called. It does not check the
-  syntax of a DNS name or an IP literal, so a malformed name passes this check and fails when the
-  SDK sets up TLS for the connection. Whether recovery retries that failure depends on the rest of
-  the TLS configuration.
+- `domainName(...)` checks the server certificate against a name other than the endpoint host. Pass
+  a DNS name or an IP address, for example `zerobus.example.com`, not a URL. A value with a scheme, a
+  port, a path or query, whitespace, or a control character fails with `IllegalArgumentException`
+  when the builder is called. Another malformed name passes this check and fails when the SDK sets up
+  TLS for the connection. Whether recovery retries that failure depends on the rest of the TLS
+  configuration.
 
 Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
 effect without restarting the process. Replace the certificate and its key together, for example by
@@ -901,13 +900,11 @@ certificate, fails with a `ZerobusException`, which is retried, because a rotati
 progress.
 
 With `connectionPerStream(true)`, each new stream reads the files again and reports any failure.
-With `connectionPerStream(false)`, JSON, protobuf and Avro streams share one channel. When the files
-change, the next stream of those formats reads them again. If the SDK cannot read or apply the new
-settings locally, it keeps the channel it already has, so that stream opens on the previous settings
-and the failure is not reported to it. This fallback ends once the local TLS setup succeeds. If the
-new certificate or key is readable but the server rejects it in the TLS handshake, the replacement
-channel is used and the stream fails. Arrow streams open their own channel for each stream, whatever
-`connectionPerStream` is set to, so they always read and apply the files themselves.
+With `connectionPerStream(false)`, JSON, protobuf and Avro streams share one channel, and the next
+stream of those formats reads changed files again. If the SDK cannot apply the new settings locally,
+that stream keeps the previous channel without reporting the failure, until local setup succeeds; a
+readable certificate or key that the server rejects in the handshake fails the stream. Arrow streams
+open their own channel and always read the files themselves.
 
 ### Binary Headers
 
@@ -1384,11 +1381,9 @@ Immutable TLS settings, created with `TlsOptions.builder()` and passed to
 `ZerobusSdkBuilder.tlsOptions(...)`. See [TLS Configuration](#tls-configuration).
 
 - `trustSystemRoots(boolean)` - Also trust the operating system's CA certificates. Defaults to `true`.
-- `addCaCertificatePem(String)` - Trust a CA certificate given as PEM text. Call more than once to add several.
-- `addCaCertificateFile(String)` - Trust the CA certificates in a PEM file, read on each connection.
-- `clientIdentityPem(String certPem, String keyPem)` - Client certificate chain and key for mutual TLS, as PEM text.
-- `clientIdentityFiles(String certPath, String keyPath)` - Client certificate chain and key for mutual TLS, read from files on each connection.
-- `domainName(String)` - Server name to check the certificate against: a DNS name or an IP address, with no scheme and no port.
+- `addCaCertificatePem(String)`, `addCaCertificateFile(String)` - Trust more CA certificates, as PEM text or a PEM file. Call more than once to add several.
+- `clientIdentityPem(String certPem, String keyPem)`, `clientIdentityFiles(String certPath, String keyPath)` - Client certificate chain and key for mutual TLS.
+- `domainName(String)` - Server name to check the certificate against. Rejects a pasted URL.
 - `build()` - Returns the options. Throws `IllegalStateException` if `trustSystemRoots(false)` is set without a CA certificate.
 
 `toString()` reports counts and the kind of client identity. It never includes certificate or key material.

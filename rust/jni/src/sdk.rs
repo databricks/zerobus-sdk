@@ -13,9 +13,9 @@ use crate::options::{
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
-use crate::tls_options::{extract_tls_options, ExtractedTlsOptions};
+use crate::tls_options::extract_tls_options;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, IdpTokenSupplier, RecordType, StreamBuilder, ZerobusSdk,
+    HeadersProvider, IdpTokenSupplier, RecordType, StreamBuilder, TlsSettings, ZerobusSdk,
 };
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE};
@@ -185,7 +185,7 @@ fn create_sdk<'local>(
     unity_catalog_endpoint: JString<'local>,
     application_name: JString<'local>,
     connection_per_stream: bool,
-    tls: Option<ExtractedTlsOptions>,
+    tls: Option<TlsSettings>,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
@@ -228,7 +228,7 @@ fn create_sdk<'local>(
         None => builder,
     };
     let builder = match tls {
-        Some(tls) => builder.tls_config(Arc::new(tls.into_settings())),
+        Some(tls) => builder.tls_config(Arc::new(tls)),
         None => builder,
     };
     match builder.build() {
