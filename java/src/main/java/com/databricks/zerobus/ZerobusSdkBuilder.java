@@ -76,26 +76,14 @@ public final class ZerobusSdkBuilder {
   /**
    * Sets an application identifier appended to the HTTP {@code user-agent} header, conventionally
    * {@code "<product>/<version>"} (for example {@code "my-app/1.0"}). Pass {@code null}, or a value
-   * that is blank after trimming, to omit it. Leading and trailing whitespace is removed. A control
-   * character anywhere in the value, including a line break at either end, is rejected.
+   * that is blank after trimming, to omit it. Leading and trailing whitespace is removed. SDK
+   * creation rejects a value that is still not a valid HTTP user-agent value after trimming, as it
+   * does for the constructors.
    *
    * @param applicationName the application identifier, or {@code null}
    * @return this builder for method chaining
-   * @throws IllegalArgumentException if {@code applicationName} contains a control character other
-   *     than tab, or the DEL character. Such a value is not a valid HTTP header value.
    */
   public ZerobusSdkBuilder applicationName(String applicationName) {
-    if (applicationName == null) {
-      this.applicationName = null;
-      return this;
-    }
-    for (int i = 0; i < applicationName.length(); i++) {
-      char c = applicationName.charAt(i);
-      if (c != '\t' && (c < 0x20 || c == 0x7f)) {
-        throw new IllegalArgumentException(
-            "applicationName must not contain control characters other than tab");
-      }
-    }
     this.applicationName = applicationName;
     return this;
   }

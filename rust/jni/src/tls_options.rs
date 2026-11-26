@@ -41,41 +41,43 @@ pub fn extract_tls_options(
 
     let domain_name = read_nullable_string(env, options, "getDomainName")?;
 
-    Ok(tls_settings(
+    Ok(tls_settings(TlsValues {
         trust_system_roots,
         ca_certificate_pems,
         ca_certificate_files,
         client_identity_pem,
         client_identity_files,
         domain_name,
-    ))
+    }))
 }
 
-/// A PEM identity takes precedence over a file identity.
-fn tls_settings(
+/// The values read from a Java `TlsOptions`. A PEM identity takes precedence over a file identity.
+struct TlsValues {
     trust_system_roots: bool,
     ca_certificate_pems: Vec<Vec<u8>>,
     ca_certificate_files: Vec<PathBuf>,
     client_identity_pem: Option<(Vec<u8>, Vec<u8>)>,
     client_identity_files: Option<(PathBuf, PathBuf)>,
     domain_name: Option<String>,
-) -> TlsSettings {
+}
+
+fn tls_settings(values: TlsValues) -> TlsSettings {
     let mut settings = TlsSettings::new();
-    if !trust_system_roots {
+    if !values.trust_system_roots {
         settings = settings.without_native_roots();
     }
-    for pem in ca_certificate_pems {
+    for pem in values.ca_certificate_pems {
         settings = settings.with_ca_certificate_pem(pem);
     }
-    for path in ca_certificate_files {
+    for path in values.ca_certificate_files {
         settings = settings.with_ca_certificate_file(path);
     }
-    if let Some((cert, key)) = client_identity_pem {
+    if let Some((cert, key)) = values.client_identity_pem {
         settings = settings.with_client_identity_pem(cert, key);
-    } else if let Some((cert, key)) = client_identity_files {
+    } else if let Some((cert, key)) = values.client_identity_files {
         settings = settings.with_client_identity_files(cert, key);
     }
-    if let Some(domain_name) = domain_name {
+    if let Some(domain_name) = values.domain_name {
         settings = settings.with_domain_name(domain_name);
     }
     settings
@@ -125,7 +127,7 @@ fn read_nullable_string(
 
 #[cfg(test)]
 mod tests {
-    use super::tls_settings;
+    use super::{tls_settings, TlsValues};
     use async_trait::async_trait;
     use databricks_zerobus_ingest_sdk::{HeadersProvider, TlsSettings, ZerobusResult, ZerobusSdk};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
@@ -221,14 +223,14 @@ mod tests {
         std::fs::write(&cert_path, client_cert_pem.as_bytes())?;
         std::fs::write(&key_path, client_key.serialize_pem())?;
 
-        let settings = tls_settings(
-            false,
-            Vec::new(),
-            vec![ca_path],
-            None,
-            Some((cert_path, key_path)),
-            Some("localhost".to_string()),
-        );
+        let settings = tls_settings(TlsValues {
+            trust_system_roots: false,
+            ca_certificate_pems: Vec::new(),
+            ca_certificate_files: vec![ca_path],
+            client_identity_pem: None,
+            client_identity_files: Some((cert_path, key_path)),
+            domain_name: Some("localhost".to_string()),
+        });
         let received = stream_binary_header_over_mtls(&mock_server, server_url, settings).await?;
 
         assert_eq!(received, vec![Some(BINARY_HEADER_BYTES.to_vec())]);
@@ -250,17 +252,17 @@ mod tests {
         let (mock_server, server_url, server_ca_pem) =
             start_mock_mtls_server(client_cert_pem.as_bytes()).await?;
 
-        let settings = tls_settings(
-            false,
-            vec![server_ca_pem],
-            Vec::new(),
-            Some((
+        let settings = tls_settings(TlsValues {
+            trust_system_roots: false,
+            ca_certificate_pems: vec![server_ca_pem],
+            ca_certificate_files: Vec::new(),
+            client_identity_pem: Some((
                 client_cert_pem.into_bytes(),
                 client_key.serialize_pem().into_bytes(),
             )),
-            None,
-            Some("localhost".to_string()),
-        );
+            client_identity_files: None,
+            domain_name: Some("localhost".to_string()),
+        });
         let server_url = server_url.replace("https://localhost:", "https://127.0.0.1:");
         let received = stream_binary_header_over_mtls(&mock_server, server_url, settings).await?;
 
@@ -272,7 +274,14 @@ mod tests {
     fn default_settings_keep_system_roots_and_no_identity() {
         let debug = format!(
             "{:?}",
-            tls_settings(true, Vec::new(), Vec::new(), None, None, None)
+            tls_settings(TlsValues {
+                trust_system_roots: true,
+                ca_certificate_pems: Vec::new(),
+                ca_certificate_files: Vec::new(),
+                client_identity_pem: None,
+                client_identity_files: None,
+                domain_name: None,
+            })
         );
 
         assert!(debug.contains("native_roots: true"), "{debug}");
@@ -285,14 +294,14 @@ mod tests {
     fn private_ca_settings_disable_system_roots_and_set_the_domain() {
         let debug = format!(
             "{:?}",
-            tls_settings(
-                false,
-                vec![b"pem-ca".to_vec()],
-                Vec::new(),
-                None,
-                None,
-                Some("zerobus.example.com".to_string()),
-            )
+            tls_settings(TlsValues {
+                trust_system_roots: false,
+                ca_certificate_pems: vec![b"pem-ca".to_vec()],
+                ca_certificate_files: Vec::new(),
+                client_identity_pem: None,
+                client_identity_files: None,
+                domain_name: Some("zerobus.example.com".to_string()),
+            })
         );
 
         assert!(debug.contains("native_roots: false"), "{debug}");
