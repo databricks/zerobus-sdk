@@ -18,7 +18,7 @@ use tracing::{debug, instrument, warn};
 use crate::builder::HeadersProviderFactory;
 use crate::databricks::zerobus::InsertRecordsRequest;
 use crate::errors::should_retry_initial_connection;
-use crate::grpc_channel::GrpcChannelSource;
+use crate::grpc_channel::{AttemptProgress, GrpcChannelSource, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::{EncodedRecord, HeadersProvider, PreparedInput, ZerobusError, ZerobusResult};
@@ -261,39 +261,52 @@ impl UnaryClient {
         RetryIf::spawn(strategy, attempt, should_retry).await
     }
 
-    /// One attempt, bounded by `server_lack_of_ack_timeout_ms`. After an auth
-    /// rejection it invalidates the credential within the rest of that deadline,
-    /// so a stalled provider cannot turn the rejection into a retryable timeout.
+    /// One attempt, bounded by `server_lack_of_ack_timeout_ms`. The channel lookup,
+    /// headers and call share that deadline. After an auth rejection the credential
+    /// is invalidated within the rest of it, so a stalled provider cannot turn the
+    /// rejection into a retryable timeout.
     async fn send_attempt(
         &self,
         request: &InsertRecordsRequest,
         headers_provider: &dyn HeadersProvider,
     ) -> ZerobusResult<()> {
-        let timeout_ms = self.options.server_lack_of_ack_timeout_ms;
-        let attempt_timeout = Duration::from_millis(timeout_ms);
-        let attempt_started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
-            attempt_timeout,
-            self.send_once(request.clone(), headers_provider),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ZerobusError::UnaryIngestError(
-                GrpcStatus::deadline_exceeded(format!(
-                    "InsertRecords attempt timed out after {timeout_ms} ms"
-                )),
-            ))
-        });
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.options.server_lack_of_ack_timeout_ms);
+        let progress = Arc::new(AttemptProgress::default());
+        // Asking the source on every attempt picks up rotated TLS certificates.
+        let result = match tokio::time::timeout_at(deadline, self.channel_source.client()).await {
+            Err(_) => Err(self.attempt_timed_out()),
+            Ok(Err(err)) => Err(err),
+            Ok(Ok((channel, channel_timeout))) => {
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.send_once(
+                        channel,
+                        request.clone(),
+                        headers_provider,
+                        &progress,
+                        deadline,
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        channel_timeout.record_timeout(&progress);
+                        Err(self.attempt_timed_out())
+                    }
+                }
+            }
+        };
 
         if let Err(err) = &result {
-            let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
             if err.is_auth_rejection()
-                && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
+                && tokio::time::timeout_at(deadline, headers_provider.invalidate())
                     .await
                     .is_err()
             {
                 warn!(
-                    timeout_ms,
+                    timeout_ms = self.options.server_lack_of_ack_timeout_ms,
                     "Headers provider invalidation timed out; preserving auth rejection"
                 );
             }
@@ -301,16 +314,33 @@ impl UnaryClient {
         result
     }
 
+    fn attempt_timed_out(&self) -> ZerobusError {
+        ZerobusError::UnaryIngestError(GrpcStatus::deadline_exceeded(format!(
+            "InsertRecords attempt timed out after {} ms",
+            self.options.server_lack_of_ack_timeout_ms
+        )))
+    }
+
+    /// Checks the deadline before the headers and before the call, so a lookup
+    /// that finishes after the deadline does not start the next phase.
     async fn send_once(
         &self,
+        mut channel: GrpcClient,
         request: InsertRecordsRequest,
         headers_provider: &dyn HeadersProvider,
+        progress: &Arc<AttemptProgress>,
+        deadline: tokio::time::Instant,
     ) -> ZerobusResult<()> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(self.attempt_timed_out());
+        }
         let headers = headers_provider.get_headers().await?;
         let mut request = tonic::Request::new(request);
         *request.metadata_mut() = grpc_metadata_from_headers(headers, &self.table_name)?;
-        // Asking the source on every attempt picks up rotated TLS certificates.
-        let mut channel = self.channel_source.client().await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(self.attempt_timed_out());
+        }
+        request.extensions_mut().insert(Arc::clone(progress));
         channel
             .insert_records(request)
             .await
@@ -398,6 +428,9 @@ fn validate_json_object(record: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc_channel::test_support::{
+        is_deadline, rotated_source, stalled_endpoint, ReadyHeaders, StalledHeaders,
+    };
     use crate::headers_provider::tests::MockTokenEndpoint;
     use crate::{JsonString, JsonValue, ProtoBytes};
 
@@ -526,6 +559,56 @@ mod tests {
         assert_eq!(second.get_headers().await.unwrap(), retried);
         assert_ne!(retried, sent);
         assert_eq!(mock.mint_count(), 2);
+    }
+
+    fn unary_client(source: Arc<GrpcChannelSource>) -> UnaryClient {
+        UnaryClient::new(
+            source,
+            "cat.sch.tbl".to_string(),
+            Arc::new(|| Arc::new(ReadyHeaders) as Arc<dyn HeadersProvider>),
+            UnaryOptions {
+                recovery: false,
+                recovery_retries: 0,
+                recovery_backoff_ms: 0,
+                server_lack_of_ack_timeout_ms: 200,
+                max_ingest_payload_bytes: 1024,
+            },
+        )
+    }
+
+    /// The RPC is sent on the rotated channel and never answers, so the attempt
+    /// times out after the request was sent, and the source falls back.
+    #[tokio::test]
+    async fn a_stalled_call_on_a_rotated_channel_falls_back_to_the_previous_channel() {
+        let (listener, endpoint) = stalled_endpoint();
+        let (source, _, previous, rotated) = rotated_source(&endpoint).await;
+        let client = unary_client(Arc::clone(&source));
+
+        let err = client
+            .send_attempt(&InsertRecordsRequest::default(), &ReadyHeaders)
+            .await
+            .unwrap_err();
+
+        assert!(is_deadline(&err), "{err:?}");
+        assert_eq!(source.next_channel_fingerprint_for_test().await, previous);
+        assert_ne!(previous, rotated);
+        drop(listener);
+    }
+
+    /// A headers provider that stalls never sends a request, so the timeout says
+    /// nothing about the rotated channel and the next call still uses it.
+    #[tokio::test]
+    async fn a_stalled_headers_provider_does_not_fail_the_rotated_channel() {
+        let (source, _, _, rotated) = rotated_source("https://localhost:443").await;
+        let client = unary_client(Arc::clone(&source));
+
+        let err = client
+            .send_attempt(&InsertRecordsRequest::default(), &StalledHeaders)
+            .await
+            .unwrap_err();
+
+        assert!(is_deadline(&err), "{err:?}");
+        assert_eq!(source.next_channel_fingerprint_for_test().await, rotated);
     }
 
     #[test]

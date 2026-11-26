@@ -10,14 +10,13 @@ use std::sync::Arc;
 
 use prost::Message;
 use tokio::time::Duration;
-use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::supervisor::StreamInitInfo;
 use super::transport::{
     self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
 };
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::grpc_channel::{AttemptProgress, ChannelTimeout, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::RecordType;
@@ -41,11 +40,12 @@ impl super::ZerobusStream {
     /// This covers IdP-revoked tokens, not a same-named table recreated within
     /// the token's lifetime, which the server accepts.
     pub(super) async fn create_stream_connection(
-        channel: ZerobusClient<Channel>,
+        channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
         kind: &GrpcConnectionMode,
+        progress: &Arc<AttemptProgress>,
     ) -> ZerobusResult<StreamConnection> {
         let result = Self::create_stream_connection_inner(
             channel,
@@ -53,6 +53,7 @@ impl super::ZerobusStream {
             headers_provider,
             record_type,
             kind,
+            progress,
         )
         .await;
         if let Err(err) = &result {
@@ -72,31 +73,31 @@ impl super::ZerobusStream {
     /// retryable `DeadlineExceeded` and thereby bypass the one-shot auth-retry limit.
     /// Reconnect keeps using [`create_stream_connection`] so its behavior is unchanged.
     pub(super) async fn create_initial_stream_connection(
-        channel: ZerobusClient<Channel>,
+        channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
         kind: &GrpcConnectionMode,
         recovery_timeout_ms: u64,
+        channel_timeout: &ChannelTimeout,
     ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
         let attempt_started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
-            attempt_timeout,
-            Self::create_stream_connection_inner(
-                channel,
-                table_properties,
-                headers_provider,
-                record_type,
-                kind,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            ZerobusError::CreateStreamError(GrpcStatus::deadline_exceeded(
-                "Stream creation timed out",
-            ))
-        })?;
+        let progress = Arc::new(AttemptProgress::default());
+        let result = channel_timeout
+            .bounded(
+                recovery_timeout_ms,
+                &progress,
+                Self::create_stream_connection_inner(
+                    channel,
+                    table_properties,
+                    headers_provider,
+                    record_type,
+                    kind,
+                    &progress,
+                ),
+            )
+            .await;
 
         if let Err(err) = &result {
             let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
@@ -116,18 +117,19 @@ impl super::ZerobusStream {
 
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     async fn create_stream_connection_inner(
-        mut channel: ZerobusClient<Channel>,
+        mut channel: GrpcClient,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
         kind: &GrpcConnectionMode,
+        progress: &Arc<AttemptProgress>,
     ) -> ZerobusResult<StreamConnection> {
         let outbound = transport::make_outbound(kind);
         let headers = headers_provider.get_headers().await?;
         let stream_metadata = grpc_metadata_from_headers(headers, &table_properties.table_name)?;
 
         let (sink, mut inbound) =
-            transport::open_rpc(outbound, &mut channel, stream_metadata).await?;
+            transport::open_rpc(outbound, &mut channel, stream_metadata, progress).await?;
 
         let open_params = Self::build_open_params(table_properties, record_type)?;
 
@@ -240,7 +242,66 @@ impl super::ZerobusStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc_channel::test_support::{
+        is_deadline, rotated_source, stalled_endpoint, ReadyHeaders, StalledHeaders,
+    };
+    use crate::grpc_channel::GrpcChannelSource;
     use crate::ZerobusStream;
+
+    /// Runs the initial stream setup on the source's current channel.
+    async fn initial_setup(
+        source: &GrpcChannelSource,
+        headers_provider: Arc<dyn HeadersProvider>,
+    ) -> ZerobusResult<StreamConnection> {
+        let (channel, channel_timeout) = source.client().await.unwrap();
+        let table_properties = TableProperties {
+            table_name: "catalog.schema.table".into(),
+            descriptor_proto: None,
+            message_descriptor: None,
+            #[cfg(feature = "avro")]
+            avro_schema: None,
+        };
+        ZerobusStream::create_initial_stream_connection(
+            channel,
+            &table_properties,
+            &headers_provider,
+            RecordType::Json,
+            &GrpcConnectionMode::Ephemeral,
+            200,
+            &channel_timeout,
+        )
+        .await
+    }
+
+    /// The rotated channel's TLS handshake never completes, so the request was
+    /// sent and went unanswered: the stream setup falls back to the previous channel.
+    #[tokio::test]
+    async fn a_stalled_stream_setup_on_a_rotated_channel_falls_back() {
+        let (listener, endpoint) = stalled_endpoint();
+        let (source, _, previous, rotated) = rotated_source(&endpoint).await;
+
+        let Err(err) = initial_setup(&source, Arc::new(ReadyHeaders)).await else {
+            panic!("a stalled handshake must fail the stream setup");
+        };
+        assert!(is_deadline(&err), "{err:?}");
+
+        assert_eq!(source.next_channel_fingerprint_for_test().await, previous);
+        assert_ne!(previous, rotated);
+        drop(listener);
+    }
+
+    /// A headers provider that stalls never sends a request, so the timeout says
+    /// nothing about the rotated channel and it stays selected.
+    #[tokio::test]
+    async fn a_stalled_headers_provider_keeps_the_rotated_channel_selected() {
+        let (source, _, _, rotated) = rotated_source("https://localhost:443").await;
+
+        assert!(initial_setup(&source, Arc::new(StalledHeaders))
+            .await
+            .is_err());
+
+        assert_eq!(source.next_channel_fingerprint_for_test().await, rotated);
+    }
 
     #[test]
     fn persistent_create_accepts_create_response() {

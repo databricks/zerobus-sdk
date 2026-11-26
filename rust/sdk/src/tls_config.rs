@@ -10,7 +10,6 @@
 use crate::errors::ZerobusError;
 use crate::ZerobusResult;
 use rustls_pki_types::{pem::PemObject, CertificateDer};
-use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -27,10 +26,12 @@ use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 /// - Custom implementations for special certificate requirements
 ///
 /// The SDK calls [`tls_settings`](TlsConfig::tls_settings) every time it opens a
-/// new channel, and before it reuses a gRPC channel for a new stream or a
-/// recovery attempt. When the settings differ from the ones the channel was
-/// opened with, the SDK opens a new channel. An implementation can return
-/// different settings on each call, for example to rotate certificates.
+/// new channel, and before it reuses a gRPC channel for a new stream, a recovery
+/// attempt or a unary call. When the settings differ from the ones the channel
+/// was opened with, the SDK opens a new channel and may keep the replaced one as
+/// a fallback; the TLS Configuration section of the Rust README gives the rule.
+/// An implementation can return different settings on each call, for example to
+/// rotate certificates.
 ///
 /// # Examples
 ///
@@ -99,6 +100,12 @@ pub trait TlsConfig: Send + Sync {
 ///
 /// When the SDK can't read or use the files before it reuses a gRPC channel, it
 /// keeps the channel it has and logs a warning.
+///
+/// The SDK may keep the gRPC channel it replaced as a fallback until the new one
+/// reaches the server; the TLS Configuration section of the Rust README gives the rule.
+///
+/// The SDK reads the files on a blocking thread, so a slow volume doesn't stall
+/// the async runtime.
 ///
 /// Replace the certificate and the key together: write both into a new
 /// directory, then switch a symbolic link to that directory, as Kubernetes
@@ -176,10 +183,10 @@ impl PemSource {
         matches!(self, Self::File(_))
     }
 
-    fn read(&self) -> ZerobusResult<Cow<'_, [u8]>> {
+    fn read(&self) -> ZerobusResult<Vec<u8>> {
         match self {
-            Self::Bytes(pem) => Ok(Cow::Borrowed(pem)),
-            Self::File(path) => read_pem_file(path).map(Cow::Owned),
+            Self::Bytes(pem) => Ok(pem.clone()),
+            Self::File(path) => read_pem_file(path),
         }
     }
 }
@@ -217,14 +224,14 @@ struct ClientIdentity {
 }
 
 /// A PEM certificate chain and its private key, in that order.
-type PemPair<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+type PemPair = (Vec<u8>, Vec<u8>);
 
 impl ClientIdentity {
     fn is_file(&self) -> bool {
         self.cert_pem.is_file() || self.key_pem.is_file()
     }
 
-    fn read(&self) -> ZerobusResult<PemPair<'_>> {
+    fn read(&self) -> ZerobusResult<PemPair> {
         read_consistent_pair(|| self.cert_pem.read(), || self.key_pem.read())
     }
 }
@@ -238,10 +245,10 @@ const MAX_IDENTITY_READS: usize = 3;
 /// a new certificate with an old key. When the certificate changed in between,
 /// the pair is read again. If it keeps changing, the last pair is returned and
 /// the TLS library's key check reports a mismatch.
-fn read_consistent_pair<'a>(
-    mut read_cert: impl FnMut() -> ZerobusResult<Cow<'a, [u8]>>,
-    mut read_key: impl FnMut() -> ZerobusResult<Cow<'a, [u8]>>,
-) -> ZerobusResult<PemPair<'a>> {
+fn read_consistent_pair(
+    mut read_cert: impl FnMut() -> ZerobusResult<Vec<u8>>,
+    mut read_key: impl FnMut() -> ZerobusResult<Vec<u8>>,
+) -> ZerobusResult<PemPair> {
     let mut cert = read_cert()?;
     let mut key = read_key()?;
     for _ in 1..MAX_IDENTITY_READS {
@@ -362,15 +369,42 @@ impl TlsSettings {
         self.resolve()?.apply(endpoint)
     }
 
+    /// Like [`resolve`](Self::resolve), but reads the files on a blocking thread,
+    /// so a slow certificate volume doesn't stall the async runtime.
+    pub(crate) async fn resolve_off_runtime(&self) -> ZerobusResult<ResolvedTls> {
+        if !self.reads_files() {
+            return self.resolve();
+        }
+        let settings = self.clone();
+        tokio::task::spawn_blocking(move || settings.resolve())
+            .await
+            .unwrap_or_else(|err| match err.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(err) => Err(ZerobusError::ChannelCreationError(format!(
+                    "reading the TLS files did not finish: {err}"
+                ))),
+            })
+    }
+
+    /// Whether [`resolve`](Self::resolve) reads any file.
+    fn reads_files(&self) -> bool {
+        self.mode == TlsMode::Tls
+            && (self.ca_certificates.iter().any(PemSource::is_file)
+                || self
+                    .client_identity
+                    .as_ref()
+                    .is_some_and(ClientIdentity::is_file))
+    }
+
     /// Reads every file the settings name, once. The result can be applied to an
     /// endpoint and compared with the material an existing channel was opened with.
-    pub(crate) fn resolve(&self) -> ZerobusResult<ResolvedTls<'_>> {
+    pub(crate) fn resolve(&self) -> ZerobusResult<ResolvedTls> {
         let mut resolved = ResolvedTls {
             mode: self.mode,
             native_roots: self.native_roots,
             ca_certificates: Vec::new(),
             client_identity: None,
-            domain_name: self.domain_name.as_deref(),
+            domain_name: self.domain_name.clone(),
             ca_from_files: self.ca_certificates.iter().any(PemSource::is_file),
             identity_from_files: self
                 .client_identity
@@ -396,12 +430,12 @@ impl TlsSettings {
 }
 
 /// [`TlsSettings`] with every file read, ready to apply to a gRPC endpoint.
-pub(crate) struct ResolvedTls<'a> {
+pub(crate) struct ResolvedTls {
     mode: TlsMode,
     native_roots: bool,
-    ca_certificates: Vec<Cow<'a, [u8]>>,
-    client_identity: Option<PemPair<'a>>,
-    domain_name: Option<&'a str>,
+    ca_certificates: Vec<Vec<u8>>,
+    client_identity: Option<PemPair>,
+    domain_name: Option<String>,
     /// Whether any CA certificate came from a file.
     ca_from_files: bool,
     /// Whether the client identity came from files.
@@ -414,7 +448,7 @@ pub(crate) struct ResolvedTls<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TlsFingerprint(u64);
 
-impl ResolvedTls<'_> {
+impl ResolvedTls {
     pub(crate) fn fingerprint(&self) -> TlsFingerprint {
         let mut hasher = DefaultHasher::new();
         self.mode.hash(&mut hasher);
@@ -467,7 +501,7 @@ impl ResolvedTls<'_> {
         if let Some((cert_pem, key_pem)) = &self.client_identity {
             tls_config = tls_config.identity(Identity::from_pem(cert_pem, key_pem));
         }
-        if let Some(domain_name) = self.domain_name {
+        if let Some(domain_name) = self.domain_name.as_deref() {
             tls_config = tls_config.domain_name(domain_name);
         }
 
@@ -750,6 +784,50 @@ OXAXnIE7l91w/88HcoR0
         assert!(settings.apply(endpoint()).is_ok());
     }
 
+    #[test]
+    fn only_settings_that_name_a_file_read_files() {
+        assert!(!TlsSettings::new().reads_files());
+        assert!(!TlsSettings::new()
+            .with_ca_certificate_pem(TEST_CA_PEM)
+            .with_client_identity_pem(CERT_MARKER, KEY_MARKER)
+            .reads_files());
+        assert!(TlsSettings::new()
+            .with_ca_certificate_file("/etc/zerobus/ca.pem")
+            .reads_files());
+        assert!(TlsSettings::new()
+            .with_client_identity_files("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key")
+            .reads_files());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_off_runtime_reads_files_and_applies_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, TEST_CA_PEM).unwrap();
+        let settings = TlsSettings::new()
+            .without_native_roots()
+            .with_ca_certificate_file(&ca_path)
+            .with_ca_certificate_pem(TEST_CA_PEM)
+            .with_domain_name("localhost");
+
+        let off_runtime = settings.resolve_off_runtime().await.unwrap();
+
+        assert_eq!(off_runtime.ca_certificates.len(), 2);
+        assert!(off_runtime.apply(endpoint()).is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_off_runtime_reports_an_unreadable_file_with_its_path() {
+        let settings = TlsSettings::new().with_ca_certificate_file("/nonexistent/ca.pem");
+
+        let Err(err) = settings.resolve_off_runtime().await else {
+            panic!("a missing CA file must fail");
+        };
+
+        assert!(matches!(err, ZerobusError::InvalidArgument(_)), "{err:?}");
+        assert!(err.to_string().contains("/nonexistent/ca.pem"), "{err}");
+    }
+
     /// The SDK applies the same settings to every new channel, so each call must
     /// read the files again to pick up a replaced certificate.
     #[test]
@@ -874,11 +952,11 @@ OXAXnIE7l91w/88HcoR0
         let (cert, key) = read_consistent_pair(
             || {
                 cert_reads += 1;
-                Ok(Cow::Borrowed(b"cert".as_slice()))
+                Ok(b"cert".to_vec())
             },
             || {
                 key_reads += 1;
-                Ok(Cow::Borrowed(b"key".as_slice()))
+                Ok(b"key".to_vec())
             },
         )
         .unwrap();
@@ -897,8 +975,8 @@ OXAXnIE7l91w/88HcoR0
         let (mut certs, mut keys) = (certs.into_iter(), keys.into_iter());
 
         let (cert, key) = read_consistent_pair(
-            || Ok(Cow::Borrowed(certs.next().unwrap())),
-            || Ok(Cow::Borrowed(keys.next().unwrap())),
+            || Ok(certs.next().unwrap().to_vec()),
+            || Ok(keys.next().unwrap().to_vec()),
         )
         .unwrap();
 
@@ -912,8 +990,8 @@ OXAXnIE7l91w/88HcoR0
         let (mut certs, mut keys) = (certs.into_iter(), keys.into_iter());
 
         let (cert, key) = read_consistent_pair(
-            || Ok(Cow::Borrowed(certs.next().unwrap())),
-            || Ok(Cow::Borrowed(keys.next().unwrap())),
+            || Ok(certs.next().unwrap().to_vec()),
+            || Ok(keys.next().unwrap().to_vec()),
         )
         .unwrap();
 
@@ -934,6 +1012,7 @@ OXAXnIE7l91w/88HcoR0
             .with_ca_certificate_file("/nonexistent/ca.pem")
             .with_client_identity_files("/nonexistent/tls.crt", "/nonexistent/tls.key");
 
+        assert!(!settings.reads_files());
         assert!(settings
             .apply(Endpoint::from_static("http://localhost:50051"))
             .is_ok());

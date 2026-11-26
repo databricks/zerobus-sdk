@@ -18,16 +18,17 @@
 //! identical and stays transport-agnostic. This module normalizes the three
 //! differences so the sender/receiver tasks never mention a concrete RPC.
 
+use std::sync::Arc;
+
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 
 use crate::databricks::zerobus::ephemeral_stream_request::Payload as EphemeralRequestPayload;
 use crate::databricks::zerobus::ephemeral_stream_response::Payload as EphemeralResponsePayload;
-use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse,
 };
+use crate::grpc_channel::{AttemptProgress, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, RecordType, ZerobusError, ZerobusResult};
 
@@ -358,13 +359,15 @@ pub(super) fn make_outbound(kind: &GrpcConnectionMode) -> OutboundConnection {
 /// both normalized connection halves.
 pub(super) async fn open_rpc(
     outbound: OutboundConnection,
-    channel: &mut ZerobusClient<Channel>,
+    channel: &mut GrpcClient,
     metadata: tonic::metadata::MetadataMap,
+    progress: &Arc<AttemptProgress>,
 ) -> ZerobusResult<(OutboundSink, InboundStream)> {
     match outbound {
         OutboundConnection::Ephemeral { tx, requests } => {
             let mut req = tonic::Request::new(requests);
             *req.metadata_mut() = metadata;
+            req.extensions_mut().insert(Arc::clone(progress));
             let resp = channel.ephemeral_stream(req).await.map_err(|status| {
                 ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
             })?;
@@ -383,6 +386,7 @@ pub(super) async fn open_rpc(
         } => {
             let mut req = tonic::Request::new(requests);
             *req.metadata_mut() = metadata;
+            req.extensions_mut().insert(Arc::clone(progress));
             let resp = channel.persistent_stream(req).await.map_err(|status| {
                 ZerobusError::CreateStreamError(GrpcStatus::from_tonic(&status))
             })?;

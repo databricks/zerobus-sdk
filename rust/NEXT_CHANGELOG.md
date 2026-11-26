@@ -32,6 +32,14 @@
 
 ### Bug Fixes
 
+- TLS certificate files are read on a blocking thread, so a slow certificate
+  volume no longer stalls other tasks on the async runtime or the streams that
+  share a gRPC channel.
+- A rotated TLS setting no longer replaces a working gRPC channel before the new
+  one reaches the server. The replaced channel is kept as a fallback until the
+  new one gets a response, for streams and unary calls alike; see the TLS
+  Configuration section of the Rust README.
+
 ### Documentation
 
 - Documented the unary client in the Rust README, with a usage section, API
