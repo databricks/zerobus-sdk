@@ -26,3 +26,9 @@ the unit tests (e.g. local tests).
 to your PR (e.g. if the PR only modifies comments). Do not be afraid of 
 answering "Not tested" if the PR has not been tested. Being clear about what 
 has been done and not done provides important context to the reviewers. 
+
+## Left out on purpose
+
+Optional. List anything this PR deliberately doesn't do, with a short reason,
+such as a sibling SDK that follows in another PR. Reviewers won't raise these
+again unless the reason doesn't hold.
