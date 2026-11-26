@@ -353,13 +353,13 @@ impl ZerobusStream {
 
             // 5. Handle errors.
             if let Err(error) = result {
-                // A clean end-of-stream (status OK) once shutdown has
-                // started is not a failure: a `recovery(false)` multiplexed
-                // stream half-closes on close and the server ends the RPC
-                // with status OK, which the unbiased `select!` above can
-                // surface before the sender's clean completion. Clear the
-                // error the receiver already published so a later
-                // terminal-cause read does not promote it to a failure.
+                // A clean end-of-stream (status OK) after shutdown started
+                // is not a failure: a `recovery(false)` multiplexed stream
+                // half-closes on close and the server ends the RPC with
+                // status OK. Check before logging, so a clean close is not
+                // reported as a stream failure. Clear the error the receiver
+                // already published so a later terminal-cause read does not
+                // promote this clean shutdown to a failure.
                 if Self::is_clean_shutdown_error(&error, &cancellation_token) {
                     let _ = server_error_tx.send(None);
                     info!(
