@@ -108,18 +108,26 @@ pub(crate) struct TrackedChannel {
     health: Arc<ChannelHealth>,
 }
 
-/// Set once an attempt hands its request to the channel. A timeout before that
-/// says nothing about the channel, for example when the headers provider stalls.
+/// How far one attempt's request got. The attempt attaches a shared copy to its
+/// request. `TrackedChannel` sets `sent` when the call is submitted and `answered`
+/// when a gRPC response arrives.
 #[derive(Debug, Default)]
-pub(crate) struct RequestSent(AtomicBool);
+pub(crate) struct AttemptProgress {
+    sent: AtomicBool,
+    answered: AtomicBool,
+}
 
-impl RequestSent {
-    pub(crate) fn mark(&self) {
-        self.0.store(true, Ordering::Relaxed);
+impl AttemptProgress {
+    pub(crate) fn sent(&self) -> bool {
+        self.sent.load(Ordering::Relaxed)
     }
 
-    fn is_set(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+    pub(crate) fn answered(&self) -> bool {
+        self.answered.load(Ordering::Relaxed)
+    }
+
+    fn is_unanswered(&self) -> bool {
+        self.sent() && !self.answered()
     }
 }
 
@@ -130,26 +138,27 @@ impl RequestSent {
 pub(crate) struct ChannelTimeout(Arc<ChannelHealth>);
 
 impl ChannelTimeout {
-    /// Records a failed attempt on the channel if the attempt's request was sent.
-    pub(crate) fn record_timeout(&self, sent: &RequestSent) {
-        if sent.is_set() {
+    /// Records a failed attempt on the channel if its request was sent and no
+    /// gRPC response came back.
+    pub(crate) fn record_timeout(&self, progress: &AttemptProgress) {
+        if progress.is_unanswered() {
             self.0.record(false);
         }
     }
 
     /// Runs one attempt on the channel, bounded by `timeout_ms`. If the attempt
-    /// times out after its request was sent, the channel records a failure and
-    /// the attempt fails with a deadline error.
+    /// times out, the channel records a failure only when the request was sent
+    /// and unanswered, and the attempt fails with a deadline error.
     pub(crate) async fn bounded<T>(
         &self,
         timeout_ms: u64,
-        sent: &RequestSent,
+        progress: &AttemptProgress,
         attempt: impl Future<Output = ZerobusResult<T>>,
     ) -> ZerobusResult<T> {
         match tokio::time::timeout(Duration::from_millis(timeout_ms), attempt).await {
             Ok(result) => result,
             Err(_) => {
-                self.record_timeout(sent);
+                self.record_timeout(progress);
                 Err(ZerobusError::CreateStreamError(
                     GrpcStatus::deadline_exceeded("Stream creation timed out"),
                 ))
@@ -177,11 +186,21 @@ impl Service<http::Request<Body>> for TrackedChannel {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        // Tonic calls this only once the channel has a free slot, so a request that
+        // waits for one is not marked sent.
+        let progress = request.extensions().get::<Arc<AttemptProgress>>().cloned();
+        if let Some(progress) = &progress {
+            progress.sent.store(true, Ordering::Relaxed);
+        }
         let response = self.channel.call(request);
         let health = Arc::clone(&self.health);
         Box::pin(async move {
             let response = response.await;
-            health.record(response.as_ref().is_ok_and(is_grpc_response));
+            let answered = response.as_ref().is_ok_and(is_grpc_response);
+            if let (Some(progress), true) = (&progress, answered) {
+                progress.answered.store(true, Ordering::Relaxed);
+            }
+            health.record(answered);
             response
         })
     }
@@ -384,6 +403,69 @@ impl GrpcChannelSource {
     /// The TLS fingerprint of the channel a call would get now.
     pub(crate) async fn next_channel_fingerprint_for_test(&self) -> TlsFingerprint {
         self.acquire().await.unwrap().tls
+    }
+}
+
+/// Helpers for tests that rotate TLS settings and stall calls.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::{HeadersProvider, TlsSettings};
+
+    /// TLS settings that a test can replace, to rotate the channel.
+    pub(crate) struct RotatingTls(pub(crate) std::sync::Mutex<TlsSettings>);
+
+    impl TlsConfig for RotatingTls {
+        fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+
+    pub(crate) struct ReadyHeaders;
+
+    #[async_trait::async_trait]
+    impl HeadersProvider for ReadyHeaders {
+        async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    pub(crate) struct StalledHeaders;
+
+    #[async_trait::async_trait]
+    impl HeadersProvider for StalledHeaders {
+        async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+            std::future::pending().await
+        }
+    }
+
+    /// A source whose previous channel reached the server, rotated to a channel
+    /// that has not. Returns the source, the settings, and the two fingerprints.
+    pub(crate) async fn rotated_source(
+        endpoint: &str,
+    ) -> (
+        Arc<GrpcChannelSource>,
+        Arc<RotatingTls>,
+        TlsFingerprint,
+        TlsFingerprint,
+    ) {
+        let tls = Arc::new(RotatingTls(std::sync::Mutex::new(
+            TlsSettings::new().with_domain_name("a.example.com"),
+        )));
+        let source = Arc::new(GrpcChannelSource::new(
+            endpoint.to_string(),
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            Arc::clone(&tls) as Arc<dyn TlsConfig>,
+            None,
+        ));
+        let previous = source.next_channel_fingerprint_for_test().await;
+        source.mark_current_reached_for_test().await;
+        *tls.0.lock().unwrap() = TlsSettings::new().with_domain_name("b.example.com");
+        let rotated = source.next_channel_fingerprint_for_test().await;
+        assert_ne!(previous, rotated);
+        (source, tls, previous, rotated)
     }
 }
 
@@ -693,46 +775,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_timed_out_attempt_falls_back_to_the_previous_channel() {
-        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
-        let source = source(Arc::clone(&tls));
-        let (working, rotated) = rotate_from_a_working_channel(&tls, &source).await;
-
-        let (_, timeout) = source.client().await.unwrap();
-        let sent = RequestSent::default();
-        sent.mark();
-        let attempt = timeout
-            .bounded(10, &sent, std::future::pending::<ZerobusResult<()>>())
-            .await;
-
-        assert!(attempt.is_err());
-        assert_eq!(source.acquire().await.unwrap().tls, working.tls);
-        assert_ne!(rotated.tls, working.tls);
-    }
-
-    /// A stream's headers provider can stall before the request is sent. That
-    /// timeout says nothing about the channel.
-    #[tokio::test]
-    async fn a_timeout_before_the_request_is_sent_records_nothing() {
-        let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
-        let source = source(Arc::clone(&tls));
-        let (_, rotated) = rotate_from_a_working_channel(&tls, &source).await;
-
-        let (_, timeout) = source.client().await.unwrap();
-        let attempt = timeout
-            .bounded(
-                10,
-                &RequestSent::default(),
-                std::future::pending::<ZerobusResult<()>>(),
-            )
-            .await;
-
-        assert!(attempt.is_err());
-        assert_eq!(rotated.health.last_failure(), 0);
-        assert_eq!(source.acquire().await.unwrap().tls, rotated.tls);
-    }
-
-    #[tokio::test]
     async fn an_attempt_that_finishes_in_time_records_nothing() {
         let tls = SwitchableTlsConfig::new(settings_for("a.example.com"));
         let source = source(Arc::clone(&tls));
@@ -740,7 +782,7 @@ mod tests {
 
         let (_, timeout) = source.client().await.unwrap();
         let attempt = timeout
-            .bounded(1_000, &RequestSent::default(), async { Ok(()) })
+            .bounded(1_000, &AttemptProgress::default(), async { Ok(()) })
             .await;
 
         assert!(attempt.is_ok());
@@ -796,6 +838,51 @@ mod tests {
         assert_eq!(stale_read.tls, rotated_tls);
         assert_eq!(current_fingerprint(&source), rotated_tls);
         assert!(has_previous(&source));
+    }
+
+    /// After a gRPC response the attempt is answered, so a later timeout in the
+    /// same attempt, such as a stalled credential invalidation, is not blamed on
+    /// the channel.
+    #[tokio::test]
+    async fn a_timeout_after_a_grpc_response_records_nothing() {
+        let health = Arc::new(ChannelHealth::new(Arc::new(AtomicU64::new(0))));
+        let timeout = ChannelTimeout(Arc::clone(&health));
+        let progress = AttemptProgress::default();
+        progress.sent.store(true, Ordering::Relaxed);
+        progress.answered.store(true, Ordering::Relaxed);
+
+        timeout.record_timeout(&progress);
+
+        assert_eq!(health.last_failure(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_request_is_marked_sent_when_called_and_answered_by_a_grpc_response() {
+        let url = serve_rejecting_server().await;
+        let health = Arc::new(ChannelHealth::new(Arc::new(AtomicU64::new(0))));
+        let mut channel = TrackedChannel {
+            channel: base_endpoint(&url, "zerobus-test").unwrap().connect_lazy(),
+            health,
+        };
+        let progress = Arc::new(AttemptProgress::default());
+        let mut request = http::Request::post(format!("{url}/zerobus.test.Rejecting/Call"))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(Arc::clone(&progress));
+        std::future::poll_fn(|cx| channel.poll_ready(cx))
+            .await
+            .unwrap();
+        assert!(
+            !progress.sent(),
+            "readiness alone must not mark the request sent"
+        );
+
+        let response = channel.call(request);
+
+        assert!(progress.sent());
+        assert!(!progress.answered());
+        response.await.unwrap();
+        assert!(progress.answered());
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use tracing::{debug, instrument, warn};
 use crate::builder::HeadersProviderFactory;
 use crate::databricks::zerobus::InsertRecordsRequest;
 use crate::errors::should_retry_initial_connection;
-use crate::grpc_channel::{GrpcChannelSource, GrpcClient, RequestSent};
+use crate::grpc_channel::{AttemptProgress, GrpcChannelSource, GrpcClient};
 use crate::grpc_status::GrpcStatus;
 use crate::headers_provider::grpc_metadata_from_headers;
 use crate::{EncodedRecord, HeadersProvider, PreparedInput, ZerobusError, ZerobusResult};
@@ -270,44 +270,43 @@ impl UnaryClient {
         request: &InsertRecordsRequest,
         headers_provider: &dyn HeadersProvider,
     ) -> ZerobusResult<()> {
-        let timeout_ms = self.options.server_lack_of_ack_timeout_ms;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let timed_out = || {
-            ZerobusError::UnaryIngestError(GrpcStatus::deadline_exceeded(format!(
-                "InsertRecords attempt timed out after {timeout_ms} ms"
-            )))
-        };
-        let sent = RequestSent::default();
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(self.options.server_lack_of_ack_timeout_ms);
+        let progress = Arc::new(AttemptProgress::default());
         // Asking the source on every attempt picks up rotated TLS certificates.
         let result = match tokio::time::timeout_at(deadline, self.channel_source.client()).await {
-            Err(_) => Err(timed_out()),
+            Err(_) => Err(self.attempt_timed_out()),
             Ok(Err(err)) => Err(err),
             Ok(Ok((channel, channel_timeout))) => {
                 match tokio::time::timeout_at(
                     deadline,
-                    self.send_once(channel, request.clone(), headers_provider, &sent),
+                    self.send_once(
+                        channel,
+                        request.clone(),
+                        headers_provider,
+                        &progress,
+                        deadline,
+                    ),
                 )
                 .await
                 {
                     Ok(result) => result,
                     Err(_) => {
-                        channel_timeout.record_timeout(&sent);
-                        Err(timed_out())
+                        channel_timeout.record_timeout(&progress);
+                        Err(self.attempt_timed_out())
                     }
                 }
             }
         };
 
         if let Err(err) = &result {
-            let invalidate_timeout =
-                deadline.saturating_duration_since(tokio::time::Instant::now());
             if err.is_auth_rejection()
-                && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
+                && tokio::time::timeout_at(deadline, headers_provider.invalidate())
                     .await
                     .is_err()
             {
                 warn!(
-                    timeout_ms,
+                    timeout_ms = self.options.server_lack_of_ack_timeout_ms,
                     "Headers provider invalidation timed out; preserving auth rejection"
                 );
             }
@@ -315,17 +314,33 @@ impl UnaryClient {
         result
     }
 
+    fn attempt_timed_out(&self) -> ZerobusError {
+        ZerobusError::UnaryIngestError(GrpcStatus::deadline_exceeded(format!(
+            "InsertRecords attempt timed out after {} ms",
+            self.options.server_lack_of_ack_timeout_ms
+        )))
+    }
+
+    /// Checks the deadline before the headers and before the call, so a lookup
+    /// that finishes after the deadline does not start the next phase.
     async fn send_once(
         &self,
         mut channel: GrpcClient,
         request: InsertRecordsRequest,
         headers_provider: &dyn HeadersProvider,
-        sent: &RequestSent,
+        progress: &Arc<AttemptProgress>,
+        deadline: tokio::time::Instant,
     ) -> ZerobusResult<()> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(self.attempt_timed_out());
+        }
         let headers = headers_provider.get_headers().await?;
         let mut request = tonic::Request::new(request);
         *request.metadata_mut() = grpc_metadata_from_headers(headers, &self.table_name)?;
-        sent.mark();
+        if tokio::time::Instant::now() >= deadline {
+            return Err(self.attempt_timed_out());
+        }
+        request.extensions_mut().insert(Arc::clone(progress));
         channel
             .insert_records(request)
             .await
@@ -413,9 +428,9 @@ fn validate_json_object(record: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc_channel::test_support::{rotated_source, ReadyHeaders, StalledHeaders};
     use crate::headers_provider::tests::MockTokenEndpoint;
-    use crate::tls_config::TlsFingerprint;
-    use crate::{JsonString, JsonValue, ProtoBytes, TlsConfig, TlsSettings};
+    use crate::{JsonString, JsonValue, ProtoBytes};
 
     fn invalid_argument(result: ZerobusResult<Option<Vec<u8>>>) -> String {
         match result {
@@ -542,64 +557,6 @@ mod tests {
         assert_eq!(second.get_headers().await.unwrap(), retried);
         assert_ne!(retried, sent);
         assert_eq!(mock.mint_count(), 2);
-    }
-
-    /// TLS settings that a test can replace, to rotate the channel.
-    struct RotatingTls(std::sync::Mutex<TlsSettings>);
-
-    impl TlsConfig for RotatingTls {
-        fn tls_settings(&self) -> ZerobusResult<TlsSettings> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-    }
-
-    struct ReadyHeaders;
-
-    #[async_trait::async_trait]
-    impl HeadersProvider for ReadyHeaders {
-        async fn get_headers(
-            &self,
-        ) -> ZerobusResult<std::collections::HashMap<&'static str, String>> {
-            Ok(std::collections::HashMap::new())
-        }
-    }
-
-    struct StalledHeaders;
-
-    #[async_trait::async_trait]
-    impl HeadersProvider for StalledHeaders {
-        async fn get_headers(
-            &self,
-        ) -> ZerobusResult<std::collections::HashMap<&'static str, String>> {
-            std::future::pending().await
-        }
-    }
-
-    /// A source whose previous channel reached the server, rotated to a channel
-    /// that has not. Returns the source, the settings, and the two fingerprints.
-    async fn rotated_source(
-        endpoint: &str,
-    ) -> (
-        Arc<GrpcChannelSource>,
-        Arc<RotatingTls>,
-        TlsFingerprint,
-        TlsFingerprint,
-    ) {
-        let tls = Arc::new(RotatingTls(std::sync::Mutex::new(
-            TlsSettings::new().with_domain_name("a.example.com"),
-        )));
-        let source = Arc::new(GrpcChannelSource::new(
-            endpoint.to_string(),
-            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
-            Arc::clone(&tls) as Arc<dyn TlsConfig>,
-            None,
-        ));
-        let previous = source.next_channel_fingerprint_for_test().await;
-        source.mark_current_reached_for_test().await;
-        *tls.0.lock().unwrap() = TlsSettings::new().with_domain_name("b.example.com");
-        let rotated = source.next_channel_fingerprint_for_test().await;
-        assert_ne!(previous, rotated);
-        (source, tls, previous, rotated)
     }
 
     fn unary_client(source: Arc<GrpcChannelSource>) -> UnaryClient {
