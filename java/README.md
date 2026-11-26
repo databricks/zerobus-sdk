@@ -145,7 +145,7 @@ to load.
 
 - **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Maven**: 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
-- **Protocol Buffers Compiler** (`protoc`): 33.0 for protobuf-java 4.33.0, or 25.x for a 3.25.x runtime. See [Dependencies](#dependencies). [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
+- **Protocol Buffers Compiler** (`protoc`): not needed on your `PATH` to build the SDK. Maven downloads the `protoc` version set in the POM. Compiling your own schemas needs a standalone `protoc`; see [Define Your Protocol Buffer Schema](#define-your-protocol-buffer-schema).
 
 ## Quick Start User Guide
 
@@ -331,15 +331,13 @@ message AirQuality {
 }
 ```
 
-**Compile the protobuf:**
+**Compile the protobuf** with a standalone `protoc` installed locally. Use the release that matches the protobuf-java runtime your application declares: 33.0 for 4.33.0, or 25.x for 3.25.x (see [Dependencies](#dependencies)). [Download protoc](https://github.com/protocolbuffers/protobuf/releases)
 
 ```bash
 protoc --java_out=src/main/java src/main/proto/record.proto
 ```
 
 This generates `src/main/java/com/example/proto/Record.java`.
-
-**Note**: Match `protoc` to the protobuf-java runtime your application declares: 33.0 for 4.33.0, 25.x for 3.25.x. See [Dependencies](#dependencies).
 
 ### Generate Protocol Buffer Schema from Unity Catalog (Alternative)
 
