@@ -7,8 +7,21 @@
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Call `ZerobusSdk.CreateBuilder().ConnectionPerStream(false)` to share one
   HTTP/2 connection across streams.
+- Added `ZerobusSdk.CreateStreamBuilder()`, a fluent builder that is now the
+  recommended way to create a stream. Set the table, authentication
+  (`OAuth()` or `HeadersProvider()`), and configuration overrides, then select
+  the format with `Json()` or `Proto(descriptorProto)` and call `Build()` or
+  `BuildAsync()`.
 
 ### Deprecations
+
+- Deprecated `CreateStream`, `CreateJsonStream`, `CreateProtoStream`, and their
+  `WithHeadersProvider` and `Async` variants in favor of
+  `CreateStreamBuilder()`. They will be removed in the next major release. For
+  example, replace `sdk.CreateJsonStream(table, clientId, clientSecret, options)`
+  with `sdk.CreateStreamBuilder().Table(table).OAuth(clientId, clientSecret).Json().Build()`,
+  moving each `StreamConfigurationOptions` value to the builder setter of the
+  same name.
 
 ### Bug Fixes
 
@@ -22,6 +35,8 @@
   (`CreateStreamWithHeadersProviderAsync`) creation paths. Tracks the FFI
   signature change to `zerobus_sdk_create_stream_with_headers_provider` and
   `zerobus_sdk_create_stream_with_headers_provider_async`. No public API change.
+- `CreateJsonStream*` and `CreateProtoStream*` now throw `ObjectDisposedException`
+  after the SDK is disposed, like `CreateStream*`.
 
 ### Documentation
 
@@ -46,3 +61,8 @@
 - Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
 
 ### API Changes
+
+- New public API: `ZerobusSdk.CreateStreamBuilder()`, `StreamBuilder`,
+  `JsonStreamBuilder`, and `ProtoStreamBuilder`.
+- Marked the `CreateStream*`, `CreateJsonStream*`, and `CreateProtoStream*`
+  methods `[Obsolete]`.

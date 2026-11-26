@@ -1,3 +1,4 @@
+#pragma warning disable CS0618 // Exercises the deprecated Create*Stream methods until they are removed.
 using NUnit.Framework;
 
 namespace Databricks.Zerobus.IntegrationTests;

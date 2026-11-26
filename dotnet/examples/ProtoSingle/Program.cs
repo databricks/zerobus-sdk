@@ -23,19 +23,13 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .UnityCatalogUrl(workspaceUrl)
     .Build();
 
-// Configure stream options for protobuf.
-var options = StreamConfigurationOptions.Default with
-{
-    MaxInflightRequests = 50_000,
-};
-
-// Create protobuf stream.
-using var stream = sdk.CreateProtoStream(
-    tableName,
-    descriptorProto,
-    clientId,
-    clientSecret,
-    options);
+// Create protobuf stream. Configuration overrides are optional.
+using var stream = sdk.CreateStreamBuilder()
+    .Table(tableName)
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .Proto(descriptorProto)
+    .Build();
 
 Console.WriteLine("Ingesting protobuf records...");
 

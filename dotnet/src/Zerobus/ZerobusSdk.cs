@@ -27,10 +27,11 @@ namespace Databricks.Zerobus;
 ///     .UnityCatalogUrl(workspaceUrl)
 ///     .Build();
 ///
-/// using var stream = sdk.CreateJsonStream(
-///     "catalog.schema.table",
-///     clientId,
-///     clientSecret);
+/// using var stream = sdk.CreateStreamBuilder()
+///     .Table("catalog.schema.table")
+///     .OAuth(clientId, clientSecret)
+///     .Json()
+///     .Build();
 /// </code>
 /// </example>
 public sealed class ZerobusSdk : IDisposable
@@ -65,6 +66,27 @@ public sealed class ZerobusSdk : IDisposable
     public static ZerobusSdkBuilder CreateBuilder() => new();
 
     /// <summary>
+    /// Returns a builder for a new stream on this SDK. This is the recommended way
+    /// to create a stream.
+    /// </summary>
+    /// <returns>A <see cref="StreamBuilder"/> ready to configure.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
+    /// <example>
+    /// <code>
+    /// using var stream = sdk.CreateStreamBuilder()
+    ///     .Table("catalog.schema.table")
+    ///     .OAuth(clientId, clientSecret)
+    ///     .Proto(descriptorProto)
+    ///     .Build();
+    /// </code>
+    /// </example>
+    public StreamBuilder CreateStreamBuilder()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        return new StreamBuilder(this);
+    }
+
+    /// <summary>
     /// Creates a new JSON or Protocol Buffer stream for ingesting records into a Databricks table.
     /// Uses OAuth 2.0 client credentials flow for authentication.
     /// </summary>
@@ -87,6 +109,7 @@ public sealed class ZerobusSdk : IDisposable
     ///     clientSecret);
     /// </code>
     /// </example>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public ZerobusStream CreateStream(
         TableProperties tableProperties,
         string clientId,
@@ -104,6 +127,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a new JSON or Protocol Buffer stream asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public Task<ZerobusStream> CreateStreamAsync(
         TableProperties tableProperties,
         string clientId,
@@ -129,6 +153,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="clientSecret">OAuth 2.0 client secret.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public JsonZerobusStream CreateJsonStream(
         string tableName,
         string clientId,
@@ -151,6 +176,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a JSON-only stream asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public async Task<JsonZerobusStream> CreateJsonStreamAsync(
         string tableName,
         string clientId,
@@ -183,6 +209,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="clientSecret">OAuth 2.0 client secret.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public ProtoZerobusStream CreateProtoStream(
         string tableName,
         byte[] descriptorProto,
@@ -207,6 +234,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a protobuf-only stream asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public async Task<ProtoZerobusStream> CreateProtoStreamAsync(
         string tableName,
         byte[] descriptorProto,
@@ -229,12 +257,13 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
-    private ZerobusStream CreateStreamCore(
+    internal ZerobusStream CreateStreamCore(
         TableProperties tableProperties,
         string clientId,
         string clientSecret,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -250,12 +279,13 @@ public sealed class ZerobusSdk : IDisposable
         return new ZerobusStream(streamPtr);
     }
 
-    private async Task<ZerobusStream> CreateStreamCoreAsync(
+    internal async Task<ZerobusStream> CreateStreamCoreAsync(
         TableProperties tableProperties,
         string clientId,
         string clientSecret,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -294,6 +324,7 @@ public sealed class ZerobusSdk : IDisposable
     ///     provider);
     /// </code>
     /// </example>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public ZerobusStream CreateStreamWithHeadersProvider(
         TableProperties tableProperties,
         IHeadersProvider headersProvider,
@@ -309,6 +340,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a new JSON or Protocol Buffer stream using a custom headers provider asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public Task<ZerobusStream> CreateStreamWithHeadersProviderAsync(
         TableProperties tableProperties,
         IHeadersProvider headersProvider,
@@ -328,6 +360,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="headersProvider">Custom authentication headers provider.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public JsonZerobusStream CreateJsonStreamWithHeadersProvider(
         string tableName,
         IHeadersProvider headersProvider,
@@ -347,6 +380,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a JSON-only stream using a custom headers provider asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public async Task<JsonZerobusStream> CreateJsonStreamWithHeadersProviderAsync(
         string tableName,
         IHeadersProvider headersProvider,
@@ -372,6 +406,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <param name="headersProvider">Custom authentication headers provider.</param>
     /// <param name="options">Optional stream configuration overrides.</param>
     /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public ProtoZerobusStream CreateProtoStreamWithHeadersProvider(
         string tableName,
         byte[] descriptorProto,
@@ -393,6 +428,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <summary>
     /// Creates a protobuf-only stream using a custom headers provider asynchronously.
     /// </summary>
+    [Obsolete("Use CreateStreamBuilder() instead. This method will be removed in the next major release.")]
     public async Task<ProtoZerobusStream> CreateProtoStreamWithHeadersProviderAsync(
         string tableName,
         byte[] descriptorProto,
@@ -412,11 +448,12 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
-    private ZerobusStream CreateStreamWithHeadersProviderCore(
+    internal ZerobusStream CreateStreamWithHeadersProviderCore(
         TableProperties tableProperties,
         IHeadersProvider headersProvider,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -460,11 +497,12 @@ public sealed class ZerobusSdk : IDisposable
         return new ZerobusStream(streamPtr);
     }
 
-    private async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
+    internal async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
         TableProperties tableProperties,
         IHeadersProvider headersProvider,
         StreamConfigurationOptions? options)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
@@ -508,7 +546,11 @@ public sealed class ZerobusSdk : IDisposable
     /// A later <see cref="IDisposable.Dispose"/> call on the original stream wrapper is a no-op,
     /// so <c>using</c> declarations remain safe:
     /// <code>
-    /// using var stream = sdk.CreateStream(...);
+    /// using var stream = sdk.CreateStreamBuilder()
+    ///     .Table(tableName)
+    ///     .OAuth(clientId, clientSecret)
+    ///     .Json()
+    ///     .Build();
     /// stream.Close();
     /// using var recreated = sdk.RecreateStream(stream);
     /// </code>
