@@ -1220,6 +1220,29 @@ Multiplexed streams use `multiplexed_ack_callback` with
 so implementations must be thread-safe and must not rely on global ordering. See the complete
 [`proto_compiled_multiplexed`](examples/proto/compiled/multiplexed.rs) example.
 
+## Stream Statistics
+
+`stats()` returns a point-in-time snapshot of a stream's counters. It reads atomics and does not wait on the stream's tasks.
+
+```rust
+let stats = stream.stats();
+println!("in flight: {} records", stats.records_in_flight);
+println!("last acked offset: {:?}", stats.last_acked_offset);
+println!("reconnects: {}", stats.reconnects);
+if let Some(err) = &stats.last_error {
+    println!("last error ({}): {}", if err.is_retryable { "retryable" } else { "terminal" }, err.message);
+}
+```
+
+- `records_in_flight` counts records accepted by ingest and not yet acknowledged. It counts records, not batches, and counting starts when a batch is admitted, not when it reaches the wire. A record whose ingest call returned an error is not counted, unless its batch was already retained for replay or terminal handling. Records retained after a terminal failure, or left unacknowledged at close, stay counted. A partially acknowledged Arrow batch counts only its unacknowledged rows.
+- `last_acked_offset` is the offset of the most recent batch the server fully acknowledged. It is `None` until the first acknowledgment and never decreases.
+- `reconnects` counts automatic recoveries that completed successfully. The initial stream creation is not counted.
+- `last_error` is the most recent error the stream recorded, including errors that were recovered from. It is kept after a successful recovery. Some server closes are expected and not recorded: the end of a graceful gRPC rotation (a close signal followed by end of stream) with recovery on or off, a graceful Arrow rotation, the rotation error returned when the caller closes during an Arrow rotation, and the end of stream that answers the caller's own close when the request was half-closed and every record was acknowledged. An end of stream the server sends on its own during `close()` is recorded if it arrives before the request is half-closed. After the half-close, with every record acknowledged, it cannot be told apart from the answer to the caller's close, so it is not recorded. Any other server close, including one with OK status, is recorded. `last_error.error` holds the typed `ZerobusError`; `message` is its display text, so match on `error` rather than parsing `message`.
+
+`stats_reader()` returns a cloneable `StreamStatsReader` that reads the same counters without borrowing the stream. Use it when the stream is held behind a lock or owned by another component.
+
+The snapshot is not atomic across fields. A snapshot taken during concurrent ingest or acknowledgment can mix values from slightly different moments. Multiplexed streams (`MultiplexedStream`, `MultiplexedArrowStream`) do not expose statistics.
+
 ## Unary Ingestion (sparse traffic)
 
 A unary client sends each batch in one `InsertRecords` request and returns once the batch is durable. It opens no stream, so there is nothing to flush or close.
@@ -1722,6 +1745,8 @@ for record in stream.get_unacked_records().await? {
 }
 ```
 
+`stats()` returns a `StreamStats` snapshot, described in [Stream Statistics](#stream-statistics). `stats_reader()` returns a cloneable `StreamStatsReader`, whose `stats()` returns the same snapshot.
+
 ### `StreamBuilder`
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
@@ -1818,6 +1843,10 @@ The same as `ingest_records` with one record. For very sparse traffic only.
 ### `UnaryIngestResult`
 
 The result of a successful unary ingest call. It has no fields: the server returns no data for `InsertRecords`. It is `#[non_exhaustive]`, so fields can be added later without a breaking change.
+
+### `ZerobusArrowStream`
+
+`PersistentStream` and `ZerobusArrowStream` have the same `stats()` and `stats_reader()` accessors. See [Stream Statistics](#stream-statistics).
 
 ### `MultiplexedStream`
 

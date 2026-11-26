@@ -22,6 +22,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
+use zerobus_test_support::mock_grpc::MockResponseGate;
 
 /// Observations extracted from an Arrow IPC message header on the wire.
 struct IpcWireObservation {
@@ -114,6 +115,13 @@ pub enum MockFlightResponse {
         delay_ms: u64,
         /// Cumulative records acknowledged.
         ack_up_to_records: u64,
+    },
+    /// Batch acknowledgment released explicitly by a test through `gate`.
+    #[allow(dead_code)]
+    GatedBatchAck {
+        ack_up_to_offset: i64,
+        ack_up_to_records: u64,
+        gate: Arc<MockResponseGate>,
     },
     /// Acknowledgment emitted only after the client cleanly half-closes its request.
     BatchAckAfterRequestEof {
@@ -663,6 +671,40 @@ impl FlightService for MockFlightServer {
                                 response_index += 1;
 
                                 // Update response index
+                                {
+                                    let mut indices = response_indices.lock().await;
+                                    indices.insert(table_name.clone(), response_index);
+                                }
+                            }
+                        }
+                        MockFlightResponse::GatedBatchAck {
+                            ack_up_to_offset,
+                            ack_up_to_records,
+                            gate,
+                        } => {
+                            if metadata
+                                .as_ref()
+                                .map(|m| m.offset_id >= *ack_up_to_offset)
+                                .unwrap_or(false)
+                            {
+                                gate.wait().await;
+                                let ack_metadata = FlightAckMetadata {
+                                    ack_up_to_offset: *ack_up_to_offset,
+                                    ack_up_to_records: *ack_up_to_records,
+                                };
+                                let ack_bytes = serde_json::to_vec(&ack_metadata).unwrap();
+                                info!(
+                                    "Sending gated BatchAck for offset: {}, records: {}",
+                                    ack_up_to_offset, ack_up_to_records
+                                );
+                                let put_result = PutResult {
+                                    app_metadata: ack_bytes.into(),
+                                };
+                                if tx.send(Ok(put_result)).await.is_err() {
+                                    error!("Failed to send ack - channel closed");
+                                    return;
+                                }
+                                response_index += 1;
                                 {
                                     let mut indices = response_indices.lock().await;
                                     indices.insert(table_name.clone(), response_index);

@@ -7,8 +7,10 @@ use tokio::time::Instant;
 use crate::errors::ZerobusError;
 use crate::grpc_status::GrpcStatus;
 use crate::offset_generator::OffsetId;
+use crate::stream_stats::ServerErrorSender;
 use crate::ZerobusResult;
 
+use super::acks::AckProcessor;
 use super::batch::PendingBatch;
 use super::{BatchSender, RecordBatch, ZerobusArrowStream};
 
@@ -168,7 +170,7 @@ pub(super) struct CloseFinalizer {
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     last_acked_records: Arc<AtomicU64>,
-    server_error_tx: watch::Sender<Option<ZerobusError>>,
+    server_error_tx: ServerErrorSender,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<super::TestHooks>,
 }
@@ -191,6 +193,15 @@ impl CloseFinalizer {
         }
     }
 
+    fn publish_outcome(&self, outcome: &ZerobusResult<()>) {
+        let error = outcome.as_ref().err().cloned();
+        if error.as_ref().is_some_and(AckProcessor::is_rotation_error) {
+            let _ = self.server_error_tx.send_unrecorded(error);
+        } else {
+            let _ = self.server_error_tx.send(error);
+        }
+    }
+
     pub(super) async fn finish(&self, outcome: ZerobusResult<()>) -> ZerobusResult<()> {
         {
             let _guard = self.ingest_mutex.lock().await;
@@ -204,8 +215,7 @@ impl CloseFinalizer {
             *self.batch_tx.lock().await = None;
         }
 
-        self.server_error_tx
-            .send_replace(outcome.as_ref().err().cloned());
+        self.publish_outcome(&outcome);
 
         #[cfg(feature = "test-hooks")]
         {
@@ -225,8 +235,7 @@ impl CloseFinalizer {
         )
         .await;
         self.close.publish_finalized(outcome.clone());
-        self.server_error_tx
-            .send_replace(outcome.as_ref().err().cloned());
+        self.publish_outcome(&outcome);
         outcome
     }
 

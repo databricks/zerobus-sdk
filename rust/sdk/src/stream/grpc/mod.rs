@@ -31,6 +31,7 @@ use tracing::instrument;
 
 use crate::grpc_channel::GrpcChannelSource;
 use crate::landing_zone::LandingZone;
+use crate::stream_stats::{ServerErrorSender, StreamStats, StreamStatsReader, StreamStatsState};
 use crate::{
     DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
     StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusResult,
@@ -141,6 +142,10 @@ pub struct ZerobusStream {
     terminal_token: CancellationToken,
     /// Watch channel for last error received from the server.
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
+    /// Counters returned by `stats()`, updated by the ingest, ack and recovery paths.
+    stream_stats: Arc<StreamStatsState>,
+    #[cfg(feature = "test-hooks")]
+    teardown_hooks: sender::TeardownHooks,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
@@ -276,6 +281,8 @@ impl ZerobusStream {
         let logical_offset_id_generator = OffsetIdGenerator::default();
 
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
+        let stream_stats = Arc::new(StreamStatsState::default());
+        let server_error_tx = ServerErrorSender::new(server_error_tx, Arc::clone(&stream_stats));
         let cancellation_token = CancellationToken::new();
         let terminal_token = CancellationToken::new();
         let callback_cancellation_token = CancellationToken::new();
@@ -292,6 +299,9 @@ impl ZerobusStream {
             (None, None)
         };
 
+        let sender_hooks: sender::TeardownHooks = Default::default();
+        #[cfg(feature = "test-hooks")]
+        let teardown_hooks = Arc::clone(&sender_hooks);
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
@@ -309,6 +319,8 @@ impl ZerobusStream {
             server_error_tx,
             cancellation_token.clone(),
             callback_tx.clone(),
+            Arc::clone(&stream_stats),
+            sender_hooks,
         ));
         let initialization_guard = StreamInitializationGuard::new(
             cancellation_token.clone(),
@@ -366,6 +378,9 @@ impl ZerobusStream {
             sync_mutex,
             terminal_token,
             server_error_rx,
+            stream_stats,
+            #[cfg(feature = "test-hooks")]
+            teardown_hooks,
             cancellation_token,
             callback_handler_task,
             callback_cancellation_token,
@@ -373,6 +388,62 @@ impl ZerobusStream {
         };
 
         Ok(stream)
+    }
+
+    /// Returns a snapshot of this stream's counters.
+    ///
+    /// Reads atomics and does not wait on the stream's tasks. Multiplexed streams do not
+    /// expose these counters.
+    pub fn stats(&self) -> StreamStats {
+        self.stream_stats.snapshot()
+    }
+
+    /// Test-only: pauses the sender on cancellation before it half-closes the request.
+    /// Returns `(reached, proceed)`: the sender notifies `reached`, then waits on `proceed`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_before_half_close_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.teardown_hooks.arm_before_half_close().await
+    }
+
+    /// Test-only: pauses the sender after it half-closes its request on cancellation.
+    /// Returns `(reached, proceed)` as `arm_before_half_close_barrier` does.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_after_half_close_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.teardown_hooks.arm_after_half_close().await
+    }
+
+    /// Test-only: pauses the receiver after the request is half-closed, before it drains the
+    /// final acks. Returns `(reached, proceed)` as the other teardown barriers do.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_before_drain_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.teardown_hooks.arm_before_drain().await
+    }
+
+    /// Test-only: pauses the next admitted batch before it is handed to the sender.
+    /// Returns `(reached, proceed)`: the hook notifies `reached`, then waits on `proceed`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_pre_enqueue_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.teardown_hooks.arm_pre_enqueue().await
+    }
+
+    /// Returns a handle that reads this stream's counters without borrowing the stream.
+    ///
+    /// The handle stays valid after the stream is closed or dropped and reports the
+    /// last values. Use it to read statistics from a thread that cannot hold the stream.
+    pub fn stats_reader(&self) -> StreamStatsReader {
+        self.stream_stats.reader()
     }
 
     /// The [`MessageDescriptor`] for this stream's schema, for building records

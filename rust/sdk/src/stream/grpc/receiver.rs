@@ -12,11 +12,13 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, span, warn, Level};
 
+use super::sender::TeardownHooks;
 use super::transport::{InboundMessage, InboundStream};
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::{CloseStreamSignal, IngestRecordResponse};
 use crate::grpc_status::GrpcStatus;
+use crate::stream_stats::{ServerErrorSender, StreamStatsState};
 use crate::{OffsetId, StreamConfigurationOptions, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
@@ -41,11 +43,15 @@ impl ZerobusStream {
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
-        server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
+        server_error_tx: ServerErrorSender,
         recv_drain_token: CancellationToken,
         half_close_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         initial_last_acked_offset: OffsetId,
+        stream_stats: Arc<StreamStatsState>,
+        expected_close: Arc<AtomicBool>,
+        request_half_closed: Arc<AtomicBool>,
+        #[cfg_attr(not(feature = "test-hooks"), allow(unused_variables))] hooks: TeardownHooks,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
@@ -57,6 +63,8 @@ impl ZerobusStream {
             // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
             // still up, so a detached drain is used to avoid blocking recovery.
             let mut close_initiated = false;
+            // Set once the server has sent a close signal, whether or not recovery is enabled.
+            let mut close_announced = false;
 
             'recv_loop: loop {
                 if let Some(deadline) = pause_deadline {
@@ -121,6 +129,7 @@ impl ZerobusStream {
                             &oneshot_map,
                             &last_received_offset_id_tx,
                             &callback_tx,
+                            &stream_stats,
                             &mut last_acked_offset,
                             durability_ack_up_to_offset,
                         )
@@ -131,6 +140,7 @@ impl ZerobusStream {
                         }
                     }
                     Ok(Ok(Some(InboundMessage::Close(CloseStreamSignal { duration })))) => {
+                        close_announced = true;
                         if options.recovery {
                             let server_duration_ms = duration
                                 .as_ref()
@@ -176,10 +186,30 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Ok(Ok(None)) => {
-                        info!("Server closed the stream without errors.");
+                        // The server answers the caller's half-close with EOF. That is expected only
+                        // when the request was half-closed and every record was acknowledged.
+                        if half_close_token.is_cancelled()
+                            && request_half_closed.load(Ordering::Acquire)
+                            && landing_zone.len() == 0
+                        {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
                             "Stream closed by server without errors.",
                         ));
+                        if close_announced {
+                            // An announced end is a rotation: it recovers like the rotation
+                            // deadline does, and without recovery the supervisor fails the stream
+                            // without recording it.
+                            info!("Server closed the stream after its close signal.");
+                            if options.recovery {
+                                break 'recv_loop;
+                            }
+                            expected_close.store(true, Ordering::Relaxed);
+                            return Err(error);
+                        }
+                        info!("Server closed the stream without errors.");
                         let _ = server_error_tx.send(Some(error.clone()));
                         return Err(error);
                     }
@@ -212,16 +242,28 @@ impl ZerobusStream {
                 // Half-close so the server sends its final acks, then apply them before the
                 // supervisor resends the rest. On close the sender has already stopped.
                 half_close_token.cancel();
-                drain_applying_acks(
+                #[cfg(feature = "test-hooks")]
+                super::sender::TeardownPauses::park(&hooks.before_drain).await;
+                let ended_by_eof = drain_applying_acks(
                     &mut inbound,
                     drain_window,
                     &landing_zone,
                     &oneshot_map,
                     &last_received_offset_id_tx,
                     &callback_tx,
+                    &stream_stats,
                     &mut last_acked_offset,
+                    &mut close_announced,
                 )
                 .await;
+                // An end of stream that leaves records unacknowledged is a failure, as it is in the
+                // receive loop. An announced rotation is expected.
+                if ended_by_eof && !close_announced && landing_zone.len() > 0 {
+                    let error = ZerobusError::StreamClosedError(GrpcStatus::ok(
+                        "Stream closed by server without errors.",
+                    ));
+                    let _ = server_error_tx.send(Some(error));
+                }
             } else if close_initiated {
                 // Drain remaining server messages so the server sees END_STREAM instead of
                 // the client RST_STREAM-ing the response.
@@ -267,6 +309,7 @@ impl ZerobusStream {
 
 /// Reads responses until the server ends the stream or `window` elapses, and applies the
 /// acks it delivers, so those records are not sent again.
+#[allow(clippy::too_many_arguments)]
 async fn drain_applying_acks(
     inbound: &mut InboundStream,
     window: Duration,
@@ -274,8 +317,10 @@ async fn drain_applying_acks(
     oneshot_map: &Arc<tokio::sync::Mutex<OneshotMap>>,
     last_received_offset_id_tx: &tokio::sync::watch::Sender<Option<OffsetId>>,
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+    stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
-) {
+    close_announced: &mut bool,
+) -> bool {
     let deadline = tokio::time::Instant::now() + window;
     loop {
         match tokio::time::timeout_at(deadline, inbound.message()).await {
@@ -287,6 +332,7 @@ async fn drain_applying_acks(
                     oneshot_map,
                     last_received_offset_id_tx,
                     callback_tx,
+                    stream_stats,
                     last_acked_offset,
                     offset,
                 )
@@ -294,13 +340,15 @@ async fn drain_applying_acks(
                 {
                     // An invalid ack ends the read. The rest is sent again.
                     warn!("Stopped reading final acks after an invalid ack: {error}");
-                    return;
+                    return false;
                 }
             }
+            Ok(Ok(Some(InboundMessage::Close(_)))) => *close_announced = true,
             // Nothing to apply.
             Ok(Ok(Some(_))) => {}
-            // Stream ended, transport failed, or the window elapsed.
-            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => return,
+            Ok(Ok(None)) => return true,
+            // Transport failed, or the window elapsed.
+            Ok(Err(_)) | Err(_) => return false,
         }
     }
 }
@@ -312,6 +360,7 @@ async fn apply_ack(
     oneshot_map: &Arc<tokio::sync::Mutex<OneshotMap>>,
     last_received_offset_id_tx: &tokio::sync::watch::Sender<Option<OffsetId>>,
     callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+    stream_stats: &StreamStatsState,
     last_acked_offset: &mut OffsetId,
     durability_ack_up_to_offset: OffsetId,
 ) -> ZerobusResult<()> {
@@ -328,6 +377,8 @@ async fn apply_ack(
     for _offset_to_ack in (*last_acked_offset + 1)..=durability_ack_up_to_offset {
         if let Ok(record) = landing_zone.remove_observed() {
             let logical_offset = record.offset_id;
+            stream_stats.record_acked_records(record.payload.get_record_count() as u64);
+            stream_stats.record_acked_offset(logical_offset);
             last_logical_acked_offset = logical_offset;
 
             if let Some(sender) = map.remove(&logical_offset) {
