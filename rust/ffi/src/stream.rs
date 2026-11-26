@@ -1,6 +1,9 @@
 //! Stream creation and record ingestion FFI surface.
 
 use crate::common::*;
+use crate::federated::{
+    federated_auth, CallbackIdpTokenSupplier, FederatedAuth, IdpTokenSupplierCallback,
+};
 use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusResult, ZerobusStream,
 };
@@ -78,6 +81,10 @@ enum StreamCreateAuth {
         // guarantee while still routing through the shared builder below.
         headers_provider: Arc<dyn HeadersProvider>,
     },
+    // External-IdP token federation. The supplier owns the C callback's
+    // `user_data`, so, like the headers provider, it is built before any
+    // fallible work.
+    Federated(FederatedAuth),
 }
 
 async fn build_stream_from_parts(
@@ -104,6 +111,13 @@ async fn build_stream_from_parts(
             .stream_builder()
             .table(table_name)
             .headers_provider(headers_provider),
+        StreamCreateAuth::Federated(FederatedAuth {
+            idp_token_supplier,
+            client_id,
+        }) => sdk_ref
+            .stream_builder()
+            .table(table_name)
+            .federated_auth(idp_token_supplier, client_id),
     };
 
     let mut builder = match record_type {
@@ -722,6 +736,115 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
 
         write_success_result(result);
         true
+    })
+}
+
+/// Create a stream authenticated by external-IdP token federation (for example
+/// Microsoft Entra ID).
+///
+/// The SDK calls `idp_token_callback` for the current IdP token, exchanges it
+/// for a Zerobus-scoped Databricks token (RFC 8693 token exchange), caches the
+/// exchanged token, and refreshes it before it expires. The callback runs only
+/// when a token must be minted or refreshed, never per request. A federation
+/// policy must already be configured in Databricks.
+///
+/// - `client_id`: the Databricks service principal for workload identity
+///   federation, or null for account-level federation.
+/// - `cache_identity`: a stable, non-empty id for one logical federated
+///   identity. Streams created with the same id share one exchanged token; two
+///   ids never share a token. Never derive it from a pointer, which can be
+///   reused.
+///
+/// Ownership: once this function is called the FFI owns `user_data` and invokes
+/// `free_user_data` exactly once on every path, never while an
+/// `idp_token_callback` is running:
+/// - on success, once the stream is freed and its internal tasks have finished;
+/// - on failure, when the last internal reference drops. For an invalid
+///   argument that is before this call returns. For a failure while the stream
+///   starts (for example the callback's error, or a failed connection) it can be
+///   just after this call returns, on an internal SDK thread.
+///
+/// The caller must never free `user_data` itself, not even when create fails.
+/// `free_user_data` may run on an internal SDK thread.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_stream_with_federated_token(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    idp_token_callback: IdpTokenSupplierCallback,
+    user_data: *mut std::ffi::c_void,
+    // Written inline so cbindgen emits a nullable C function pointer.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    client_id: *const c_char,
+    cache_identity: *const c_char,
+    options: *const CStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CZerobusStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        // INVARIANT: take ownership of `user_data` *before* any fallible work, so
+        // that the supplier's Drop frees it exactly once on every error path below.
+        let owner = CallbackIdpTokenSupplier::new(idp_token_callback, user_data, free_user_data);
+
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let auth = unsafe { federated_auth(owner, client_id, cache_identity)? };
+
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+
+            let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0
+            {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
+                };
+                Some(
+                    prost_types::DescriptorProto::decode(bytes)
+                        .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?,
+                )
+            } else {
+                None
+            };
+
+            let c_opts = if !options.is_null() {
+                Some(unsafe { *options })
+            } else {
+                None
+            };
+
+            build_stream_from_parts(
+                sdk_ref,
+                table_name_str,
+                descriptor_proto,
+                StreamCreateAuth::Federated(auth),
+                c_opts,
+            )
+            .await
+        });
+
+        match res {
+            Ok(stream_ptr) => {
+                write_success_result(result);
+                stream_ptr
+            }
+            Err(err) => {
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
+                ptr::null_mut()
+            }
+        }
     })
 }
 
