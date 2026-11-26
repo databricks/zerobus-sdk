@@ -353,6 +353,21 @@ impl ZerobusStream {
 
             // 5. Handle errors.
             if let Err(error) = result {
+                // A clean end-of-stream (status OK) once shutdown has
+                // started is not a failure: a `recovery(false)` multiplexed
+                // stream half-closes on close and the server ends the RPC
+                // with status OK, which the unbiased `select!` above can
+                // surface before the sender's clean completion. Clear the
+                // error the receiver already published so a later
+                // terminal-cause read does not promote it to a failure.
+                if Self::is_clean_shutdown_error(&error, &cancellation_token) {
+                    let _ = server_error_tx.send(None);
+                    info!(
+                        stream_id = %stream_id,
+                        "Stream ended cleanly during shutdown"
+                    );
+                    return Ok(());
+                }
                 error!(stream_id = %stream_id, "Stream failure detected: {}", error);
                 let error = match &error {
                     // Mapping this to pass certain e2e tests.
@@ -364,24 +379,6 @@ impl ZerobusStream {
                     }
                     _ => error,
                 };
-                // A clean end-of-stream (status OK) that arrives after
-                // shutdown was requested is not a failure: the sender
-                // half-closed on close and the server ended the RPC with
-                // status OK. Without this, a `recovery(false)` stream
-                // reports close() as failed with "closed by server without
-                // errors" whenever the supervisor's unbiased `select!`
-                // resolves the receiver arm before the sender arm.
-                // Clear the error the receiver already published so a
-                // later terminal-cause read does not promote this clean
-                // shutdown to a failure.
-                if Self::is_clean_shutdown_error(&error, &cancellation_token) {
-                    let _ = server_error_tx.send(None);
-                    info!(
-                        stream_id = %stream_id,
-                        "Stream ended cleanly during shutdown"
-                    );
-                    return Ok(());
-                }
                 if !error.is_retryable() || !options.recovery {
                     Self::fail_stream(
                         sync_mutex.as_ref(),
