@@ -204,6 +204,7 @@ fn workspace_endpoint(workspace_url: &str, path: &[&str]) -> ZerobusResult<Url> 
     let mut url = Url::parse(workspace_url).map_err(|e| invalid(e.to_string()))?;
     let loopback = url
         .host_str()
+        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
         .and_then(|host| host.parse::<IpAddr>().ok())
         .is_some_and(|ip| ip.is_loopback());
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
@@ -382,7 +383,9 @@ mod tests {
                 "{url}"
             );
         }
-        assert!(workspace_endpoint("http://127.0.0.1:8080", &[]).is_ok());
+        for url in ["http://127.0.0.1:8080", "http://[::1]:8080"] {
+            assert!(workspace_endpoint(url, &[]).is_ok(), "{url}");
+        }
     }
 
     #[test]

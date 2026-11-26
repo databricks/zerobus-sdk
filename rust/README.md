@@ -1455,6 +1455,8 @@ credentials and spend at most one recovery retry on another setup attempt. A sec
 authentication rejection is terminal. This one-shot setup exception does not change
 reconnect behavior. A unary call applies the same rule to each call.
 
+`SchemaFetchError`, from [fetching a schema from Unity Catalog](#dynamic-protobuf-stream), is never retried by the SDK. Its `retryable` flag marks a transient failure (a network error, 408, 429, or 5xx), but the caller owns retry and backoff. `status` holds the HTTP status when Unity Catalog responded, so a 401 (refresh the token) can be told apart from a 403 or a 404.
+
 ### Schema Mismatch (Arrow Flight)
 
 (Requires `features = ["arrow-flight"]`.)
