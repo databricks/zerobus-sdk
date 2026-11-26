@@ -1,12 +1,8 @@
 //! gRPC channels that follow changes to the TLS settings.
 //!
 //! A [`GrpcChannelSource`] hands out the channel for gRPC streams and unary
-//! clients. Before it reuses a channel, it reads the TLS settings again and
-//! opens a new channel if they changed, so rotated certificates reach a shared
-//! channel, recovery attempts and unary calls, not only new dedicated channels.
-//! If the replaced channel had reached the server, the source keeps it until a
-//! call on the new channel reaches the server too, and goes back to it when the
-//! new channel fails first.
+//! clients, and opens a new one when the TLS settings change. The fallback rule
+//! for a replaced channel is in the TLS Configuration section of the Rust README.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -250,15 +246,13 @@ impl GrpcChannelSource {
     }
 
     /// Returns the channel for the next stream, recovery or unary attempt, and
-    /// the handle that reports a timeout of that attempt on it. Call `bounded` on the
-    /// handle only for the attempt's own timeout, not when the caller cancels.
+    /// the handle that reports the attempt's own timeout on it. Report a timeout
+    /// only for the attempt's own deadline, not when the caller cancels.
     ///
     /// The first call opens the channel and returns any error. Later calls read
     /// the TLS settings again and open a new channel if they changed. If the
     /// settings can't be read or applied at that point, the current channel is
     /// kept, so a broken rotation doesn't take down a channel that still works.
-    /// A new channel replaces one that reached the server only once a call on
-    /// it reaches the server too.
     pub(crate) async fn client(&self) -> ZerobusResult<(GrpcClient, ChannelTimeout)> {
         self.acquire()
             .await
@@ -322,7 +316,7 @@ impl GrpcChannelSource {
         self.channels.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn open(&self, resolved: &ResolvedTls<'_>, tls: TlsFingerprint) -> ZerobusResult<OpenChannel> {
+    fn open(&self, resolved: &ResolvedTls, tls: TlsFingerprint) -> ZerobusResult<OpenChannel> {
         let mut endpoint = base_endpoint(&self.endpoint, &self.sdk_identifier)?;
         if let Some((interval, timeout)) = self.keepalive {
             endpoint = endpoint
