@@ -64,7 +64,7 @@ Run from the SDK directory.
 - Don't leak an internal constraint (e.g. ring power-of-two) into the public API.
 - A core guard is unreachable if the wrapper iterates first — guard both (single and batch).
 - Check how a wrapper's default / `0` / `-1` config value maps across the boundary to Rust — a wrapper default can silently become a different Rust value (`0` read as a real limit, a zero-valued enum as "unset").
-- Validate each builder setter like its siblings, type checks included. Conflicting setters either let the last one win, as the Rust builder does, or fail with an error that names the conflict.
+- Validate each builder setter the same way as the other setters, type checks included. Conflicting setters either let the last one win, as the Rust builder does, or fail with an error that names the conflict.
 
 ## Errors and retry
 
@@ -155,9 +155,12 @@ FFI, JNI, C++, and Go ship native archives on a GitHub Release, created by the p
 
 For reviewers, people and agents alike, and for authors checking their own change.
 
-- Check in this order: breaking changes, changelog, docs and examples, sibling paths, correctness, tests. Style, naming and small refactors are nits.
-- Carry a fix to every sibling path: the other bindings of the core, single and batch calls, sync and async APIs, and other open PRs. A change made for a goal (e.g. spreading reconnects with jitter) covers every path the goal applies to, including code the PR doesn't touch.
-- Blocking means it must change before merge: a bug, data loss, a security problem, a breaking change outside a major, or a user-facing change with no changelog entry. A should-fix can land in a follow-up if the author says so. Start a nit with `nit:`.
+- Data loss and hot-path performance come first; missing either is worse than anything else here.
+  - Data loss: a record acknowledged before it's durable, dropped on close, cancel or recovery, or written twice by a retry.
+  - Hot path: the per-record path from `ingest` through encoding, the FFI crossing and the send loop to ack handling. Flag any new per-record allocation, copy, lock, blocking call or server round-trip.
+- Then check, in order: breaking changes, changelog, docs and examples, the same logic elsewhere, other correctness, tests. Style, naming and small refactors are nits.
+- Make the same fix wherever the same logic exists: in the other SDKs, in single and batch calls, sync and async APIs, gRPC and Arrow Flight streams, ephemeral and persistent streams, and in other open PRs. A change made for a goal (e.g. spreading reconnects with jitter) covers every path the goal applies to, including code the PR doesn't touch.
+- Blocking means it must change before merge: data loss or duplication, a hot-path slowdown the PR doesn't justify, a bug, a security problem, a breaking change outside a major, or a user-facing change with no changelog entry. A should-fix can land in a follow-up if the author says so. Start a nit with `nit:`.
 - One point per comment, on the line it's about: what goes wrong and when, then the fix. Check the claim against the code first.
 - List what a PR deliberately doesn't do, with a reason, under "Left out on purpose" in its description. Reviewers don't raise a listed item again unless the reason doesn't hold, and then say why.
 

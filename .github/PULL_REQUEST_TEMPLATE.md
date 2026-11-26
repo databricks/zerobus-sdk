@@ -30,5 +30,5 @@ has been done and not done provides important context to the reviewers.
 ## Left out on purpose
 
 Optional. List anything this PR deliberately doesn't do, with a short reason,
-such as a sibling SDK that follows in another PR. Reviewers won't raise these
+such as an SDK that gets the change in a later PR. Reviewers won't raise these
 again unless the reason doesn't hold.
