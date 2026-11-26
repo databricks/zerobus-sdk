@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.databricks.test.table.TestTableRow.CityPopulationTableRow;
 import com.google.protobuf.DescriptorProtos;
+import com.google.protobuf.InvalidProtocolBufferException;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for {@link TableProperties}. */
@@ -60,7 +61,7 @@ public class TablePropertiesTest {
   }
 
   @Test
-  void testDescriptorProtoCanBeSerialized() {
+  void testDescriptorProtoCanBeSerialized() throws InvalidProtocolBufferException {
     TableProperties<CityPopulationTableRow> props =
         new TableProperties<>("cat.sch.tbl", CityPopulationTableRow.getDefaultInstance());
 
@@ -70,5 +71,10 @@ public class TablePropertiesTest {
     // Should produce non-empty serialized form
     assertNotNull(serialized);
     assertTrue(serialized.length > 0);
+
+    DescriptorProtos.DescriptorProto parsed =
+        DescriptorProtos.DescriptorProto.parseFrom(serialized);
+    assertEquals(descriptorProto, parsed);
+    assertEquals("CityPopulationTableRow", parsed.getName());
   }
 }

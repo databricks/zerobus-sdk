@@ -3,7 +3,6 @@ package com.databricks.zerobus;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.databricks.test.table.TestTableRow.CityPopulationTableRow;
-import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.junit.jupiter.api.Test;
 
@@ -33,16 +32,5 @@ public class GeneratedMessageRuntimeTest {
 
     assertEquals("Zagreb", parsed.getCityName());
     assertEquals(790_000, parsed.getPopulation());
-  }
-
-  @Test
-  void descriptorProtoRoundTripsThroughBytes() throws InvalidProtocolBufferException {
-    DescriptorProtos.DescriptorProto descriptor = CityPopulationTableRow.getDescriptor().toProto();
-
-    DescriptorProtos.DescriptorProto parsed =
-        DescriptorProtos.DescriptorProto.parseFrom(descriptor.toByteArray());
-
-    assertEquals(descriptor, parsed);
-    assertEquals("CityPopulationTableRow", parsed.getName());
   }
 }
