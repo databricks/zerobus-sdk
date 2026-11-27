@@ -176,7 +176,8 @@ class MultiplexedStreamOptions(StreamConfigurationOptions):
     The same fields as ``StreamConfigurationOptions``. ``ack_callback`` is shared by every
     sub-stream, and its ``offset`` argument receives the message ID that the ingest call
     returned. A plain ``StreamConfigurationOptions`` with ``ack_callback`` set is rejected for
-    multiplexed streams.
+    multiplexed streams. Passed to ``create_stream``, it acts as a plain
+    ``StreamConfigurationOptions``, and ``ack_callback`` receives ordinary offsets.
     """
 
     def __init__(self, **kwargs: Any) -> None: ...

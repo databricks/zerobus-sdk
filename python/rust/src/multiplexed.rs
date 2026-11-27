@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use databricks_zerobus_ingest_sdk::{
     AckCallback as RustAckCallback, IdpTokenSupplier, MessageId,
@@ -25,19 +25,22 @@ use crate::sync_wrapper::apply_table_and_format;
 
 /// Options for a multiplexed stream (Beta): the `StreamConfigurationOptions` fields, where
 /// `ack_callback` is shared by every sub-stream and its `offset` argument receives the
-/// message ID returned by the ingest call.
-#[pyclass(extends = StreamConfigurationOptions)]
+/// message ID returned by the ingest call. Passed to `create_stream`, it acts as a plain
+/// `StreamConfigurationOptions`, and the callback receives ordinary offsets.
+#[pyclass(extends = StreamConfigurationOptions, subclass)]
 pub struct MultiplexedStreamOptions {}
 
 #[pymethods]
 impl MultiplexedStreamOptions {
+    /// Accept and ignore any arguments, as the base class does; the inherited `__init__`
+    /// applies the options.
     #[new]
-    #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyClassInitializer<Self>> {
-        Ok(
-            PyClassInitializer::from(StreamConfigurationOptions::new(kwargs)?)
-                .add_subclass(Self {}),
-        )
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyClassInitializer<Self> {
+        PyClassInitializer::from(StreamConfigurationOptions::default()).add_subclass(Self {})
     }
 
     fn __repr__(slf: PyRef<'_, Self>) -> String {
