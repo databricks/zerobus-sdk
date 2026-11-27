@@ -29,7 +29,8 @@ func defaultMultiplexedJitter(ctx context.Context, _ int) error {
 type multiplexedHooks struct {
 	// beforeLaneIngest runs right before each lane ingest call.
 	beforeLaneIngest atomic.Pointer[func(lane int)]
-	// beforeLaneWait runs right before each lane wait in Flush.
+	// beforeLaneWait runs right before each lane wait in Flush and
+	// WaitForMessageID.
 	beforeLaneWait atomic.Pointer[func(op string, lane int)]
 	// beforeLaneClose runs right before Close closes each lane.
 	beforeLaneClose atomic.Pointer[func(lane int)]
@@ -57,7 +58,9 @@ var errMultiplexedCapacityWait = errors.New("multiplexed capacity wait expired")
 // records, and every later ingest call, Flush, and Close returns the first
 // stored failure. It keeps the lane's retry class: once IsClosed reports true,
 // Retryable means that a new stream may succeed. Until then, calls on healthy
-// lanes still succeed. The other lanes stay open until Close.
+// lanes still succeed. WaitForMessageID reports only on the lane named by its
+// ID, so it can still succeed for a record on a healthy lane. The other lanes
+// stay open until Close.
 //
 // For throughput, queue records in a loop and call Flush once.
 //
@@ -86,6 +89,8 @@ type MultiplexedStream struct {
 	// ingestsDone gets a value when the last ingest call on a lane returns
 	// after the stream closed.
 	ingestsDone chan struct{}
+	// callbackWait bounds how long Close waits for the lane callback workers.
+	callbackWait time.Duration
 	// failure holds the first terminal lane error.
 	failure atomic.Pointer[multiplexedFailure]
 
@@ -199,6 +204,10 @@ func (s *SDK) createMultiplexedStream(
 	if capacityWait <= 0 {
 		capacityWait = defaultMultiplexedCapacityWait
 	}
+	callbackWait := sc.cfg.CallbackTeardownTimeout
+	if callbackWait <= 0 {
+		callbackWait = stream.DefaultCallbackTeardownTimeout
+	}
 	lanes := make([]*Stream, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -243,6 +252,7 @@ func (s *SDK) createMultiplexedStream(
 		tableName:       tableName,
 		laneInflight:    sc.cfg.MaxInflight,
 		capacityWait:    capacityWait,
+		callbackWait:    callbackWait,
 		laneCloseCtx:    make([]context.Context, n),
 		laneCloseCancel: make([]context.CancelFunc, n),
 		ingestsInFlight: make([]inflightCount, n),
@@ -514,6 +524,40 @@ func (m *MultiplexedStream) FlushContext(ctx context.Context) error {
 	return withOp(op, firstErr)
 }
 
+// WaitForMessageID waits until the ingest call with this ID is acknowledged,
+// or its lane fails. Only the lane named by the ID decides the result. The
+// wait is bounded by WithFlushTimeout. An ID whose lane index is out of range
+// returns a non-retryable error. If the lane fails or closes before the ID is
+// acknowledged, it returns that lane's error, even when another lane failed
+// first. A lane that closed without a failure, for example through SDK.Close,
+// gives a non-retryable lane closed error. Pass only an ID that this stream
+// returned without an error. Prefer Flush for bulk durability checks; use a
+// per-record wait only for low-volume strict confirmation flows.
+func (m *MultiplexedStream) WaitForMessageID(id MessageID) error {
+	return m.WaitForMessageIDContext(context.Background(), id)
+}
+
+// WaitForMessageIDContext is WaitForMessageID with caller context.
+func (m *MultiplexedStream) WaitForMessageIDContext(ctx context.Context, id MessageID) error {
+	const op = "WaitForMessageID"
+	idx := id.streamIndex()
+	if idx >= len(m.lanes) {
+		return &Error{Op: op, cause: fmt.Errorf("invalid lane index %d in message id", idx), retryable: false}
+	}
+	if hook := m.hooks.beforeLaneWait.Load(); hook != nil {
+		(*hook)(op, idx)
+	}
+	err := m.lanes[idx].core.WaitForOffset(ctx, id.offset())
+	if err == nil {
+		return nil
+	}
+	if cause := m.laneEndCause(idx, err); cause != nil {
+		m.fail(cause)
+		return withOp(op, cause)
+	}
+	return wrapErr(op, err)
+}
+
 // Close stops accepting records and waits for the ingest calls in flight to
 // return; each is bounded by its capacity wait. Then it closes every lane
 // concurrently. Each lane flushes its queued records within its own
@@ -522,7 +566,8 @@ func (m *MultiplexedStream) FlushContext(ctx context.Context) error {
 // lane failure, else the first close error. A lane that failed or closed before
 // Close, for example through SDK.Close, fails the stream first, as in Flush.
 //
-// Ack callbacks can still run after Close returns.
+// When Close returns, all callbacks have run, unless Close waited longer than
+// the callback limit (5 s). Do not call Close from a callback.
 func (m *MultiplexedStream) Close() error {
 	m.closeOnce.Do(func() {
 		if m.failure.Load() == nil {
@@ -548,6 +593,7 @@ func (m *MultiplexedStream) Close() error {
 			}()
 		}
 		wg.Wait()
+		m.waitCallbacks()
 
 		if f := m.failure.Load(); f != nil {
 			m.closeErr = withOp("Close", f.err)
@@ -585,6 +631,20 @@ func (m *MultiplexedStream) ingestInFlight() bool {
 		}
 	}
 	return false
+}
+
+// waitCallbacks waits until every lane's callback worker has run its queued
+// callbacks, for at most the callback limit in total.
+func (m *MultiplexedStream) waitCallbacks() {
+	timer := time.NewTimer(m.callbackWait)
+	defer timer.Stop()
+	for _, lane := range m.lanes {
+		select {
+		case <-lane.core.CallbacksDone():
+		case <-timer.C:
+			return
+		}
+	}
 }
 
 // IsClosed reports whether Close was called or a call saw a lane fail or

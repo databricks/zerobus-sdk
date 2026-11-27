@@ -18,10 +18,14 @@ const (
 const MaxMultiplexedStreams = 1 << messageIDStreamBits
 
 // MessageID identifies one ingest call on a multiplexed stream. Match it with
-// the IDs that a MultiplexedAckCallback receives. int64(id) is the raw value.
+// the IDs that a MultiplexedAckCallback receives, or pass it to
+// WaitForMessageID. int64(id) is the raw value.
 //
 // Unlike a Stream offset, MessageID values are not ordered. Use an ID only
-// with the multiplexed stream that returned it.
+// with the multiplexed stream that returned it. Pass only an ID that the
+// stream returned without an error: a zero ID from a failed or empty call, or
+// an ID from another stream, can make a wait block until its timeout or return
+// nil for a record that is not durable.
 //
 // Multiplexed streams are a Beta API.
 type MessageID int64
@@ -88,8 +92,10 @@ func Headers(provider HeadersProvider) Auth {
 // should return promptly. A panic in a callback is recovered and logged with
 // the standard log package, and later callbacks still run.
 //
-// Multiplexed stream methods, including Close, may be called from a callback.
-// Callbacks can still run after Close returns.
+// A callback may call the ingest methods, Flush, and WaitForMessageID. It must
+// not call Close: Close waits for the callbacks to finish. To close from a
+// callback, call Close in a new goroutine. When Close returns, all callbacks
+// have run, unless Close waited longer than the callback limit (5 s).
 //
 // Multiplexed streams are a Beta API.
 type MultiplexedAckCallback interface {
@@ -101,7 +107,7 @@ type MultiplexedAckCallback interface {
 
 // WithMultiplexedAckCallback registers a callback for asynchronous ack and
 // error notifications on a multiplexed stream. It is an alternative to
-// blocking on Flush; both may be used together.
+// blocking on Flush or WaitForMessageID; both may be used together.
 //
 // It is only valid with CreateMultiplexedStream. CreateStream and
 // CreateStreamWithProvider reject it with a non-retryable error.

@@ -1,9 +1,11 @@
 package zerobus_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -196,6 +198,32 @@ func (c *recordingMuxCallback) errorIDs() []zerobus.MessageID {
 	return slices.Clone(c.errIDs)
 }
 
+// funcMuxCallback runs onAck for every ack.
+type funcMuxCallback struct {
+	onAck func(zerobus.MessageID)
+}
+
+func (c *funcMuxCallback) OnAck(id zerobus.MessageID)     { c.onAck(id) }
+func (*funcMuxCallback) OnError(zerobus.MessageID, error) {}
+
+// syncBuffer is a bytes.Buffer that is safe for concurrent writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // assertSameIDs checks that got holds every ID of want exactly once.
 func assertSameIDs(t *testing.T, got, want []zerobus.MessageID) {
 	t.Helper()
@@ -332,6 +360,9 @@ func TestCreateMultiplexedStreamOpensEveryLane(t *testing.T) {
 			last := ids[len(ids)-1]
 			if got := zerobus.MessageIDStreamIndex(last); got != tc.n-1 {
 				t.Errorf("last ID = %v, want lane %d", last, tc.n-1)
+			}
+			if err := mux.WaitForMessageID(last); err != nil {
+				t.Errorf("WaitForMessageID(%v): %v", last, err)
 			}
 			for i := range 2 {
 				if err := mux.Close(); err != nil {
@@ -795,6 +826,7 @@ func TestMultiplexedCloseWaitsForBlockedIngest(t *testing.T) {
 	mustIngest(t, mux, []byte(`{"m":"hold","p":"`+strings.Repeat("x", 1000)+`"}`)) // lane 0 is full
 	mustIngest(t, mux, muxRecord(1))                                               // lane 1
 
+	ids := make(chan zerobus.MessageID, 1)
 	blocked := make(chan error, 1)
 	reached := make(chan struct{})
 	var once sync.Once
@@ -804,7 +836,8 @@ func TestMultiplexedCloseWaitsForBlockedIngest(t *testing.T) {
 		}
 	}))
 	go func() {
-		_, err := mux.IngestRecord(bigMuxRecord) // lane 0
+		id, err := mux.IngestRecord(bigMuxRecord) // lane 0
+		ids <- id
 		blocked <- err
 	}()
 	select {
@@ -826,17 +859,25 @@ func TestMultiplexedCloseWaitsForBlockedIngest(t *testing.T) {
 	if err := receive(t, blocked, "blocked IngestRecord"); err != nil {
 		t.Fatalf("blocked IngestRecord: %v, want it admitted after the ack", err)
 	}
+	id := <-ids
 	if err := receive(t, closed, "Close"); err != nil {
 		t.Errorf("Close: %v, want nil (the admitted record is acked)", err)
+	}
+	if err := mux.WaitForMessageID(id); err != nil {
+		t.Errorf("WaitForMessageID(%v) of the admitted record: %v", id, err)
 	}
 }
 
 func TestMultiplexedStreamRejectsCallsAfterClose(t *testing.T) {
 	sdk := newMuxSDK(t, &echoServer{streamID: "mux-after-close"})
 	mux := createMux(t, sdk, 2)
-	mustIngest(t, mux, muxRecord(1))
+	id := mustIngest(t, mux, muxRecord(1))
 	if err := mux.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	// A durable record never fails a wait, also after Close.
+	if err := mux.WaitForMessageID(id); err != nil {
+		t.Errorf("WaitForMessageID(%v) of an acked record after Close: %v", id, err)
 	}
 
 	// Each method only passes context.Background to its Context method, so
@@ -873,18 +914,18 @@ func TestMultiplexedStreamRejectsCallsAfterClose(t *testing.T) {
 // poisonedMux returns a two-lane stream whose lane 1 the server failed with
 // the record "poison-r1", unobserved by the multiplexed stream. Lane 0 holds
 // one acked record.
-func poisonedMux(t *testing.T, failAfterAck bool) *zerobus.MultiplexedStream {
+func poisonedMux(t *testing.T, failAfterAck bool) (*zerobus.MultiplexedStream, zerobus.MessageID, zerobus.MessageID) {
 	t.Helper()
 	sdk := newMuxSDK(t, &echoServer{streamID: "mux-poison", failMarker: "poison", failAfterAck: failAfterAck})
 	mux := createMux(t, sdk, 2)
-	mustIngest(t, mux, muxRecord(0))
-	mustIngest(t, mux, []byte(`{"m":"poison-r1"}`))
+	id0 := mustIngest(t, mux, muxRecord(0))
+	id1 := mustIngest(t, mux, []byte(`{"m":"poison-r1"}`))
 	waitLaneClosed(t, mux, 1)
-	return mux
+	return mux, id0, id1
 }
 
 func TestMultiplexedLaneFailurePoisonsOnIngest(t *testing.T) {
-	mux := poisonedMux(t, false)
+	mux, _, _ := poisonedMux(t, false)
 
 	// An ingest checks only its own lane, so lane 0 still accepts one.
 	if id := mustIngest(t, mux, muxRecord(2)); zerobus.MessageIDStreamIndex(id) != 0 {
@@ -904,11 +945,15 @@ func TestMultiplexedLaneFailurePoisonsOnIngest(t *testing.T) {
 func TestMultiplexedLaneFailurePoisonsOnFlush(t *testing.T) {
 	t.Run("failed lane record acked", func(t *testing.T) {
 		// Only the lane state shows the failure.
-		mux := poisonedMux(t, true)
+		mux, _, id1 := poisonedMux(t, true)
 
 		assertRejected(t, mux.Flush(), "poison-r1")
 		_, err := mux.IngestRecord(muxRecord(2))
 		assertRejected(t, err, "poison-r1")
+		// The failed lane acked the record first, so it is durable.
+		if err := mux.WaitForMessageID(id1); err != nil {
+			t.Errorf("WaitForMessageID of the acked record on the failed lane: %v", err)
+		}
 	})
 	for _, tc := range []struct {
 		name   string
@@ -942,13 +987,13 @@ func TestMultiplexedLaneFailurePoisonsOnFlush(t *testing.T) {
 
 func TestMultiplexedLaneFailureWinsOverTimeout(t *testing.T) {
 	// Lane 0 never gets an ack, so its Flush and Close time out; lane 1 fails.
-	failedMux := func(t *testing.T, flushTimeout time.Duration) *zerobus.MultiplexedStream {
+	failedMux := func(t *testing.T, flushTimeout time.Duration) (*zerobus.MultiplexedStream, zerobus.MessageID) {
 		t.Helper()
 		srv := &echoServer{streamID: "mux-fail-timeout", noAcks: true, failMarker: "poison"}
 		mux := createMux(t, newMuxSDK(t, srv), 2, zerobus.WithFlushTimeout(flushTimeout))
-		mustIngest(t, mux, muxRecord(0))                // lane 0, never acked
-		mustIngest(t, mux, []byte(`{"m":"poison-r1"}`)) // lane 1 fails
-		return mux
+		mustIngest(t, mux, muxRecord(0))                       // lane 0, never acked
+		id1 := mustIngest(t, mux, []byte(`{"m":"poison-r1"}`)) // lane 1 fails
+		return mux, id1
 	}
 	assertOnlyFailure := func(t *testing.T, err error) {
 		t.Helper()
@@ -958,13 +1003,35 @@ func TestMultiplexedLaneFailureWinsOverTimeout(t *testing.T) {
 		}
 	}
 	t.Run("Flush", func(t *testing.T) {
-		assertOnlyFailure(t, failedMux(t, 500*time.Millisecond).Flush())
+		mux, _ := failedMux(t, 500*time.Millisecond)
+		assertOnlyFailure(t, mux.Flush())
 	})
 	t.Run("Close", func(t *testing.T) {
-		mux := failedMux(t, 50*time.Millisecond)
-		waitLaneClosed(t, mux, 1)
+		mux, id1 := failedMux(t, 50*time.Millisecond)
+		assertRejected(t, mux.WaitForMessageID(id1), "poison-r1")
 		assertOnlyFailure(t, mux.Close())
 	})
+}
+
+func TestMultiplexedLaneFailurePoisonsOnWaitForMessageID(t *testing.T) {
+	srv := newHoldServer("mux-poison-wait")
+	srv.failMarker = "poison"
+	mux := createMux(t, newMuxSDK(t, srv), 2)
+	release := releaseHeldAck(t, srv)
+	id0 := mustIngest(t, mux, []byte(`{"m":"hold"}`))      // lane 0, ack held
+	id1 := mustIngest(t, mux, []byte(`{"m":"poison-r1"}`)) // lane 1 fails
+
+	assertRejected(t, mux.WaitForMessageID(id1), "poison-r1")
+	_, err := mux.IngestRecord(muxRecord(2)) // lane 0
+	assertRejected(t, err, "poison-r1")
+	// Only the lane named by the ID decides: lane 0 still acks its record.
+	releaseSoon(release)
+	if err := mux.WaitForMessageID(id0); err != nil {
+		t.Errorf("WaitForMessageID on the healthy lane: %v", err)
+	}
+	if !srv.heldAcked.Load() {
+		t.Error("WaitForMessageID returned before lane 0 got its ack")
+	}
 }
 
 // A call that sees its own lane end returns that lane's result, also when
@@ -995,9 +1062,9 @@ func TestMultiplexedCallReturnsOwnLaneResult(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := &echoServer{streamID: "mux-own-lane", noAcks: true, failMarker: "poison"}
 			mux := createMux(t, newMuxSDK(t, srv), 2, zerobus.WithFlushTimeout(50*time.Millisecond))
-			mustIngest(t, mux, muxRecord(0)) // lane 0
-			mustIngest(t, mux, muxRecord(1)) // lane 1, never acked
-			mustIngest(t, mux, muxRecord(2)) // lane 0
+			mustIngest(t, mux, muxRecord(0))        // lane 0
+			id1 := mustIngest(t, mux, muxRecord(1)) // lane 1, never acked
+			mustIngest(t, mux, muxRecord(2))        // lane 0
 
 			// The next ingest goes to lane 1; hold it after its closed check.
 			reached, proceed := make(chan struct{}), make(chan struct{})
@@ -1035,6 +1102,7 @@ func TestMultiplexedCallReturnsOwnLaneResult(t *testing.T) {
 
 			release()
 			tc.check(t, receive(t, done, "IngestRecord on lane 1"), "IngestRecord")
+			tc.check(t, mux.WaitForMessageID(id1), "WaitForMessageID")
 			_, err = mux.IngestRecord(muxRecord(5))
 			assertRejected(t, err, "poison-a")
 		})
@@ -1212,6 +1280,9 @@ func TestMultiplexedSDKCloseClosesStream(t *testing.T) {
 		{op: "Flush", lane: -1, call: func(mux *zerobus.MultiplexedStream, _ []zerobus.MessageID) error {
 			return mux.Flush()
 		}},
+		{op: "WaitForMessageID", lane: 1, call: func(mux *zerobus.MultiplexedStream, ids []zerobus.MessageID) error {
+			return mux.WaitForMessageID(ids[1])
+		}},
 	} {
 		t.Run(tc.op+" waiting", func(t *testing.T) {
 			sdk := newMuxSDK(t, &echoServer{streamID: "mux-sdk-close-wait", noAcks: true})
@@ -1248,7 +1319,7 @@ func TestMultiplexedSDKCloseClosesStream(t *testing.T) {
 			if err := sdk.Close(); err != nil {
 				t.Fatalf("SDK.Close: %v", err)
 			}
-			// Flush stores the lowest-index lane.
+			// Flush stores the lowest-index lane; a wait stores its own lane.
 			lane := max(tc.lane, 0)
 			assertLaneClosed(t, receive(t, done, tc.op), tc.op, lane)
 			if !mux.IsClosed() {
@@ -1273,6 +1344,36 @@ func TestMultiplexedFlush(t *testing.T) {
 		}
 		if !srv.heldAcked.Load() {
 			t.Error("Flush returned before lane 2 got its ack")
+		}
+	})
+	t.Run("WaitForMessageID waits for its own offset", func(t *testing.T) {
+		srv := newHoldServer("mux-wait-offset")
+		mux := createMux(t, newMuxSDK(t, srv), 2)
+		release := releaseHeldAck(t, srv)
+		id0 := mustIngest(t, mux, muxRecord(0)) // lane 0, offset 0
+		mustIngest(t, mux, muxRecord(1))        // lane 1
+		id2 := mustIngest(t, mux, []byte(`{"m":"hold"}`))
+		if id2 != zerobus.NewMessageID(0, 1) {
+			t.Fatalf("held record ID = %v, want lane 0 offset 1", id2)
+		}
+		if err := mux.WaitForMessageID(id0); err != nil {
+			t.Fatalf("WaitForMessageID(%v): %v", id0, err)
+		}
+
+		// Offset 0 of lane 0 is acked, but the wait on offset 1 still waits for
+		// its own ack.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if err := mux.WaitForMessageIDContext(ctx, id2); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WaitForMessageIDContext(%v) with a held ack = %v, want DeadlineExceeded", id2, err)
+		}
+		if mux.IsClosed() {
+			t.Error("IsClosed() = true after a WaitForMessageID timeout")
+		}
+		mustIngest(t, mux, muxRecord(3))
+		release()
+		if err := mux.WaitForMessageID(id2); err != nil {
+			t.Errorf("WaitForMessageID(%v) after the ack: %v", id2, err)
 		}
 	})
 	t.Run("timeout does not close", func(t *testing.T) {
@@ -1313,6 +1414,20 @@ func TestMultiplexedFlush(t *testing.T) {
 	})
 }
 
+func TestMultiplexedWaitForMessageIDRejectsUnknownLane(t *testing.T) {
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-bad-id"}), 2)
+	for _, tc := range []struct {
+		id   zerobus.MessageID
+		lane int
+	}{
+		{id: zerobus.NewMessageID(5, 0), lane: 5},
+		{id: zerobus.MessageID(-1), lane: 63},
+	} {
+		assertPermanentError(t, mux.WaitForMessageID(tc.id),
+			fmt.Sprintf("zerobus: WaitForMessageID: invalid lane index %d in message id", tc.lane))
+	}
+}
+
 // A clean double Close: TestCreateMultiplexedStreamOpensEveryLane.
 func TestMultiplexedCloseReturnsOneErrorToEveryCaller(t *testing.T) {
 	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-close-error", noAcks: true}), 2,
@@ -1332,6 +1447,121 @@ func TestMultiplexedCloseReturnsOneErrorToEveryCaller(t *testing.T) {
 	if second != first || third != first {
 		t.Errorf("Close errors = %v, %v, %v, want one shared error", first, second, third)
 	}
+}
+
+func TestMultiplexedCloseWaitsForRunningCallback(t *testing.T) {
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(release)
+	var once sync.Once
+	cb := &funcMuxCallback{onAck: func(zerobus.MessageID) {
+		once.Do(func() { close(entered) })
+		<-unblock
+	}}
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-callback-wait"}), 2, zerobus.WithMultiplexedAckCallback(cb))
+	mustIngest(t, mux, muxRecord(0))
+	if err := mux.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnAck did not run")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- mux.Close() }()
+	// Once every lane is closed, Close can only be waiting for the callback.
+	for i := range mux.StreamCount() {
+		waitLaneClosed(t, mux, i)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned %v while OnAck still ran", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	if err := receive(t, closed, "Close"); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestMultiplexedCloseWaitForCallbacksIsBounded(t *testing.T) {
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	var once sync.Once
+	cb := &funcMuxCallback{onAck: func(zerobus.MessageID) {
+		once.Do(func() { close(entered) })
+		<-unblock
+	}}
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-callback-bound"}), 2,
+		zerobus.WithMultiplexedAckCallback(cb), zerobus.WithCallbackTeardownTimeout(50*time.Millisecond))
+	mustIngest(t, mux, muxRecord(0))
+	if err := mux.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnAck did not run")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- mux.Close() }()
+	// The default limit is 5 s; the 50 ms limit must end the wait well before.
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close waited for a blocked callback past its limit")
+	}
+}
+
+func TestMultiplexedCloseRacesIngest(t *testing.T) {
+	rec := &recordingMuxCallback{}
+	sdk := newMuxSDK(t, &echoServer{streamID: "mux-close-race"})
+	mux := createMux(t, sdk, 4, zerobus.WithMultiplexedAckCallback(rec))
+
+	const workers = 8
+	start := make(chan struct{})
+	var firstIngest, done sync.WaitGroup
+	firstIngest.Add(workers)
+	ids := make([][]zerobus.MessageID, workers)
+	lastErrs := make([]error, workers)
+	for w := range workers {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			<-start
+			for {
+				id, err := mux.IngestRecord(muxRecord(w))
+				if len(ids[w]) == 0 {
+					firstIngest.Done()
+				}
+				if err != nil {
+					lastErrs[w] = err
+					return
+				}
+				ids[w] = append(ids[w], id)
+			}
+		}()
+	}
+	close(start)
+	firstIngest.Wait()
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	done.Wait()
+
+	var all []zerobus.MessageID
+	for w := range workers {
+		if len(ids[w]) == 0 {
+			t.Fatalf("worker %d ingested nothing before Close: %v", w, lastErrs[w])
+		}
+		assertMuxClosed(t, lastErrs[w], "IngestRecord")
+		all = append(all, ids[w]...)
+	}
+	// Close returns after every lane's callbacks ran.
+	assertSameIDs(t, rec.ackIDs(), all)
 }
 
 func TestMultiplexedCloseClosesLanesConcurrently(t *testing.T) {
@@ -1392,4 +1622,84 @@ func TestMultiplexedLowestIndexLaneFailureWins(t *testing.T) {
 		assertRejected(t, mux.Flush(), "tag-a")
 		assertRejected(t, mux.Close(), "tag-a")
 	})
+}
+
+func TestMultiplexedAckCallbackReportsErrorIDs(t *testing.T) {
+	rec := &recordingMuxCallback{}
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-ack-errors", noAcks: true}), 2,
+		zerobus.WithMultiplexedAckCallback(rec), zerobus.WithFlushTimeout(50*time.Millisecond))
+
+	var ids []zerobus.MessageID
+	for i := range 4 {
+		ids = append(ids, mustIngest(t, mux, muxRecord(i)))
+	}
+	_ = mux.Close()
+	assertSameIDs(t, rec.errorIDs(), ids)
+}
+
+func TestMultiplexedAckCallbackPanicIsLogged(t *testing.T) {
+	var logs syncBuffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	rec := &recordingMuxCallback{}
+	var once sync.Once
+	cb := &funcMuxCallback{onAck: func(id zerobus.MessageID) {
+		once.Do(func() { panic("mux callback failure") })
+		rec.OnAck(id)
+	}}
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-ack-panic"}), 2, zerobus.WithMultiplexedAckCallback(cb))
+
+	var ids []zerobus.MessageID
+	for i := range 4 {
+		ids = append(ids, mustIngest(t, mux, muxRecord(i)))
+	}
+	if err := mux.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, "zerobus: MultiplexedAckCallback.OnAck(message ID ") ||
+		!strings.Contains(got, "panicked: mux callback failure") {
+		t.Errorf("log = %q, want the recovered panic", got)
+	}
+	if got := rec.ackIDs(); len(got) != len(ids)-1 {
+		t.Errorf("OnAck after the panic ran for %v, want the other %d of %v", got, len(ids)-1, ids)
+	}
+}
+
+func TestMultiplexedAckCallbackCanCallStream(t *testing.T) {
+	var mux *zerobus.MultiplexedStream
+	type result struct {
+		ingest, flush, wait error
+	}
+	results := make(chan result, 1)
+	var once sync.Once
+	cb := &funcMuxCallback{onAck: func(zerobus.MessageID) {
+		once.Do(func() {
+			var r result
+			var id zerobus.MessageID
+			id, r.ingest = mux.IngestRecord(muxRecord(1))
+			r.flush = mux.Flush()
+			if r.ingest == nil {
+				r.wait = mux.WaitForMessageID(id)
+			}
+			results <- r
+		})
+	}}
+	mux = createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-ack-calls"}), 2, zerobus.WithMultiplexedAckCallback(cb))
+	mustIngest(t, mux, muxRecord(0))
+
+	select {
+	case r := <-results:
+		if r.ingest != nil || r.flush != nil || r.wait != nil {
+			t.Errorf("calls from OnAck: IngestRecord %v, Flush %v, WaitForMessageID %v, want all nil", r.ingest, r.flush, r.wait)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("calls from OnAck did not return")
+	}
+	if err := mux.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
 }

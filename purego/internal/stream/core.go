@@ -810,6 +810,23 @@ func (cs *CoreStream[Req, Resp]) TerminalErr() error {
 	return cs.terminalErr()
 }
 
+// closedChan is an already closed channel.
+var closedChan = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
+// CallbacksDone returns a channel that is closed when the callback worker has
+// run every queued callback and exited. The worker exits only after the stream
+// is closed. Without a callback, the channel is already closed.
+func (cs *CoreStream[Req, Resp]) CallbacksDone() <-chan struct{} {
+	if cs.dispatcher == nil {
+		return closedChan
+	}
+	return cs.dispatcher.done
+}
+
 func (cs *CoreStream[Req, Resp]) isClosed() bool {
 	select {
 	case <-cs.done:

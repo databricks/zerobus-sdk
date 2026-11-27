@@ -113,7 +113,8 @@ if err := mux.Flush(); err != nil { // wait once for every lane
   Each has a `Context` form.
 - A batch goes to one lane. Records keep their order within a lane, but there
   is no order across lanes, so `MessageID` values are not ordered. Use `Flush`
-  to confirm everything.
+  to confirm everything; use a per-record `WaitForMessageID` only for
+  low-volume strict confirmation flows.
 - When the chosen lane is full (`WithMaxInflight` or
   `WithMaxBufferedPayloadBytes`), the call waits for that lane, for at most 30
   seconds, then returns a retryable error. A context deadline can only shorten
@@ -124,13 +125,17 @@ if err := mux.Flush(); err != nil { // wait once for every lane
   records, and every later ingest call, `Flush`, and `Close` returns the first
   stored failure. It keeps the lane's retry class: once `IsClosed` reports
   true, `Retryable` means that a new stream may succeed. Until then, calls on
-  healthy lanes still succeed.
+  healthy lanes still succeed. `WaitForMessageID` reports only on the lane
+  named by its ID.
 - `Close` waits for the ingest calls in flight, each for at most the 30-second
   capacity wait, then closes every lane.
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
   call the callback concurrently and in no global order, so it must be safe for
-  concurrent use. Callbacks can still run after `Close` returns. A panic in a
-  callback is logged with the standard `log` package.
+  concurrent use. A callback may call the ingest methods, `Flush`, and
+  `WaitForMessageID`, but not `Close`. To close from a callback, call `Close`
+  in a new goroutine. When `Close` returns, all callbacks have run, unless
+  `Close` waited longer than the callback limit (5 s). A panic in a callback is
+  logged with the standard `log` package.
 
 ## Authentication
 
