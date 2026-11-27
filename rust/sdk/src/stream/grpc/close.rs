@@ -27,7 +27,11 @@ impl ZerobusStream {
 
     /// Closes the stream after a flush attempt.
     ///
-    /// If already closed, returns immediately without flushing or awaiting cleanup.
+    /// If already closed, returns `Ok(())` without flushing. A stream that failed is
+    /// closed by the SDK, which queues an `on_error()` for each pending record; in that
+    /// case `close()` still stops the supervisor and delivers those queued callbacks,
+    /// within `callback_max_wait_time_ms`, as a normal close does. A second `close()`
+    /// after a completed one does nothing.
     /// Otherwise, calls `flush()`, then requests task shutdown even if flushing fails.
     /// Supervisor shutdown waits up to one second, then at most 100 ms after abort.
     /// Callback draining uses `callback_max_wait_time_ms` (`None` waits indefinitely).
@@ -61,6 +65,12 @@ impl ZerobusStream {
     /// ```
     pub async fn close(&mut self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
+            if self.callback_handler_task.is_some() {
+                // A failed stream: the supervisor may still be queueing one
+                // on_error per pending record, so stop it first, then drain.
+                let _ = self.shutdown_supervisor().await;
+                self.shutdown_callbacks().await;
+            }
             return Ok(());
         }
         if let Some(stream_id) = self.stream_id.as_deref() {
