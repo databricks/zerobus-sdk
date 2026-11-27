@@ -87,8 +87,9 @@ defer mux.Close()
 ```
 
 - The lane count is between 1 and `MaxMultiplexedStreams` (64).
-  `CreateMultiplexedStream` opens all lanes and waits until every lane is
-  open. If one lane fails to open, it closes the others and returns the error.
+  `CreateMultiplexedStream` opens all lanes, each after a random delay of up to
+  1 second, and waits until every lane is open. If one lane fails to open, it
+  closes the others and returns the error.
 - `WithMaxInflight` is the budget for the whole multiplexed stream. It counts
   ingest calls, not records, and the lanes split it evenly, so it must be at
   least the lane count. `WithAckCallback` is rejected, and `WithWaitForReady`
@@ -97,11 +98,10 @@ defer mux.Close()
   can buffer up to N times that value.
 - Each lane opens its own gRPC connection, unless the SDK was created with
   `WithConnectionPerStream(false)`.
-- Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`.
-  `WithAckCallback` is rejected. Lanes call the callback concurrently and in no
-  global order, so it must be safe for concurrent use. Callbacks can still run
-  after `Close` returns. A panic in a callback is logged with the standard
-  `log` package.
+- Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
+  call the callback concurrently and in no global order, so it must be safe for
+  concurrent use. Callbacks can still run after `Close` returns. A panic in a
+  callback is logged with the standard `log` package.
 
 ## Authentication
 

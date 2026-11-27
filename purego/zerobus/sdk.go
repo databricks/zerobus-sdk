@@ -34,8 +34,9 @@ const version = "0.1.0"
 const userAgentPrefix = "zerobus-sdk-go-purego/" + version
 
 // HeadersProvider supplies the gRPC authentication metadata for a stream.
-// Implement it to plug in custom authentication with CreateStreamWithProvider;
-// the built-in OAuth path (CreateStream) provides one for you.
+// Implement it to plug in custom authentication with CreateStreamWithProvider,
+// or with Headers for a multiplexed stream; the built-in OAuth path
+// (CreateStream, or OAuth for a multiplexed stream) provides one for you.
 //
 // GetHeaders may block on token minting (bounded by ctx).
 // Invalidate should drop cached credentials and return quickly.
@@ -142,8 +143,9 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	return sdk, nil
 }
 
-// Close terminates open streams and releases their connections.
-// It is idempotent; CreateStream fails after Close.
+// Close terminates open streams, including the lanes of multiplexed streams,
+// and releases their connections. It is idempotent; CreateStream and
+// CreateMultiplexedStream fail after Close.
 func (s *SDK) Close() error {
 	s.mu.Lock()
 	if s.closed {
