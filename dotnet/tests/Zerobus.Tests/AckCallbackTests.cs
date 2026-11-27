@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Databricks.Zerobus;
 using Databricks.Zerobus.Native;
 using NUnit.Framework;
@@ -153,6 +155,8 @@ public class AckCallbackTests
     {
         var callback = new RecordingCallback();
         var key = AckCallbackRegistry.Register(callback);
+        var log = new CapturingTraceListener();
+        Trace.Listeners.Add(log);
         try
         {
             callback.ThrowOnce = true;
@@ -165,10 +169,44 @@ public class AckCallbackTests
 
             Assert.That(callback.Acks, Is.EqualTo(new long[] { 2 }));
             Assert.That(callback.Errors, Is.EqualTo(new[] { (4L, "second") }));
+            // Each swallowed exception is reported with its method and offset.
+            var text = log.Text;
+            Assert.That(text, Does.Contain("IAckCallback.OnAck(offset 1) threw"));
+            Assert.That(text, Does.Contain("OnAck test exception"));
+            Assert.That(text, Does.Contain("IAckCallback.OnError(offset 3) threw"));
+            Assert.That(text, Does.Contain("OnError test exception"));
+            Assert.That(text, Does.Not.Contain("offset 2").And.Not.Contain("offset 4"));
         }
         finally
         {
+            Trace.Listeners.Remove(log);
             AckCallbackRegistry.Release(key);
+        }
+    }
+
+    private sealed class CapturingTraceListener : TraceListener
+    {
+        private readonly StringBuilder _text = new();
+
+        public string Text
+        {
+            get
+            {
+                lock (_text)
+                    return _text.ToString();
+            }
+        }
+
+        public override void Write(string? message)
+        {
+            lock (_text)
+                _text.Append(message);
+        }
+
+        public override void WriteLine(string? message)
+        {
+            lock (_text)
+                _text.AppendLine(message);
         }
     }
 
