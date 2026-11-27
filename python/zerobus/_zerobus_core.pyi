@@ -113,7 +113,12 @@ class StreamConfigurationOptions:
     """Timeout for stream recovery in milliseconds for one attempt (default: 15000)"""
 
     recovery_backoff_ms: int
-    """Backoff time in milliseconds between recovery attempts (default: 2000)"""
+    """Base backoff in milliseconds between stream creation and recovery retries (default: 2000).
+
+    The delay doubles after each consecutive failed attempt, up to 15 s (or this value, if
+    larger), and a random jitter of up to the same amount is added, so a single wait can
+    reach 30 s. A value of 0 retries immediately.
+    """
 
     recovery_retries: int
     """Number of retries for stream recovery (default: 4)"""
@@ -157,7 +162,9 @@ class StreamConfigurationOptions:
             max_inflight_records: Maximum number of unacknowledged records (default: 1000000)
             recovery: Enable automatic stream recovery (default: True)
             recovery_timeout_ms: Recovery operation timeout in ms (default: 15000)
-            recovery_backoff_ms: Delay between recovery attempts in ms (default: 2000)
+            recovery_backoff_ms: Base delay between retry attempts in ms; doubles per
+                failure up to 15 s, plus jitter of up to the same amount, so a single
+                wait can reach 30 s (default: 2000)
             recovery_retries: Maximum number of recovery attempts (default: 4)
             server_lack_of_ack_timeout_ms: Server acknowledgment timeout in ms (default: 60000)
             flush_timeout_ms: Flush operation timeout in ms (default: 300000)
@@ -856,7 +863,12 @@ class arrow:
         """Timeout per recovery attempt in milliseconds. Default: 15000"""
 
         recovery_backoff_ms: int
-        """Backoff between recovery attempts in milliseconds. Default: 2000"""
+        """Base backoff between stream creation and recovery retries in milliseconds.
+
+        Doubles after each consecutive failed attempt, up to 15 s (or this value, if larger),
+        plus a random jitter of up to the same amount, so a single wait can reach 30 s.
+        Default: 2000
+        """
 
         recovery_retries: int
         """Maximum recovery retry attempts. Default: 4"""

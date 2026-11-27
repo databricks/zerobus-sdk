@@ -34,7 +34,10 @@ type StreamConfigurationOptions struct {
 	// Default: 15000 (15 seconds)
 	RecoveryTimeoutMs uint64
 
-	// Backoff delay between recovery attempts in milliseconds
+	// Base delay between stream creation and recovery retries in milliseconds. The delay
+	// doubles after each consecutive failed attempt, up to 15 s (or this value, if larger),
+	// and a random jitter of up to the same amount is added, so a single wait can reach
+	// 30 s.
 	// Default: 2000 (2 seconds)
 	RecoveryBackoffMs uint64
 

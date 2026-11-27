@@ -219,6 +219,11 @@ the option to `Some(0)` skips ACK waiting but does not skip transport cleanup.
 When recovery is disabled, the same half-close/drain still runs, but the stream
 then terminates instead of reconnecting.
 
+Before reconnecting after a rotation, the supervisor waits a random time between
+half and 1.5 times `recovery_backoff_ms`. The average stays at
+`recovery_backoff_ms`, and streams rotated together don't all reconnect at once.
+A rotation is not a failure, so this wait does not double.
+
 ## Recovery and replay
 
 Only the supervisor reconnects or publishes a replacement sender.

@@ -372,7 +372,7 @@ the FFI defaults.
 | `max_inflight_requests` | `std::size_t` | 1,000,000 | Maximum unacknowledged requests in flight |
 | `recovery` | `bool` | `true` | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `std::uint64_t` | 15,000 | Total time budget for a recovery attempt (ms) |
-| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Backoff between recovery retries (ms) |
+| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `recovery_retries` | `std::uint32_t` | 4 | Number of recovery retries before giving up |
 | `server_lack_of_ack_timeout_ms` | `std::uint64_t` | 60,000 | How long to wait for a server ack before the stream is considered stalled (ms) |
 | `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
@@ -388,7 +388,7 @@ the FFI defaults.
 | `max_inflight_batches` | `std::size_t` | 1,000 | Maximum unacknowledged batches in flight |
 | `recovery` | `bool` | `true` | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `std::uint64_t` | 15,000 | Total time budget for a recovery attempt (ms) |
-| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Backoff between recovery retries (ms) |
+| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `recovery_retries` | `std::uint32_t` | 4 | Number of recovery retries before giving up |
 | `server_lack_of_ack_timeout_ms` | `std::uint64_t` | 60,000 | How long to wait for a server ack before the stream is considered stalled (ms) |
 | `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |

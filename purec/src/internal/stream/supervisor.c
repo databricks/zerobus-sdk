@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "backoff.h"
 #include "error.h"
 #include "headers_provider.h"
 #include "internal/common/utils.h"
@@ -355,12 +356,11 @@ static void drop_transport(zb_transport_t **transport)
     }
 }
 
-/* Sleeps for the recovery backoff unless the stream stops first. Returns
- * false once it stops. */
-static bool back_off(zerobus_stream_t *stream)
+/* Sleeps for delay_ms unless the stream stops first. Returns false once it
+ * stops. */
+static bool back_off(zerobus_stream_t *stream, uint64_t delay_ms)
 {
-    zb_deadline_t until =
-        zb_deadline_after_ms(stream->config.recovery_backoff_ms);
+    zb_deadline_t until = zb_deadline_after_ms(delay_ms);
     (void)zb_mutex_lock(&stream->mutex);
     while (!stream->aborting && !stream->finishing &&
            zb_cond_wait_until(&stream->changed, &stream->mutex, until) !=
@@ -379,6 +379,11 @@ void *zb_supervisor_main(void *arg)
     bool opened = false;
     bool auth_retry = config->recovery && config->recovery_retries > 0;
     uint32_t failures = 0;
+    /* Whether the failures being retried began with an open stream failing.
+     * As in the Rust core (rust/sdk/src/stream/grpc/supervisor.rs), losing an
+     * open stream doesn't spend a retry: recovery gets recovery_retries + 1
+     * reconnects. A failed first open gets recovery_retries retries. */
+    bool after_lost_stream = false;
     for (;;) {
         if (stopping(stream)) {
             break;
@@ -399,6 +404,7 @@ void *zb_supervisor_main(void *arg)
                 ZB_INFO("stream to %s recovered", stream->table);
             }
             failures = 0;
+            after_lost_stream = true;
             status = run_attempt(stream, &attempt, &message);
             if (status == ZEROBUS_STATUS_OK) {
                 break;
@@ -419,8 +425,11 @@ void *zb_supervisor_main(void *arg)
             zb_headers_provider_invalidate(stream->headers_provider);
         }
         /* The first open may spend one retry on a stale credential. */
+        bool budget_left = after_lost_stream
+                               ? failures <= config->recovery_retries
+                               : failures < config->recovery_retries;
         bool retry =
-            config->recovery && failures < config->recovery_retries &&
+            config->recovery && budget_left &&
             (zb_status_is_retryable(status) || (!opened && auth && auth_retry));
         if (!opened && auth) {
             auth_retry = false;
@@ -432,11 +441,18 @@ void *zb_supervisor_main(void *arg)
             fail_stream(stream, status, message);
             break;
         }
-        ZB_WARN("stream to %s: %s (status %u), retrying", stream->table,
-                message ? message : "failed", (unsigned)status);
+        /* Exponential and jittered, like the Rust core
+         * (rust/sdk/src/backoff.rs) and PureGo, so streams that fail together
+         * don't retry together. The first reconnect after a lost stream waits
+         * too. */
+        uint64_t delay_ms =
+            zb_recovery_backoff_ms(config->recovery_backoff_ms, failures);
+        ZB_WARN("stream to %s: %s (status %u), retrying in %llu ms",
+                stream->table, message ? message : "failed", (unsigned)status,
+                (unsigned long long)delay_ms);
         free(message);
         ++failures;
-        if (!back_off(stream)) {
+        if (!back_off(stream, delay_ms)) {
             break;
         }
     }

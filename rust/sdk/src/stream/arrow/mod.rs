@@ -373,7 +373,13 @@ impl ZerobusArrowStream {
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
         let request_bodies = stream.request_bodies.clone();
-        let strategy = recovery_backoff(options.recovery_backoff_ms, options.recovery_retries);
+        let strategy = recovery_backoff(options.recovery_backoff_ms, 0, options.recovery_retries)
+            .inspect(|delay| {
+                debug!(target: LOG_TARGET,
+                    backoff_ms = delay.as_millis() as u64,
+                    "Retrying Arrow stream creation"
+                )
+            });
 
         let create_attempt = || {
             let endpoint = endpoint.clone();

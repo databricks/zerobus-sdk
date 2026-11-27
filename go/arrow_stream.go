@@ -50,7 +50,10 @@ type ArrowStreamConfigurationOptions struct {
 	// Default: 15,000
 	RecoveryTimeoutMs uint64
 
-	// Backoff delay between recovery attempts in milliseconds.
+	// Base delay between stream creation and recovery retries in milliseconds. The delay
+	// doubles after each consecutive failed attempt, up to 15 s (or this value, if larger),
+	// and a random jitter of up to the same amount is added, so a single wait can reach
+	// 30 s.
 	// Default: 2,000
 	RecoveryBackoffMs uint64
 

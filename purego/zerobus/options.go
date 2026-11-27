@@ -162,7 +162,9 @@ func WithMaxBufferedPayloadBytes(n int64) StreamOption {
 }
 
 // WithRecoveryRetries limits consecutive reconnect failures before the stream
-// gives up. A non-positive value keeps the default (4).
+// gives up. A failed first open is retried n times. Once an established stream
+// is lost, recovery makes up to n+1 reconnect attempts, as the Rust core and the
+// SDKs built on it do. A non-positive value keeps the default (4).
 func WithRecoveryRetries(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.RecoveryRetries = n }
 }

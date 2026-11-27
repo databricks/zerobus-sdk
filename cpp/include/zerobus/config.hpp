@@ -81,7 +81,9 @@ struct StreamOptions {
   bool recovery = true;
   /// Total time budget for a recovery attempt.
   std::uint64_t recovery_timeout_ms = 15'000;
-  /// Backoff between recovery retries.
+  /// Base delay between stream creation and recovery retries. The delay doubles after each
+  /// consecutive failed attempt, up to 15 s (or this value, if larger), and a random jitter of up
+  /// to the same amount is added, so a single wait can reach 30 s. 0 retries immediately.
   std::uint64_t recovery_backoff_ms = 2'000;
   /// Number of recovery retries before giving up.
   std::uint32_t recovery_retries = 4;
@@ -127,7 +129,9 @@ struct ArrowStreamOptions {
   bool recovery = true;
   /// Total time budget for a recovery attempt.
   std::uint64_t recovery_timeout_ms = 15'000;
-  /// Backoff between recovery retries.
+  /// Base delay between stream creation and recovery retries. The delay doubles after each
+  /// consecutive failed attempt, up to 15 s (or this value, if larger), and a random jitter of up
+  /// to the same amount is added, so a single wait can reach 30 s. 0 retries immediately.
   std::uint64_t recovery_backoff_ms = 2'000;
   /// Number of recovery retries before giving up.
   std::uint32_t recovery_retries = 4;

@@ -956,7 +956,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 | `maxInflightRecords` | 1000000 | Maximum number of unacknowledged records |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
+| `recoveryBackoffMs` | 2000 | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
@@ -971,7 +971,7 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `maxInflightBatches` | 1000 | Maximum number of unacknowledged Arrow batches |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
+| `recoveryBackoffMs` | 2000 | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
@@ -1561,7 +1561,7 @@ Sets the recovery operation timeout in milliseconds (default: 15000).
 ```java
 StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs)
 ```
-Sets the delay between recovery attempts in milliseconds (default: 2000).
+Sets the base delay between stream creation and recovery retries in milliseconds (default: 2000). The delay doubles after each consecutive failed attempt, up to 15 s (or this value, if larger), and a random jitter of up to the same amount is added, so a single wait can reach 30 s.
 
 ```java
 StreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries)

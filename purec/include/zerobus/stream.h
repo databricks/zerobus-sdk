@@ -81,13 +81,20 @@ zerobus_stream_builder_set_recovery_timeout_ms(
     zerobus_stream_builder_t *builder, uint64_t timeout_ms,
     zerobus_error_t **out_error);
 
-/* Wait between recovery attempts. Default 2 seconds. */
+/* Base wait between stream creation and recovery attempts. Default 2 seconds.
+ * The wait is never shorter than this. It doubles after each consecutive
+ * failed attempt, up to 15 seconds (or this value, if larger), and a random
+ * jitter of up to the same amount is added, so streams that fail together
+ * don't retry together. With the default, retries wait 2-4 s, 4-8 s, 8-16 s,
+ * then 15-30 s. */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_stream_builder_set_recovery_backoff_ms(
     zerobus_stream_builder_t *builder, uint64_t backoff_ms,
     zerobus_error_t **out_error);
 
-/* Recovery attempts before the stream fails. Default 4. */
+/* Retries before the stream fails. Default 4. A failed open is retried this
+ * many times. Once an open stream is lost, recovery makes up to this many + 1
+ * reconnect attempts, as in the other SDKs. */
 ZEROBUS_API zerobus_status_t ZEROBUS_CALL
 zerobus_stream_builder_set_recovery_retries(zerobus_stream_builder_t *builder,
                                             uint32_t retries,
@@ -133,7 +140,8 @@ zerobus_stream_builder_set_headers_provider(
  *
  * Blocks until the open succeeds or recovery gives up: at most
  * recovery_retries + 1 attempts, one without recovery, with the backoff between
- * them, so up to about 83 seconds with the defaults. Each attempt is bounded by
+ * them, so up to about 133 seconds with the defaults (5 attempts of up to 15
+ * seconds, and up to 58 seconds of backoff). Each attempt is bounded by
  * the recovery timeout, except for its DNS lookup and for the get_headers of a
  * headers provider other than OAuth.
  *

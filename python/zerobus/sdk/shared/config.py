@@ -62,8 +62,10 @@ Args:
         failure. Default: True
     recovery_timeout_ms: Timeout for stream recovery in milliseconds (for one
         attempt of recovery). Default: 15000
-    recovery_backoff_ms: Backoff time in milliseconds between recovery attempts.
-        Default: 2000
+    recovery_backoff_ms: Base backoff time in milliseconds between stream creation
+        and recovery retries. The delay doubles after each consecutive failed attempt,
+        up to 15 s (or this value, if larger), and a random jitter of up to the same
+        amount is added, so a single wait can reach 30 s. Default: 2000
     recovery_retries: Number of retries for stream recovery. Default: 4
     server_lack_of_ack_timeout_ms: The number of ms in which, if we do not
         receive an acknowledgement, the server is considered unresponsive.

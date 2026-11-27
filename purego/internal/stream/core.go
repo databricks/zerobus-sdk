@@ -68,7 +68,9 @@ type Config struct {
 	// Recovery controls whether stream reconnection is attempted on failure. The
 	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
 	Recovery RecoverySetting
-	// RecoveryRetries limits consecutive reconnect failures.
+	// RecoveryRetries limits consecutive reconnect failures. Recovery after a
+	// lost stream gets RecoveryRetries+1 reconnect attempts (see afterLostStream
+	// in supervise).
 	RecoveryRetries int
 	// RecoveryBackoff is the base wait between reconnect attempts. The wait
 	// doubles after each consecutive failure, up to 15s (or RecoveryBackoff if

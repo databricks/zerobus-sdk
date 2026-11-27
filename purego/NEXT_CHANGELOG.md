@@ -19,15 +19,27 @@
   the descriptor themselves. It accepts the bytes returned by
   `FetchProtoDescriptorFromUC` or passed to `WithProto`.
 
-- Reconnect retries now back off exponentially with jitter instead of waiting a
-  fixed `WithRecoveryBackoff` interval, matching the Rust core and the SDKs built
-  on it. The wait still starts at the configured backoff and is never shorter
-  than it. It doubles after each consecutive failed attempt, up to 15 seconds (or
-  the configured backoff if larger), and a random jitter of up to the same amount
-  is added. With the defaults (2 s, 4 retries), a stream that keeps failing gives
-  up after about 29–58 s of waiting instead of 8 s. Streams rejected at the same
-  time, for example by the server's stream-creation rate limit, no longer all
-  retry at the same moment. No API change.
+- Behavior change (no API change): stream creation and reconnect retries now back
+  off exponentially with jitter instead of waiting a fixed `WithRecoveryBackoff`
+  interval, matching the Rust core and the SDKs built on it. The wait starts at the
+  configured backoff and is never shorter than it. It doubles after each consecutive
+  failed attempt, up to 15 s (or the configured backoff if larger), and a random
+  jitter of up to the same amount is added, so a single wait can reach 30 s. With
+  the defaults (2 s, 4 retries), retries wait 2–4 s, 4–8 s, 8–16 s, then 15–30 s, so
+  a stream that keeps failing to open gives up after about 29–58 s of waiting
+  instead of 8 s. Streams rejected at the same time, for example by the server's
+  stream-creation rate limit, no longer all retry at the same moment.
+
+  Behavior change: once an established stream is lost, recovery now makes up to
+  `WithRecoveryRetries` + 1 reconnect attempts instead of `WithRecoveryRetries`, as
+  the Rust core's gRPC streams do: losing the stream no longer spends a retry. With
+  the defaults, a stream whose reconnects keep failing gives up after 5 attempts and
+  about 44–88 s of waiting, instead of 4 attempts and 8 s. A failed first open is
+  still retried `WithRecoveryRetries` times.
+
+  To keep a total retry window close to the previous one, lower
+  `WithRecoveryRetries`. With the default 2 s base, 2 retries wait 6–12 s in total
+  when the first open fails, and 14–28 s during recovery.
 
 ### Bug Fixes
 

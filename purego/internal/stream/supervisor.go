@@ -37,6 +37,12 @@ func (cs *CoreStream[Req, Resp]) supervise(lifecycleCtx, firstOpenCtx context.Co
 
 	var err error
 	failedAttempts := 0
+	// Whether the current run of failures began with an established stream
+	// failing rather than with an Open failing. Like the Rust core
+	// (rust/sdk/src/stream/grpc/supervisor.rs), the loss of an established
+	// stream does not spend a retry: recovery gets RecoveryRetries+1
+	// reconnect attempts, with a backoff before each, including the first.
+	afterLostStream := false
 	openedOnce := false
 	initialAuthRefreshUsed := false
 superviseLoop:
@@ -51,7 +57,11 @@ superviseLoop:
 		}
 
 		if failedAttempts > 0 {
-			if !cs.cfg.Recovery.enabled() || failedAttempts > cs.cfg.RecoveryRetries {
+			budget := cs.cfg.RecoveryRetries
+			if afterLostStream {
+				budget++
+			}
+			if !cs.cfg.Recovery.enabled() || failedAttempts > budget {
 				err = fmt.Errorf("stream: recovery exhausted after %d attempt(s): %w",
 					failedAttempts, err)
 				break
@@ -103,6 +113,7 @@ superviseLoop:
 		// Reset after durable progress or sufficient connection uptime.
 		if resetRecoveryBudget {
 			failedAttempts = 0
+			afterLostStream = false
 		}
 
 		// Pauses do not consume the retry budget.
@@ -154,6 +165,9 @@ superviseLoop:
 		err = runErr
 		if !isRetryable(runErr) && !initialAuthRefresh {
 			break
+		}
+		if failedAttempts == 0 {
+			afterLostStream = !isOpenFailure
 		}
 		failedAttempts++
 	}

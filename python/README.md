@@ -528,7 +528,7 @@ select the format but must match the inferred one, otherwise stream creation rai
 | `max_inflight_records`           | `int`           | `1000000`          | Maximum number of unacknowledged records                                                                             |
 | `recovery`                       | `bool`          | `True`             | Enable automatic stream recovery                                                                                     |
 | `recovery_timeout_ms`            | `int`           | `15000`            | Timeout for recovery operations (ms)                                                                                 |
-| `recovery_backoff_ms`            | `int`           | `2000`             | Delay between recovery attempts (ms)                                                                                 |
+| `recovery_backoff_ms`            | `int`           | `2000`             | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `recovery_retries`               | `int`           | `4`                | Maximum number of recovery attempts                                                                                  |
 | `flush_timeout_ms`               | `int`           | `300000`           | Timeout for flush operations (ms)                                                                                    |
 | `server_lack_of_ack_timeout_ms`  | `int`           | `60000`            | Server acknowledgment timeout (ms)                                                                                   |

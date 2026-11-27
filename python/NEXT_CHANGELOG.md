@@ -13,16 +13,26 @@
   core, so no Python callback runs per request, and it is never shown in `repr()`. It
   is compiled into the wheel; no extra is needed. See `examples/sync_example_pat.py`.
 
-- Stream creation and recovery retries now back off exponentially with jitter
-  instead of waiting a fixed `recovery_backoff_ms` between attempts (from the Rust core).
-  The wait still starts at `recovery_backoff_ms` and is never shorter than it. It
-  doubles after each consecutive failed attempt, up to 15 seconds (or
-  `recovery_backoff_ms` if larger), and a random jitter of up to the same amount is
-  added. With the defaults (2 s, 4 retries), a stream that keeps failing gives
-  up after about 29–58 s of waiting instead of 8 s. Clients rejected at the same
-  time, for example by the server's stream-creation rate limit, no longer all
-  retry at the same moment. No API change; a backoff of 0 still retries
-  immediately.
+- Behavior change (no API change): stream creation and recovery retries now back off
+  exponentially with jitter instead of waiting a fixed `recovery_backoff_ms` between
+  attempts (from the Rust core). The wait starts at `recovery_backoff_ms` and is
+  never shorter than it. It doubles after each consecutive failed attempt, up to
+  15 s (or `recovery_backoff_ms` if larger), and a random jitter of up to the same
+  amount is added, so a single wait can reach 30 s. With the defaults (2 s, 4
+  retries), retries wait 2–4 s, 4–8 s, 8–16 s, then 15–30 s, so a stream that keeps
+  failing gives up after about 29–58 s of waiting instead of 8 s. Recovery of a gRPC
+  stream after a failure now also waits before its first reconnect attempt (2–4 s by
+  default), so streams the server drops at the same time don't all reconnect at
+  once; a gRPC stream that keeps failing during recovery gives up after about
+  44–88 s instead of 8 s. A server-initiated Arrow Flight stream rotation still
+  waits `recovery_backoff_ms` on average (a random wait between half and 1.5 times
+  it), and a gRPC close signal still reconnects immediately. Clients rejected at the
+  same time, for example by the server's stream-creation rate limit, no longer all
+  retry at the same moment. A backoff of 0 still retries immediately.
+
+  To keep a total retry window close to the previous one, lower `recovery_retries`.
+  With the default 2 s base, 2 retries wait 6–12 s in total (14–28 s for gRPC
+  recovery after a failure).
 
 ### Bug Fixes
 

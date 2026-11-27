@@ -94,6 +94,9 @@ pub struct ArrowStreamConfigurationOptions {
     /// 2–4 s, 4–8 s, 8–16 s, then 15–30 s. The jitter spreads out retries from clients
     /// that fail at the same time. A value of 0 retries immediately.
     ///
+    /// A server-initiated stream rotation is not a failure: its reconnect waits a random
+    /// time between half and 1.5 times this value, so `recovery_backoff_ms` on average.
+    ///
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: u64,
 

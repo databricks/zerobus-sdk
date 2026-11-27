@@ -32,9 +32,25 @@ pub(crate) fn recovery_backoff_delay(base_ms: u64, retry_index: u32) -> Duration
 }
 
 /// Returns the delays for up to `retries` retries, computed by
-/// [`recovery_backoff_delay`]. Jitter is drawn lazily, as each delay is taken.
-pub(crate) fn recovery_backoff(base_ms: u64, retries: u32) -> impl Iterator<Item = Duration> {
-    (0..retries).map(move |retry_index| recovery_backoff_delay(base_ms, retry_index))
+/// [`recovery_backoff_delay`] for retry indices starting at `first_retry_index`.
+/// Jitter is drawn lazily, as each delay is taken.
+pub(crate) fn recovery_backoff(
+    base_ms: u64,
+    first_retry_index: u32,
+    retries: u32,
+) -> impl Iterator<Item = Duration> {
+    (0..retries).map(move |n| recovery_backoff_delay(base_ms, first_retry_index.saturating_add(n)))
+}
+
+/// Returns how long to wait before reconnecting after a server-initiated stream
+/// rotation. A rotation is routine, not a failure, so this keeps the average wait
+/// at `base_ms`, as before jitter was added, and only spreads it uniformly over
+/// `[base_ms / 2, 1.5 * base_ms]` so that streams rotated together don't all
+/// reconnect together. A `base_ms` of 0 gives zero.
+#[cfg(feature = "arrow-flight")]
+pub(crate) fn rotation_backoff_delay(base_ms: u64) -> Duration {
+    let jitter_ms = rand::rng().random_range(0..=base_ms);
+    Duration::from_millis((base_ms / 2).saturating_add(jitter_ms))
 }
 
 #[cfg(test)]
@@ -106,12 +122,45 @@ mod tests {
 
     #[test]
     fn strategy_yields_one_delay_per_retry() {
-        assert_eq!(recovery_backoff(1_000, 0).count(), 0);
-        let delays: Vec<_> = recovery_backoff(1_000, 4).collect();
+        assert_eq!(recovery_backoff(1_000, 0, 0).count(), 0);
+        let delays: Vec<_> = recovery_backoff(1_000, 0, 4).collect();
         assert_eq!(delays.len(), 4);
         for (retry_index, delay) in delays.into_iter().enumerate() {
             let floor = Duration::from_millis(1_000 << retry_index);
             assert!(delay >= floor && delay < 2 * floor);
         }
+    }
+
+    #[test]
+    fn strategy_can_start_at_a_later_retry() {
+        let delays: Vec<_> = recovery_backoff(1_000, 1, 3).collect();
+        assert_eq!(delays.len(), 3);
+        for (n, delay) in delays.into_iter().enumerate() {
+            let floor = Duration::from_millis(1_000 << (n + 1));
+            assert!(delay >= floor && delay < 2 * floor);
+        }
+        assert_eq!(recovery_backoff(1_000, u32::MAX, 2).count(), 2);
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn rotation_delay_averages_base_and_is_jittered() {
+        let delays: Vec<_> = (0..SAMPLES)
+            .map(|_| rotation_backoff_delay(2_000))
+            .collect();
+        for delay in &delays {
+            assert!(
+                *delay >= Duration::from_millis(1_000) && *delay <= Duration::from_millis(3_000),
+                "rotation waited {delay:?}, expected [1000ms, 3000ms]"
+            );
+        }
+        let distinct: std::collections::HashSet<_> = delays.iter().collect();
+        assert!(
+            distinct.len() > 1,
+            "{SAMPLES} rotation delays were all equal"
+        );
+        assert_eq!(rotation_backoff_delay(0), Duration::ZERO);
+        // Saturates instead of overflowing.
+        let _ = rotation_backoff_delay(u64::MAX);
     }
 }
