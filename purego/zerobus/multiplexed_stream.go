@@ -656,11 +656,11 @@ func (m *MultiplexedStream) IsClosed() bool {
 
 // GetUnackedRecords closes the stream, then returns the queued records that
 // were never acknowledged, lane by lane, not in ingest order. It blocks as
-// Close does: each lane flushes again for up to its FlushTimeout, and Close
-// waits for the callbacks. It ignores the Close result; call Close afterwards
-// to get it. Repeated calls return the same records. On a proto stream,
-// records ingested as JSON come back as protobuf bytes; replay them with
-// IngestRecord or IngestRecords. Do not call it from a callback.
+// Close does: each lane flushes for up to its FlushTimeout, and Close waits
+// for the callbacks. It ignores the Close result; call Close afterwards to get
+// it. Repeated calls return the same records. On a proto stream, records
+// ingested as JSON come back as protobuf bytes; replay them with IngestRecord
+// or IngestRecords. Do not call it from a callback.
 func (m *MultiplexedStream) GetUnackedRecords() ([][]byte, error) {
 	const op = "GetUnackedRecords"
 	_ = m.Close()
@@ -677,7 +677,7 @@ func (m *MultiplexedStream) GetUnackedRecords() ([][]byte, error) {
 
 // GetUnackedBatches closes the stream, then returns the unacknowledged records
 // grouped for replay, one group per ingest call, lane by lane, not in ingest
-// order. It blocks as Close does: each lane flushes again for up to its
+// order. It blocks as Close does: each lane flushes for up to its
 // FlushTimeout, and Close waits for the callbacks. It ignores the Close
 // result; call Close afterwards to get it. Repeated calls return the same
 // records. On a proto stream, records ingested as JSON come back as protobuf
