@@ -8,12 +8,21 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// errClosed is returned by buffer operations when the buffer has been closed.
+// errClosed is returned by buffer operations when the buffer has been closed,
+// and by Ingest when the stream is closing or closed.
 var errClosed = errors.New("stream: buffer closed")
+
+// ErrClosed is errClosed for callers outside this package. Ingest can return
+// it before IsClosed reports true.
+var ErrClosed = errClosed
 
 // errWatermarkClosed is returned when a clean Close makes an unacknowledged
 // WaitForOffset target permanently unreachable.
 var errWatermarkClosed = errors.New("stream: closed before offset was acknowledged")
+
+// ErrWatermarkClosed is errWatermarkClosed for callers outside this package.
+// Flush and WaitForOffset can return it before IsClosed reports true.
+var ErrWatermarkClosed = errWatermarkClosed
 
 // errClosedBeforeReady is returned when teardown happens before any successful
 // open completes.

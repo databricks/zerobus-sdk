@@ -802,6 +802,14 @@ func (cs *CoreStream[Req, Resp]) IsClosed() bool {
 	return cs.isClosed()
 }
 
+// TerminalErr returns the cause of a terminal stream failure, or nil if the
+// stream has not failed. It stays nil after a clean Close or Terminate. The
+// cause is stored before any waiter wakes on the failure and before the
+// stream reports IsClosed.
+func (cs *CoreStream[Req, Resp]) TerminalErr() error {
+	return cs.terminalErr()
+}
+
 func (cs *CoreStream[Req, Resp]) isClosed() bool {
 	select {
 	case <-cs.done:

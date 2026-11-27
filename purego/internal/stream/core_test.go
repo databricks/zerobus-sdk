@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"slices"
 	"strings"
@@ -571,6 +572,55 @@ func TestCoreStreamIsClosed(t *testing.T) {
 	if !cs.IsClosed() {
 		t.Fatal("want closed after Close()")
 	}
+}
+
+// TerminalErr is how a multiplexed stream tells a failed lane from a lane that
+// was closed or is only slow, so it must stay nil on every path that is not a
+// terminal failure.
+func TestCoreStreamTerminalErrNilWithoutTerminalFailure(t *testing.T) {
+	t.Run("after recovery", func(t *testing.T) {
+		rpc1 := newFakeRPC()
+		rpc2 := newFakeRPC()
+		cfg := testConfig()
+		cfg.RecoveryRetries = 1
+		cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc1, rpc2), nil)
+		t.Cleanup(func() { cs.Close() })
+
+		offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+		if err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		waitCondition(t, func() bool { return len(rpc1.sends) == 1 }, time.Second)
+		rpc1.close()
+		waitCondition(t, func() bool { return len(rpc2.sends) == 1 }, 2*time.Second)
+		rpc2.ack(0)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := cs.WaitForOffset(ctx, offset); err != nil {
+			t.Fatalf("WaitForOffset after recovery: %v", err)
+		}
+		if err := cs.TerminalErr(); err != nil {
+			t.Fatalf("TerminalErr = %v, want nil after a recovered disconnect", err)
+		}
+	})
+	t.Run("after Close flush times out", func(t *testing.T) {
+		rpc := newFakeRPC()
+		cfg := testConfig()
+		cfg.FlushTimeout = 25 * time.Millisecond
+		cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+
+		if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+		if err := cs.Close(); err == nil {
+			t.Fatal("Close = nil, want the flush timeout")
+		}
+		if err := cs.TerminalErr(); err != nil {
+			t.Fatalf("TerminalErr = %v, want nil after a Close whose flush timed out", err)
+		}
+	})
 }
 
 func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
@@ -1474,6 +1524,52 @@ func TestCoreStreamOpenTimeoutKeepsTerminalStatus(t *testing.T) {
 	}
 }
 
+// The terminal cause must be readable the moment a waiter wakes on the failure,
+// not only once the stream reports IsClosed: a multiplexed stream reads it right
+// after a lane call returns.
+func TestCoreStreamTerminalErrSetBeforeWaitersWake(t *testing.T) {
+	t.Run("WaitForOffset on a live terminal failure", func(t *testing.T) {
+		rpc := newBlockedSendTerminalRPC()
+		cfg := testConfig()
+		cfg.Recovery = RecoveryDisabled
+		cs := newCoreForTest(testParams(), cfg, &blockedSendTerminalOpener{rpc: rpc}, nil)
+		t.Cleanup(func() { cs.Close() })
+
+		offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+		if err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		select {
+		case <-rpc.started:
+		case <-time.After(time.Second):
+			t.Fatal("Send did not block")
+		}
+		waitErr := make(chan error, 1)
+		go func() { waitErr <- cs.WaitForOffset(context.Background(), offset) }()
+		rpc.recvErr <- status.Error(codes.InvalidArgument, "bad record")
+
+		var got error
+		select {
+		case got = <-waitErr:
+		case <-time.After(time.Second):
+			t.Fatal("WaitForOffset did not return after the terminal failure")
+		}
+		if got == nil {
+			t.Fatal("WaitForOffset = nil, want the terminal failure")
+		}
+		err = cs.TerminalErr()
+		if err == nil {
+			t.Fatal("TerminalErr = nil right after WaitForOffset returned the failure")
+		}
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("TerminalErr status code = %v, want %v", status.Code(err), codes.InvalidArgument)
+		}
+		if !errors.Is(got, err) {
+			t.Fatalf("WaitForOffset error %v does not match TerminalErr %v", got, err)
+		}
+	})
+}
+
 // The same masking applies to a rejection that carries no gRPC status at all: an
 // OAuth TokenError is codes.Unknown, so IsTerminalStatus cannot see it and the
 // openBudgetExceeded wrapper outranked its own non-retryable classification,
@@ -2226,6 +2322,13 @@ func TestCallbackDispatcherDoesNotDropLargeAckRange(t *testing.T) {
 }
 
 func TestCallbackDispatcherRecoversPanicAndContinues(t *testing.T) {
+	var logs bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
 	delivered := make(chan int64, 1)
 	panicPath := make(chan struct{}, 1)
 	cb := &callbackFuncs{
@@ -2253,6 +2356,10 @@ func TestCallbackDispatcherRecoversPanicAndContinues(t *testing.T) {
 		}
 	default:
 		t.Fatal("callback after panic was not delivered")
+	}
+	// shutdown waited for the worker, so its log write is visible.
+	if got, want := logs.String(), "zerobus: AckCallback.OnAck(offset 0) panicked: callback failure"; !strings.Contains(got, want) {
+		t.Errorf("log = %q, want it to contain %q", got, want)
 	}
 }
 
