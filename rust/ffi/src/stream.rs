@@ -1803,7 +1803,8 @@ pub extern "C" fn zerobus_stream_get_unacked_records_async(
     })
 }
 
-/// Free a CRecordArray returned by zerobus_stream_get_unacked_records
+/// Free a CRecordArray returned by zerobus_stream_get_unacked_records or
+/// zerobus_multiplexed_stream_get_unacked_records
 #[no_mangle]
 pub extern "C" fn zerobus_free_record_array(array: CRecordArray) {
     ffi_guard(ptr::null_mut(), (), move || {

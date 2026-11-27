@@ -104,8 +104,9 @@ but the `CZerobusSdk*` itself must remain valid until the callback fires.
 ### Multiplexed streams (Beta)
 
 When one stream is the throughput bottleneck and global ordering is not
-required, a multiplexed stream opens several sub-streams to the same table.
-Ack callbacks receive opaque message IDs instead of offsets:
+required, a multiplexed stream opens several sub-streams to the same table and
+routes records round-robin across them. Ordering is preserved only within each
+sub-stream. Ingest calls return an opaque message ID instead of an offset:
 
 ```c
 CResult r = {0};
@@ -120,12 +121,51 @@ if (mux == NULL) {
     return;
 }
 
-r = (CResult){0};
-if (!zerobus_multiplexed_stream_close(mux, &r))
+size_t i = 0;
+while (i < n) {
+    /* Returns once queued; do not wait for each record. */
+    r = (CResult){0};
+    zerobus_multiplexed_stream_ingest_proto_record(mux, rec[i], rec_len[i], &r);
+    if (r.success) { i++; continue; }
+    /* rec[i] was not queued. */
+    bool retryable = r.is_retryable;
     zerobus_free_error_message(r.error_message);
+    if (zerobus_multiplexed_stream_is_closed(mux)) break;
+    if (!retryable) { reject_record(i++); continue; }  /* the record is invalid */
+    backoff();  /* retryable while the mux is open: try rec[i] again */
+}
+
+r = (CResult){0};
+bool ok = zerobus_multiplexed_stream_flush(mux, &r);  /* wait once for every ack */
+if (!ok) zerobus_free_error_message(r.error_message);
+r = (CResult){0};
+ok = zerobus_multiplexed_stream_close(mux, &r) && ok;
+if (!ok) zerobus_free_error_message(r.error_message);
+if (!ok || i < n) {
+    r = (CResult){0};
+    CRecordArray unacked = zerobus_multiplexed_stream_get_unacked_records(mux, &r);
+    /* Re-send unacked.records, then rec[i..n), on a new stream. Each
+       record's data has data_len bytes and no NUL: copy a JSON record
+       (is_json) into a NUL-terminated buffer before a JSON ingest. */
+    zerobus_free_record_array(unacked);
+    zerobus_free_error_message(r.error_message);
+}
 zerobus_multiplexed_stream_free(mux);
 ```
 
+- Message IDs are not ordered and may be negative. Check `r.success` rather
+  than the sign of the return value, and pass IDs only to
+  `zerobus_multiplexed_stream_wait_for_message_id` on the same stream. An
+  empty batch returns -2 with `r.success` set; -2 is not a message ID. On a
+  closed mux it fails with -1.
+- A NULL record pointer or array is valid only with a length or count of 0.
+- A failed ingest call queued nothing, and its records will not come back from
+  `zerobus_multiplexed_stream_get_unacked_records`. Retry it only when
+  `r.is_retryable` is set and the mux is still open. A non-retryable error on
+  an open mux means the record itself is invalid; once the mux is closed,
+  re-send it on a new stream.
+- A batch call sends the whole batch to one sub-stream. To use every
+  sub-stream, send at least `stream_count` batches.
 - For JSON, pass options with `record_type = 2` and a NULL descriptor. NULL
   options select protobuf.
 - Every `zerobus_multiplexed_stream_*` call except `_free` may run
@@ -145,6 +185,11 @@ zerobus_multiplexed_stream_free(mux);
   headers callback serves every sub-stream. The FFI serializes calls into it,
   so a slow callback delays every sub-stream's open; keep it fast. Like ack
   callbacks, it must not call `zerobus_multiplexed_stream_*` functions.
+- If a sub-stream fails, the mux stops accepting records once a call observes
+  the failure. Recover anything unacknowledged with
+  `zerobus_multiplexed_stream_get_unacked_records`, and send them, plus any
+  record whose ingest call failed, on a new stream. Every call returns the
+  same records, so re-send them once, from one caller.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.
 
 ### Dynamic protobuf from a Unity Catalog schema (pure C)
