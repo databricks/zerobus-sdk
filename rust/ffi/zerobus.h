@@ -160,6 +160,9 @@ typedef struct CStreamConfigurationOptions {
    * callback object is destroyed, not merely until close() returns.
    * error_message is valid only during the call (copy to keep). Callbacks must
    * not unwind across the C boundary (panics are contained and logged).
+   * Multiplexed streams reject `ack_on_ack` and `ack_on_error` and ignore
+   * `ack_user_data`; pass the mux create function's own ack parameters
+   * instead.
    */
   void (*ack_on_ack)(int64_t offset_id, void *user_data);
   void (*ack_on_error)(int64_t offset_id, const char *error_message, void *user_data);
@@ -224,6 +227,25 @@ typedef struct CRecordArray {
 typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
                                          const struct CResult *result,
                                          void *user_data);
+
+/**
+ * Opaque handle for a multiplexed stream. Created by
+ * `zerobus_sdk_create_multiplexed_stream_with_headers_provider` and released
+ * by `zerobus_multiplexed_stream_free`. (Beta)
+ *
+ * Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
+ * run concurrently on the same handle from any thread. `_free` must not
+ * overlap any other call on that handle.
+ *
+ * Ack and headers callbacks run on the FFI's runtime threads. They must not
+ * call `zerobus_multiplexed_stream_*` functions, and must not block on a
+ * thread that is inside one: the call would fail, or deadlock while close
+ * waits for callbacks to drain. Ack callbacks fire in order within each
+ * sub-stream.
+ */
+typedef struct CZerobusMultiplexedStream {
+  uint8_t _private[0];
+} CZerobusMultiplexedStream;
 
 /**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
@@ -842,6 +864,116 @@ void zerobus_free_error_message(char *message);
  * Get default stream configuration options
  */
 struct CStreamConfigurationOptions zerobus_get_default_config(void);
+
+/**
+ * Create a multiplexed stream with a custom headers provider callback (Beta).
+ *
+ * Opens `stream_count` sub-streams (1 to 64) to the same table and routes
+ * records round-robin across them. Use it when one stream is the throughput
+ * bottleneck and global ordering is not required: order is preserved only
+ * within each sub-stream. Construction is all-or-nothing; if any sub-stream
+ * fails to open, the opened ones are closed and NULL is returned. Sub-stream
+ * opens are staggered by a random delay of up to 1 second each, so creation
+ * takes up to that much longer than a single stream.
+ *
+ * `descriptor_proto_bytes` is a protobuf-encoded DescriptorProto, required
+ * for protobuf streams. `options` may be NULL for defaults, which select
+ * protobuf records; for JSON, pass options with `record_type = 2` and a NULL
+ * descriptor. `max_inflight_requests` in `options` is a budget for the whole
+ * mux: each sub-stream gets `max_inflight_requests / stream_count` (any
+ * remainder is unused), so it must be at least `stream_count`.
+ *
+ * Authenticates with `headers_callback`. One provider is shared by every
+ * sub-stream; calls into `headers_callback` are serialized, so it need not be
+ * reentrant.
+ * Because sub-streams wait for each other's calls, time spent in the callback
+ * counts against every sub-stream's `recovery_timeout_ms` open deadline. With
+ * many sub-streams, a slow callback can make late ones time out, failing the
+ * whole create, so keep it fast (for example, return a cached token).
+ *
+ * Once this function is called, the FFI owns `user_data` and invokes
+ * `free_user_data` (when set) exactly once, from any thread, after the last
+ * sub-stream releases the provider. Unlike
+ * `zerobus_sdk_create_stream_with_headers_provider`, that can be after this
+ * function returns even when it fails, since sub-streams that started to
+ * open are torn down in the background. Never free `user_data` yourself.
+ * With a NULL `free_user_data` the caller keeps ownership, and `user_data`
+ * must stay valid for the rest of the process.
+ *
+ * `ack_on_ack` and `ack_on_error` (either may be NULL) receive message IDs,
+ * which are opaque: they can be negative and are not ordered, so do not
+ * compare them. Each sub-stream delivers its callbacks on its own background
+ * task, so callbacks from different sub-streams may run concurrently and in no
+ * global order; `ack_user_data` must tolerate concurrent access.
+ * `error_message` is valid only during the call. `options->ack_on_ack` and
+ * `options->ack_on_error` must be NULL: they carry ordered offsets for
+ * ordinary streams and are rejected here. `options->ack_user_data` is ignored;
+ * pass the `ack_user_data` parameter instead. When close returns, all ack
+ * callbacks have run, unless close waited longer than
+ * `callback_max_wait_time_ms` (default 5 s; see
+ * `zerobus_multiplexed_stream_close`).
+ *
+ * Once this function is called, the FFI owns `ack_user_data` and invokes
+ * `free_ack_user_data` (when set) exactly once, from any thread, after the
+ * last sub-stream and background task releases the callbacks. That can be
+ * after this function returns, even when it fails (a sub-stream that
+ * started to open is torn down in the background), and after
+ * `zerobus_multiplexed_stream_free` returns. Never free `ack_user_data`
+ * yourself. With a NULL `free_ack_user_data` the caller keeps ownership, and
+ * `ack_user_data` must stay valid for the rest of the process.
+ *
+ * Returns NULL on error; see `result` for details. Free the handle with
+ * `zerobus_multiplexed_stream_free`.
+ */
+struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_headers_provider(struct CZerobusSdk *sdk,
+                                                                                              const char *table_name,
+                                                                                              const uint8_t *descriptor_proto_bytes,
+                                                                                              uintptr_t descriptor_proto_len,
+                                                                                              HeadersProviderCallback headers_callback,
+                                                                                              void *user_data,
+                                                                                              void (*free_user_data)(void *user_data),
+                                                                                              uintptr_t stream_count,
+                                                                                              const struct CStreamConfigurationOptions *options,
+                                                                                              void (*ack_on_ack)(int64_t message_id,
+                                                                                                                 void *user_data),
+                                                                                              void (*ack_on_error)(int64_t message_id,
+                                                                                                                   const char *error_message,
+                                                                                                                   void *user_data),
+                                                                                              void *ack_user_data,
+                                                                                              void (*free_ack_user_data)(void *user_data),
+                                                                                              struct CResult *result);
+
+/**
+ * Free a multiplexed stream handle (Beta).
+ *
+ * Call `zerobus_multiplexed_stream_close` first to flush pending records;
+ * freeing an open stream abandons them. Must not run concurrently with any
+ * other call on `mux`, and `mux` must not be used afterwards.
+ */
+void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
+
+/**
+ * Flush and close every sub-stream (Beta).
+ *
+ * Waits for in-progress calls on this mux to return, then flushes and closes.
+ * The handle must still be released with `zerobus_multiplexed_stream_free`.
+ *
+ * Returns false with `result` set on failure; the mux is closed either way.
+ * When close returns, all ack callbacks have run, unless close waited longer
+ * than `callback_max_wait_time_ms` (default 5 s). With
+ * `has_callback_max_wait_time_ms` false there is no limit. After it, queued
+ * callbacks are dropped and a running one can outlive close.
+ */
+bool zerobus_multiplexed_stream_close(struct CZerobusMultiplexedStream *mux,
+                                      struct CResult *result);
+
+/**
+ * Returns whether the mux is closed (Beta): either explicitly or because a
+ * call on it observed a sub-stream failure. A failure that no call has
+ * observed yet does not set it. Also returns true while a close is in
+ * progress and for a null handle.
+ */
+bool zerobus_multiplexed_stream_is_closed(struct CZerobusMultiplexedStream *mux);
 
 /**
  * Build a protobuf schema from Unity Catalog table metadata JSON.

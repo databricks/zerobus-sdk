@@ -12,8 +12,8 @@ extern crate libc;
 // shared header helpers from `common` (`zerobus_alloc_header_array`,
 // `zerobus_alloc_cstring`, `zerobus_free_headers`) → arrow fns → builder fns →
 // sdk fns → stream fns ending with `zerobus_free_error_message` and
-// `zerobus_get_default_config` → proto fns. `common` also declares the shared
-// types and the header helpers listed above.
+// `zerobus_get_default_config` → multiplexed stream fns → proto fns. `common`
+// also declares the shared types and the header helpers listed above.
 //
 // A comment between each declaration breaks rustfmt's contiguous-`mod` grouping,
 // so it cannot alphabetize them and reorder the generated header.
@@ -28,6 +28,8 @@ mod builder;
 mod sdk;
 // stream follows sdk.
 mod stream;
+// multiplexed follows stream, whose builder helpers it reuses.
+mod multiplexed;
 // proto_schema must be declared last.
 mod proto_schema;
 
@@ -39,6 +41,7 @@ pub use arrow::*;
 pub use arrow_c_data::*;
 pub use builder::*;
 pub use common::*;
+pub use multiplexed::*;
 // Re-exported SDK types referenced via `crate::` paths by the test module.
 #[cfg(test)]
 pub(crate) use databricks_zerobus_ingest_sdk::ZerobusError;

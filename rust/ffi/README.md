@@ -101,6 +101,53 @@ the call, so copy `error_message` if you need to keep it. All string,
 descriptor, and config inputs are copied before the async create call returns,
 but the `CZerobusSdk*` itself must remain valid until the callback fires.
 
+### Multiplexed streams (Beta)
+
+When one stream is the throughput bottleneck and global ordering is not
+required, a multiplexed stream opens several sub-streams to the same table.
+Ack callbacks receive opaque message IDs instead of offsets:
+
+```c
+CResult r = {0};
+CStreamConfigurationOptions opts = zerobus_get_default_config();
+CZerobusMultiplexedStream *mux =
+    zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+        sdk, "catalog.schema.table", descriptor, descriptor_len,
+        headers_callback, headers_user_data, free_headers_user_data,
+        /* stream_count */ 4, &opts,
+        /* ack_on_ack, ack_on_error, ack_user_data, free_ack_user_data */
+        NULL, NULL, NULL, NULL, &r);
+if (mux == NULL) {
+    zerobus_free_error_message(r.error_message);
+    return;
+}
+
+r = (CResult){0};
+if (!zerobus_multiplexed_stream_close(mux, &r))
+    zerobus_free_error_message(r.error_message);
+zerobus_multiplexed_stream_free(mux);
+```
+
+- For JSON, pass options with `record_type = 2` and a NULL descriptor. NULL
+  options select protobuf.
+- Every `zerobus_multiplexed_stream_*` call except `_free` may run
+  concurrently on one handle. `_free` must not overlap any other call.
+- Ack callbacks are create parameters (`ack_on_ack`, `ack_on_error`,
+  `ack_user_data`, `free_ack_user_data`); the `ack_on_*` fields of
+  `CStreamConfigurationOptions` must stay NULL, and its `ack_user_data` is
+  ignored. They receive opaque message IDs (not ordered, may be negative), and
+  callbacks from different sub-streams may run concurrently, so `ack_user_data`
+  must be thread-safe. The FFI owns `ack_user_data` and calls
+  `free_ack_user_data` once, from any thread, after the last callback. That can
+  be after the create returns, even a failed one, and after
+  `zerobus_multiplexed_stream_free` returns. With a NULL `free_ack_user_data`,
+  keep `ack_user_data` valid for the rest of the process. Callbacks must not
+  call `zerobus_multiplexed_stream_*` functions or block on a thread that does.
+- One headers callback serves every sub-stream. The FFI serializes calls into it,
+  so a slow callback delays every sub-stream's open; keep it fast. Like ack
+  callbacks, it must not call `zerobus_multiplexed_stream_*` functions.
+- Arrow Flight multiplexing is not yet exposed through the C FFI.
+
 ### Dynamic protobuf from a Unity Catalog schema (pure C)
 
 Build a protobuf descriptor and encode records straight from Unity Catalog
