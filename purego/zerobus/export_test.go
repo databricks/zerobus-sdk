@@ -111,6 +111,12 @@ func WithMultiplexedJitter(wait func(ctx context.Context, lane int) error) Strea
 	return func(c *streamConfig) { c.muxJitter = wait }
 }
 
+// WithCallbackTeardownTimeout sets how long Close waits for the callback
+// worker of a stream, or of each multiplexed lane.
+func WithCallbackTeardownTimeout(d time.Duration) StreamOption {
+	return func(c *streamConfig) { c.cfg.CallbackTeardownTimeout = d }
+}
+
 // WithMultiplexedCapacityWait replaces the capacity wait of a multiplexed
 // stream.
 func WithMultiplexedCapacityWait(d time.Duration) StreamOption {
@@ -124,8 +130,8 @@ func (m *MultiplexedStream) SetBeforeLaneIngest(hook func(lane int)) (remove fun
 	return func() { m.hooks.beforeLaneIngest.Store(nil) }
 }
 
-// SetBeforeLaneWait sets a hook that runs right before each lane wait in
-// Flush. The returned function removes it.
+// SetBeforeLaneWait sets a hook that runs right before each lane wait in Flush
+// and WaitForMessageID. The returned function removes it.
 func (m *MultiplexedStream) SetBeforeLaneWait(hook func(op string, lane int)) (remove func()) {
 	m.hooks.beforeLaneWait.Store(&hook)
 	return func() { m.hooks.beforeLaneWait.Store(nil) }
