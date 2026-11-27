@@ -21,6 +21,7 @@ use databricks_zerobus_ingest_sdk::{
     MultiplexedStream, ZerobusError, ZerobusResult, ZerobusSdk,
 };
 use prost::Message;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::future::Future;
@@ -45,11 +46,20 @@ const EMPTY_BATCH: i64 = -2;
 /// run concurrently on the same handle from any thread. `_free` must not
 /// overlap any other call on that handle.
 ///
-/// Ack and headers callbacks run on the FFI's runtime threads. They must not
-/// call `zerobus_multiplexed_stream_*` functions, and must not block on a
-/// thread that is inside one: the call would fail, or deadlock while close
-/// waits for callbacks to drain. Ack callbacks fire once per ingest call (one
-/// for a whole batch), in order within each sub-stream.
+/// Ack and headers callbacks run on the FFI's runtime threads. An ack callback
+/// may call the `_async` functions and `zerobus_multiplexed_stream_is_closed`.
+/// It must not call `zerobus_multiplexed_stream_free`, since it cannot know
+/// that no other call is in flight, nor a sync create or a blocking
+/// `zerobus_stream_*` function. A blocking `zerobus_multiplexed_stream_*` call
+/// (ingest, wait, flush, close, `get_unacked_records`) made from inside an ack
+/// callback fails at once with a fixed, non-retryable error. Only that case is
+/// checked: the same misuse from an `_async` completion callback or a headers
+/// callback, or a sync create from an ack callback, also fails, but with a
+/// caught runtime panic as the error. A headers callback must not call
+/// `zerobus_multiplexed_stream_*` functions. No callback may block on a thread
+/// that is inside a blocking call: close waits for callbacks to drain, so that
+/// deadlocks. Ack callbacks fire once per ingest call (one for a whole
+/// batch), in order within each sub-stream.
 #[repr(C)]
 pub struct CZerobusMultiplexedStream {
     _private: [u8; 0],
@@ -257,6 +267,46 @@ unsafe fn copy_json_records(
         .collect()
 }
 
+thread_local! {
+    /// Set while a mux ack callback runs on this thread.
+    static IN_ACK_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as running a mux ack callback until dropped.
+struct AckCallbackScope {
+    previous: bool,
+}
+
+impl AckCallbackScope {
+    fn enter() -> Self {
+        Self {
+            previous: IN_ACK_CALLBACK.with(|flag| flag.replace(true)),
+        }
+    }
+}
+
+impl Drop for AckCallbackScope {
+    fn drop(&mut self) {
+        IN_ACK_CALLBACK.with(|flag| flag.set(self.previous));
+    }
+}
+
+const BLOCKING_CALL_IN_ACK_CALLBACK: &str =
+    "Blocking multiplexed stream calls (ingest, wait_for_message_id, flush, close, \
+     get_unacked_records) cannot be called from an ack callback: callbacks run on \
+     runtime threads that must not block. Use the _async calls, or hand the work \
+     to another thread.";
+
+/// Fails a blocking call made from inside a mux ack callback, where blocking
+/// the runtime thread could deadlock a close that waits for the callback.
+fn blocking_call_in_ack_callback(result: *mut CResult) -> bool {
+    let inside = IN_ACK_CALLBACK.with(Cell::get);
+    if inside {
+        write_error_result(result, BLOCKING_CALL_IN_ACK_CALLBACK, false);
+    }
+    inside
+}
+
 /// C callback receiving an acknowledged message ID.
 type MuxAckOnAck = extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void);
 /// C callback receiving a failed message ID and the error text.
@@ -314,10 +364,12 @@ unsafe impl Sync for MultiplexedCallbackAckCallback {}
 
 impl AckCallback<MessageId> for MultiplexedCallbackAckCallback {
     fn on_ack(&self, message_id: MessageId) {
+        let _scope = AckCallbackScope::enter();
         self.inner.on_ack(message_id.raw());
     }
 
     fn on_error(&self, message_id: MessageId, error_message: &str) {
+        let _scope = AckCallbackScope::enter();
         self.inner.on_error(message_id.raw(), error_message);
     }
 }
@@ -600,7 +652,8 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
 /// freeing an open stream abandons them. Pending `_async` operations keep the
 /// stream alive and still call back exactly once. Must not run concurrently
 /// with any other call on `mux` (it may be called from an `_async` completion
-/// callback), and `mux` must not be used afterwards.
+/// callback, but not from an ack callback), and `mux` must not be used
+/// afterwards.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedStream) {
     ffi_guard(ptr::null_mut(), (), move || {
@@ -628,7 +681,7 @@ pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedS
 /// unacknowledged records, on a new stream. Otherwise retry it only when
 /// `result->is_retryable` is set; a non-retryable error on an open mux means
 /// the record itself is invalid (for example, its type does not match the
-/// stream).
+/// stream), or that the call was made from inside an ack callback.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
     mux: *mut CZerobusMultiplexedStream,
@@ -637,6 +690,9 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record(
     result: *mut CResult,
 ) -> i64 {
     ffi_guard(result, INGEST_ERROR, move || {
+        if blocking_call_in_ack_callback(result) {
+            return INGEST_ERROR;
+        }
         if data.is_null() && data_len != 0 {
             write_error_result(result, "Invalid data pointer", false);
             return INGEST_ERROR;
@@ -672,6 +728,9 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record(
     result: *mut CResult,
 ) -> i64 {
     ffi_guard(result, INGEST_ERROR, move || {
+        if blocking_call_in_ack_callback(result) {
+            return INGEST_ERROR;
+        }
         let handle = match validate_mux_ptr(mux) {
             Ok(h) => h,
             Err(msg) => {
@@ -701,8 +760,8 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record(
 ///
 /// The arrays may be NULL only when `num_records` is 0. Returns -1 on error.
 /// For an empty batch it returns -2 with `result->success` set; -2 is not a
-/// message ID, so do not wait on it. On a closed mux an empty batch fails
-/// with -1, like any other batch.
+/// message ID, so do not wait on it. On a closed mux, or from inside an ack
+/// callback, an empty batch fails with -1, like any other batch.
 /// Valid message IDs can be negative, so check `result->success` rather than
 /// the sign. Errors follow
 /// `zerobus_multiplexed_stream_ingest_proto_record`: a failed call queued none
@@ -716,6 +775,9 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records(
     result: *mut CResult,
 ) -> i64 {
     ffi_guard(result, INGEST_ERROR, move || {
+        if blocking_call_in_ack_callback(result) {
+            return INGEST_ERROR;
+        }
         if num_records != 0 && (records.is_null() || record_lens.is_null()) {
             write_error_result(result, "Invalid records pointer", false);
             return INGEST_ERROR;
@@ -756,6 +818,9 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records(
     result: *mut CResult,
 ) -> i64 {
     ffi_guard(result, INGEST_ERROR, move || {
+        if blocking_call_in_ack_callback(result) {
+            return INGEST_ERROR;
+        }
         if num_records != 0 && json_records.is_null() {
             write_error_result(result, "Invalid records pointer", false);
             return INGEST_ERROR;
@@ -830,6 +895,8 @@ fn read_now(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<Multiplexe
 ///
 /// For high throughput, prefer one `zerobus_multiplexed_stream_flush` after an
 /// ingest loop over waiting on every message ID.
+///
+/// Fails at once, without closing, when called from inside an ack callback.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
     mux: *mut CZerobusMultiplexedStream,
@@ -837,6 +904,9 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
     result: *mut CResult,
 ) -> bool {
     ffi_guard(result, false, move || {
+        if blocking_call_in_ack_callback(result) {
+            return false;
+        }
         let handle = match validate_mux_ptr(mux) {
             Ok(h) => h,
             Err(msg) => {
@@ -896,7 +966,8 @@ async fn drain_then_flush(
 /// Returns false with `result` set on a timeout, on a closed mux, or once any
 /// sub-stream has failed, even if the other sub-streams flushed. Check
 /// `zerobus_multiplexed_stream_is_closed` to tell a failed mux from a
-/// timeout.
+/// timeout. Fails at once, without closing, when called from inside an ack
+/// callback.
 ///
 /// A terminal sub-stream failure closes the mux for further ingestion; its
 /// unacknowledged records remain available via
@@ -907,6 +978,9 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
     result: *mut CResult,
 ) -> bool {
     ffi_guard(result, false, move || {
+        if blocking_call_in_ack_callback(result) {
+            return false;
+        }
         let handle = match validate_mux_ptr(mux) {
             Ok(h) => h,
             Err(msg) => {
@@ -933,9 +1007,10 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 /// unacknowledged records. The handle must still be released with
 /// `zerobus_multiplexed_stream_free`.
 ///
-/// Returns false with `result` set on failure; the mux is closed either way.
-/// When close returns, all ack callbacks have run, unless close waited longer
-/// than `callback_max_wait_time_ms` (default 5 s). With
+/// Returns false with `result` set on failure; the mux is closed either way,
+/// except that a close called from an ack callback fails at once without
+/// closing. When close returns, all ack callbacks have run, unless close waited
+/// longer than `callback_max_wait_time_ms` (default 5 s). With
 /// `has_callback_max_wait_time_ms` false there is no limit. After it, queued
 /// callbacks are dropped and a running one can outlive close. `_async`
 /// completion callbacks can still run after close returns. Close runs its own
@@ -948,6 +1023,9 @@ pub extern "C" fn zerobus_multiplexed_stream_close(
     result: *mut CResult,
 ) -> bool {
     ffi_guard(result, false, move || {
+        if blocking_call_in_ack_callback(result) {
+            return false;
+        }
         let handle = match validate_mux_ptr(mux) {
             Ok(h) => h,
             Err(msg) => {
@@ -984,7 +1062,8 @@ pub extern "C" fn zerobus_multiplexed_stream_is_closed(
 /// a JSON ingest.
 ///
 /// Every call returns the same records, so re-send them once, from one
-/// caller.
+/// caller. Fails at once with an empty array, without closing, when called from
+/// inside an ack callback.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
     mux: *mut CZerobusMultiplexedStream,
@@ -995,6 +1074,9 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
         len: 0,
     };
     ffi_guard(result, empty(), move || {
+        if blocking_call_in_ack_callback(result) {
+            return empty();
+        }
         let handle = match validate_mux_ptr(mux) {
             Ok(h) => h,
             Err(msg) => {

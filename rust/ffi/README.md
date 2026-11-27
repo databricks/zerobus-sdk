@@ -157,12 +157,13 @@ zerobus_multiplexed_stream_free(mux);
   than the sign of the return value, and pass IDs only to
   `zerobus_multiplexed_stream_wait_for_message_id` on the same stream. An
   empty batch returns -2 with `r.success` set; -2 is not a message ID. On a
-  closed mux it fails with -1.
+  closed mux, or from inside an ack callback, it fails with -1.
 - A NULL record pointer or array is valid only with a length or count of 0.
 - A failed ingest call queued nothing, and its records will not come back from
   `zerobus_multiplexed_stream_get_unacked_records`. Retry it only when
   `r.is_retryable` is set and the mux is still open. A non-retryable error on
-  an open mux means the record itself is invalid; once the mux is closed,
+  an open mux means the record itself is invalid, or that the call was made
+  from inside an ack callback; once the mux is closed,
   re-send it on a new stream.
 - A batch call sends the whole batch to one sub-stream. To use every
   sub-stream, send at least `stream_count` batches.
@@ -179,26 +180,31 @@ zerobus_multiplexed_stream_free(mux);
   `free_ack_user_data` once, from any thread, after the last callback. That can
   be after the create returns, even a failed one, and after
   `zerobus_multiplexed_stream_free` returns. With a NULL `free_ack_user_data`,
-  keep `ack_user_data` valid for the rest of the process. Callbacks must not
-  call `zerobus_multiplexed_stream_*` functions or block on a thread that does.
+  keep `ack_user_data` valid for the rest of the process. A blocking
+  `zerobus_multiplexed_stream_*` call (ingest, wait, flush, close,
+  `get_unacked_records`) made from inside an ack callback fails at once with a
+  non-retryable error; use the `_async` calls instead. An ack callback must not
+  call `zerobus_multiplexed_stream_free`, a sync create, or a blocking
+  `zerobus_stream_*` call. Callbacks must not block on a thread that is inside a
+  blocking call.
 - With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one
   headers callback serves every sub-stream. The FFI serializes calls into it,
-  so a slow callback delays every sub-stream's open; keep it fast. Like ack
-  callbacks, it must not call `zerobus_multiplexed_stream_*` functions.
+  so a slow callback delays every sub-stream's open; keep it fast. It must not
+  call `zerobus_multiplexed_stream_*` functions.
 - If a sub-stream fails, the mux stops accepting records once a call observes
   the failure. Recover anything unacknowledged with
   `zerobus_multiplexed_stream_get_unacked_records`, and send them, plus any
   record whose ingest call failed, on a new stream. Every call returns the
   same records, so re-send them once, from one caller.
-- Every call except `is_closed` and `free` has an `_async` variant that
-  returns at once and reports through a completion callback on a runtime
-  thread (`zerobus_sdk_create_multiplexed_stream_async`,
+- Every call except `is_closed` and `free` has an `_async` variant that returns
+  at once and reports through a completion callback on a runtime thread
+  (`zerobus_sdk_create_multiplexed_stream_async`,
   `zerobus_multiplexed_stream_ingest_proto_record_async`, ...). A callback can
-  run before its call returns. Its `result` is valid only during the call: do not free its
-  `error_message` (the FFI frees it), and copy it to keep it. A callback may
-  call the `_async` functions, `is_closed` and `free`, but no blocking call.
-  Call `free` from a callback only after the `_async` call that started it
-  has returned.
+  run before its call returns. Its `result` is valid only during the call: do
+  not free its `error_message` (the FFI frees it), and copy it to keep it. A
+  completion callback may call the `_async` functions, `is_closed` and `free`,
+  but no blocking call. Call `free` from a completion callback only after the
+  `_async` call that started it has returned.
 - Flush and close wait for every `_async` ingest accepted before them to be
   queued, but not for its completion callback; a failed `_async` ingest is not
   in `get_unacked_records`, so keep each record until its callback reports

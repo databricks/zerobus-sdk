@@ -238,11 +238,20 @@ typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
  * run concurrently on the same handle from any thread. `_free` must not
  * overlap any other call on that handle.
  *
- * Ack and headers callbacks run on the FFI's runtime threads. They must not
- * call `zerobus_multiplexed_stream_*` functions, and must not block on a
- * thread that is inside one: the call would fail, or deadlock while close
- * waits for callbacks to drain. Ack callbacks fire once per ingest call (one
- * for a whole batch), in order within each sub-stream.
+ * Ack and headers callbacks run on the FFI's runtime threads. An ack callback
+ * may call the `_async` functions and `zerobus_multiplexed_stream_is_closed`.
+ * It must not call `zerobus_multiplexed_stream_free`, since it cannot know
+ * that no other call is in flight, nor a sync create or a blocking
+ * `zerobus_stream_*` function. A blocking `zerobus_multiplexed_stream_*` call
+ * (ingest, wait, flush, close, `get_unacked_records`) made from inside an ack
+ * callback fails at once with a fixed, non-retryable error. Only that case is
+ * checked: the same misuse from an `_async` completion callback or a headers
+ * callback, or a sync create from an ack callback, also fails, but with a
+ * caught runtime panic as the error. A headers callback must not call
+ * `zerobus_multiplexed_stream_*` functions. No callback may block on a thread
+ * that is inside a blocking call: close waits for callbacks to drain, so that
+ * deadlocks. Ack callbacks fire once per ingest call (one for a whole
+ * batch), in order within each sub-stream.
  */
 typedef struct CZerobusMultiplexedStream {
   uint8_t _private[0];
@@ -1031,7 +1040,8 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_hea
  * freeing an open stream abandons them. Pending `_async` operations keep the
  * stream alive and still call back exactly once. Must not run concurrently
  * with any other call on `mux` (it may be called from an `_async` completion
- * callback), and `mux` must not be used afterwards.
+ * callback, but not from an ack callback), and `mux` must not be used
+ * afterwards.
  */
 void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
 
@@ -1052,7 +1062,7 @@ void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
  * unacknowledged records, on a new stream. Otherwise retry it only when
  * `result->is_retryable` is set; a non-retryable error on an open mux means
  * the record itself is invalid (for example, its type does not match the
- * stream).
+ * stream), or that the call was made from inside an ack callback.
  */
 int64_t zerobus_multiplexed_stream_ingest_proto_record(struct CZerobusMultiplexedStream *mux,
                                                        const uint8_t *data,
@@ -1077,8 +1087,8 @@ int64_t zerobus_multiplexed_stream_ingest_json_record(struct CZerobusMultiplexed
  *
  * The arrays may be NULL only when `num_records` is 0. Returns -1 on error.
  * For an empty batch it returns -2 with `result->success` set; -2 is not a
- * message ID, so do not wait on it. On a closed mux an empty batch fails
- * with -1, like any other batch.
+ * message ID, so do not wait on it. On a closed mux, or from inside an ack
+ * callback, an empty batch fails with -1, like any other batch.
  * Valid message IDs can be negative, so check `result->success` rather than
  * the sign. Errors follow
  * `zerobus_multiplexed_stream_ingest_proto_record`: a failed call queued none
@@ -1111,6 +1121,8 @@ int64_t zerobus_multiplexed_stream_ingest_json_records(struct CZerobusMultiplexe
  *
  * For high throughput, prefer one `zerobus_multiplexed_stream_flush` after an
  * ingest loop over waiting on every message ID.
+ *
+ * Fails at once, without closing, when called from inside an ack callback.
  */
 bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedStream *mux,
                                                     int64_t message_id,
@@ -1134,7 +1146,8 @@ bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedSt
  * Returns false with `result` set on a timeout, on a closed mux, or once any
  * sub-stream has failed, even if the other sub-streams flushed. Check
  * `zerobus_multiplexed_stream_is_closed` to tell a failed mux from a
- * timeout.
+ * timeout. Fails at once, without closing, when called from inside an ack
+ * callback.
  *
  * A terminal sub-stream failure closes the mux for further ingestion; its
  * unacknowledged records remain available via
@@ -1152,9 +1165,10 @@ bool zerobus_multiplexed_stream_flush(struct CZerobusMultiplexedStream *mux,
  * unacknowledged records. The handle must still be released with
  * `zerobus_multiplexed_stream_free`.
  *
- * Returns false with `result` set on failure; the mux is closed either way.
- * When close returns, all ack callbacks have run, unless close waited longer
- * than `callback_max_wait_time_ms` (default 5 s). With
+ * Returns false with `result` set on failure; the mux is closed either way,
+ * except that a close called from an ack callback fails at once without
+ * closing. When close returns, all ack callbacks have run, unless close waited
+ * longer than `callback_max_wait_time_ms` (default 5 s). With
  * `has_callback_max_wait_time_ms` false there is no limit. After it, queued
  * callbacks are dropped and a running one can outlive close. `_async`
  * completion callbacks can still run after close returns. Close runs its own
@@ -1184,7 +1198,8 @@ bool zerobus_multiplexed_stream_is_closed(struct CZerobusMultiplexedStream *mux)
  * a JSON ingest.
  *
  * Every call returns the same records, so re-send them once, from one
- * caller.
+ * caller. Fails at once with an empty array, without closing, when called from
+ * inside an ack callback.
  */
 struct CRecordArray zerobus_multiplexed_stream_get_unacked_records(struct CZerobusMultiplexedStream *mux,
                                                                    struct CResult *result);
