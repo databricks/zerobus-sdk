@@ -438,47 +438,45 @@ public sealed class ZerobusSdk : IDisposable
     {
         ValidateStreamConfiguration(tableProperties, options);
 
+        // Register before the native create, so no ack can arrive unregistered.
         var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
-        var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
-
-        // Create the callback bridge that the native code will invoke. The bridge
-        // holds both delegate instances, so rooting the bridge keeps their native
-        // thunks alive.
-        var bridge = new HeadersProviderBridge(headersProvider);
-
-        // Ownership transfer: the GCHandle to the bridge is handed to the FFI as
-        // user_data. The FFI releases it via the free callback (NativeFree)
-        // exactly once — after any in-flight GetHeaders has returned — which
-        // closes the recovery-vs-teardown use-after-free. The stream therefore
-        // owns nothing and never frees this handle itself.
-        var handle = GCHandle.Alloc(bridge);
-        var handlePtr = GCHandle.ToIntPtr(handle);
-        var tableName = tableProperties.TableName;
-        var descriptorProto = tableProperties.DescriptorProto ?? [];
-
-        IntPtr streamPtr;
         try
         {
-            streamPtr = NativeInterop.SdkCreateStreamWithHeadersProvider(
+            var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
+
+            // Create the callback bridge that the native code will invoke. The
+            // bridge holds both delegate instances, so rooting the bridge keeps
+            // their native thunks alive.
+            var bridge = new HeadersProviderBridge(headersProvider);
+
+            // Ownership transfer: the GCHandle to the bridge is handed to the FFI
+            // as user_data. The FFI releases it via the free callback (NativeFree)
+            // exactly once — after any in-flight GetHeaders has returned — which
+            // closes the recovery-vs-teardown use-after-free. The stream therefore
+            // owns nothing and never frees this handle itself. It is allocated
+            // last, so a managed failure before it leaves no handle to free.
+            var handlePtr = GCHandle.ToIntPtr(GCHandle.Alloc(bridge));
+
+            var streamPtr = NativeInterop.SdkCreateStreamWithHeadersProvider(
                 _ptr,
-                tableName,
-                descriptorProto,
+                tableProperties.TableName,
+                tableProperties.DescriptorProto ?? [],
                 bridge.Callback,
                 handlePtr,
                 bridge.FreeCallback,
                 ref nativeOpts);
+
+            // The FFI owns the provider handle now; the stream keeps no reference.
+            return new ZerobusStream(streamPtr, ackKey);
         }
         catch
         {
-            // On a thrown failure the FFI already invoked the free callback (the
-            // provider is built before any fallible work), so the handle is
+            // On a thrown native failure the FFI already invoked the free callback
+            // (the provider is built before any fallible work), so the handle is
             // already freed — do NOT free it again here (double-free).
             AckCallbackRegistry.Release(ackKey);
             throw;
         }
-
-        // The FFI owns the provider handle now; the stream keeps no reference.
-        return new ZerobusStream(streamPtr, ackKey);
     }
 
     private async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
@@ -489,39 +487,36 @@ public sealed class ZerobusSdk : IDisposable
         ValidateStreamConfiguration(tableProperties, options);
 
         var ackKey = AckCallbackRegistry.Register(options?.AckCallback);
-        var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
-
-        var bridge = new HeadersProviderBridge(headersProvider);
-
-        var handle = GCHandle.Alloc(bridge);
-        var handlePtr = GCHandle.ToIntPtr(handle);
-        var tableName = tableProperties.TableName;
-        var descriptorProto = tableProperties.DescriptorProto ?? [];
-
-        // Ownership transfer point: this call hands the bridge GCHandle to the
-        // FFI as user_data. On failure, the native side has already invoked the
-        // free callback; on success, it owns cleanup for the full stream lifetime.
-        IntPtr streamPtr;
         try
         {
-            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+            var nativeOpts = NativeInterop.ConvertConfig(options, ackKey);
+            var bridge = new HeadersProviderBridge(headersProvider);
+
+            // Ownership transfer point: this call hands the bridge GCHandle to the
+            // FFI as user_data. On failure, the native side has already invoked
+            // the free callback; on success, it owns cleanup for the full stream
+            // lifetime. The handle is allocated last, after the fallible managed
+            // work.
+            var handlePtr = GCHandle.ToIntPtr(GCHandle.Alloc(bridge));
+
+            var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
                     _ptr,
-                    tableName,
-                    descriptorProto,
+                    tableProperties.TableName,
+                    tableProperties.DescriptorProto ?? [],
                     bridge.Callback,
                     handlePtr,
                     bridge.FreeCallback,
                     nativeOpts)
                 .ConfigureAwait(false);
+
+            // The FFI owns the provider handle now; the stream keeps no reference.
+            return new ZerobusStream(streamPtr, ackKey);
         }
         catch
         {
             AckCallbackRegistry.Release(ackKey);
             throw;
         }
-
-        // The FFI owns the provider handle now; the stream keeps no reference.
-        return new ZerobusStream(streamPtr, ackKey);
     }
 
     /// <summary>

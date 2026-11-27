@@ -27,11 +27,17 @@ namespace Databricks.Zerobus;
 /// </para>
 /// <para>
 /// <c>Flush()</c> can return before the last <see cref="OnAck"/> has run. When
-/// <c>Close()</c> returns, all callbacks have run, unless <c>Close()</c> waited
+/// <c>Close()</c> returns, all callbacks have run, unless its wait for them took
 /// longer than <see cref="StreamConfigurationOptions.CallbackMaxWaitTimeMs"/>
 /// (default 5 s). <c>Dispose()</c> does the same, so read state that your
-/// callbacks update after it. After <c>Dispose()</c> returns, no new callback
-/// starts; one already running may still finish.
+/// callbacks update after it. After <c>Dispose()</c> returns, a callback that
+/// was about to start may still start, and one already running may still
+/// finish; no other callback runs.
+/// </para>
+/// <para>
+/// Call <c>Dispose()</c> on every stream that has a callback. The SDK holds the
+/// callback strongly, so a callback that references its stream keeps an
+/// undisposed stream alive, and its finalizer never runs.
 /// </para>
 /// <para>
 /// Callbacks run on the SDK's background threads, not on the thread that
@@ -41,7 +47,10 @@ namespace Databricks.Zerobus;
 /// or blocking callback holds an SDK thread and can delay <c>Flush()</c>,
 /// <c>Close()</c> and other streams. Do not call stream or
 /// <see cref="ZerobusSdk"/> methods (such as <c>CreateStream</c> or
-/// <c>RecreateStream</c>) from a callback; do recovery on your own task.
+/// <c>RecreateStream</c>) from a callback; do recovery on your own task. A
+/// stream method called from a callback while <c>Close()</c> runs stalls
+/// <c>Close()</c> until its callback wait ends (never, with
+/// <see cref="StreamConfigurationOptions.CallbackWaitForever"/>).
 /// An exception thrown by a callback is caught and reported with
 /// <see cref="System.Diagnostics.Trace.TraceError(string)"/>, including the
 /// offset; later callbacks still run.

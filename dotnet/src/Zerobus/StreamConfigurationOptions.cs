@@ -89,7 +89,8 @@ public sealed record StreamConfigurationOptions
     /// <c>null</c> means no callback; use <c>Flush()</c> or <c>WaitForOffset()</c>.
     /// See <see cref="IAckCallback"/> for when and where it is called. After a
     /// stream failure, callbacks can still run after <c>Close()</c> returns, until
-    /// <c>Dispose()</c>, and some <c>OnError</c> calls may not arrive.
+    /// <c>Dispose()</c>, and some <c>OnError</c> calls may not arrive. Call
+    /// <c>Dispose()</c> on every stream that has a callback.
     /// Default: null.
     /// </summary>
     public IAckCallback? AckCallback { get; init; }
@@ -102,8 +103,8 @@ public sealed record StreamConfigurationOptions
     ///   <item>A value — Wait up to that many milliseconds (<c>0</c> drops them at once).</item>
     ///   <item><see cref="CallbackWaitForever"/> — Wait until every pending callback has run.</item>
     /// </list>
-    /// When <c>Close()</c> returns, all callbacks have run, unless <c>Close()</c>
-    /// waited longer than this (default 5 s).
+    /// When <c>Close()</c> returns, all callbacks have run, unless its wait for
+    /// them took longer than this (default 5 s).
     /// Has no effect without an <see cref="AckCallback"/>.
     /// Default: null.
     /// </summary>

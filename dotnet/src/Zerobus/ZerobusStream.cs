@@ -303,7 +303,10 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// This method does not free native resources. Call <see cref="Dispose()"/>
-    /// after you have finished any recovery operations.
+    /// after you have finished any recovery operations. With an ack callback,
+    /// <c>Close()</c>, <c>CloseAsync()</c> and <c>Dispose()</c> also wait for
+    /// pending callbacks, for up to
+    /// <see cref="StreamConfigurationOptions.CallbackMaxWaitTimeMs"/>.
     /// </remarks>
     /// <exception cref="ZerobusException">
     /// Thrown if flush or close fails.

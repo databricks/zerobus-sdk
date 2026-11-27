@@ -54,30 +54,43 @@ try
 {
     stream.Flush();
 }
-finally
+catch (ZerobusException flushError)
 {
-    stream.Dispose();
+    // Dispose, but report the flush error: a later Dispose error must not hide it.
+    try
+    {
+        stream.Dispose();
+    }
+    catch (ZerobusException)
+    {
+        // Ignored: the flush error below is the one to report.
+    }
+    throw new InvalidOperationException($"Flush failed: {flushError.RawMessage}", flushError);
 }
+stream.Dispose();
 
 Console.WriteLine(
-    $"Acknowledged {tracker.Acked} records, {tracker.Failed} failed, {rejected} rejected at ingest.");
+    $"Last acknowledged offset {tracker.LastAckedOffset}, {tracker.Failed} failed, {rejected} rejected at ingest.");
 if (rejected > 0 || tracker.Failed > 0)
 {
     throw new InvalidOperationException(
         $"{tracker.Failed} records failed and {rejected} were rejected at ingest.");
 }
 
-// Counts acknowledged records. The SDK calls it from a background thread, so it
-// only touches Interlocked state and returns quickly.
+// Tracks the last acknowledged offset and counts failures. The SDK calls it from
+// a background thread, so it only touches Interlocked state and returns quickly.
+// An ack for offset N confirms every earlier offset of the stream; offsets count
+// ingest calls, so with single-record ingests from offset 0, N + 1 records are
+// acknowledged.
 internal sealed class AckTracker : IAckCallback
 {
-    private long _acked;
+    private long _lastAcked = -1;
     private long _failed;
 
-    public long Acked => Interlocked.Read(ref _acked);
+    public long LastAckedOffset => Interlocked.Read(ref _lastAcked);
     public long Failed => Interlocked.Read(ref _failed);
 
-    public void OnAck(long offset) => Interlocked.Exchange(ref _acked, offset + 1);
+    public void OnAck(long offset) => Interlocked.Exchange(ref _lastAcked, offset);
 
     public void OnError(long offset, string errorMessage)
     {

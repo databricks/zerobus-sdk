@@ -64,11 +64,12 @@ Callbacks run on the SDK's background threads. One stream's callbacks run one at
 callback shared by several streams can run concurrently. Keep them short and thread-safe, and
 move longer work to your own task: a slow or blocking callback can delay `Flush()`, `Close()`
 and other streams. Do not call stream or `ZerobusSdk` methods (such as `CreateStream` or
-`RecreateStream`) from a callback; do recovery on your own task. An exception thrown by a
-callback is caught and logged with `Trace.TraceError`.
+`RecreateStream`) from a callback; do recovery on your own task. A stream method called from
+a callback while `Close()` runs stalls `Close()` until its callback wait ends. An exception
+thrown by a callback is caught and logged with `Trace.TraceError`.
 
 `Flush()` can return before the last `OnAck` has run. When `Close()` returns, all callbacks
-have run, unless `Close()` waited longer than `CallbackMaxWaitTimeMs` (default 5 s;
+have run, unless its wait for them took longer than `CallbackMaxWaitTimeMs` (default 5 s;
 `StreamConfigurationOptions.CallbackWaitForever`: no limit). `Dispose()` does the same, so
 read the state the callbacks update after it:
 
@@ -76,16 +77,25 @@ read the state the callbacks update after it:
 var tracker = new AckTracker();   // implements IAckCallback
 var options = StreamConfigurationOptions.Default with { AckCallback = tracker };
 var stream = sdk.CreateJsonStream(tableName, clientId, clientSecret, options);
-foreach (var record in records)
+try
 {
-    stream.IngestRecord(record);
+    foreach (var record in records)
+    {
+        stream.IngestRecord(record);
+    }
+    stream.Flush();
 }
-stream.Flush();
-stream.Dispose();
-Console.WriteLine($"acknowledged {tracker.Acked} records");
+finally
+{
+    stream.Dispose();
+}
+Console.WriteLine($"last acknowledged offset: {tracker.LastAckedOffset}");
 ```
 
-After `Dispose()` returns, no new callback starts. After the stream fails, `Close()` can
+Call `Dispose()` on every stream that has a callback: the SDK holds the callback strongly, so a
+callback that references its stream keeps it alive, and its finalizer never runs. After
+`Dispose()` returns, a callback that was about to start may still start, but no other callback
+runs. After the stream fails, `Close()` can
 return before pending callbacks run: they may still run until `Dispose()`, and `Dispose()`
 drops the rest. So some `OnError` calls may not arrive; use the error from `Flush()` and
 `GetUnackedRecords()` as the source of truth for which records failed. See
@@ -363,7 +373,8 @@ readable for recovery (`GetUnackedRecords`, `RecreateStream`).
 If you call `RecreateStream(stream)`, the original stream object is disposed and
 no longer usable.
 `Dispose()` frees native resources and should be called when recovery work is done.
-`using` calls `Dispose()` automatically.
+`using` calls `Dispose()` automatically. With an ack callback, `Close()`, `CloseAsync()` and
+`Dispose()` also wait up to `CallbackMaxWaitTimeMs` for pending callbacks.
 
 ```csharp
 stream.Close();
@@ -570,7 +581,12 @@ dotnet/
 │   ├── Zerobus.Tests/                         # Unit tests (NUnit)
 │   └── Zerobus.IntegrationTests/              # Integration tests (NUnit + gRPC mock)
 │       ├── Zerobus.IntegrationTests.csproj
-│       ├── IntegrationTests.cs                # 11 integration tests
+│       ├── IntegrationTestBase.cs             # Shared mock-server setup
+│       ├── StreamCreationIntegrationTests.cs  # Stream creation
+│       ├── IngestionIntegrationTests.cs       # Ingestion and flush
+│       ├── LifecycleRecoveryIntegrationTests.cs # Close, dispose and recovery
+│       ├── HeadersProviderIntegrationTests.cs # Custom headers provider
+│       ├── AckCallbackIntegrationTests.cs     # Ack callback (Beta)
 │       ├── MockZerobusServer.cs               # Mock gRPC server
 │       ├── TestHelpers.cs                     # Fixtures, response builders, interceptor
 │       └── Protos/
@@ -579,6 +595,7 @@ dotnet/
     ├── JsonSingle/                            # Single JSON record ingestion
     ├── JsonBatch/                             # Batch JSON record ingestion
     ├── ProtoSingle/                           # Single protobuf record ingestion
+    ├── JsonAckCallback/                       # Ack callback (Beta)
 ```
 
 ## Architecture
