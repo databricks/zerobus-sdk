@@ -32,6 +32,9 @@
 
 ### Bug Fixes
 
+- `ParseError::UnknownTypeName` now omits the schema type name from its
+  `Display` message.
+
 ### Documentation
 
 - Documented the unary client in the Rust README, with a usage section, API
