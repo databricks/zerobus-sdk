@@ -1703,3 +1703,93 @@ func TestMultiplexedAckCallbackCanCallStream(t *testing.T) {
 		t.Errorf("Close: %v", err)
 	}
 }
+
+// GetUnackedRecords closes the stream first and ignores the close error.
+func TestMultiplexedGetUnackedClosesStream(t *testing.T) {
+	t.Run("open", func(t *testing.T) {
+		mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-unacked-open", noAcks: true}), 2,
+			zerobus.WithFlushTimeout(50*time.Millisecond))
+		r0, r1 := muxRecord(0), muxRecord(1)
+		mustIngest(t, mux, r0)
+		mustIngest(t, mux, r1)
+
+		records, err := mux.GetUnackedRecords()
+		if err != nil {
+			t.Fatalf("GetUnackedRecords: %v", err)
+		}
+		if want := [][]byte{r0, r1}; !slices.EqualFunc(records, want, bytes.Equal) {
+			t.Errorf("GetUnackedRecords = %q, want %q", records, want)
+		}
+		if !mux.IsClosed() {
+			t.Error("IsClosed() = false after GetUnackedRecords")
+		}
+		_, err = mux.IngestRecord(muxRecord(2))
+		assertMuxClosed(t, err, "IngestRecord")
+		batches, err := mux.GetUnackedBatches()
+		if err != nil {
+			t.Fatalf("GetUnackedBatches: %v", err)
+		}
+		if want := [][][]byte{{r0}, {r1}}; !slices.EqualFunc(batches, want, func(x, y [][]byte) bool {
+			return slices.EqualFunc(x, y, bytes.Equal)
+		}) {
+			t.Errorf("GetUnackedBatches = %q, want %q", batches, want)
+		}
+		// Close returns the result of the close that GetUnackedRecords ran.
+		if err := mux.Close(); err == nil {
+			t.Error("Close = nil with unacked records, want the flush timeout")
+		}
+	})
+	t.Run("lane failed", func(t *testing.T) {
+		srv := &echoServer{streamID: "mux-unacked-failed", noAcks: true, failMarker: "poison"}
+		mux := createMux(t, newMuxSDK(t, srv), 2, zerobus.WithFlushTimeout(50*time.Millisecond))
+		stranded, poisoned := []byte(`{"m":"stranded"}`), []byte(`{"m":"poison-r1"}`)
+		mustIngest(t, mux, stranded) // lane 0, never acked
+		mustIngest(t, mux, poisoned) // lane 1 fails
+		waitLaneClosed(t, mux, 1)
+
+		records, err := mux.GetUnackedRecords()
+		if err != nil {
+			t.Fatalf("GetUnackedRecords: %v", err)
+		}
+		if want := [][]byte{stranded, poisoned}; !slices.EqualFunc(records, want, bytes.Equal) {
+			t.Errorf("GetUnackedRecords = %q, want %q (lane 0 first)", records, want)
+		}
+		assertRejected(t, mux.Close(), "poison-r1")
+	})
+}
+
+func TestMultiplexedGetUnackedAfterClose(t *testing.T) {
+	mux := createMux(t, newMuxSDK(t, &echoServer{streamID: "mux-unacked", noAcks: true}), 2,
+		zerobus.WithFlushTimeout(50*time.Millisecond))
+	r := [][]byte{muxRecord(0), muxRecord(1), muxRecord(2), muxRecord(3)}
+	b := [][]byte{muxRecord(10), muxRecord(11)}
+	var ids []zerobus.MessageID
+	for _, record := range r {
+		ids = append(ids, mustIngest(t, mux, record))
+	}
+	if id, ok, err := mux.IngestRecords(b); err != nil || !ok || zerobus.MessageIDStreamIndex(id) != 0 {
+		t.Fatalf("IngestRecords = (%v, %v, %v), want an ID on lane 0", id, ok, err)
+	}
+	_ = mux.Close()
+	// Close abandoned the record, so the wait fails with the lane closed error.
+	assertLaneClosed(t, mux.WaitForMessageID(ids[0]), "WaitForMessageID", 0)
+
+	records, err := mux.GetUnackedRecords()
+	if err != nil {
+		t.Fatalf("GetUnackedRecords: %v", err)
+	}
+	wantRecords := [][]byte{r[0], r[2], b[0], b[1], r[1], r[3]}
+	if !slices.EqualFunc(records, wantRecords, bytes.Equal) {
+		t.Errorf("GetUnackedRecords = %q, want %q (lane 0 first)", records, wantRecords)
+	}
+	batches, err := mux.GetUnackedBatches()
+	if err != nil {
+		t.Fatalf("GetUnackedBatches: %v", err)
+	}
+	wantBatches := [][][]byte{{r[0]}, {r[2]}, b, {r[1]}, {r[3]}}
+	if !slices.EqualFunc(batches, wantBatches, func(x, y [][]byte) bool {
+		return slices.EqualFunc(x, y, bytes.Equal)
+	}) {
+		t.Errorf("GetUnackedBatches = %q, want %q (lane 0 first)", batches, wantBatches)
+	}
+}

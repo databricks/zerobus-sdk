@@ -93,9 +93,10 @@ func Headers(provider HeadersProvider) Auth {
 // the standard log package, and later callbacks still run.
 //
 // A callback may call the ingest methods, Flush, and WaitForMessageID. It must
-// not call Close: Close waits for the callbacks to finish. To close from a
-// callback, call Close in a new goroutine. When Close returns, all callbacks
-// have run, unless Close waited longer than the callback limit (5 s).
+// not call Close, GetUnackedRecords, or GetUnackedBatches: they wait for the
+// callbacks to finish. To close from a callback, call Close in a new
+// goroutine. When Close returns, all callbacks have run, unless Close waited
+// longer than the callback limit (5 s).
 //
 // Multiplexed streams are a Beta API.
 type MultiplexedAckCallback interface {

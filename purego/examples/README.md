@@ -8,6 +8,7 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | ------------ | ---------------- | -------------------------------- | -------------- |
 | JSON single  | JSON             | Single-record loop, then `Flush` | `json/single`  |
 | JSON batch   | JSON             | One atomic batch                 | `json/batch`   |
+| JSON multiplexed (Beta) | JSON | Loop across 4 lanes, then `Flush` | `json/multiplexed` |
 | Proto single | Protocol Buffers | Single-record loop, then `Flush` | `proto/single` |
 | Proto batch  | Protocol Buffers | One atomic batch                 | `proto/batch`  |
 | Proto runtime | Runtime Protocol Buffers | Descriptor and messages built in Go | `proto/runtime` |
@@ -58,6 +59,7 @@ From this directory:
 ```bash
 go run ./json/single
 go run ./json/batch
+go run ./json/multiplexed
 go run ./proto/single
 go run ./proto/batch
 go run ./proto/runtime

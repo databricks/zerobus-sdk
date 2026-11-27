@@ -60,7 +60,8 @@ var errMultiplexedCapacityWait = errors.New("multiplexed capacity wait expired")
 // Retryable means that a new stream may succeed. Until then, calls on healthy
 // lanes still succeed. WaitForMessageID reports only on the lane named by its
 // ID, so it can still succeed for a record on a healthy lane. The other lanes
-// stay open until Close.
+// stay open until Close. GetUnackedRecords and GetUnackedBatches close the
+// stream and return the records that were not acknowledged.
 //
 // For throughput, queue records in a loop and call Flush once.
 //
@@ -651,6 +652,49 @@ func (m *MultiplexedStream) waitCallbacks() {
 // close.
 func (m *MultiplexedStream) IsClosed() bool {
 	return m.closed.Load()
+}
+
+// GetUnackedRecords closes the stream, then returns the queued records that
+// were never acknowledged, lane by lane, not in ingest order. It blocks as
+// Close does: each lane flushes for up to its FlushTimeout, and Close waits
+// for the callbacks. It ignores the Close result; call Close afterwards to get
+// it. Repeated calls return the same records. On a proto stream, records
+// ingested as JSON come back as protobuf bytes; replay them with IngestRecord
+// or IngestRecords. Do not call it from a callback.
+func (m *MultiplexedStream) GetUnackedRecords() ([][]byte, error) {
+	const op = "GetUnackedRecords"
+	_ = m.Close()
+	var out [][]byte
+	for _, lane := range m.lanes {
+		recs, err := lane.core.GetUnacked()
+		if err != nil {
+			return nil, wrapErr(op, err)
+		}
+		out = append(out, recs...)
+	}
+	return out, nil
+}
+
+// GetUnackedBatches closes the stream, then returns the unacknowledged records
+// grouped for replay, one group per ingest call, lane by lane, not in ingest
+// order. It blocks as Close does: each lane flushes for up to its
+// FlushTimeout, and Close waits for the callbacks. It ignores the Close
+// result; call Close afterwards to get it. Repeated calls return the same
+// records. On a proto stream, records ingested as JSON come back as protobuf
+// bytes; replay them with IngestRecord or IngestRecords. Do not call it from a
+// callback.
+func (m *MultiplexedStream) GetUnackedBatches() ([][][]byte, error) {
+	const op = "GetUnackedBatches"
+	_ = m.Close()
+	var out [][][]byte
+	for _, lane := range m.lanes {
+		batches, err := lane.core.GetUnackedBatches()
+		if err != nil {
+			return nil, wrapErr(op, err)
+		}
+		out = append(out, batches...)
+	}
+	return out, nil
 }
 
 // MessageDescriptor returns the protobuf descriptor configured for this
