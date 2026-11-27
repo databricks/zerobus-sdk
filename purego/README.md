@@ -72,10 +72,11 @@ that stream is unchanged.
 
 ## Multiplexed streams (Beta)
 
-A multiplexed stream opens several ordinary streams, called lanes, for one
-table. The lanes send in parallel on their own gRPC streams. Pass
-`zerobus.OAuth(clientID, clientSecret)` or `zerobus.Headers(provider)` as the
-auth:
+A multiplexed stream spreads ingest calls round-robin across several ordinary
+streams, called lanes. The lanes send in parallel on their own gRPC streams,
+which raises throughput above one stream. Each ingest call returns a
+`MessageID`. Pass `zerobus.OAuth(clientID, clientSecret)` or
+`zerobus.Headers(provider)` as the auth:
 
 ```go
 mux, err := sdk.CreateMultiplexedStream(ctx, "catalog.schema.table",
@@ -84,6 +85,15 @@ if err != nil {
     log.Fatal(err)
 }
 defer mux.Close()
+
+for _, rec := range records {
+    if _, err := mux.IngestRecord(rec); err != nil { // queue only
+        log.Fatal(err)
+    }
+}
+if err := mux.Flush(); err != nil { // wait once for every lane
+    log.Fatal(err)
+}
 ```
 
 - The lane count is between 1 and `MaxMultiplexedStreams` (64).
@@ -98,6 +108,18 @@ defer mux.Close()
   can buffer up to N times that value.
 - Each lane opens its own gRPC connection, unless the SDK was created with
   `WithConnectionPerStream(false)`.
+- A batch goes to one lane. Records keep their order within a lane, but there
+  is no order across lanes, so `MessageID` values are not ordered. Use `Flush`
+  to confirm everything.
+- When the chosen lane is full, the call waits for that lane, for at most 30
+  seconds, then returns a retryable error. A context deadline can only shorten
+  this wait.
+- A call that sees its lane fail or close returns that lane's error, and the
+  stream stores it as its failure. After that, the stream stops accepting
+  records, and every later ingest call, `Flush`, and `Close` returns the first
+  stored failure. Until then, calls on healthy lanes still succeed.
+- `Close` waits for the ingest calls in flight, each for at most the 30-second
+  capacity wait, then closes every lane.
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
   call the callback concurrently and in no global order, so it must be safe for
   concurrent use. Callbacks can still run after `Close` returns. A panic in a

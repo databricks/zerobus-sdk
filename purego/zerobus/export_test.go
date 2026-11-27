@@ -111,12 +111,35 @@ func WithMultiplexedJitter(wait func(ctx context.Context, lane int) error) Strea
 	return func(c *streamConfig) { c.muxJitter = wait }
 }
 
+// WithMultiplexedCapacityWait replaces the capacity wait of a multiplexed
+// stream.
+func WithMultiplexedCapacityWait(d time.Duration) StreamOption {
+	return func(c *streamConfig) { c.muxCapacityWait = d }
+}
+
+// SetBeforeLaneIngest sets a hook that runs right before each lane ingest
+// call. The returned function removes it.
+func (m *MultiplexedStream) SetBeforeLaneIngest(hook func(lane int)) (remove func()) {
+	m.hooks.beforeLaneIngest.Store(&hook)
+	return func() { m.hooks.beforeLaneIngest.Store(nil) }
+}
+
+// SetBeforeLaneWait sets a hook that runs right before each lane wait in
+// Flush. The returned function removes it.
+func (m *MultiplexedStream) SetBeforeLaneWait(hook func(op string, lane int)) (remove func()) {
+	m.hooks.beforeLaneWait.Store(&hook)
+	return func() { m.hooks.beforeLaneWait.Store(nil) }
+}
+
 // SetBeforeLaneClose sets a hook that runs right before Close closes each
 // lane. The returned function removes it.
 func (m *MultiplexedStream) SetBeforeLaneClose(hook func(lane int)) (remove func()) {
 	m.hooks.beforeLaneClose.Store(&hook)
 	return func() { m.hooks.beforeLaneClose.Store(nil) }
 }
+
+// Lane returns lane i of a multiplexed stream.
+func (m *MultiplexedStream) Lane(i int) *Stream { return m.lanes[i] }
 
 // ResolveMultiplexedStreamConfig applies the multiplexed validation and budget
 // split, and returns the per-lane MaxInflight.

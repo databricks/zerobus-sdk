@@ -100,7 +100,8 @@ type MultiplexedAckCallback interface {
 }
 
 // WithMultiplexedAckCallback registers a callback for asynchronous ack and
-// error notifications on a multiplexed stream.
+// error notifications on a multiplexed stream. It is an alternative to
+// blocking on Flush; both may be used together.
 //
 // It is only valid with CreateMultiplexedStream. CreateStream and
 // CreateStreamWithProvider reject it with a non-retryable error.
