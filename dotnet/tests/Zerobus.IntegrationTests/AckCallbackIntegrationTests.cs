@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using Databricks.Zerobus.Native;
 using NUnit.Framework;
 
@@ -109,6 +110,43 @@ public class AckCallbackIntegrationTests : IntegrationTestBase
 
         stream.Dispose();
         Assert.That(AckCallbackRegistry.Count, Is.EqualTo(baseline), "Dispose releases the key");
+    }
+
+    // A stream that is never disposed releases its callback key on the
+    // finalizer path. The callback holds no reference to the stream.
+    [Test]
+    public async Task Finalizer_ReleasesTheAckCallbackKey()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_1"),
+        ]);
+        using var sdk = CreateDefaultSdk(fixture);
+        var baseline = AckCallbackRegistry.Count;
+        var options = CreateDefaultOptions() with { AckCallback = new ChannelCallback() };
+
+        var stream = CreateUnreferencedStream(sdk, options);
+        Assert.That(AckCallbackRegistry.Count, Is.EqualTo(baseline + 1));
+        // Bounded: a few collections let the finalizer run and release the key.
+        for (var i = 0; i < 20 && (stream.IsAlive || AckCallbackRegistry.Count != baseline); i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            await Task.Delay(50);
+        }
+        Assert.That(stream.IsAlive, Is.False, "the stream was not collected");
+        Assert.That(AckCallbackRegistry.Count, Is.EqualTo(baseline), "the finalizer releases the key");
+    }
+
+    // Creates a stream in its own frame, so no local keeps it alive (Debug
+    // builds extend local lifetimes to the end of the method).
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference CreateUnreferencedStream(ZerobusSdk sdk, StreamConfigurationOptions options)
+    {
+        var stream = sdk.CreateStreamWithHeadersProvider(CreateTableProperties(), new TestHeadersProvider(), options);
+        return new WeakReference(stream);
     }
 
     // An IAckCallback whose first OnAck signals Entered and blocks until
