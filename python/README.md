@@ -16,6 +16,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
   - [Protocol Buffers](#option-2-protocol-buffers)
   - [Acknowledgments and throughput](#acknowledgments-and-throughput)
 - [Persistent Streams](#persistent-streams)
+- [Multiplexed Streams (Beta)](#multiplexed-streams-beta)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -320,6 +321,10 @@ Preview), and a custom `headers_provider`. `auth` and `client_id`/`client_secret
 mutually exclusive — passing both raises `ValueError` rather than silently preferring
 one. When `auth` is given alongside `headers_provider`, `auth` takes precedence.
 
+`create_multiplexed_stream()` takes every method through its required `auth=` argument,
+with OAuth as `auth=OAuth(client_id, client_secret)`; see
+[Multiplexed Streams (Beta)](#multiplexed-streams-beta).
+
 ### OAuth client credentials (default)
 
 ```python
@@ -390,8 +395,8 @@ recovers a stream. It does not exchange, cache, or refresh the token. Once the t
 expires or is revoked, creating or recovering a stream fails with
 `NonRetriableException`.
 
-PAT authentication works with `create_stream()` and, through `personal_access_token()`,
-with the persistent stream builder. Arrow Flight streams (`create_arrow_stream()`) do not
+PAT authentication works with `create_stream()`, `create_multiplexed_stream(auth=...)`, and,
+through `personal_access_token()`, with the persistent stream builder. Arrow Flight streams (`create_arrow_stream()`) do not
 support it yet. `ZerobusSdk` still needs the workspace URL, but PAT authentication does
 not use it.
 
@@ -497,6 +502,106 @@ and `callback_max_wait_time_ms`. Unset values use the SDK defaults. Of `oauth`,
 no `*_nowait()` methods, and no `get_unacked_*()` methods.
 
 See `examples/sync_example_persistent.py` and `examples/async_example_persistent.py`. Both examples read the optional `ZEROBUS_PERSISTENT_STREAM_ID` environment variable.
+
+## Multiplexed Streams (Beta)
+
+A single stream is ordered, which caps its throughput. When one stream is the bottleneck and
+you do not need a global order, a multiplexed stream opens several sub-streams to one table
+and distributes records round-robin across them. Records keep their order within a
+sub-stream, but there is no order across sub-streams.
+
+Open one with `create_multiplexed_stream(table_properties, stream_count, *, auth=, options=)`.
+Multiplexed streams support JSON, protobuf, and Avro records. For JSON, first migrate to
+protobuf and measure again before multiplexing.
+
+```python
+from zerobus import MultiplexedStreamOptions, OAuth, TableProperties
+from zerobus.sdk.sync import ZerobusSdk
+
+sdk = ZerobusSdk(server_endpoint, workspace_url)
+stream = sdk.create_multiplexed_stream(
+    TableProperties(table_name, record_pb2.AirQuality.DESCRIPTOR),
+    4,
+    auth=OAuth(client_id, client_secret),
+    options=MultiplexedStreamOptions(max_inflight_records=100_000),
+)
+
+for record in records:
+    stream.ingest_record(record)  # queues only; returns a message ID
+stream.flush()  # confirms every sub-stream once
+stream.close()
+```
+
+In the async SDK, `create_multiplexed_stream()` and the stream methods are coroutines.
+
+- `stream_count` takes 1 to 64 sub-streams; other values raise `ValueError`.
+- `auth=` is required: `OAuth(client_id, client_secret)`, a `HeadersProvider` (or, as with
+  `create_stream()`, any object with a `get_headers()` method), a `FederatedToken`, or a
+  `PersonalAccessToken` (see [Authentication](#authentication)).
+  A `FederatedToken` gets a fresh IdP supplier per call, as with `create_stream()`.
+- `options=` takes a `MultiplexedStreamOptions`, which has the same fields as
+  `StreamConfigurationOptions`. `max_inflight_records` is a budget for the whole stream;
+  each sub-stream gets `max_inflight_records // stream_count`, so it must be at least
+  `stream_count` (the error uses the core's name for it, `max_inflight_requests`). A plain
+  `StreamConfigurationOptions` is accepted only without `ack_callback`; with one,
+  `create_multiplexed_stream()` raises `ValueError`.
+- `ingest_record()` and `ingest_records()` return a **message ID**: an opaque `int` that
+  identifies the sub-stream and the record's position in it. Message IDs are not ordered and
+  may be negative. Pass one to `wait_for_message_id()` on the same stream; use `flush()` to
+  confirm everything.
+- A batch from `ingest_records()` lands on one sub-stream, and one message ID covers it.
+- `ingest_record()` and `ingest_records()` are the multiplexed stream's ingest methods. Unlike
+  `ZerobusStream`, `MultiplexedStream` has no `*_offset` variants, and its `ingest_record()`
+  is not deprecated.
+- An `AckCallback` set in `MultiplexedStreamOptions` is shared by every sub-stream; its
+  `offset` argument receives the message ID, and sub-streams may call it concurrently.
+- When the chosen sub-stream is at capacity, an ingest call waits for it to drain, for at most
+  30 seconds. Then it raises a retriable `ZerobusException` and the record is not queued, so
+  ingest it again.
+- Multiplexed streams are thread-safe: several threads may ingest into, flush, and close one
+  sync stream. An async stream is safe to share across tasks.
+- When close returns, all callbacks have run, unless close waited longer than
+  `callback_max_wait_time_ms` (default 5 s).
+- Opening is atomic: with more than one sub-stream, each opens after a random delay of up to
+  one second, and if any fails, the others are closed and `create_multiplexed_stream()`
+  raises.
+- Once a call reports a sub-stream failure, `is_closed` is `True` and every later ingest,
+  `flush()`, and `close()` raises that error again, which may be a retriable
+  `ZerobusException`; retrying on the same stream does not help. `wait_for_message_id()`
+  still reports only its own sub-stream. `get_unacked_records()` and `get_unacked_batches()`
+  close the stream if needed and return the records that were never acknowledged, across
+  every sub-stream, as bytes. Ingest them into a new stream; in JSON mode, decode them first
+  (see **Decoding unacked records** under [Handling Stream
+  Failures](#handling-stream-failures)). There is no `recreate_stream()` for multiplexed
+  streams; create a new one instead:
+
+  ```python
+  from zerobus import OAuth, TableProperties, ZerobusException
+
+  def open_stream():
+      auth = OAuth(client_id, client_secret)
+      return sdk.create_multiplexed_stream(TableProperties(table_name), 4, auth=auth)
+
+  stream = open_stream()
+  queued = 0
+  try:
+      for record in records:  # records: a list of JSON strings or dicts
+          stream.ingest_record(record)
+          queued += 1
+      stream.flush()
+  except ZerobusException:
+      if not stream.is_closed:
+          raise
+      retry = [r.decode() for r in stream.get_unacked_records()]  # JSON comes back as bytes
+      retry += records[queued:]  # the failing call and the rest were never queued
+      stream = open_stream()
+      for record in retry:
+          stream.ingest_record(record)
+      stream.flush()
+  stream.close()
+  ```
+
+See `examples/sync_example_multiplexed.py` and `examples/async_example_multiplexed.py`.
 
 ## Configuration
 
@@ -693,6 +798,9 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options=N
 async def create_async_stream(sdk):
     return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, auth=None)
 ```
+
+`create_multiplexed_stream(table_properties, stream_count, *, auth, options=None)` opens a
+multiplexed stream (Beta); see [Multiplexed Streams (Beta)](#multiplexed-streams-beta).
 
 ### `ZerobusStream`
 
