@@ -1,0 +1,5 @@
+{
+  "argv": ["{harness_dir}/bin/zerobus-testing-harness-purego"],
+  "artifact": "{harness_dir}/bin/zerobus-testing-harness-purego",
+  "build_hint": "cd conformance/harness/purego && go build -tags testing -o bin/zerobus-testing-harness-purego ."
+}
