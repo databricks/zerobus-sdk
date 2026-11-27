@@ -344,6 +344,7 @@ func TestCreateMultiplexedStreamOpensEveryLane(t *testing.T) {
 			if !mux.IsClosed() {
 				t.Error("IsClosed() = false after Close")
 			}
+			waitFor(t, func() bool { return len(rec.ackIDs()) >= len(ids) }, "an ack for every ID")
 			assertSameIDs(t, rec.ackIDs(), ids)
 		})
 	}
@@ -1006,6 +1007,11 @@ func TestMultiplexedCallReturnsOwnLaneResult(t *testing.T) {
 					<-proceed
 				}
 			}))
+			// Release the held ingest also when the test fails, so the
+			// cleanup Close does not wait for it.
+			var once sync.Once
+			release := func() { once.Do(func() { close(proceed) }) }
+			t.Cleanup(release)
 			done := make(chan error, 1)
 			go func() {
 				_, err := mux.IngestRecord(muxRecord(3))
@@ -1027,7 +1033,7 @@ func TestMultiplexedCallReturnsOwnLaneResult(t *testing.T) {
 			tc.endLane(t, mux.Lane(1))
 			waitLaneClosed(t, mux, 1)
 
-			close(proceed)
+			release()
 			tc.check(t, receive(t, done, "IngestRecord on lane 1"), "IngestRecord")
 			_, err = mux.IngestRecord(muxRecord(5))
 			assertRejected(t, err, "poison-a")
