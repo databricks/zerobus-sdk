@@ -857,6 +857,25 @@ func TestCoreStreamImmediateEOFExhaustsRecovery(t *testing.T) {
 	}
 }
 
+// The extra reconnect after a lost stream must not overflow a RecoveryRetries
+// of math.MaxInt, which callers use to retry indefinitely.
+func TestCoreStreamMaxRecoveryRetriesKeepsReconnecting(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc.close()
+	// One stream opens and ends; every reconnect then fails to open.
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.RecoveryRetries = math.MaxInt
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return fo.openCount() >= 4 || cs.IsClosed() }, 5*time.Second)
+	if cs.IsClosed() {
+		t.Fatalf("stream gave up after %d Open attempts with RecoveryRetries = MaxInt", fo.openCount())
+	}
+}
+
 // Matches the Rust core's gRPC recovery (rust/sdk/src/stream/grpc/supervisor.rs):
 // once an established stream is lost, recovery makes RecoveryRetries+1
 // reconnect attempts, each after a backoff, before it gives up.

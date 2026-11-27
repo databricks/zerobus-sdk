@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
@@ -58,7 +59,7 @@ superviseLoop:
 
 		if failedAttempts > 0 {
 			budget := cs.cfg.RecoveryRetries
-			if afterLostStream {
+			if afterLostStream && budget < math.MaxInt {
 				budget++
 			}
 			if !cs.cfg.Recovery.enabled() || failedAttempts > budget {

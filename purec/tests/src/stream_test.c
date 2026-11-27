@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "fake_zerobus.h"
 #include "internal/common/utils.h"
@@ -1461,13 +1460,6 @@ static zerobus_headers_provider_t *new_counting(counting_t *counting)
     return provider;
 }
 
-static uint64_t monotonic_ms(void)
-{
-    struct timespec now;
-    (void)clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
-}
-
 /* Retries of a refused open back off exponentially, as in the Rust core: from
  * a 50 ms base, three retries wait at least 50 + 100 + 200 = 350 ms, where a
  * fixed interval would wait 150 ms. Jitter only adds to that. */
@@ -1480,18 +1472,16 @@ static void test_open_retries_back_off_exponentially(void)
     zerobus_error_t *err = NULL;
     const stream_options_t o = {
         .recovery = true, .backoff_ms = 50, .retries = 3};
-    uint64_t start = 0;
-    uint64_t elapsed = 0;
+    zb_deadline_t floor = 0;
     REQUIRE_OK(fake_zerobus_start(&options, &service));
     sdk = make_sdk_for(service);
-    start = monotonic_ms();
+    floor = zb_deadline_after_ms(350);
     CHECK_EQ_INT(build_stream(sdk, &o, &stream, &err),
                  ZEROBUS_STATUS_UNAVAILABLE);
-    elapsed = monotonic_ms() - start;
     zerobus_error_free(err);
     CHECK(stream == NULL);
     CHECK_EQ_INT(fake_zerobus_calls(service), 4);
-    CHECK(elapsed >= 350);
+    CHECK(zb_deadline_expired(floor));
 zb_cleanup:
     zerobus_stream_free(stream);
     zerobus_sdk_free(sdk);

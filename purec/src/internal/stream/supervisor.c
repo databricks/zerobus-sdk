@@ -444,7 +444,10 @@ void *zb_supervisor_main(void *arg)
         /* Exponential and jittered, like the Rust core
          * (rust/sdk/src/backoff.rs) and PureGo, so streams that fail together
          * don't retry together. The first reconnect after a lost stream waits
-         * too. */
+         * too. Unlike the Rust core, a server close (a close signal or a clean
+         * end of the call) ends as UNAVAILABLE here, so its reconnect also
+         * waits instead of starting at once, as it did with the fixed
+         * backoff. */
         uint64_t delay_ms =
             zb_recovery_backoff_ms(config->recovery_backoff_ms, failures);
         ZB_WARN("stream to %s: %s (status %u), retrying in %llu ms",
