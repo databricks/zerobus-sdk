@@ -99,6 +99,36 @@ func ExampleStream_proto() {
 	}
 }
 
+// Spread ingestion across 4 lanes with a multiplexed stream (Beta): queue
+// every record without waiting, then flush every lane once at the end.
+func ExampleMultiplexedStream() {
+	sdk, err := zerobus.New(
+		serverEndpoint(),
+		workspaceURL(),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sdk.Close()
+
+	mux, err := sdk.CreateMultiplexedStream(context.Background(), "catalog.schema.table",
+		zerobus.OAuth(clientID(), clientSecret()), 4, zerobus.WithJSON())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer mux.Close()
+
+	records := [][]byte{[]byte(`{"id":1}`), []byte(`{"id":2}`), []byte(`{"id":3}`)}
+	for _, rec := range records {
+		if _, err := mux.IngestRecord(rec); err != nil { // queue only — do NOT wait here
+			log.Fatal(err)
+		}
+	}
+	if err := mux.Flush(); err != nil { // wait once for every lane
+		log.Fatal(err)
+	}
+}
+
 // Check which columns a descriptor declares before ingesting into the table.
 func ExampleColumnsFromDescriptor() {
 	columns, err := zerobus.ColumnsFromDescriptor(descriptorProto())

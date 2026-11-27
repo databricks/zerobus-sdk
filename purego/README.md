@@ -126,16 +126,19 @@ if err := mux.Flush(); err != nil { // wait once for every lane
   stored failure. It keeps the lane's retry class: once `IsClosed` reports
   true, `Retryable` means that a new stream may succeed. Until then, calls on
   healthy lanes still succeed. `WaitForMessageID` reports only on the lane
-  named by its ID.
+  named by its ID. `GetUnackedRecords` and `GetUnackedBatches` close the
+  stream, blocking as `Close` does, and return the records that were not
+  acknowledged.
 - `Close` waits for the ingest calls in flight, each for at most the 30-second
   capacity wait, then closes every lane.
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
   call the callback concurrently and in no global order, so it must be safe for
   concurrent use. A callback may call the ingest methods, `Flush`, and
-  `WaitForMessageID`, but not `Close`. To close from a callback, call `Close`
-  in a new goroutine. When `Close` returns, all callbacks have run, unless
-  `Close` waited longer than the callback limit (5 s). A panic in a callback is
-  logged with the standard `log` package.
+  `WaitForMessageID`, but not `Close`, `GetUnackedRecords`, or
+  `GetUnackedBatches`. To close from a callback, call `Close` in a new
+  goroutine. When `Close` returns, all callbacks have run, unless `Close`
+  waited longer than the callback limit (5 s). A panic in a callback is logged
+  with the standard `log` package.
 
 ## Authentication
 
