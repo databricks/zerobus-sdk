@@ -23,6 +23,19 @@ use crate::stream::ZerobusArrowStream;
 /// application suffix.
 pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
+/// How long the unary channel waits without receiving any frame before it
+/// sends an HTTP/2 PING. It pings only while a call is in flight, so a call
+/// that starts after a longer idle gap pings at once. A silently dropped
+/// connection is closed [`UNARY_KEEPALIVE_TIMEOUT`] after such a call starts,
+/// and otherwise at most this long plus that timeout after its last frame,
+/// instead of when the kernel stops retransmitting, which takes about 15
+/// minutes with Linux defaults.
+const UNARY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long the unary channel waits for the PING reply before it closes the
+/// connection.
+const UNARY_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
 /// ```rust,ignore
@@ -51,7 +64,12 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
     /// Created on first use, from the field values at that time.
-    shared_channel: OnceLock<Arc<GrpcChannelSource>>,
+    shared_stream_channel: OnceLock<Arc<GrpcChannelSource>>,
+    /// Channel source shared by every unary client of this SDK, created on
+    /// first use. It is separate from `shared_stream_channel`, so unary clients
+    /// never share a connection with streams, whatever `connection_per_stream`
+    /// says.
+    unary_channel: OnceLock<Arc<GrpcChannelSource>>,
     /// Whether JSON/protobuf streams receive dedicated gRPC connections.
     pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
@@ -150,6 +168,27 @@ impl ZerobusSdk {
         crate::PersistentStreamBuilder::new(StreamBuilder::new(self))
     }
 
+    /// Creates a new builder for a unary ingestion client.
+    ///
+    /// A unary client is bound to one table and sends each batch as a single
+    /// request, without opening a stream. It is meant for clients that ingest
+    /// sparsely; for continuous ingestion, use a stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let client = sdk
+    ///     .unary_client_builder()
+    ///     .table("catalog.schema.events")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn unary_client_builder(&self) -> crate::UnaryClientBuilder<'_> {
+        crate::UnaryClientBuilder::new(self)
+    }
+
     /// Creates a new SDK instance with explicit configuration.
     ///
     /// This is used internally by the builder pattern. `sdk_identifier` is the
@@ -172,7 +211,8 @@ impl ZerobusSdk {
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
-            shared_channel: OnceLock::new(),
+            shared_stream_channel: OnceLock::new(),
+            unary_channel: OnceLock::new(),
             connection_per_stream,
             tls_config,
             connector_factory,
@@ -221,7 +261,7 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let channel = self.grpc_channel_source();
+        let channel = self.stream_channel_source();
         let new_stream = ZerobusStream::new_stream(
             channel,
             stream.table_properties.clone(),
@@ -346,15 +386,30 @@ impl ZerobusSdk {
     ///
     /// The stream's supervisor opens the channel inside its retry loop, so a
     /// retryable setup error on the first open is retried like any other attempt.
-    pub(crate) fn grpc_channel_source(&self) -> Arc<GrpcChannelSource> {
+    pub(crate) fn stream_channel_source(&self) -> Arc<GrpcChannelSource> {
         if self.connection_per_stream {
             Arc::new(self.new_grpc_channel_source())
         } else {
             Arc::clone(
-                self.shared_channel
+                self.shared_stream_channel
                     .get_or_init(|| Arc::new(self.new_grpc_channel_source())),
             )
         }
+    }
+
+    /// Returns the channel source shared by every unary client of this SDK,
+    /// creating it on first use.
+    ///
+    /// Its channels send HTTP/2 keepalive PINGs only while a call is in flight,
+    /// so a connection that died silently between sparse calls is detected and
+    /// closed during the next call, and its retry opens a new connection.
+    pub(crate) fn unary_channel_source(&self) -> Arc<GrpcChannelSource> {
+        Arc::clone(self.unary_channel.get_or_init(|| {
+            Arc::new(
+                self.new_grpc_channel_source()
+                    .with_keepalive(UNARY_KEEPALIVE_INTERVAL, UNARY_KEEPALIVE_TIMEOUT),
+            )
+        }))
     }
 
     fn new_grpc_channel_source(&self) -> GrpcChannelSource {
@@ -364,5 +419,37 @@ impl ZerobusSdk {
             Arc::clone(&self.tls_config),
             self.connector_factory.clone(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sdk(connection_per_stream: bool) -> ZerobusSdk {
+        ZerobusSdk::new_with_config(
+            "http://localhost:1234".to_string(),
+            "http://localhost:5678".to_string(),
+            "test-workspace".to_string(),
+            Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            connection_per_stream,
+        )
+    }
+
+    #[tokio::test]
+    async fn unary_channel_is_created_once_and_never_shared_with_streams() {
+        for connection_per_stream in [true, false] {
+            let sdk = test_sdk(connection_per_stream);
+            let first = sdk.unary_channel_source();
+            first.client().await.unwrap();
+            let second = sdk.unary_channel_source();
+
+            assert!(Arc::ptr_eq(&first, &second));
+            assert!(sdk.shared_stream_channel.get().is_none());
+        }
     }
 }

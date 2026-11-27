@@ -169,6 +169,35 @@ public class ZerobusSdk implements AutoCloseable {
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
   }
 
+  ZerobusSdk(
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream,
+      TlsOptions tlsOptions) {
+    this.serverEndpoint = serverEndpoint;
+    this.unityCatalogEndpoint = unityCatalogEndpoint;
+    logger.debug("Creating ZerobusSdk for endpoint: {}", serverEndpoint);
+    this.nativeHandle =
+        nativeCreateWithOptions(
+            serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream, tlsOptions);
+    if (this.nativeHandle == 0) {
+      throw new RuntimeException("Failed to create native SDK instance");
+    }
+  }
+
+  /**
+   * Returns a fluent {@link ZerobusSdkBuilder} for creating an SDK. Use it to set TLS options,
+   * which the constructors cannot express.
+   *
+   * @return a new SDK builder
+   * @see ZerobusSdkBuilder
+   * @see TlsOptions
+   */
+  public static ZerobusSdkBuilder builder() {
+    return new ZerobusSdkBuilder();
+  }
+
   // ==================== Stream Builder ====================
 
   /**
@@ -1039,6 +1068,19 @@ public class ZerobusSdk implements AutoCloseable {
       HeadersProvider headersProvider,
       Object options,
       int formatCode) {
+    if (headersProvider instanceof FederatedAuthHeadersProvider) {
+      FederatedToken token = ((FederatedAuthHeadersProvider) headersProvider).token();
+      return nativeCreateStreamWithFederatedAuth(
+          sdkHandle,
+          tableName,
+          descriptorProto,
+          avroSchemaJson,
+          token.getIdpTokenSupplier(),
+          token.getClientId(),
+          token.getCacheIdentity(),
+          options,
+          formatCode);
+    }
     if (headersProvider == null) {
       return nativeCreateStream(
           sdkHandle,
@@ -1070,6 +1112,17 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       HeadersProvider headersProvider,
       Object options) {
+    if (headersProvider instanceof FederatedAuthHeadersProvider) {
+      FederatedToken token = ((FederatedAuthHeadersProvider) headersProvider).token();
+      return nativeCreateArrowStreamWithFederatedAuth(
+          sdkHandle,
+          tableName,
+          arrowSchema,
+          token.getIdpTokenSupplier(),
+          token.getClientId(),
+          token.getCacheIdentity(),
+          options);
+    }
     if (headersProvider == null) {
       return nativeCreateArrowStream(
           sdkHandle, tableName, arrowSchema, clientId, clientSecret, options);
@@ -1088,6 +1141,13 @@ public class ZerobusSdk implements AutoCloseable {
       String unityCatalogEndpoint,
       String applicationName,
       boolean connectionPerStream);
+
+  private static native long nativeCreateWithOptions(
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream,
+      TlsOptions tlsOptions);
 
   private static native void nativeDestroy(long handle);
 
@@ -1112,6 +1172,17 @@ public class ZerobusSdk implements AutoCloseable {
       Object options,
       int formatCode);
 
+  private native CompletableFuture<Long> nativeCreateStreamWithFederatedAuth(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String avroSchemaJson,
+      IdpTokenSupplier idpTokenSupplier,
+      String federatedClientId,
+      String cacheIdentity,
+      Object options,
+      int formatCode);
+
   private native CompletableFuture<Long> nativeCreateArrowStream(
       long sdkHandle,
       String tableName,
@@ -1127,5 +1198,14 @@ public class ZerobusSdk implements AutoCloseable {
       String clientId,
       String clientSecret,
       HeadersProvider headersProvider,
+      Object options);
+
+  private native CompletableFuture<Long> nativeCreateArrowStreamWithFederatedAuth(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      IdpTokenSupplier idpTokenSupplier,
+      String federatedClientId,
+      String cacheIdentity,
       Object options);
 }

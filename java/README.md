@@ -15,6 +15,8 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [JSON Examples](#json-examples)
   - [Arrow Flight Examples](#arrow-flight-examples)
 - [Authentication](#authentication)
+  - [TLS Configuration](#tls-configuration)
+  - [Binary Headers](#binary-headers)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
   - [Future-Based API (Deprecated)](#future-based-api-deprecated)
@@ -39,6 +41,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
+- **External-IdP federation**: Authenticate with a token from an external identity provider such as Microsoft Entra ID, with no Databricks OAuth secret
 - **Framework compatible**: Works inside Spring Boot and other frameworks with isolated classloaders
 
 ## Architecture
@@ -795,6 +798,133 @@ Providers may override `invalidate()` to clear cached credentials after an authe
 rejection. Implementations must be thread-safe because the SDK can invoke them from internal
 threads during creation and recovery.
 
+### External-IdP federation (e.g. Entra ID)
+
+Use `federatedAuth(FederatedToken)` to authenticate with a token from an external identity
+provider instead of a Databricks OAuth secret. You provide an `IdpTokenSupplier` that returns the
+current IdP token. The SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange), caches the exchanged token, and refreshes it before it expires. The federation policy
+must already be configured in Databricks.
+
+```java
+IdpTokenSupplier idpToken = () -> fetchEntraIdToken(); // return the current IdP access token
+
+// Account-level federation: no Databricks service principal. The identity is synced into
+// Databricks through automatic identity management.
+FederatedToken auth = FederatedToken.accountLevel(idpToken);
+
+// Workload identity federation: a Databricks service principal with a federation policy and no
+// secret, named by its client ID.
+FederatedToken workloadAuth = FederatedToken.workloadIdentity(idpToken, spClientId);
+
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .federatedAuth(auth)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
+```
+
+`federatedAuth` works with every format selector (`json()`, `compiledProto()`, `avro()`, and
+`arrow()`), and `recreateStream` reuses the stream's `FederatedToken`.
+
+- **Reuse one `FederatedToken` per identity.** Exchanged Databricks tokens are cached per table.
+  For account-level federation the cache is per `FederatedToken` instance, so a new instance, even
+  with the same supplier, mints its own token. For workload identity federation it is per service
+  principal client ID, so two instances with the same client ID share a token.
+- **The supplier is called only when a token must be minted** (on a cache miss or a proactive
+  refresh), not on every request. It runs on an SDK thread, so it may call the identity provider
+  over the network, but a slow supplier delays stream creation and recovery.
+- **Errors:** an exception from `getToken()` is treated as retryable. Throw
+  `NonRetriableException` for a permanent failure. Returning `null` or an empty string, or
+  throwing an `Error`, is also a non-retryable error.
+- **Set timeouts on the IdP request.** The SDK can't interrupt `getToken()`, and the recovery
+  timeout does not bound it. Set connect and read timeouts on the IdP request so a hung call can't
+  stall stream creation. While a call is stuck, the stream waits for it instead of starting
+  another one.
+- Implementations must be thread-safe: the SDK may call the supplier concurrently for streams on
+  different tables.
+
+See [`examples/json/FederatedAuthExample.java`](examples/json/FederatedAuthExample.java) for a
+complete example.
+
+### TLS Configuration
+
+By default the SDK trusts the operating system's CA certificates. To trust a private CA, present a
+client certificate for mutual TLS, or check the server certificate against a different name, pass
+`TlsOptions` to a `ZerobusSdk` built with `ZerobusSdk.builder()`. These settings apply to the gRPC connection to the Zerobus endpoint only. OAuth and federated token
+requests to the workspace URL trust the operating system's CA certificates and the SDK's bundled
+public roots, ignore TlsOptions, and present no client certificate. A workspace behind a private CA
+must therefore be trusted by the operating system.
+
+```java
+TlsOptions tls = TlsOptions.builder()
+    .trustSystemRoots(false)
+    .addCaCertificateFile("/etc/zerobus/ca.pem")
+    .clientIdentityFiles("/etc/zerobus/tls.crt", "/etc/zerobus/tls.key")
+    .domainName("zerobus.example.com")
+    .build();
+
+try (ZerobusSdk sdk = ZerobusSdk.builder()
+        .serverEndpoint(serverEndpoint)
+        .unityCatalogEndpoint(workspaceUrl)
+        .tlsOptions(tls)
+        .build()) {
+    // Create streams with sdk.streamBuilder()
+}
+```
+
+- `trustSystemRoots(false)` trusts only the CA certificates you add. At least one CA certificate
+  is required in that case.
+- `addCaCertificatePem(...)` and `clientIdentityPem(certPem, keyPem)` take PEM text instead of
+  paths. Use them when the certificates come from a secret store rather than the file system.
+- `domainName(...)` checks the server certificate against a name other than the endpoint host. Pass
+  a DNS name or an IP address, for example `zerobus.example.com`, not a URL. A value with a scheme,
+  a port, a path or query, brackets, whitespace, or a control character fails with
+  `IllegalArgumentException` when the builder is called. Another malformed name passes this check
+  and fails when the SDK sets up TLS for the connection. Whether recovery retries that failure
+  depends on the rest of the TLS configuration.
+
+Certificate files are read each time the SDK opens a connection, so a rotated certificate takes
+effect without restarting the process. Replace the certificate and its key together, for example by
+writing both into a new directory and switching a symbolic link to it, as Kubernetes secret volumes
+do. Use absolute paths.
+
+A missing or unreadable file fails stream creation with a `NonRetriableException` that names the
+file, and the SDK does not retry it. Rotating by deleting a file and then writing its replacement can
+therefore fail a stream that is created or recovered during the gap. Switch to the new files with a
+single rename or symbolic link change instead. Content the SDK cannot use, such as a file with no
+certificate, fails with a `ZerobusException`, which is retried, because a rotation may be in
+progress.
+
+With `connectionPerStream(true)`, each new stream reads the files again and reports any failure.
+With `connectionPerStream(false)`, JSON, protobuf and Avro streams share one channel, and the next
+stream of those formats reads changed files again. If the SDK cannot apply the new settings locally,
+that stream keeps the previous channel without reporting the failure, until local setup succeeds; a
+readable certificate or key that the server rejects in the handshake fails the stream. Arrow streams
+open their own channel and always read the files themselves.
+
+### Binary Headers
+
+A `HeadersProvider` header whose name ends in `-bin` is sent as binary gRPC metadata. Its value must
+be the standard base64 encoding of the bytes, padded or unpadded. The SDK decodes the value before
+sending it:
+
+```java
+HeadersProvider provider = () -> {
+    Map<String, String> headers = new HashMap<>();
+    headers.put("authorization", "Bearer " + fetchToken());
+    headers.put("x-databricks-zerobus-table-name", tableName);
+    headers.put("x-context-bin", Base64.getEncoder().encodeToString(contextBytes));
+    return headers;
+};
+```
+
+Any other header value is sent as ASCII text. Names beginning with `grpc-` and ending in `-bin` are
+reserved for gRPC and are rejected.
+
 ---
 
 ## API Styles
@@ -1138,6 +1268,15 @@ aggregate throughput. Dedicated connections isolate that loss. For many
 smaller, low-throughput streams, pass `false`; shared multiplexing is
 recommended there to reduce connection overhead.
 
+**Static methods:**
+
+```java
+ZerobusSdkBuilder builder()
+```
+Returns a [`ZerobusSdkBuilder`](#zerobussdkbuilder) for setting the endpoints, the application name,
+the connection mode, and [TLS options](#tls-configuration). The constructors above remain available
+and create an SDK with the same defaults.
+
 **Methods:**
 
 ```java
@@ -1221,6 +1360,36 @@ Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batc
 
 ---
 
+### ZerobusSdkBuilder
+
+Fluent builder for `ZerobusSdk`, returned by [`ZerobusSdk.builder()`](#zerobussdk). Only
+`serverEndpoint` is required.
+
+- `serverEndpoint(String)` - The Zerobus gRPC endpoint. Required.
+- `unityCatalogEndpoint(String)` - The Databricks workspace URL, used for Unity Catalog and OAuth.
+  Streams that use a `HeadersProvider` can omit it.
+- `applicationName(String)` - Application identifier for the `user-agent` header. Pass `null` to omit.
+- `connectionPerStream(boolean)` - Dedicated connection per JSON/protobuf stream. Defaults to `true`.
+- `tlsOptions(TlsOptions)` - TLS settings. Defaults to the operating system's CA certificates.
+- `build()` - Creates the SDK. Throws `IllegalStateException` if the server endpoint is not set.
+
+---
+
+### TlsOptions
+
+Immutable TLS settings, created with `TlsOptions.builder()` and passed to
+`ZerobusSdkBuilder.tlsOptions(...)`. See [TLS Configuration](#tls-configuration).
+
+- `trustSystemRoots(boolean)` - Also trust the operating system's CA certificates. Defaults to `true`.
+- `addCaCertificatePem(String)`, `addCaCertificateFile(String)` - Trust more CA certificates, as PEM text or a PEM file. Call more than once to add several.
+- `clientIdentityPem(String certPem, String keyPem)`, `clientIdentityFiles(String certPath, String keyPath)` - Client certificate chain and key for mutual TLS.
+- `domainName(String)` - Server name to check the certificate against. Rejects a pasted URL.
+- `build()` - Returns the options. Throws `IllegalStateException` if `trustSystemRoots(false)` is set without a CA certificate.
+
+`toString()` reports counts and the kind of client identity. It never includes certificate or key material.
+
+---
+
 ### StreamBuilder
 
 Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](#zerobussdk). Set the table, authentication, and stream configuration, then select a record format to obtain a typed sub-builder whose `build()` returns the matching stream type.
@@ -1229,6 +1398,7 @@ Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](
 StreamBuilder table(String tableName)
 StreamBuilder oauth(String clientId, String clientSecret)
 StreamBuilder headersProvider(HeadersProvider headersProvider)
+StreamBuilder federatedAuth(FederatedToken federatedToken)
 StreamBuilder recovery(boolean recovery)
 StreamBuilder recoveryTimeoutMs(int ms)
 StreamBuilder recoveryBackoffMs(int ms)
@@ -1677,6 +1847,27 @@ T deserialize(String json)
 **Usage with Gson:**
 ```java
 List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
+```
+
+---
+
+### FederatedToken
+
+Authenticates a stream by federating an external IdP token. Pass it to `StreamBuilder.federatedAuth()`. Instances are immutable. Exchanged tokens are cached per table, and per instance for account-level federation or per client ID for workload identity federation. See [External-IdP federation](#external-idp-federation-eg-entra-id).
+
+```java
+static FederatedToken accountLevel(IdpTokenSupplier idpTokenSupplier)
+static FederatedToken workloadIdentity(IdpTokenSupplier idpTokenSupplier, String clientId)
+```
+
+---
+
+### IdpTokenSupplier (Functional Interface)
+
+Supplies the current external IdP token for `FederatedToken`. Called only when a Databricks token must be minted. Implementations must be thread-safe.
+
+```java
+String getToken() throws Exception  // throw NonRetriableException for permanent failures
 ```
 
 ---

@@ -390,9 +390,10 @@ recovers a stream. It does not exchange, cache, or refresh the token. Once the t
 expires or is revoked, creating or recovering a stream fails with
 `NonRetriableException`.
 
-PAT authentication works with `create_stream()` only: Arrow Flight streams
-(`create_arrow_stream()`) and persistent streams do not support it yet. `ZerobusSdk`
-still needs the workspace URL, but PAT authentication does not use it.
+PAT authentication works with `create_stream()` and, through `personal_access_token()`,
+with the persistent stream builder. Arrow Flight streams (`create_arrow_stream()`) do not
+support it yet. `ZerobusSdk` still needs the workspace URL, but PAT authentication does
+not use it.
 
 ```python
 import os
@@ -408,7 +409,9 @@ stream.close()
 ```
 
 `PersonalAccessToken` raises `ValueError` for an empty token, is immutable, and leaves
-the token out of its `repr()`. The async SDK takes the same `auth=` argument.
+the token out of its `repr()`. The async SDK takes the same `auth=` argument. Persistent
+streams use the builder method `personal_access_token(token)` instead; it takes the token
+string or a `PersonalAccessToken`.
 
 See [`examples/sync_example_pat.py`](examples/sync_example_pat.py) for a complete example.
 
@@ -423,8 +426,10 @@ A persistent (Eos) stream records its identity and committed offset on the serve
 restart, you resume the same stream by its `stream_id`, and delivery into Delta stays
 exactly-once.
 
-Persistent streams support JSON and protobuf records. They authenticate with OAuth or a
-custom headers provider. They do not support Avro or external-IdP federation.
+Persistent streams support JSON and protobuf records. They authenticate with OAuth, a
+personal access token (Private Preview), or a custom headers provider. They do not
+support Avro or external-IdP federation. The SDK cannot refresh a PAT; once it expires,
+call `resume(stream_id)` on a new builder that has a fresh token.
 
 > **Experimental.** The persistent stream API in the Rust core is in development. It can
 > change in a minor release.
@@ -479,11 +484,12 @@ match which offsets, for example by storing its own source position with each ba
 Use one process per `stream_id`. The SDK does not check whether another client has
 resumed the same stream.
 
-The builder has these setters: `table`, `oauth`, `headers_provider`, `json`,
-`compiled_proto`, `recovery`, `recovery_timeout_ms`, `recovery_backoff_ms`,
-`recovery_retries`, `server_lack_of_ack_timeout_ms`, `flush_timeout_ms`,
-`max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`, and
-`callback_max_wait_time_ms`. Unset values use the SDK defaults.
+The builder has these setters: `table`, `oauth`, `headers_provider`,
+`personal_access_token`, `json`, `compiled_proto`, `recovery`, `recovery_timeout_ms`,
+`recovery_backoff_ms`, `recovery_retries`, `server_lack_of_ack_timeout_ms`,
+`flush_timeout_ms`, `max_inflight_requests`, `max_ingest_payload_bytes`, `ack_callback`,
+and `callback_max_wait_time_ms`. Unset values use the SDK defaults. Of `oauth`,
+`headers_provider`, and `personal_access_token`, the last call wins.
 
 `PersistentStream` has `ingest_record_offset()`, `ingest_records_offset()`,
 `wait_for_offset()`, `flush()`, and `close()`. It also has the properties `stream_id`,
@@ -682,10 +688,10 @@ multiplexing is recommended there to reduce connection overhead.
 
 ```python
 # Sync
-stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
+stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, auth=None)
 # Async
 async def create_async_stream(sdk):
-    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, *, auth=None)
+    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None, auth=None)
 ```
 
 ### `ZerobusStream`

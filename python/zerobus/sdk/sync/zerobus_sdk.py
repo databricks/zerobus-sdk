@@ -434,8 +434,8 @@ class ZerobusSdk:
 
         A persistent stream records its identity and committed offset on the server, so
         ``PersistentStreamBuilder.resume()`` can reconnect to it after a restart with
-        exactly-once delivery. It supports JSON and protobuf records, with OAuth or a custom
-        headers provider.
+        exactly-once delivery. It supports JSON and protobuf records, with OAuth, a personal
+        access token, or a custom headers provider.
         """
         return PersistentStreamBuilder(self._inner)
 

@@ -4,7 +4,8 @@
 
 use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
-use crate::errors::{guard, throw_from_zerobus_error, throw_zerobus_exception};
+use crate::errors::{guard, guard_or, throw_from_zerobus_error, throw_zerobus_exception};
+use crate::federated_auth::java_idp_token_supplier;
 use crate::headers_provider::JavaHeadersProvider;
 use crate::options::{
     apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
@@ -12,7 +13,10 @@ use crate::options::{
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
-use databricks_zerobus_ingest_sdk::{RecordType, ZerobusSdk};
+use crate::tls_options::extract_tls_options;
+use databricks_zerobus_ingest_sdk::{
+    HeadersProvider, IdpTokenSupplier, RecordType, StreamBuilder, TlsSettings, ZerobusSdk,
+};
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, JNI_FALSE};
 use jni::JNIEnv;
@@ -20,7 +24,7 @@ use std::sync::Arc;
 
 /// Native ABI version; bump in lockstep with Java's `NativeLoader.EXPECTED_NATIVE_ABI` whenever
 /// native method signatures change, so a stale library is rejected at load.
-const NATIVE_ABI_VERSION: jint = 1;
+const NATIVE_ABI_VERSION: jint = 3;
 
 /// # JNI Signature
 /// ```java
@@ -63,12 +67,125 @@ impl NativeSdkHandle {
     }
 }
 
+/// How a stream created over JNI authenticates.
+enum JniStreamAuth {
+    /// OAuth client credentials.
+    OAuth {
+        client_id: String,
+        client_secret: String,
+    },
+    /// A Java `HeadersProvider`.
+    HeadersProvider(Arc<dyn HeadersProvider>),
+    /// External-IdP federation. `client_id` is `None` for account-level
+    /// federation, or the service principal client_id for workload identity
+    /// federation.
+    Federated {
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: Option<String>,
+    },
+}
+
+impl JniStreamAuth {
+    /// The OAuth credentials kept on the native stream handle. Empty for the
+    /// other modes; recreation reuses the stream's headers provider instead.
+    fn stored_credentials(&self) -> (String, String) {
+        match self {
+            Self::OAuth {
+                client_id,
+                client_secret,
+            } => (client_id.clone(), client_secret.clone()),
+            Self::HeadersProvider(_) | Self::Federated { .. } => (String::new(), String::new()),
+        }
+    }
+
+    fn apply(self, builder: StreamBuilder<'_>) -> StreamBuilder<'_> {
+        match self {
+            Self::OAuth {
+                client_id,
+                client_secret,
+            } => builder.oauth(client_id, client_secret),
+            Self::HeadersProvider(provider) => builder.headers_provider(provider),
+            Self::Federated {
+                idp_token_supplier,
+                client_id,
+            } => builder.federated_auth(idp_token_supplier, client_id),
+        }
+    }
+}
+
+/// Reads OAuth credentials, or a `HeadersProvider` when one is passed (the
+/// credentials are then empty and ignored).
+fn extract_oauth_or_headers_provider_auth(
+    env: &mut JNIEnv<'_>,
+    client_id: &JString<'_>,
+    client_secret: &JString<'_>,
+    headers_provider: &JObject<'_>,
+) -> Result<JniStreamAuth, String> {
+    let client_id: String = env
+        .get_string(client_id)
+        .map_err(|e| format!("Invalid client ID: {}", e))?
+        .into();
+    let client_secret: String = env
+        .get_string(client_secret)
+        .map_err(|e| format!("Invalid client secret: {}", e))?
+        .into();
+
+    if headers_provider.is_null() {
+        return Ok(JniStreamAuth::OAuth {
+            client_id,
+            client_secret,
+        });
+    }
+    let provider_ref = env
+        .new_global_ref(headers_provider)
+        .map_err(|e| format!("Failed to retain headers provider: {}", e))?;
+    Ok(JniStreamAuth::HeadersProvider(
+        JavaHeadersProvider::new(provider_ref).into_arc(),
+    ))
+}
+
+/// Reads the federation parameters passed by the Java `FederatedToken`.
+fn extract_federated_auth(
+    env: &mut JNIEnv<'_>,
+    idp_token_supplier: &JObject<'_>,
+    federated_client_id: &JString<'_>,
+    cache_identity: &JString<'_>,
+) -> Result<JniStreamAuth, String> {
+    if idp_token_supplier.is_null() {
+        return Err("IdP token supplier must not be null".to_string());
+    }
+    let client_id: Option<String> = if federated_client_id.is_null() {
+        None
+    } else {
+        Some(
+            env.get_string(federated_client_id)
+                .map_err(|e| format!("Invalid federated client ID: {}", e))?
+                .into(),
+        )
+    };
+    if cache_identity.is_null() {
+        return Err("Federated cache identity must not be null".to_string());
+    }
+    let cache_identity: String = env
+        .get_string(cache_identity)
+        .map_err(|e| format!("Invalid federated cache identity: {}", e))?
+        .into();
+    let supplier_ref = env
+        .new_global_ref(idp_token_supplier)
+        .map_err(|e| format!("Failed to retain IdP token supplier: {}", e))?;
+    Ok(JniStreamAuth::Federated {
+        idp_token_supplier: java_idp_token_supplier(supplier_ref, cache_identity),
+        client_id,
+    })
+}
+
 fn create_sdk<'local>(
     env: &mut JNIEnv<'local>,
     server_endpoint: JString<'local>,
     unity_catalog_endpoint: JString<'local>,
     application_name: JString<'local>,
     connection_per_stream: bool,
+    tls: Option<TlsSettings>,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
@@ -108,6 +225,10 @@ fn create_sdk<'local>(
         .connection_per_stream(connection_per_stream);
     let builder = match application_name {
         Some(name) => builder.application_name(name),
+        None => builder,
+    };
+    let builder = match tls {
+        Some(tls) => builder.tls_config(Arc::new(tls)),
         None => builder,
     };
     match builder.build() {
@@ -157,6 +278,7 @@ fn native_create<'local>(
         unity_catalog_endpoint,
         application_name,
         true,
+        None,
     )
 }
 
@@ -203,6 +325,69 @@ fn native_create_with_connection_per_stream<'local>(
         unity_catalog_endpoint,
         application_name,
         connection_per_stream != JNI_FALSE,
+        None,
+    )
+}
+
+/// Create a new ZerobusSdk instance with connection ownership and TLS options.
+///
+/// # JNI Signature
+/// ```java
+/// private static native long nativeCreateWithOptions(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream, TlsOptions tlsOptions);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateWithOptions<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+    tls_options: JObject<'local>,
+) -> jlong {
+    guard_or(env, 0, |env| {
+        native_create_with_options(
+            env,
+            _class,
+            server_endpoint,
+            unity_catalog_endpoint,
+            application_name,
+            connection_per_stream,
+            tls_options,
+        )
+    })
+}
+
+fn native_create_with_options<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server_endpoint: JString<'local>,
+    unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
+    connection_per_stream: jboolean,
+    tls_options: JObject<'local>,
+) -> jlong {
+    let tls = if tls_options.is_null() {
+        None
+    } else {
+        match extract_tls_options(&mut env, &tls_options) {
+            Ok(tls) => Some(tls),
+            // A Java exception from a getter is already pending; JNI calls are not allowed
+            // until it is cleared, so leave it for the caller.
+            Err(jni::errors::Error::JavaException) => return 0,
+            Err(e) => {
+                throw_zerobus_exception(&mut env, &format!("Invalid TLS options: {}", e));
+                return 0;
+            }
+        }
+    };
+    create_sdk(
+        &mut env,
+        server_endpoint,
+        unity_catalog_endpoint,
+        application_name,
+        connection_per_stream != JNI_FALSE,
+        tls,
     )
 }
 
@@ -321,6 +506,132 @@ fn native_create_stream_with_headers_provider<'local>(
     options: JObject<'local>,
     format_code: jint,
 ) -> JObject<'local> {
+    let auth = match extract_oauth_or_headers_provider_auth(
+        &mut env,
+        &client_id,
+        &client_secret,
+        &headers_provider,
+    ) {
+        Ok(auth) => auth,
+        Err(message) => {
+            throw_zerobus_exception(&mut env, &message);
+            return JObject::null();
+        }
+    };
+    create_stream(
+        env,
+        sdk_handle,
+        table_name,
+        descriptor_proto,
+        avro_schema,
+        auth,
+        options,
+        format_code,
+    )
+}
+
+/// Create a new stream authenticated with external-IdP federation (RFC 8693).
+///
+/// `federated_client_id` is `null` for account-level federation, or the
+/// Databricks service principal client_id for workload identity federation.
+/// `cache_identity` is the Java `FederatedToken`'s stable id.
+///
+/// # JNI Signature
+/// ```java
+/// private native CompletableFuture<Long> nativeCreateStreamWithFederatedAuth(
+///     long sdkHandle,
+///     String tableName,
+///     byte[] descriptorProto,
+///     String avroSchemaJson,
+///     IdpTokenSupplier idpTokenSupplier,
+///     String federatedClientId,
+///     String cacheIdentity,
+///     Object options,
+///     int formatCode
+/// );
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStreamWithFederatedAuth<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
+    idp_token_supplier: JObject<'local>,
+    federated_client_id: JString<'local>,
+    cache_identity: JString<'local>,
+    options: JObject<'local>,
+    format_code: jint,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_create_stream_with_federated_auth(
+            env,
+            _obj,
+            sdk_handle,
+            table_name,
+            descriptor_proto,
+            avro_schema,
+            idp_token_supplier,
+            federated_client_id,
+            cache_identity,
+            options,
+            format_code,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_create_stream_with_federated_auth<'local>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
+    idp_token_supplier: JObject<'local>,
+    federated_client_id: JString<'local>,
+    cache_identity: JString<'local>,
+    options: JObject<'local>,
+    format_code: jint,
+) -> JObject<'local> {
+    let auth = match extract_federated_auth(
+        &mut env,
+        &idp_token_supplier,
+        &federated_client_id,
+        &cache_identity,
+    ) {
+        Ok(auth) => auth,
+        Err(message) => {
+            throw_zerobus_exception(&mut env, &message);
+            return JObject::null();
+        }
+    };
+    create_stream(
+        env,
+        sdk_handle,
+        table_name,
+        descriptor_proto,
+        avro_schema,
+        auth,
+        options,
+        format_code,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_stream<'local>(
+    mut env: JNIEnv<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    descriptor_proto: JByteArray<'local>,
+    avro_schema: JString<'local>,
+    auth: JniStreamAuth,
+    options: JObject<'local>,
+    format_code: jint,
+) -> JObject<'local> {
     // Create the CompletableFuture to return
     let future = match create_completable_future(&mut env) {
         Ok(f) => f,
@@ -345,37 +656,6 @@ fn native_create_stream_with_headers_provider<'local>(
         Err(e) => {
             throw_zerobus_exception(&mut env, &format!("Invalid table name: {}", e));
             return JObject::null();
-        }
-    };
-
-    let client_id: String = match env.get_string(&client_id) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid client ID: {}", e));
-            return JObject::null();
-        }
-    };
-
-    let client_secret: String = match env.get_string(&client_secret) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid client secret: {}", e));
-            return JObject::null();
-        }
-    };
-
-    let headers_provider = if headers_provider.is_null() {
-        None
-    } else {
-        match env.new_global_ref(&headers_provider) {
-            Ok(provider_ref) => Some(JavaHeadersProvider::new(provider_ref).into_arc()),
-            Err(e) => {
-                throw_zerobus_exception(
-                    &mut env,
-                    &format!("Failed to retain headers provider: {}", e),
-                );
-                return JObject::null();
-            }
         }
     };
 
@@ -425,7 +705,7 @@ fn native_create_stream_with_headers_provider<'local>(
     let sdk_arc = sdk.sdk.clone();
 
     // Store credentials for later use in stream recreation
-    let credentials = (client_id, client_secret);
+    let credentials = auth.stored_credentials();
 
     // Spawn async operation to create stream
     spawn_and_complete(
@@ -443,11 +723,7 @@ fn native_create_stream_with_headers_provider<'local>(
                 None
             };
 
-            let base = sdk_arc.stream_builder().table(table_name);
-            let base = match headers_provider {
-                Some(provider) => base.headers_provider(provider),
-                None => base.oauth(credentials.0.clone(), credentials.1.clone()),
-            };
+            let base = auth.apply(sdk_arc.stream_builder().table(table_name));
             // Map the wire format code to the builder, mirroring the FFI layer's integer
             // dispatch. `RecordType` no longer derives `TryFrom<i32>`, and its `Avro` variant
             // only exists with the `avro` feature, so match on the code (its discriminant).
@@ -660,6 +936,101 @@ fn native_create_arrow_stream_with_headers_provider<'local>(
     headers_provider: JObject<'local>,
     options: JObject<'local>,
 ) -> JObject<'local> {
+    let auth = match extract_oauth_or_headers_provider_auth(
+        &mut env,
+        &client_id,
+        &client_secret,
+        &headers_provider,
+    ) {
+        Ok(auth) => auth,
+        Err(message) => {
+            throw_zerobus_exception(&mut env, &message);
+            return JObject::null();
+        }
+    };
+    create_arrow_stream(env, sdk_handle, table_name, arrow_schema, auth, options)
+}
+
+/// Create a new Arrow stream authenticated with external-IdP federation (RFC 8693).
+///
+/// See `nativeCreateStreamWithFederatedAuth` for the federation parameters.
+///
+/// # JNI Signature
+/// ```java
+/// private native CompletableFuture<Long> nativeCreateArrowStreamWithFederatedAuth(
+///     long sdkHandle,
+///     String tableName,
+///     byte[] arrowSchema,
+///     IdpTokenSupplier idpTokenSupplier,
+///     String federatedClientId,
+///     String cacheIdentity,
+///     Object options
+/// );
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStreamWithFederatedAuth<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    arrow_schema: JByteArray<'local>,
+    idp_token_supplier: JObject<'local>,
+    federated_client_id: JString<'local>,
+    cache_identity: JString<'local>,
+    options: JObject<'local>,
+) -> JObject<'local> {
+    guard(env, |env| {
+        native_create_arrow_stream_with_federated_auth(
+            env,
+            _obj,
+            sdk_handle,
+            table_name,
+            arrow_schema,
+            idp_token_supplier,
+            federated_client_id,
+            cache_identity,
+            options,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_create_arrow_stream_with_federated_auth<'local>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    arrow_schema: JByteArray<'local>,
+    idp_token_supplier: JObject<'local>,
+    federated_client_id: JString<'local>,
+    cache_identity: JString<'local>,
+    options: JObject<'local>,
+) -> JObject<'local> {
+    let auth = match extract_federated_auth(
+        &mut env,
+        &idp_token_supplier,
+        &federated_client_id,
+        &cache_identity,
+    ) {
+        Ok(auth) => auth,
+        Err(message) => {
+            throw_zerobus_exception(&mut env, &message);
+            return JObject::null();
+        }
+    };
+    create_arrow_stream(env, sdk_handle, table_name, arrow_schema, auth, options)
+}
+
+fn create_arrow_stream<'local>(
+    mut env: JNIEnv<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    arrow_schema: JByteArray<'local>,
+    auth: JniStreamAuth,
+    options: JObject<'local>,
+) -> JObject<'local> {
     // Create the CompletableFuture to return
     let future = match create_completable_future(&mut env) {
         Ok(f) => f,
@@ -684,37 +1055,6 @@ fn native_create_arrow_stream_with_headers_provider<'local>(
         Err(e) => {
             throw_zerobus_exception(&mut env, &format!("Invalid table name: {}", e));
             return JObject::null();
-        }
-    };
-
-    let client_id: String = match env.get_string(&client_id) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid client ID: {}", e));
-            return JObject::null();
-        }
-    };
-
-    let client_secret: String = match env.get_string(&client_secret) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Invalid client secret: {}", e));
-            return JObject::null();
-        }
-    };
-
-    let headers_provider = if headers_provider.is_null() {
-        None
-    } else {
-        match env.new_global_ref(&headers_provider) {
-            Ok(provider_ref) => Some(JavaHeadersProvider::new(provider_ref).into_arc()),
-            Err(e) => {
-                throw_zerobus_exception(
-                    &mut env,
-                    &format!("Failed to retain headers provider: {}", e),
-                );
-                return JObject::null();
-            }
         }
     };
 
@@ -743,7 +1083,7 @@ fn native_create_arrow_stream_with_headers_provider<'local>(
     let sdk = unsafe { NativeSdkHandle::borrow_from_raw(sdk_handle) };
     let sdk_arc = sdk.sdk.clone();
 
-    let credentials = (client_id, client_secret);
+    let credentials = auth.stored_credentials();
 
     // Spawn async operation
     spawn_and_complete(
@@ -760,11 +1100,7 @@ fn native_create_arrow_stream_with_headers_provider<'local>(
 
             let schema = reader.schema();
 
-            let builder = sdk_arc.stream_builder().table(table_name);
-            let builder = match headers_provider {
-                Some(provider) => builder.headers_provider(provider),
-                None => builder.oauth(credentials.0.clone(), credentials.1.clone()),
-            };
+            let builder = auth.apply(sdk_arc.stream_builder().table(table_name));
             let mut builder = builder.arrow(schema);
             if let Some(opts) = extracted_options {
                 builder = apply_arrow_stream_options(builder, opts);

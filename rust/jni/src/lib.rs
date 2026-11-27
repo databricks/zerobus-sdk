@@ -8,6 +8,7 @@ mod async_bridge;
 mod callbacks;
 mod class_cache;
 mod errors;
+mod federated_auth;
 mod headers_provider;
 mod options;
 mod runtime;
@@ -15,6 +16,7 @@ mod sdk;
 mod stream;
 #[cfg(feature = "test-helpers")]
 mod test_helper;
+mod tls_options;
 
 use jni::sys::jint;
 use jni::JavaVM;

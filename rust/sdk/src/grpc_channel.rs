@@ -1,11 +1,12 @@
 //! gRPC channels that follow changes to the TLS settings.
 //!
-//! A [`GrpcChannelSource`] hands out the channel for gRPC streams. Before it
-//! reuses a channel, it reads the TLS settings again and opens a new channel if
-//! they changed, so rotated certificates reach a shared channel and recovery
-//! attempts, not only new dedicated channels.
+//! A [`GrpcChannelSource`] hands out the channel for gRPC streams and unary
+//! clients. Before it reuses a channel, it reads the TLS settings again and
+//! opens a new channel if they changed, so rotated certificates reach a shared
+//! channel, recovery attempts and unary calls, not only new dedicated channels.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
@@ -20,6 +21,8 @@ pub(crate) struct GrpcChannelSource {
     sdk_identifier: Arc<str>,
     tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
+    /// HTTP/2 keepalive interval and timeout of every channel opened, if set.
+    keepalive: Option<(Duration, Duration)>,
     current: tokio::sync::Mutex<Option<OpenChannel>>,
 }
 
@@ -40,11 +43,20 @@ impl GrpcChannelSource {
             sdk_identifier,
             tls_config,
             connector_factory,
+            keepalive: None,
             current: tokio::sync::Mutex::new(None),
         }
     }
 
-    /// Returns the channel for the next stream or recovery attempt.
+    /// Makes every channel this source opens send an HTTP/2 PING after
+    /// `interval` without a received frame, only while a call is in flight, and
+    /// close the connection if the reply takes longer than `timeout`.
+    pub(crate) fn with_keepalive(mut self, interval: Duration, timeout: Duration) -> Self {
+        self.keepalive = Some((interval, timeout));
+        self
+    }
+
+    /// Returns the channel for the next stream, recovery or unary attempt.
     ///
     /// The first call opens the channel and returns any error. Later calls read
     /// the TLS settings again and open a new channel if they changed. If the
@@ -86,7 +98,14 @@ impl GrpcChannelSource {
     }
 
     fn open(&self, tls: &ResolvedTls<'_>) -> ZerobusResult<OpenChannel> {
-        let endpoint = tls.apply(base_endpoint(&self.endpoint, &self.sdk_identifier)?)?;
+        let mut endpoint = base_endpoint(&self.endpoint, &self.sdk_identifier)?;
+        if let Some((interval, timeout)) = self.keepalive {
+            endpoint = endpoint
+                .http2_keep_alive_interval(interval)
+                .keep_alive_timeout(timeout)
+                .keep_alive_while_idle(false);
+        }
+        let endpoint = tls.apply(endpoint)?;
         let host = endpoint.uri().host().unwrap_or_default().to_string();
         let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
         let channel = match proxy_connector {
