@@ -46,53 +46,69 @@ pub enum RecordType {
     Avro = 2,
 }
 
-/// Configuration options for the Zerobus stream.
-///
-/// These options control stream behavior including recovery, timeouts, and inflight limits.
-#[napi(object)]
-pub struct StreamConfigurationOptions {
-    /// Maximum number of unacknowledged requests that can be in flight.
-    /// Default: 1,000,000
-    pub max_inflight_requests: Option<u32>,
+macro_rules! define_stream_configuration_options {
+    ($($testing:tt)*) => {
+        /// Configuration options for the Zerobus stream.
+        ///
+        /// These options control stream behavior including recovery, timeouts, and inflight limits.
+        #[napi(object)]
+        pub struct StreamConfigurationOptions {
+            /// Maximum number of unacknowledged requests that can be in flight.
+            /// Default: 1,000,000
+            pub max_inflight_requests: Option<u32>,
 
-    /// Enable automatic stream recovery on transient failures.
-    /// Default: true
-    pub recovery: Option<bool>,
+            /// Enable automatic stream recovery on transient failures.
+            /// Default: true
+            pub recovery: Option<bool>,
 
-    /// Timeout for recovery operations in milliseconds.
-    /// Default: 15,000 (15 seconds)
-    pub recovery_timeout_ms: Option<u32>,
+            /// Timeout for recovery operations in milliseconds.
+            /// Default: 15,000 (15 seconds)
+            pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
-    /// Default: 2,000 (2 seconds)
-    pub recovery_backoff_ms: Option<u32>,
+            /// Delay between recovery retry attempts in milliseconds.
+            /// Default: 2,000 (2 seconds)
+            pub recovery_backoff_ms: Option<u32>,
 
-    /// Maximum number of recovery attempts before giving up.
-    /// Default: 4
-    pub recovery_retries: Option<u32>,
+            /// Maximum number of recovery attempts before giving up.
+            /// Default: 4
+            pub recovery_retries: Option<u32>,
 
-    /// Timeout for flush operations in milliseconds.
-    /// Default: 300,000 (5 minutes)
-    pub flush_timeout_ms: Option<u32>,
+            /// Timeout for flush operations in milliseconds.
+            /// Default: 300,000 (5 minutes)
+            pub flush_timeout_ms: Option<u32>,
 
-    /// Timeout waiting for server acknowledgments in milliseconds.
-    /// Default: 60,000 (1 minute)
-    pub server_lack_of_ack_timeout_ms: Option<u32>,
+            /// Timeout waiting for server acknowledgments in milliseconds.
+            /// Default: 60,000 (1 minute)
+            pub server_lack_of_ack_timeout_ms: Option<u32>,
 
-    /// Record serialization format: RecordType.Json, RecordType.Proto, or RecordType.Avro.
-    /// Optional — the schema on TableProperties selects the format (avroSchema → Avro,
-    /// descriptor → Proto); when set this must agree with it. Default: RecordType.Proto.
-    pub record_type: Option<i32>,
+            /// Record serialization format: RecordType.Json, RecordType.Proto, or RecordType.Avro.
+            /// Optional — the schema on TableProperties selects the format (avroSchema → Avro,
+            /// descriptor → Proto); when set this must agree with it. Default: RecordType.Proto.
+            pub record_type: Option<i32>,
 
-    /// Maximum wait time during graceful stream close in milliseconds.
-    /// When the server signals stream closure, this controls how long to wait
-    /// for in-flight records to be acknowledged.
-    /// - None (undefined): Wait for full server-specified duration
-    /// - Some(0): Immediately trigger recovery without waiting
-    /// - Some(x): Wait up to min(x, server_duration) milliseconds
-    /// Default: None (wait for full server duration)
-    pub stream_paused_max_wait_time_ms: Option<u32>,
+            /// Maximum wait time during graceful stream close in milliseconds.
+            /// When the server signals stream closure, this controls how long to wait
+            /// for in-flight records to be acknowledged.
+            /// - None (undefined): Wait for full server-specified duration
+            /// - Some(0): Immediately trigger recovery without waiting
+            /// - Some(x): Wait up to min(x, server_duration) milliseconds
+            /// Default: None (wait for full server duration)
+            pub stream_paused_max_wait_time_ms: Option<u32>,
+            $($testing)*
+        }
+    };
 }
+
+#[cfg(feature = "testing")]
+define_stream_configuration_options! {
+    /// TESTING ONLY (conformance harness): send no authorization headers.
+    /// Requires the Rust SDK `testing` feature. Do not use against production.
+    /// Default: false
+    pub no_auth: Option<bool>,
+}
+
+#[cfg(not(feature = "testing"))]
+define_stream_configuration_options! {}
 
 /// Properties of the target Delta table for ingestion.
 ///
@@ -868,15 +884,31 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
     }
 }
 
-#[napi(object)]
-#[derive(Default)]
-pub struct ZerobusSdkOptions {
-    /// Identifier appended to the `user-agent` header
-    pub application_name: Option<String>,
-    /// Whether every JSON/protobuf stream gets a dedicated gRPC connection.
-    /// Defaults to true.
-    pub connection_per_stream: Option<bool>,
+macro_rules! define_zerobus_sdk_options {
+    ($($testing:tt)*) => {
+        #[napi(object)]
+        #[derive(Default)]
+        pub struct ZerobusSdkOptions {
+            /// Identifier appended to the `user-agent` header
+            pub application_name: Option<String>,
+            /// Whether every JSON/protobuf stream gets a dedicated gRPC connection.
+            /// Defaults to true.
+            pub connection_per_stream: Option<bool>,
+            $($testing)*
+        }
+    };
 }
+
+#[cfg(feature = "testing")]
+define_zerobus_sdk_options! {
+    /// TESTING ONLY (conformance harness): plaintext `http://` transport, no TLS.
+    /// Requires the Rust SDK `testing` feature. Do not use against production.
+    /// Default: false
+    pub no_tls: Option<bool>,
+}
+
+#[cfg(not(feature = "testing"))]
+define_zerobus_sdk_options! {}
 
 /// The main SDK for interacting with the Databricks Zerobus service.
 ///
@@ -953,6 +985,13 @@ impl ZerobusSdk {
         let builder = match options.application_name {
             Some(name) => builder.application_name(name),
             None => builder,
+        };
+        // TESTING ONLY: see ZerobusSdkOptions::no_tls.
+        #[cfg(feature = "testing")]
+        let builder = if options.no_tls.unwrap_or(false) {
+            builder.no_tls()
+        } else {
+            builder
         };
         let inner = builder
             .build()
@@ -1053,6 +1092,8 @@ impl ZerobusSdk {
             server_lack_of_ack_timeout_ms: None,
             record_type: None,
             stream_paused_max_wait_time_ms: None,
+            #[cfg(feature = "testing")]
+            no_auth: None,
         });
 
         // The schema selects the format (descriptor -> Proto, avro_schema -> Avro,
@@ -1123,6 +1164,11 @@ impl ZerobusSdk {
                     .stream_builder()
                     .table(table_name)
                     .headers_provider(headers_provider_arc);
+                // TESTING ONLY: `no_auth()` overrides the provider set above (last wins).
+                #[cfg(feature = "testing")]
+                if opts.no_auth.unwrap_or(false) {
+                    builder = builder.no_auth();
+                }
 
                 if let Some(v) = opts.max_inflight_requests {
                     builder = builder.max_inflight_requests(v as usize);
@@ -1291,48 +1337,67 @@ pub enum IpcCompressionType {
     Zstd = 1,
 }
 
-/// Configuration options for Arrow Flight streams.
-///
 #[cfg(feature = "arrow-flight")]
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct ArrowStreamConfigurationOptions {
-    /// Maximum number of batches that can be in-flight (sent but not acknowledged).
-    /// Default: 1,000
-    pub max_inflight_batches: Option<u32>,
+macro_rules! define_arrow_stream_configuration_options {
+    ($($testing:tt)*) => {
+        /// Configuration options for Arrow Flight streams.
+        ///
+        #[napi(object)]
+        #[derive(Debug, Clone)]
+        pub struct ArrowStreamConfigurationOptions {
+            /// Maximum number of batches that can be in-flight (sent but not acknowledged).
+            /// Default: 1,000
+            pub max_inflight_batches: Option<u32>,
 
-    /// Whether to enable automatic stream recovery on failure.
-    /// Default: true
-    pub recovery: Option<bool>,
+            /// Whether to enable automatic stream recovery on failure.
+            /// Default: true
+            pub recovery: Option<bool>,
 
-    /// Timeout for recovery operations in milliseconds.
-    /// Default: 15,000 (15 seconds)
-    pub recovery_timeout_ms: Option<u32>,
+            /// Timeout for recovery operations in milliseconds.
+            /// Default: 15,000 (15 seconds)
+            pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
-    /// Default: 2,000 (2 seconds)
-    pub recovery_backoff_ms: Option<u32>,
+            /// Delay between recovery retry attempts in milliseconds.
+            /// Default: 2,000 (2 seconds)
+            pub recovery_backoff_ms: Option<u32>,
 
-    /// Maximum number of recovery attempts before giving up.
-    /// Default: 4
-    pub recovery_retries: Option<u32>,
+            /// Maximum number of recovery attempts before giving up.
+            /// Default: 4
+            pub recovery_retries: Option<u32>,
 
-    /// Timeout waiting for server acknowledgments in milliseconds.
-    /// Default: 60,000 (1 minute)
-    pub server_lack_of_ack_timeout_ms: Option<u32>,
+            /// Timeout waiting for server acknowledgments in milliseconds.
+            /// Default: 60,000 (1 minute)
+            pub server_lack_of_ack_timeout_ms: Option<u32>,
 
-    /// Timeout for flush operations in milliseconds.
-    /// Default: 300,000 (5 minutes)
-    pub flush_timeout_ms: Option<u32>,
+            /// Timeout for flush operations in milliseconds.
+            /// Default: 300,000 (5 minutes)
+            pub flush_timeout_ms: Option<u32>,
 
-    /// Timeout for connection establishment in milliseconds.
-    /// Default: 30,000 (30 seconds)
-    pub connection_timeout_ms: Option<u32>,
+            /// Timeout for connection establishment in milliseconds.
+            /// Default: 30,000 (30 seconds)
+            pub connection_timeout_ms: Option<u32>,
 
-    /// IPC compression type (-1 = None, 0 = Lz4Frame, 1 = Zstd).
-    /// Default: Zstd
-    pub ipc_compression: Option<i32>,
+            /// IPC compression type (-1 = None, 0 = Lz4Frame, 1 = Zstd).
+            /// Default: Zstd
+            pub ipc_compression: Option<i32>,
+            $($testing)*
+        }
+    };
 }
+
+#[cfg(feature = "arrow-flight")]
+#[cfg(feature = "testing")]
+define_arrow_stream_configuration_options! {
+    /// TESTING ONLY (conformance harness): send no authorization headers.
+    /// When true, `clientId`/`clientSecret` are ignored. Requires the Rust SDK `testing`
+    /// feature. Do not use against production.
+    /// Default: false
+    pub no_auth: Option<bool>,
+}
+
+#[cfg(feature = "arrow-flight")]
+#[cfg(not(feature = "testing"))]
+define_arrow_stream_configuration_options! {}
 
 // Rust SDK 2.0 `ArrowStreamConfigurationOptions` is `#[non_exhaustive]` and
 // cannot be constructed via struct literal from this crate. Arrow options are
@@ -1750,6 +1815,8 @@ impl ZerobusSdk {
             flush_timeout_ms: None,
             connection_timeout_ms: None,
             ipc_compression: None,
+            #[cfg(feature = "testing")]
+            no_auth: None,
         });
         let ipc_compression = map_ipc_compression(opts.ipc_compression);
         let schema_for_stream = schema.clone();
@@ -1758,11 +1825,17 @@ impl ZerobusSdk {
 
         env.execute_tokio_future(
             async move {
-                let mut builder = sdk
-                    .stream_builder()
-                    .table(table_name)
-                    .oauth(client_id, client_secret)
-                    .arrow(schema.clone());
+                let builder = sdk.stream_builder().table(table_name);
+                // TESTING ONLY: `no_auth()` replaces `oauth()` (same pattern as the gRPC path).
+                #[cfg(feature = "testing")]
+                let builder = if opts.no_auth.unwrap_or(false) {
+                    builder.no_auth()
+                } else {
+                    builder.oauth(client_id, client_secret)
+                };
+                #[cfg(not(feature = "testing"))]
+                let builder = builder.oauth(client_id, client_secret);
+                let mut builder = builder.arrow(schema.clone());
 
                 if let Some(v) = opts.max_inflight_batches {
                     builder = builder.max_inflight_batches(v as usize);

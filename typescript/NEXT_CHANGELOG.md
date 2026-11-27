@@ -25,6 +25,8 @@
 
 ### Internal Changes
 
+- Added testing-only `noTls` (`ZerobusSdkOptions`) and `noAuth` (stream options) for the Layer-1 conformance test harness. They are compiled only with the `testing` Cargo feature (`npm run build:testing`), which the release build (`npm run build:all`) does not enable, so published packages do not expose them. They disable TLS and auth and must never be used against a real endpoint.
+
 ### Breaking Changes
 
 ### Deprecations

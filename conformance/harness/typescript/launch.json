@@ -1,0 +1,5 @@
+{
+  "argv": ["node", "{harness_dir}/dist/main.js"],
+  "artifact": "{harness_dir}/dist/main.js",
+  "build_hint": "cd typescript && npm install && npx napi build --platform --release --features arrow-flight,avro,testing && cd conformance/harness/typescript && npm install && npm run build"
+}
