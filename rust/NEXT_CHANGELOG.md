@@ -32,6 +32,8 @@
 
 ### Bug Fixes
 
+- Fixed `MultiplexedStream::close()` failing with "closed by server without errors" on streams with recovery disabled, when every record was acknowledged.
+
 ### Documentation
 
 - Documented the unary client in the Rust README, with a usage section, API
