@@ -102,9 +102,11 @@ type streamConfig struct {
 	// muxCallback is kept apart from callback so CreateStream can reject it.
 	// A multiplexed stream wraps it in a per-lane callback.
 	muxCallback MultiplexedAckCallback
-	// muxJitter replaces the wait before each lane of a multiplexed stream
-	// opens. Only tests set it.
-	muxJitter func(ctx context.Context, lane int) error
+	// muxCapacityWait and muxJitter replace the capacity wait of a
+	// multiplexed stream and the wait before each lane opens. Only tests set
+	// them.
+	muxCapacityWait time.Duration
+	muxJitter       func(ctx context.Context, lane int) error
 }
 
 func defaultStreamConfig() streamConfig {

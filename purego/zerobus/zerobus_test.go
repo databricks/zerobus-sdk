@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -213,6 +215,15 @@ type echoServer struct {
 	ingests  chan *zerobuspb.EphemeralStreamRequest
 	peers    chan string
 
+	// failMarker ends the stream with InvalidArgument when a single JSON
+	// record contains it: before the ack, or right after it with failAfterAck.
+	failMarker   string
+	failAfterAck bool
+	// holdMarker delays the ack of a single JSON record that contains it
+	// until release is closed; heldAcked is set right before that ack is sent.
+	holdMarker string
+	release    chan struct{}
+	heldAcked  atomic.Bool
 	// readyStreams, with noReady, lets the first readyStreams creates finish.
 	readyStreams int
 	readied      atomic.Int32
@@ -257,6 +268,10 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		if err != nil {
 			return err
 		}
+		rejected := recordWith(req, s.failMarker)
+		if rejected != "" && !s.failAfterAck {
+			return status.Error(codes.InvalidArgument, "rejected "+rejected)
+		}
 		if s.noAcks {
 			continue
 		}
@@ -273,6 +288,14 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		if s.ingests != nil {
 			s.ingests <- proto.Clone(req).(*zerobuspb.EphemeralStreamRequest)
 		}
+		if recordWith(req, s.holdMarker) != "" {
+			select {
+			case <-s.release:
+			case <-stream.Context().Done():
+				return stream.Context().Err()
+			}
+			s.heldAcked.Store(true)
+		}
 		if err := stream.Send(&zerobuspb.EphemeralStreamResponse{
 			Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
 				IngestRecordResponse: &zerobuspb.IngestRecordResponse{
@@ -282,7 +305,22 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		}); err != nil {
 			return err
 		}
+		if rejected != "" {
+			return status.Error(codes.InvalidArgument, "rejected "+rejected)
+		}
 	}
+}
+
+// recordWith returns the JSON record of a single-record req if it contains
+// marker, or "" if it does not or marker is empty.
+func recordWith(req *zerobuspb.EphemeralStreamRequest, marker string) string {
+	if marker == "" {
+		return ""
+	}
+	if record := req.GetIngestRecord().GetJsonRecord(); strings.Contains(record, marker) {
+		return record
+	}
+	return ""
 }
 
 func TestConnectionPerStreamModes(t *testing.T) {

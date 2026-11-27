@@ -19,11 +19,12 @@
   the descriptor themselves. It accepts the bytes returned by
   `FetchProtoDescriptorFromUC` or passed to `WithProto`.
 - Added multiplexed streams (Beta). `SDK.CreateMultiplexedStream` opens up to
-  `MaxMultiplexedStreams` lanes, with `OAuth` or `Headers` auth, which send in
-  parallel on their own gRPC streams. `WithMaxInflight` is the budget for the
-  whole multiplexed stream, and the lanes split it. `WithAckCallback` is
-  rejected, and `WithWaitForReady` is always on; every other option applies to
-  each lane.
+  `MaxMultiplexedStreams` lanes, with `OAuth` or `Headers` auth, and spreads
+  ingest calls across them round-robin. The lanes send in parallel on their own
+  gRPC streams, which raises throughput above one stream. Each ingest call
+  returns a `MessageID`. `WithMaxInflight` is the budget for the whole
+  multiplexed stream, and the lanes split it. `WithAckCallback` is rejected, and
+  `WithWaitForReady` is always on; every other option applies to each lane.
 
 ### Bug Fixes
 
@@ -82,3 +83,6 @@
   `MultiplexedAckCallback`, and `WithMultiplexedAckCallback` (Beta).
   `CreateStream` and `CreateStreamWithProvider` reject
   `WithMultiplexedAckCallback` with a non-retryable error.
+- Added `MultiplexedStream.IngestRecord`, `IngestRecords`, `IngestJSONRecord`,
+  `IngestJSONRecords`, their `Context` forms, `Flush`, and `FlushContext`
+  (Beta).
