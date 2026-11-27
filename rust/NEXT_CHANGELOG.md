@@ -29,6 +29,13 @@
   (dynamic protobuf) or `arrow_schema_from_uc_schema` (Arrow Flight) to resolve a
   table's schema at runtime without pre-generating a `.proto` file. See the new
   `proto_dynamic_uc_schema` example.
+- Added `ZerobusSdkBuilder::producer_id`, which sets the producer id that the
+  server records for each stream. The SDK sends it as a `producer/<id>` token
+  in the `user-agent` header, after the SDK prefix and before the application
+  name. Blank values are ignored; a value longer than 128 bytes or with a
+  character outside ASCII letters, digits and ``!#$%&'*+-.^_`|~/`` is rejected
+  by `build()` with `ZerobusError::InvalidArgument`. The default `user-agent`
+  is unchanged.
 
 ### Bug Fixes
 
@@ -36,6 +43,9 @@
 
 - Documented the unary client in the Rust README, with a usage section, API
   reference entries, and a runnable example (`examples/json/unary.rs`).
+- Corrected the `ZerobusSdkBuilder::application_name` and `HeadersProvider`
+  docs: a `user-agent` value returned by a headers provider is sent before the
+  SDK value, not ignored.
 
 ### Internal Changes
 
@@ -74,3 +84,4 @@
   variant, returned by `schema::fetch_uc_table_schema`. `status` is the HTTP
   status of a non-success response. The enum is `#[non_exhaustive]`, so this is
   an additive change.
+- Added `ZerobusSdkBuilder::producer_id`.

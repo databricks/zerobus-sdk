@@ -19,8 +19,8 @@ use tracing::error;
 /// such as fetching tokens from different OAuth providers or using alternative
 /// authentication mechanisms.
 ///
-/// The HTTP `user-agent` header is set by the SDK on the underlying tonic
-/// `Endpoint` and cannot be overridden by values returned from `get_headers`.
+/// The SDK sets the HTTP `user-agent` header itself. A `user-agent` value
+/// returned from `get_headers` is sent before the SDK value in the same header.
 /// Use [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
 /// to customize it.
 ///

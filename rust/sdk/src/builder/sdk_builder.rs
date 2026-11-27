@@ -11,6 +11,9 @@ use crate::{
     SecureTlsConfig, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk, DEFAULT_SDK_IDENTIFIER,
 };
 
+/// Maximum length of a producer id, in bytes, after trimming.
+const MAX_PRODUCER_ID_BYTES: usize = 128;
+
 /// Builder for creating a [`ZerobusSdk`] instance with fluent configuration.
 ///
 /// # Examples
@@ -32,6 +35,7 @@ pub struct ZerobusSdkBuilder {
     tls_config: Option<Arc<dyn TlsConfig>>,
     connector_factory: Option<ConnectorFactory>,
     application_name: Option<String>,
+    producer_id: Option<String>,
     sdk_identifier_override: Option<String>,
     token_cache_enabled: bool,
     token_refresh_buffer: Duration,
@@ -49,6 +53,7 @@ impl ZerobusSdkBuilder {
             tls_config: None,
             connector_factory: None,
             application_name: None,
+            producer_id: None,
             sdk_identifier_override: None,
             token_cache_enabled: true,
             token_refresh_buffer: DEFAULT_REFRESH_BUFFER,
@@ -136,11 +141,12 @@ impl ZerobusSdkBuilder {
     /// preserving the SDK version prefix for server-side telemetry while
     /// adding caller-supplied identification (e.g. `"my-app/1.0"`).
     ///
-    /// The SDK owns the `user-agent` header at the tonic `Endpoint` level;
-    /// values returned by a [`HeadersProvider`](crate::HeadersProvider) cannot
-    /// override it.
+    /// A `user-agent` value returned by a
+    /// [`HeadersProvider`](crate::HeadersProvider) is sent before this value
+    /// in the same header.
     ///
-    /// If [`sdk_identifier`](Self::sdk_identifier) is also set, the override
+    /// If [`producer_id`](Self::producer_id) is set, its token comes before
+    /// this value. If [`sdk_identifier`](Self::sdk_identifier) is also set, the override
     /// replaces the SDK prefix but this value is still appended — the wire
     /// value becomes `<sdk_identifier> <application_name>`.
     ///
@@ -156,6 +162,38 @@ impl ZerobusSdkBuilder {
     /// * `name` - Application identifier, conventionally `<product>/<version>`
     pub fn application_name(mut self, name: impl Into<String>) -> Self {
         self.application_name = Some(name.into());
+        self
+    }
+
+    /// Sets a producer id that the server records as the producer of every
+    /// stream opened from this SDK instance.
+    ///
+    /// The SDK sends it as a `producer/<id>` token in the HTTP `user-agent`
+    /// header, right after the SDK prefix: the value sent becomes
+    /// `zerobus-sdk-rs/<version> producer/<id>`, or
+    /// `zerobus-sdk-rs/<version> producer/<id> <application_name>` when
+    /// [`application_name`](Self::application_name) is also set. If
+    /// [`sdk_identifier`](Self::sdk_identifier) is set, it replaces the
+    /// `zerobus-sdk-rs/<version>` prefix.
+    ///
+    /// The value is trimmed of surrounding whitespace; a blank value is ignored.
+    /// After trimming it must be at most 128 bytes, and each byte must be an
+    /// ASCII letter or digit or one of ``!#$%&'*+-.^_`|~/``. Otherwise
+    /// [`build`](Self::build) returns
+    /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument).
+    ///
+    /// The server reads the first `producer/` token in the `user-agent`. A
+    /// `user-agent` value returned by a
+    /// [`HeadersProvider`](crate::HeadersProvider) is sent first, so a
+    /// `producer/` token in it takes precedence. The server ignores the whole
+    /// `user-agent`, producer id included, if it holds a non-ASCII byte, e.g.
+    /// from a non-ASCII `application_name`.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Producer id, e.g. `"ingest-service-1"`
+    pub fn producer_id(mut self, id: impl Into<String>) -> Self {
+        self.producer_id = Some(id.into());
         self
     }
 
@@ -226,6 +264,8 @@ impl ZerobusSdkBuilder {
     /// - The endpoint is not set
     /// - The workspace ID cannot be extracted from the endpoint
     /// - The `application_name` is not a valid `user-agent` header value
+    /// - The `producer_id` is longer than 128 bytes or holds a character that
+    ///   is not allowed
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> ZerobusResult<ZerobusSdk> {
         let zerobus_endpoint = self
@@ -279,14 +319,44 @@ impl ZerobusSdkBuilder {
             None => None,
         };
 
+        // The id must stay one `user-agent` product token: RFC 9110 `tchar`
+        // bytes, plus `/` because the server takes everything after the first
+        // `/` of `producer/<id>`.
+        let producer_id = match self.producer_id.as_deref().map(str::trim) {
+            Some(id) if !id.is_empty() => {
+                if id.len() > MAX_PRODUCER_ID_BYTES {
+                    return Err(ZerobusError::InvalidArgument(format!(
+                        "producer_id is {} bytes; the maximum is {} bytes",
+                        id.len(),
+                        MAX_PRODUCER_ID_BYTES
+                    )));
+                }
+                if let Some(bad) = id.bytes().find(|b| !is_producer_id_byte(*b)) {
+                    return Err(ZerobusError::InvalidArgument(format!(
+                        "producer_id contains the byte 0x{:02x}; only ASCII letters, digits \
+                         and !#$%&'*+-.^_`|~/ are allowed",
+                        bad
+                    )));
+                }
+                Some(id)
+            }
+            _ => None,
+        };
+
         let sdk_prefix: &str = match self.sdk_identifier_override.as_deref() {
             Some(override_id) if !override_id.is_empty() => override_id,
             _ => DEFAULT_SDK_IDENTIFIER,
         };
-        let sdk_identifier: Arc<str> = match application_name {
-            Some(app) => Arc::from(format!("{} {}", sdk_prefix, app)),
-            None => Arc::from(sdk_prefix),
-        };
+        let mut sdk_identifier = sdk_prefix.to_string();
+        if let Some(id) = producer_id {
+            sdk_identifier.push_str(" producer/");
+            sdk_identifier.push_str(id);
+        }
+        if let Some(app) = application_name {
+            sdk_identifier.push(' ');
+            sdk_identifier.push_str(app);
+        }
+        let sdk_identifier: Arc<str> = Arc::from(sdk_identifier);
 
         Ok(ZerobusSdk::new_with_config(
             zerobus_endpoint,
@@ -300,6 +370,11 @@ impl ZerobusSdkBuilder {
             self.connection_per_stream,
         ))
     }
+}
+
+/// Returns whether `b` may appear in a producer id: an RFC 9110 `tchar` or `/`.
+fn is_producer_id_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~/".contains(&b)
 }
 
 impl Default for ZerobusSdkBuilder {
