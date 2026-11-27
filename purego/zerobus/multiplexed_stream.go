@@ -46,15 +46,18 @@ var errMultiplexedCapacityWait = errors.New("multiplexed capacity wait expired")
 // one with SDK.CreateMultiplexedStream.
 //
 // A whole batch goes to one lane. Records keep their order within a lane, but
-// there is no order across lanes. When the chosen lane is at capacity, the
-// call waits for that lane; it does not try another lane. The wait lasts at
-// most 30 seconds, then the call returns a retryable error.
+// there is no order across lanes. When the chosen lane is at capacity
+// (WithMaxInflight or WithMaxBufferedPayloadBytes), the call waits for that
+// lane; it does not try another lane. The wait lasts at most 30 seconds, then
+// the call returns a retryable error. A caller deadline that ends first
+// returns the non-retryable context error instead.
 //
 // A call that sees its lane fail or close returns that lane's error, and the
 // stream stores it as its failure. After that, the stream stops accepting
 // records, and every later ingest call, Flush, and Close returns the first
-// stored failure. Until then, calls on healthy lanes still succeed. The other
-// lanes stay open until Close.
+// stored failure. It keeps the lane's retry class: once IsClosed reports true,
+// Retryable means that a new stream may succeed. Until then, calls on healthy
+// lanes still succeed. The other lanes stay open until Close.
 //
 // For throughput, queue records in a loop and call Flush once.
 //
@@ -287,8 +290,10 @@ func (m *MultiplexedStream) IngestRecordContext(ctx context.Context, record []by
 }
 
 // IngestRecords queues records as one batch on the next lane and returns the
-// batch's MessageID. ok is false for an empty batch, which queues nothing. It
-// blocks only on backpressure, for at most 30 seconds.
+// batch's MessageID. ok is false for an empty batch, which queues nothing. On
+// error, id is zero and ok is false; a closed or failed stream returns its
+// error also for an empty batch. It blocks only on backpressure, for at most
+// 30 seconds.
 //
 // Prefer this in hot paths to reduce overhead.
 func (m *MultiplexedStream) IngestRecords(records [][]byte) (id MessageID, ok bool, err error) {
@@ -321,8 +326,10 @@ func (m *MultiplexedStream) IngestJSONRecordContext(ctx context.Context, record 
 
 // IngestJSONRecords queues JSON payloads as one batch on the next lane and
 // returns the batch's MessageID. ok is false for an empty batch, which queues
-// nothing. Proto streams convert the payloads to protobuf before ingestion. It
-// blocks only on backpressure, for at most 30 seconds.
+// nothing. On error, id is zero and ok is false; a closed or failed stream
+// returns its error also for an empty batch. Proto streams convert the
+// payloads to protobuf before ingestion. It blocks only on backpressure, for
+// at most 30 seconds.
 func (m *MultiplexedStream) IngestJSONRecords(records [][]byte) (id MessageID, ok bool, err error) {
 	return m.IngestJSONRecordsContext(context.Background(), records)
 }
@@ -443,12 +450,13 @@ func (m *MultiplexedStream) laneIngestError(callerCtx, laneCtx context.Context, 
 }
 
 // Flush waits until every lane has acknowledged its queued records or failed.
-// It flushes all lanes concurrently and waits for all of them. A failed or
-// closed lane fails the stream, and its error wins over other errors; Flush
-// still flushes every lane, then returns the first stored failure. A lane that
-// closed without a failure, for example through SDK.Close, gives a
-// non-retryable lane closed error. After Close, Flush returns the stored
-// failure, else a non-retryable closed error.
+// It flushes all lanes concurrently and waits for all of them. A lane that
+// does not finish within its FlushTimeout gives the timeout error, and the
+// stream stays open. A failed or closed lane fails the stream, and its error
+// wins over other errors; Flush still flushes every lane, then returns the
+// first stored failure. A lane that closed without a failure, for example
+// through SDK.Close, gives a non-retryable lane closed error. After Close,
+// Flush returns the stored failure, else a non-retryable closed error.
 func (m *MultiplexedStream) Flush() error {
 	return m.FlushContext(context.Background())
 }

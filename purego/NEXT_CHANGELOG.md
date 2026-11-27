@@ -83,3 +83,6 @@
   `MultiplexedAckCallback`, and `WithMultiplexedAckCallback` (Beta).
   `CreateStream` and `CreateStreamWithProvider` reject
   `WithMultiplexedAckCallback` with a non-retryable error.
+- Added `MultiplexedStream.IngestRecord`, `IngestRecords`, `IngestJSONRecord`,
+  `IngestJSONRecords`, their `Context` forms, `Flush`, and `FlushContext`
+  (Beta).

@@ -108,16 +108,23 @@ if err := mux.Flush(); err != nil { // wait once for every lane
   can buffer up to N times that value.
 - Each lane opens its own gRPC connection, unless the SDK was created with
   `WithConnectionPerStream(false)`.
+- `IngestRecord` and `IngestJSONRecord` queue one record; `IngestRecords` and
+  `IngestJSONRecords` queue one batch and are the better choice in hot paths.
+  Each has a `Context` form.
 - A batch goes to one lane. Records keep their order within a lane, but there
   is no order across lanes, so `MessageID` values are not ordered. Use `Flush`
   to confirm everything.
-- When the chosen lane is full, the call waits for that lane, for at most 30
+- When the chosen lane is full (`WithMaxInflight` or
+  `WithMaxBufferedPayloadBytes`), the call waits for that lane, for at most 30
   seconds, then returns a retryable error. A context deadline can only shorten
-  this wait.
+  this wait; when it ends first, the call returns the non-retryable context
+  error.
 - A call that sees its lane fail or close returns that lane's error, and the
   stream stores it as its failure. After that, the stream stops accepting
   records, and every later ingest call, `Flush`, and `Close` returns the first
-  stored failure. Until then, calls on healthy lanes still succeed.
+  stored failure. It keeps the lane's retry class: once `IsClosed` reports
+  true, `Retryable` means that a new stream may succeed. Until then, calls on
+  healthy lanes still succeed.
 - `Close` waits for the ingest calls in flight, each for at most the 30-second
   capacity wait, then closes every lane.
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes

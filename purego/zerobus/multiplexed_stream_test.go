@@ -1248,7 +1248,7 @@ func TestMultiplexedSDKCloseClosesStream(t *testing.T) {
 			if err := sdk.Close(); err != nil {
 				t.Fatalf("SDK.Close: %v", err)
 			}
-			// Flush stores the lowest-index lane; a wait stores its own lane.
+			// Flush stores the lowest-index lane.
 			lane := max(tc.lane, 0)
 			assertLaneClosed(t, receive(t, done, tc.op), tc.op, lane)
 			if !mux.IsClosed() {
