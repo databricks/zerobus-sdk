@@ -62,14 +62,15 @@ Example (Async):
 # Import from Rust core
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
-from zerobus.sdk.shared.auth import FederatedToken, PersonalAccessToken
-from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
+from zerobus.sdk.shared.auth import FederatedToken, OAuth, PersonalAccessToken
+from zerobus.sdk.sync import MultiplexedStream, ZerobusArrowStream, ZerobusSdk, ZerobusStream
 
 __version__ = "1.6.1"
 
 # Re-export common types
 TableProperties = _core.TableProperties
 StreamConfigurationOptions = _core.StreamConfigurationOptions
+MultiplexedStreamOptions = _core.MultiplexedStreamOptions
 RecordType = _core.RecordType
 AckCallback = _core.AckCallback
 ZerobusException = _core.ZerobusException
@@ -81,6 +82,7 @@ __all__ = [
     # Sync SDK (default)
     "ZerobusSdk",
     "ZerobusStream",
+    "MultiplexedStream",
     # Arrow
     "ZerobusArrowStream",
     "ArrowStreamConfigurationOptions",
@@ -89,11 +91,13 @@ __all__ = [
     # Common types
     "TableProperties",
     "StreamConfigurationOptions",
+    "MultiplexedStreamOptions",
     "RecordType",
     "AckCallback",
     # Authentication
     "HeadersProvider",
     "FederatedToken",
+    "OAuth",
     "PersonalAccessToken",
     # Exceptions
     "ZerobusException",

@@ -41,12 +41,14 @@ from typing import Iterator, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
+from zerobus.sdk.shared import multiplexed as _multiplexed
 from zerobus.sdk.shared.auth import FederatedToken, PersonalAccessToken
 from zerobus.sdk.shared.persistent import _PersistentStreamBuilderBase
 
 # Import base Rust SDK classes
 _RustZerobusSdk = _core.sync.ZerobusSdk
 _RustZerobusStream = _core.sync.ZerobusStream
+_RustMultiplexedStream = _core.sync.MultiplexedStream
 PersistentStream = _core.sync.PersistentStream
 
 
@@ -159,6 +161,118 @@ class ZerobusStream:
     def get_state(self):
         """Get the current stream state (placeholder)."""
         return self._inner.get_state() if hasattr(self._inner, "get_state") else 1
+
+
+class MultiplexedStream:
+    """
+    A stream that distributes records round-robin across several sub-streams (Beta).
+
+    Create one with ``ZerobusSdk.create_multiplexed_stream()``. Ingest in a loop, then call
+    ``flush()`` once to confirm durability. Records keep their order within a sub-stream, but
+    there is no order across sub-streams. Thread-safe: several threads may ingest, flush, and
+    close one stream.
+
+    Ingest methods return a message ID: an opaque ``int`` that identifies the sub-stream and
+    the record's position in it. Message IDs are not ordered and may be negative. Pass one to
+    ``wait_for_message_id()`` on this stream; do not compare them or use them with another
+    stream.
+
+    Once a call reports a sub-stream failure, ``is_closed`` is ``True`` and every later
+    ingest, ``flush()``, and ``close()`` raises that error again, which may be a retriable
+    ``ZerobusException``; ``wait_for_message_id()`` still reports only its own sub-stream.
+    Retrying on this stream does not help: recover the unacknowledged records with
+    ``get_unacked_records()`` or ``get_unacked_batches()`` and ingest them into a new stream.
+    Handles Avro encoding transparently on an Avro stream.
+    """
+
+    def __init__(self, rust_stream: _RustMultiplexedStream, avro_encoder=None):
+        self._inner = rust_stream
+        self._avro = avro_encoder  # AvroEncoder for an Avro stream, else None
+
+    def _encode_payload(self, payload):
+        """Encode payload to Avro bytes on an Avro stream; else pass through."""
+        return payload if self._avro is None else self._avro.encode(payload)
+
+    def _encode_payloads(self, payloads):
+        """Encode a batch on an Avro stream; else pass through."""
+        return payloads if self._avro is None else self._avro.encode_batch(payloads)
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the stream is closed, by ``close()`` or by a sub-stream failure.
+
+        A ``close()`` or ``get_unacked_*()`` call that is in progress counts as closed.
+        """
+        return self._inner.is_closed
+
+    def ingest_record(self, payload) -> int:
+        """Queue a record on the next sub-stream and return its message ID.
+
+        Returns as soon as the record is queued; the SDK sends it and tracks its
+        acknowledgment in the background. The idiomatic flow is to ingest in a loop and call
+        ``flush()`` once to confirm durability (or use an ``AckCallback``). If the selected
+        sub-stream is at capacity, this waits for it to drain rather than rerouting, for at
+        most 30 seconds; then it raises a retriable ``ZerobusException`` and the record is not
+        queued, so ingest it again.
+        """
+        return self._inner.ingest_record(self._encode_payload(payload))
+
+    def ingest_records(self, payloads) -> Optional[int]:
+        """Queue a batch on one sub-stream and return one message ID for it.
+
+        Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+        raises like any other. Waits for a full sub-stream as ``ingest_record()`` does, for at
+        most 30 seconds.
+        """
+        return self._inner.ingest_records(self._encode_payloads(payloads))
+
+    def wait_for_message_id(self, message_id: int) -> None:
+        """Block until the record or batch behind ``message_id`` is acknowledged.
+
+        Use when a specific record must be confirmed before continuing. Unlike offsets,
+        message IDs are not ordered, so acknowledging one says nothing about the others. For
+        bulk durability, ingest in a loop and call ``flush()`` once.
+        """
+        return self._inner.wait_for_message_id(message_id)
+
+    def flush(self) -> None:
+        """Flush every sub-stream, blocking until all pending records are acknowledged.
+
+        The idiomatic way to confirm durability: ingest in a loop, then call ``flush()``
+        once to confirm everything queued so far is committed.
+        """
+        return self._inner.flush()
+
+    def close(self) -> None:
+        """Flush pending records and close every sub-stream.
+
+        When close returns, all callbacks have run, unless close waited longer than
+        ``callback_max_wait_time_ms`` (default 5 s).
+        """
+        return self._inner.close()
+
+    def get_unacked_records(self) -> Iterator[bytes]:
+        """
+        Get iterator of unacknowledged records, across every sub-stream.
+
+        Closes the stream first if it is still open, so the result is complete. Avro
+        records are returned as encoded bytes.
+
+        Returns:
+            Iterator[bytes]: Iterator yielding record payloads that were ingested but not acknowledged.
+        """
+        return iter(self._inner.get_unacked_records())
+
+    def get_unacked_batches(self) -> Iterator[list[bytes]]:
+        """
+        Get iterator of unacknowledged batches, across every sub-stream.
+
+        Closes the stream first if it is still open, so the result is complete.
+
+        Returns:
+            Iterator[List[bytes]]: Iterator yielding batches, where each batch is a list of record payloads.
+        """
+        return iter(self._inner.get_unacked_batches())
 
 
 class ZerobusArrowStream:
@@ -428,6 +542,61 @@ class ZerobusSdk:
             rust_stream = self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream, avro_encoder=avro_encoder)
 
+    def create_multiplexed_stream(
+        self,
+        table_properties: _core.TableProperties,
+        stream_count: int,
+        *,
+        auth,
+        options: Optional[_core.StreamConfigurationOptions] = None,
+    ) -> MultiplexedStream:
+        """
+        Open a multiplexed stream (Beta): ``stream_count`` sub-streams to one table, with
+        records distributed round-robin across them.
+
+        Use it when one stream is the throughput bottleneck and global ordering is not
+        required. Opening is atomic: if any sub-stream fails to open, the others are closed
+        and this raises. Ingest calls return a message ID instead of an offset, and an
+        ``AckCallback`` set in ``MultiplexedStreamOptions`` receives that message ID in its
+        ``offset`` argument.
+
+        Args:
+            table_properties: Table configuration. JSON, protobuf, and Avro are supported.
+            stream_count: The number of sub-streams, from 1 to 64.
+            auth: ``OAuth(client_id, client_secret)``, a ``HeadersProvider`` (or any object
+                with a ``get_headers()`` method), a ``FederatedToken``, or a
+                ``PersonalAccessToken``.
+            options: Optional ``MultiplexedStreamOptions``. ``max_inflight_records`` is a
+                budget for the whole stream; each sub-stream gets
+                ``max_inflight_records // stream_count``, so it must be at least
+                ``stream_count``. A plain ``StreamConfigurationOptions`` is accepted only
+                without ``ack_callback``.
+
+        Raises:
+            ValueError: If an argument is missing, out of range, or of the wrong kind.
+            NonRetriableException: If an option is invalid, such as an in-flight budget below
+                ``stream_count`` (the error calls ``max_inflight_records`` by the core's name,
+                ``max_inflight_requests``).
+            ZerobusException: If a sub-stream fails to open.
+
+        Example:
+            >>> stream = sdk.create_multiplexed_stream(
+            ...     TableProperties("catalog.schema.table"),
+            ...     4,
+            ...     auth=OAuth("client-id", "client-secret"),
+            ... )
+            >>> for record in records:
+            ...     stream.ingest_record(record)
+            >>> stream.flush()
+            >>> stream.close()
+        """
+        from zerobus.sdk.shared.avro import make_encoder
+
+        _multiplexed.check_arguments(table_properties, stream_count, auth, options)
+        avro_encoder = make_encoder(table_properties.avro_schema)
+        native = _multiplexed.call_native(self._inner, table_properties, stream_count, auth, options, allow_async=False)
+        return MultiplexedStream(native, avro_encoder)
+
     def persistent_stream_builder(self) -> PersistentStreamBuilder:
         """
         Start building a persistent (Eos) stream.
@@ -452,6 +621,7 @@ RecordAcknowledgment = _core.sync.RecordAcknowledgment
 HeadersProvider = _core.HeadersProvider
 RecordType = _core.RecordType
 StreamConfigurationOptions = _core.StreamConfigurationOptions
+MultiplexedStreamOptions = _core.MultiplexedStreamOptions
 TableProperties = _core.TableProperties
 AckCallback = _core.AckCallback
 ZerobusException = _core.ZerobusException
@@ -466,6 +636,8 @@ __all__ = [
     "RecordAcknowledgment",
     "TableProperties",
     "StreamConfigurationOptions",
+    "MultiplexedStream",
+    "MultiplexedStreamOptions",
     "RecordType",
     "AckCallback",
     "HeadersProvider",
