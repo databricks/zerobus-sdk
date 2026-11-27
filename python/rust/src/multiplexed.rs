@@ -25,7 +25,10 @@ use crate::sync_wrapper::apply_table_and_format;
 
 /// Options for a multiplexed stream (Beta): the `StreamConfigurationOptions` fields, where
 /// `ack_callback` is shared by every sub-stream and its `offset` argument receives the
-/// message ID returned by the ingest call. Passed to `create_stream`, it acts as a plain
+/// message ID returned by the ingest call. Sub-streams may call it concurrently.
+/// `max_inflight_records` is a budget for the whole stream: each sub-stream gets
+/// `max_inflight_records // stream_count`, so it must be at least `stream_count`; the core's
+/// error calls it `max_inflight_requests`. Passed to `create_stream`, it acts as a plain
 /// `StreamConfigurationOptions`, and the callback receives ordinary offsets.
 #[pyclass(extends = StreamConfigurationOptions, subclass)]
 pub struct MultiplexedStreamOptions {}

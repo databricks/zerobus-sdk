@@ -175,7 +175,9 @@ class MultiplexedStreamOptions(StreamConfigurationOptions):
 
     The same fields as ``StreamConfigurationOptions``. ``ack_callback`` is shared by every
     sub-stream, and its ``offset`` argument receives the message ID that the ingest call
-    returned. A plain ``StreamConfigurationOptions`` with ``ack_callback`` set is rejected for
+    returned; sub-streams may call it concurrently. ``max_inflight_records`` is a budget for
+    the whole stream: each sub-stream gets ``max_inflight_records // stream_count``, so it must
+    be at least ``stream_count``; the core's error calls it ``max_inflight_requests``. A plain ``StreamConfigurationOptions`` with ``ack_callback`` set is rejected for
     multiplexed streams. Passed to ``create_stream``, it acts as a plain
     ``StreamConfigurationOptions``, and ``ack_callback`` receives ordinary offsets.
     """
@@ -437,7 +439,7 @@ class sync:
 
         @property
         def is_closed(self) -> bool:
-            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+            """Whether the stream is closed, by ``close`` or after a call reports a sub-stream failure.
 
             A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
             """
@@ -798,7 +800,7 @@ class aio:
 
         @property
         def is_closed(self) -> bool:
-            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+            """Whether the stream is closed, by ``close`` or after a call reports a sub-stream failure.
 
             A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
             """

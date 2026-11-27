@@ -459,8 +459,8 @@ impl MultiplexedStream {
         self.idp_holder = None;
     }
 
-    /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
-    /// `close` or `get_unacked_*` call that is in progress counts as closed.
+    /// Whether the stream is closed, by `close` or after a call reports a sub-stream failure.
+    /// A `close` or `get_unacked_*` call that is in progress counts as closed.
     #[getter]
     fn is_closed(&self) -> bool {
         match self.inner.try_read() {
