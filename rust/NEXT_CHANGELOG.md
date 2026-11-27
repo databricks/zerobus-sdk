@@ -31,8 +31,9 @@
   `proto_dynamic_uc_schema` example.
 - Added `ZerobusSdkBuilder::producer_id`, which sets the producer id that the
   server records for each stream. The SDK sends it as a `producer/<id>` token
-  in the `user-agent` header, after the SDK prefix and before the application
-  name. Blank values are ignored; a value longer than 128 bytes or with a
+  in the `user-agent` header of every request, unary calls included, after the
+  SDK prefix and before the application name. A blank value means no producer
+  id, and the last call wins. A value longer than 128 bytes or with a
   character outside ASCII letters, digits and ``!#$%&'*+-.^_`|~/`` is rejected
   by `build()` with `ZerobusError::InvalidArgument`. The default `user-agent`
   is unchanged.

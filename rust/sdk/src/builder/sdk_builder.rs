@@ -170,14 +170,16 @@ impl ZerobusSdkBuilder {
     /// stream opened from this SDK instance.
     ///
     /// The SDK sends it as a `producer/<id>` token in the HTTP `user-agent`
-    /// header, right after the SDK prefix: the value sent becomes
+    /// header of every request, unary calls included, right after the SDK
+    /// prefix: the value sent becomes
     /// `zerobus-sdk-rs/<version> producer/<id>`, or
     /// `zerobus-sdk-rs/<version> producer/<id> <application_name>` when
     /// [`application_name`](Self::application_name) is also set. If
     /// [`sdk_identifier`](Self::sdk_identifier) is set, it replaces the
     /// `zerobus-sdk-rs/<version>` prefix.
     ///
-    /// The value is trimmed of surrounding whitespace; a blank value is ignored.
+    /// The value is trimmed of surrounding whitespace; a blank value means no
+    /// producer id. The last call wins.
     /// After trimming it must be at most 128 bytes, and each byte must be an
     /// ASCII letter or digit or one of ``!#$%&'*+-.^_`|~/``. Otherwise
     /// [`build`](Self::build) returns
@@ -189,8 +191,8 @@ impl ZerobusSdkBuilder {
     /// `producer/` token in it takes precedence. The server ignores the whole
     /// `user-agent`, producer id included, if it holds a non-ASCII byte, e.g.
     /// from a non-ASCII `application_name`. The server scans only the start of
-    /// the header, so an `sdk_identifier` with an unclosed `(` or many
-    /// space-separated parts can hide the producer id.
+    /// the header, so a provider `user-agent` or an `sdk_identifier` that has
+    /// an unclosed `(` or many space-separated parts can hide the producer id.
     ///
     /// # Arguments
     ///
