@@ -13,8 +13,9 @@
   and logged with `Trace.TraceError`. `StreamConfigurationOptions.CallbackMaxWaitTimeMs` sets how
   long `Close()` and `Dispose()` wait for pending callbacks: `null` keeps the SDK default of
   5,000 ms, and `StreamConfigurationOptions.CallbackWaitForever` waits without a limit.
-  `RecreateStream` keeps the callback. With a callback set, `Close()` and `Dispose()` call the
-  native close even on a stream that already failed, so its queued `OnError` calls are delivered.
+  `RecreateStream` keeps the callback; offsets restart on the new stream. After a stream
+  failure, callbacks can still run after `Close()` returns, until `Dispose()`, and some
+  `OnError` calls may not arrive.
 
 ### Deprecations
 

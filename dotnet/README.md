@@ -63,7 +63,8 @@ with the error text. The stream is then closed, so send `GetUnackedRecords()` on
 Callbacks run on the SDK's background threads. One stream's callbacks run one at a time; a
 callback shared by several streams can run concurrently. Keep them short and thread-safe, and
 move longer work to your own task: a slow or blocking callback can delay `Flush()`, `Close()`
-and other streams. Do not call stream methods from a callback. An exception thrown by a
+and other streams. Do not call stream or `ZerobusSdk` methods (such as `CreateStream` or
+`RecreateStream`) from a callback; do recovery on your own task. An exception thrown by a
 callback is caught and logged with `Trace.TraceError`.
 
 `Flush()` can return before the last `OnAck` has run. When `Close()` returns, all callbacks
@@ -84,9 +85,10 @@ stream.Dispose();
 Console.WriteLine($"acknowledged {tracker.Acked} records");
 ```
 
-After `Dispose()` returns, no new callback starts. After the stream fails, some `OnError`
-calls may not arrive if the stream is closed before they are delivered, so use the error from
-`Flush()` and `GetUnackedRecords()` as the source of truth for which records failed. See
+After `Dispose()` returns, no new callback starts. After the stream fails, `Close()` can
+return before pending callbacks run: they may still run until `Dispose()`, and `Dispose()`
+drops the rest. So some `OnError` calls may not arrive; use the error from `Flush()` and
+`GetUnackedRecords()` as the source of truth for which records failed. See
 [`examples/JsonAckCallback/`](examples/JsonAckCallback/).
 
 ## Installation
@@ -215,6 +217,10 @@ Important: `RecreateStream(stream)` transfers ownership from `stream` to the ret
 stream. The input `stream` is disposed during recreation and must not be used afterward.
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
+
+With an ack callback, the new stream uses the same callback. Its offsets restart, so
+replayed records are acked again with new offsets. Pending `OnError` calls of the old
+stream may be lost or arrive late, mixed with the new stream's acks.
 
 ### `JsonZerobusStream` and `ProtoZerobusStream`
 

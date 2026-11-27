@@ -88,8 +88,8 @@ public sealed record StreamConfigurationOptions
     /// Receives acknowledgments and errors for ingested records in the background (Beta).
     /// <c>null</c> means no callback; use <c>Flush()</c> or <c>WaitForOffset()</c>.
     /// See <see cref="IAckCallback"/> for when and where it is called. After a
-    /// stream failure, some <c>OnError</c> calls may not arrive if the stream is
-    /// closed before they are delivered.
+    /// stream failure, callbacks can still run after <c>Close()</c> returns, until
+    /// <c>Dispose()</c>, and some <c>OnError</c> calls may not arrive.
     /// Default: null.
     /// </summary>
     public IAckCallback? AckCallback { get; init; }

@@ -61,6 +61,11 @@ finally
 
 Console.WriteLine(
     $"Acknowledged {tracker.Acked} records, {tracker.Failed} failed, {rejected} rejected at ingest.");
+if (rejected > 0 || tracker.Failed > 0)
+{
+    throw new InvalidOperationException(
+        $"{tracker.Failed} records failed and {rejected} were rejected at ingest.");
+}
 
 // Counts acknowledged records. The SDK calls it from a background thread, so it
 // only touches Interlocked state and returns quickly.

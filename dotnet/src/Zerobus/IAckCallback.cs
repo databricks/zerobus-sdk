@@ -12,10 +12,18 @@ namespace Databricks.Zerobus;
 /// <see cref="OnError"/> is called only when the stream fails: once for each
 /// record or batch still pending, with the error text. The stream is then
 /// closed; recover the records with <c>GetUnackedRecords()</c> and send them on a
-/// new stream. After a stream failure, some <see cref="OnError"/> calls may not
-/// arrive if the stream is closed before they are delivered, so use the
-/// exception from <c>Flush()</c> and <c>GetUnackedRecords()</c> as the source of
-/// truth for which records failed.
+/// new stream. After a stream failure, <c>Close()</c> can return before pending
+/// callbacks run: they may still run until <c>Dispose()</c>, and
+/// <c>Dispose()</c> drops the rest. So some <see cref="OnError"/> calls may not
+/// arrive; use the exception from <c>Flush()</c> and <c>GetUnackedRecords()</c>
+/// as the source of truth for which records failed.
+/// </para>
+/// <para>
+/// After <c>RecreateStream</c>, the new stream uses the same callback. Its
+/// offsets restart, so replayed records are acked again with new offsets, and an
+/// ack confirms only earlier offsets of the same stream. Pending
+/// <see cref="OnError"/> calls of the old stream may be lost or arrive late,
+/// mixed with the new stream's acks.
 /// </para>
 /// <para>
 /// <c>Flush()</c> can return before the last <see cref="OnAck"/> has run. When
@@ -31,7 +39,9 @@ namespace Databricks.Zerobus;
 /// callbacks run one at a time; a callback shared by several streams can run
 /// concurrently. Keep them short and move longer work to your own task: a slow
 /// or blocking callback holds an SDK thread and can delay <c>Flush()</c>,
-/// <c>Close()</c> and other streams. Do not call stream methods from a callback.
+/// <c>Close()</c> and other streams. Do not call stream or
+/// <see cref="ZerobusSdk"/> methods (such as <c>CreateStream</c> or
+/// <c>RecreateStream</c>) from a callback; do recovery on your own task.
 /// An exception thrown by a callback is caught and reported with
 /// <see cref="System.Diagnostics.Trace.TraceError(string)"/>, including the
 /// offset; later callbacks still run.

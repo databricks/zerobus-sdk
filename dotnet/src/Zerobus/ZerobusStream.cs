@@ -404,16 +404,18 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
-        // Close waited for pending ack callbacks and free dropped the rest; any
-        // call still arriving now misses the lookup.
+        // Close waited for pending ack callbacks (not yet on a failed stream:
+        // there the core returns at once) and free dropped the rest; any call
+        // still arriving now misses the lookup.
         AckCallbackRegistry.Release(_ackKey);
 
         if (closeError is not null)
             ExceptionDispatchInfo.Capture(closeError).Throw();
     }
 
-    // A stream that failed is already closed, but with an ack callback the
-    // native close still delivers the queued OnError calls, so call it anyway.
+    // With an ack callback, call the native close even on a failed stream, so
+    // it drains queued callbacks once the core does that for failed streams;
+    // today the core returns at once there.
     private bool NeedsNativeClose(IntPtr ptr) => _ackKey != 0 || !NativeMethods.StreamIsClosed(ptr);
 
     /// <summary>
