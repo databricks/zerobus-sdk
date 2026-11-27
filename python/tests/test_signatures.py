@@ -58,6 +58,24 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_async_create_stream_pat_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream_pat, "options")
 
+    def test_sync_create_multiplexed_stream_options_optional(self):
+        for name in (
+            "create_multiplexed_stream",
+            "create_multiplexed_stream_with_headers_provider",
+            "create_multiplexed_stream_federated",
+            "create_multiplexed_stream_pat",
+        ):
+            self._assert_optional(getattr(core.sync.ZerobusSdk, name), "options")
+
+    def test_async_create_multiplexed_stream_options_optional(self):
+        for name in (
+            "create_multiplexed_stream",
+            "create_multiplexed_stream_with_headers_provider",
+            "create_multiplexed_stream_federated",
+            "create_multiplexed_stream_pat",
+        ):
+            self._assert_optional(getattr(core.aio.ZerobusSdk, name), "options")
+
     def test_async_create_stream_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream, "options")
 
