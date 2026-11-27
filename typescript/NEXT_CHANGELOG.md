@@ -10,6 +10,15 @@
   `ArrowStreamConfigurationOptions.ipcCompression` unset now means `IpcCompressionType.Zstd`
   instead of no compression. To keep sending uncompressed payloads, set it to the new
   `IpcCompressionType.None`.
+- Added multiplexed streams (Beta):
+  `sdk.createMultiplexedStream(tableProperties, auth, streamCount, options?)` opens
+  `streamCount` sub-streams (1 to 64) to one table and spreads records round-robin across them,
+  for when one stream is the throughput bottleneck. `auth` is
+  `{ oauth: { clientId, clientSecret } }` or `{ headersProvider }`. Ingest calls resolve to
+  unordered `bigint` message IDs; confirm with `flush()` or `waitForMessageId()`. An optional
+  `options.ackCallback` (`{ onAck, onError }`) reports each acknowledgment, and `close()`
+  resolves once every callback has run. JSON, Protocol Buffers and Avro are supported. See the
+  README and `examples/proto/multiplexed.ts`.
 
 ### Bug Fixes
 
@@ -32,3 +41,6 @@
 ### API Changes
 
 - `IpcCompressionType` gains `None` (`-1`), which disables IPC compression.
+- `ZerobusSdk` gains `createMultiplexedStream()`. New types `MultiplexedAuth`,
+  `MultiplexedStreamOptions`, `MultiplexedAckCallback` and the class `ZerobusMultiplexedStream`
+  (Beta).
