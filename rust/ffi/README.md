@@ -110,13 +110,11 @@ Ack callbacks receive opaque message IDs instead of offsets:
 ```c
 CResult r = {0};
 CStreamConfigurationOptions opts = zerobus_get_default_config();
-CZerobusMultiplexedStream *mux =
-    zerobus_sdk_create_multiplexed_stream_with_headers_provider(
-        sdk, "catalog.schema.table", descriptor, descriptor_len,
-        headers_callback, headers_user_data, free_headers_user_data,
-        /* stream_count */ 4, &opts,
-        /* ack_on_ack, ack_on_error, ack_user_data, free_ack_user_data */
-        NULL, NULL, NULL, NULL, &r);
+CZerobusMultiplexedStream *mux = zerobus_sdk_create_multiplexed_stream(
+    sdk, "catalog.schema.table", descriptor, descriptor_len,
+    client_id, client_secret, /* stream_count */ 4, &opts,
+    /* ack_on_ack, ack_on_error, ack_user_data, free_ack_user_data */
+    NULL, NULL, NULL, NULL, &r);
 if (mux == NULL) {
     zerobus_free_error_message(r.error_message);
     return;
@@ -143,7 +141,8 @@ zerobus_multiplexed_stream_free(mux);
   `zerobus_multiplexed_stream_free` returns. With a NULL `free_ack_user_data`,
   keep `ack_user_data` valid for the rest of the process. Callbacks must not
   call `zerobus_multiplexed_stream_*` functions or block on a thread that does.
-- One headers callback serves every sub-stream. The FFI serializes calls into it,
+- With `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, one
+  headers callback serves every sub-stream. The FFI serializes calls into it,
   so a slow callback delays every sub-stream's open; keep it fast. Like ack
   callbacks, it must not call `zerobus_multiplexed_stream_*` functions.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.

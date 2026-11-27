@@ -20,9 +20,10 @@ use std::ptr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-/// Opaque handle for a multiplexed stream. Created by
+/// Opaque handle for a multiplexed stream (Beta). Created by
+/// `zerobus_sdk_create_multiplexed_stream` or
 /// `zerobus_sdk_create_multiplexed_stream_with_headers_provider` and released
-/// by `zerobus_multiplexed_stream_free`. (Beta)
+/// by `zerobus_multiplexed_stream_free`.
 ///
 /// Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
 /// run concurrently on the same handle from any thread. `_free` must not
@@ -226,7 +227,7 @@ async fn build_mux_from_parts(
     Ok(Box::into_raw(Box::new(handle)) as *mut CZerobusMultiplexedStream)
 }
 
-/// Create a multiplexed stream with a custom headers provider callback (Beta).
+/// Create a multiplexed stream with OAuth authentication (Beta).
 ///
 /// Opens `stream_count` sub-streams (1 to 64) to the same table and routes
 /// records round-robin across them. Use it when one stream is the throughput
@@ -243,22 +244,9 @@ async fn build_mux_from_parts(
 /// mux: each sub-stream gets `max_inflight_requests / stream_count` (any
 /// remainder is unused), so it must be at least `stream_count`.
 ///
-/// Authenticates with `headers_callback`. One provider is shared by every
-/// sub-stream; calls into `headers_callback` are serialized, so it need not be
-/// reentrant.
-/// Because sub-streams wait for each other's calls, time spent in the callback
-/// counts against every sub-stream's `recovery_timeout_ms` open deadline. With
-/// many sub-streams, a slow callback can make late ones time out, failing the
-/// whole create, so keep it fast (for example, return a cached token).
-///
-/// Once this function is called, the FFI owns `user_data` and invokes
-/// `free_user_data` (when set) exactly once, from any thread, after the last
-/// sub-stream releases the provider. Unlike
-/// `zerobus_sdk_create_stream_with_headers_provider`, that can be after this
-/// function returns even when it fails, since sub-streams that started to
-/// open are torn down in the background. Never free `user_data` yourself.
-/// With a NULL `free_user_data` the caller keeps ownership, and `user_data`
-/// must stay valid for the rest of the process.
+/// `client_id` and `client_secret` are the OAuth client credentials and must
+/// not be NULL. The SDK needs a Unity Catalog URL to mint the token, and the
+/// sub-streams share it.
 ///
 /// `ack_on_ack` and `ack_on_error` (either may be NULL) receive message IDs,
 /// which are opaque: they can be negative and are not ordered, so do not
@@ -284,6 +272,87 @@ async fn build_mux_from_parts(
 ///
 /// Returns NULL on error; see `result` for details. Free the handle with
 /// `zerobus_multiplexed_stream_free`.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_multiplexed_stream(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    // Written inline (not via type aliases) so cbindgen emits nullable C
+    // function pointers instead of opaque structs.
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    result: *mut CResult,
+) -> *mut CZerobusMultiplexedStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        // Take ownership of `ack_user_data` before any fallible work, so an
+        // early return frees it exactly once.
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let auth = StreamCreateAuth::OAuth {
+                client_id: unsafe { c_str_arg(client_id)? },
+                client_secret: unsafe { c_str_arg(client_secret)? },
+            };
+            build_mux_from_parts(
+                sdk_ref,
+                unsafe { c_str_arg(table_name)? },
+                unsafe { decode_descriptor(descriptor_proto_bytes, descriptor_proto_len)? },
+                auth,
+                stream_count,
+                (!options.is_null()).then(|| unsafe { *options }),
+                ack_callback,
+            )
+            .await
+        });
+        complete(result, res, ptr::null_mut())
+    })
+}
+
+/// Create a multiplexed stream with a custom headers provider callback (Beta).
+///
+/// Behaves like `zerobus_sdk_create_multiplexed_stream`, but authenticates
+/// with `headers_callback`. One provider is shared by every sub-stream; calls
+/// into `headers_callback` are serialized, so it need not be reentrant.
+/// Because sub-streams wait for each other's calls, time spent in the callback
+/// counts against every sub-stream's `recovery_timeout_ms` open deadline. With
+/// many sub-streams, a slow callback can make late ones time out, failing the
+/// whole create, so keep it fast (for example, return a cached token).
+///
+/// Once this function is called, the FFI owns `user_data` and invokes
+/// `free_user_data` (when set) exactly once, from any thread, after the last
+/// sub-stream releases the provider. Unlike
+/// `zerobus_sdk_create_stream_with_headers_provider`, that can be after this
+/// function returns even when it fails, since sub-streams that started to
+/// open are torn down in the background. Never free `user_data` yourself.
+/// With a NULL `free_user_data` the caller keeps ownership, and `user_data`
+/// must stay valid for the rest of the process.
+/// The ack parameters, and ownership of `ack_user_data`, follow
+/// `zerobus_sdk_create_multiplexed_stream`.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
