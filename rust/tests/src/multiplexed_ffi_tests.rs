@@ -2832,6 +2832,160 @@ fn flush_covers_async_ingests_accepted_before_it() {
     f.free();
 }
 
+/// One blocking call made from a callback: (call, failed by its return value,
+/// result.success, retryable, message).
+type GuardedCall = (&'static str, bool, bool, bool, String);
+
+/// What a mux ack callback saw when it called the API from inside itself.
+#[derive(Default)]
+struct CallbackCalls {
+    mux: AtomicUsize,
+    finished: AtomicBool,
+    blocking: Mutex<Vec<GuardedCall>>,
+    flush_async_accepted: AtomicBool,
+    flush_async: AsyncSink,
+}
+
+impl Leaked for CallbackCalls {}
+
+/// Once, from inside a callback: every guarded blocking call, then
+/// `flush_async`. No asserts here: a panic would cross the C boundary.
+fn call_the_api_from_callback(user_data: *mut c_void) {
+    let calls = unsafe { &*(user_data as *const CallbackCalls) };
+    if calls.finished.load(Ordering::SeqCst) || !calls.blocking.lock().unwrap().is_empty() {
+        return;
+    }
+    let mux = calls.mux.load(Ordering::SeqCst) as Mux;
+    let (data, lens, json) = ([1u8], [1usize], json_record(9));
+    let (data_ptrs, json_ptrs) = ([data.as_ptr()], [json.as_ptr()]);
+    type Guarded<'a> = (&'static str, Box<dyn Fn(*mut CResult) -> bool + 'a>);
+    let guarded: [Guarded; 8] = [
+        (
+            "ingest_proto_record",
+            Box::new(|r| proto1(mux, data.as_ptr(), 1, r) == -1),
+        ),
+        (
+            "ingest_json_record",
+            Box::new(|r| json1(mux, json.as_ptr(), r) == -1),
+        ),
+        (
+            "ingest_proto_records",
+            Box::new(|r| protos(mux, data_ptrs.as_ptr(), lens.as_ptr(), 1, r) == -1),
+        ),
+        (
+            "ingest_json_records",
+            Box::new(|r| jsons(mux, json_ptrs.as_ptr(), 1, r) == -1),
+        ),
+        (
+            "wait_for_message_id",
+            Box::new(|r| !zerobus_multiplexed_stream_wait_for_message_id(mux, 0, r)),
+        ),
+        (
+            "flush",
+            Box::new(|r| !zerobus_multiplexed_stream_flush(mux, r)),
+        ),
+        (
+            "close",
+            Box::new(|r| !zerobus_multiplexed_stream_close(mux, r)),
+        ),
+        (
+            "get_unacked_records",
+            Box::new(|r| {
+                let records = zerobus_multiplexed_stream_get_unacked_records(mux, r);
+                records.records.is_null() && records.len == 0
+            }),
+        ),
+    ];
+    let mut blocking = Vec::new();
+    for (call, run) in guarded {
+        let mut result = new_result();
+        result.success = true;
+        let failed = run(&mut result);
+        let success = result.success;
+        let (retryable, message) = (result.is_retryable, take_message(&mut result));
+        blocking.push((call, failed, success, retryable, message));
+    }
+    *calls.blocking.lock().unwrap() = blocking;
+    let mut result = new_result();
+    let sink = &calls.flush_async as *const AsyncSink as *mut c_void;
+    let accepted = zerobus_multiplexed_stream_flush_async(mux, sink_bool, sink, &mut result);
+    take_message(&mut result);
+    calls.flush_async_accepted.store(accepted, Ordering::SeqCst);
+    calls.finished.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn call_the_api_from_ack(_id: i64, user_data: *mut c_void) {
+    call_the_api_from_callback(user_data);
+}
+
+extern "C" fn call_the_api_from_error(_id: i64, _message: *const c_char, user_data: *mut c_void) {
+    call_the_api_from_callback(user_data);
+}
+
+/// From inside an ack callback (on_ack and on_error), every guarded blocking
+/// call fails at once with a fixed, non-retryable error and does not close the
+/// mux, while an `_async` call is accepted and calls back; the close
+/// afterwards still finishes, and the rejected ingests are never sent.
+#[test]
+fn blocking_calls_from_an_ack_callback_fail_at_once() {
+    const IN_CALLBACK: &str = "Blocking multiplexed stream calls (ingest, wait_for_message_id, \
+                               flush, close, get_unacked_records) cannot be called from an ack \
+                               callback";
+    for on_error in [false, true] {
+        let what = if on_error { "on_error" } else { "on_ack" };
+        let calls = CallbackCalls::leaked();
+        let mux_ack = MuxAck {
+            on_ack: (!on_error).then_some(call_the_api_from_ack as _),
+            on_error: on_error.then_some(call_the_api_from_error as _),
+            user_data: calls.user_data(),
+            free_user_data: None,
+        };
+        // on_ack: r0 is acked. on_error: r0's lane fails, terminally.
+        let (responses, options) = if on_error {
+            let denied = lane_error(Status::permission_denied("denied"));
+            (vec![lane_open(), denied], json_options_terminal())
+        } else {
+            (vec![ack(0)], json_options())
+        };
+        let f = Fixture::new("ffi.mux.callback.scope", responses, 1, &options, mux_ack);
+        calls.mux.store(f.mux as usize, Ordering::SeqCst);
+        ingest_json(f.mux, &json_record(0));
+        wait_until(&format!("{what}: the callback finishes its calls"), || {
+            calls.finished.load(Ordering::SeqCst)
+        });
+        let blocking = calls.blocking.lock().unwrap().clone();
+        assert_eq!(blocking.len(), 8, "{what}");
+        for (call, failed, success, retryable, message) in &blocking {
+            let during = format!("{what}: {call} from the callback");
+            assert!(*failed && !*success && !*retryable, "{during}: {message}");
+            assert!(message.starts_with(IN_CALLBACK), "{during}: {message}");
+        }
+        assert!(calls.flush_async_accepted.load(Ordering::SeqCst), "{what}");
+        let done = calls
+            .flush_async
+            .one(&format!("{what}: flush_async from the callback"));
+        if on_error {
+            // The lane failed, so close reports that failure; it still ends.
+            let mut result = new_result();
+            zerobus_multiplexed_stream_close(f.mux, &mut result);
+            take_message(&mut result);
+        } else {
+            assert!(done.success, "{done:?}");
+            assert!(
+                !zerobus_multiplexed_stream_is_closed(f.mux),
+                "the rejected close must not close the mux"
+            );
+            close_ok(f.mux);
+        }
+        assert_eq!(
+            f.writes(),
+            1,
+            "{what}: the rejected ingests were never sent"
+        );
+        f.free();
+    }
+}
+
 /// A blocking `_async` ingest callback holds nothing the mux needs: with an
 /// in-task rejection (nothing queued), the ticket and read guard are released,
 /// so a flush and a close during the callback return within 1 s; with a
