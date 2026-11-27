@@ -229,22 +229,6 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
-    // Wraps a newly created native stream. If the wrapper cannot be built (out of
-    // memory), frees the native stream so it does not leak; the caller's catch
-    // then releases the ack key.
-    private static ZerobusStream WrapStream(IntPtr streamPtr, long ackKey)
-    {
-        try
-        {
-            return new ZerobusStream(streamPtr, ackKey);
-        }
-        catch
-        {
-            NativeMethods.StreamFree(streamPtr);
-            throw;
-        }
-    }
-
     private ZerobusStream CreateStreamCore(
         TableProperties tableProperties,
         string clientId,
@@ -267,7 +251,7 @@ public sealed class ZerobusSdk : IDisposable
                 clientSecret,
                 ref nativeOpts);
 
-            return WrapStream(streamPtr, ackKey);
+            return ZerobusStream.Wrap(streamPtr, ackKey);
         }
         catch
         {
@@ -298,7 +282,7 @@ public sealed class ZerobusSdk : IDisposable
                     ref nativeOpts)
                 .ConfigureAwait(false);
 
-            return WrapStream(streamPtr, ackKey);
+            return ZerobusStream.Wrap(streamPtr, ackKey);
         }
         catch
         {
@@ -470,7 +454,8 @@ public sealed class ZerobusSdk : IDisposable
             // exactly once — after any in-flight GetHeaders has returned — which
             // closes the recovery-vs-teardown use-after-free. The stream therefore
             // owns nothing and never frees this handle itself. It is allocated
-            // last, so a managed failure before it leaves no handle to free.
+            // last: only the P/Invoke marshalling runs after it, so only an
+            // out-of-memory there can leak it.
             var handlePtr = GCHandle.ToIntPtr(GCHandle.Alloc(bridge));
 
             var streamPtr = NativeInterop.SdkCreateStreamWithHeadersProvider(
@@ -483,7 +468,7 @@ public sealed class ZerobusSdk : IDisposable
                 ref nativeOpts);
 
             // The FFI owns the provider handle now; the stream keeps no reference.
-            return WrapStream(streamPtr, ackKey);
+            return ZerobusStream.Wrap(streamPtr, ackKey);
         }
         catch
         {
@@ -511,8 +496,10 @@ public sealed class ZerobusSdk : IDisposable
             // Ownership transfer point: this call hands the bridge GCHandle to the
             // FFI as user_data. On failure, the native side has already invoked
             // the free callback; on success, it owns cleanup for the full stream
-            // lifetime. The handle is allocated last, after the fallible managed
-            // work.
+            // lifetime. The handle is allocated after the native options and the
+            // bridge, but NativeInterop still allocates its completion state (a
+            // TaskCompletionSource, a delegate and its GCHandle) after it, so an
+            // out-of-memory there leaks this handle.
             var handlePtr = GCHandle.ToIntPtr(GCHandle.Alloc(bridge));
 
             var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
@@ -526,7 +513,7 @@ public sealed class ZerobusSdk : IDisposable
                 .ConfigureAwait(false);
 
             // The FFI owns the provider handle now; the stream keeps no reference.
-            return WrapStream(streamPtr, ackKey);
+            return ZerobusStream.Wrap(streamPtr, ackKey);
         }
         catch
         {

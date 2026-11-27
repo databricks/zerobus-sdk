@@ -76,8 +76,7 @@ read the state the callbacks update after it:
 ```csharp
 var tracker = new AckTracker();   // implements IAckCallback
 var options = StreamConfigurationOptions.Default with { AckCallback = tracker };
-var stream = sdk.CreateJsonStream(tableName, clientId, clientSecret, options);
-try
+using (var stream = sdk.CreateJsonStream(tableName, clientId, clientSecret, options))
 {
     foreach (var record in records)
     {
@@ -85,20 +84,7 @@ try
     }
     stream.Flush();
 }
-catch
-{
-    // Dispose, but rethrow the first error: a Dispose error must not hide it.
-    try
-    {
-        stream.Dispose();
-    }
-    catch
-    {
-        // Ignored: the first error is the one to report.
-    }
-    throw;
-}
-stream.Dispose();
+// Dispose at the end of the using block waited for pending callbacks.
 Console.WriteLine($"last acknowledged offset: {tracker.LastAckedOffset}");
 ```
 

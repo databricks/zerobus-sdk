@@ -446,6 +446,24 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Wraps a newly created native stream. If the wrapper cannot be built (out of
+    /// memory), frees the native stream so it does not leak; the caller then
+    /// releases the ack key.
+    /// </summary>
+    internal static ZerobusStream Wrap(IntPtr streamPtr, long ackKey)
+    {
+        try
+        {
+            return new ZerobusStream(streamPtr, ackKey);
+        }
+        catch
+        {
+            NativeMethods.StreamFree(streamPtr);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Transfers this stream's native pointer to a new wrapper around
     /// <paramref name="newPtr"/>, disposing this one. The provider (when one is
     /// used) is owned by the FFI, not the stream, so only the pointer moves.
@@ -463,12 +481,24 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         // it shares this stream's registry key: add its reference before this
         // stream drops its own.
         AckCallbackRegistry.AddRef(_ackKey);
-        var newStream = new ZerobusStream(newPtr, _ackKey);
-
-        // Free the old native stream (don't Close — it's already failed/closed)
-        if (oldPtr != IntPtr.Zero)
-            NativeMethods.StreamFree(oldPtr);
-        AckCallbackRegistry.Release(_ackKey);
+        ZerobusStream newStream;
+        try
+        {
+            newStream = Wrap(newPtr, _ackKey);
+        }
+        catch
+        {
+            // Wrap freed the new native stream; drop the reference added for it.
+            AckCallbackRegistry.Release(_ackKey);
+            throw;
+        }
+        finally
+        {
+            // Free the old native stream (don't Close — it's already failed/closed)
+            if (oldPtr != IntPtr.Zero)
+                NativeMethods.StreamFree(oldPtr);
+            AckCallbackRegistry.Release(_ackKey);
+        }
 
         return newStream;
     }
