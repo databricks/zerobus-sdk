@@ -6,7 +6,7 @@
 
 ### New Features and Improvements
 
-- Add multiplexed gRPC streams (Beta). `zerobus_sdk_create_multiplexed_stream` and `zerobus_sdk_create_multiplexed_stream_with_headers_provider` open `stream_count` sub-streams and return a `CZerobusMultiplexedStream*`. Ack callbacks receive message IDs and are passed as create parameters, with `free_ack_user_data` releasing `ack_user_data` after the last callback. `zerobus_multiplexed_stream_close`, `zerobus_multiplexed_stream_is_closed` and `zerobus_multiplexed_stream_free` close, inspect and release the handle.
+- Add multiplexed gRPC streams (Beta). `zerobus_sdk_create_multiplexed_stream` and `zerobus_sdk_create_multiplexed_stream_with_headers_provider` open `stream_count` sub-streams and return a `CZerobusMultiplexedStream*`. Ack callbacks receive message IDs and are passed as create parameters, with `free_ack_user_data` releasing `ack_user_data` after the last callback. The `zerobus_multiplexed_stream_*` functions ingest proto/JSON records (single and batch), wait for message IDs, flush, close, and recover unacknowledged records.
 
 ### Bug Fixes
 

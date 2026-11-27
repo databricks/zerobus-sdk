@@ -2,38 +2,50 @@
 //!
 //! The FFI blocks on its own global runtime, so these tests call it from plain
 //! threads and run the mock server on a separate runtime. They test the FFI
-//! layer only: C arguments, ownership, and error mapping. The core mux
+//! layer only: C arguments, ID passing, ownership, and error mapping. The core mux
 //! behavior is tested in `multiplexed_stream_tests.rs`.
 
 #[allow(dead_code)]
 mod mock_oauth;
 mod utils;
 
+use std::collections::HashSet;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
+use databricks_zerobus_ingest_sdk::MessageId;
 use mock_oauth::{start_mock_oauth_server, MockTokenResponse};
 use prost::Message;
 use tokio::runtime::Runtime;
 use tonic::Status;
+use utils::create_test_descriptor_proto;
 use zerobus_ffi::{
-    zerobus_free_error_message, zerobus_get_default_config, zerobus_multiplexed_stream_close,
-    zerobus_multiplexed_stream_free, zerobus_multiplexed_stream_is_closed,
+    zerobus_free_error_message, zerobus_free_record_array, zerobus_get_default_config,
+    zerobus_multiplexed_stream_close, zerobus_multiplexed_stream_flush,
+    zerobus_multiplexed_stream_free, zerobus_multiplexed_stream_get_unacked_records,
+    zerobus_multiplexed_stream_is_closed, zerobus_multiplexed_stream_wait_for_message_id,
     zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
     zerobus_sdk_builder_new, zerobus_sdk_builder_unity_catalog_url,
     zerobus_sdk_create_multiplexed_stream,
     zerobus_sdk_create_multiplexed_stream_with_headers_provider, zerobus_sdk_free, CHeaders,
-    CResult, CStreamConfigurationOptions, CZerobusMultiplexedStream, CZerobusSdk,
+    CRecordArray, CResult, CStreamConfigurationOptions, CZerobusMultiplexedStream, CZerobusSdk,
 };
 use zerobus_ffi::{
     zerobus_sdk_create_stream_with_headers_provider, zerobus_stream_close, zerobus_stream_flush,
     zerobus_stream_free, zerobus_stream_ingest_json_record,
 };
 use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockZerobusServer};
+// Short names for the ingest exports, so each call fits on one line.
+use zerobus_ffi::{
+    zerobus_multiplexed_stream_ingest_json_record as json1,
+    zerobus_multiplexed_stream_ingest_json_records as jsons,
+    zerobus_multiplexed_stream_ingest_proto_record as proto1,
+    zerobus_multiplexed_stream_ingest_proto_records as protos,
+};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -78,12 +90,32 @@ fn expect_permanent_failure(result: &mut CResult, call: &str) -> String {
     message
 }
 
+/// Runs a call that reports through a `CResult`: `(returned, retryable,
+/// message)`. `result.success` starts true, so a failure path that forgets to
+/// clear it is caught: it must match the return value.
+fn outcome(f: impl FnOnce(*mut CResult) -> bool) -> (bool, bool, String) {
+    let mut result = CResult {
+        success: true,
+        ..new_result()
+    };
+    let returned = f(&mut result as *mut CResult);
+    assert_eq!(
+        result.success, returned,
+        "result.success must match the return value"
+    );
+    (returned, result.is_retryable, take_message(&mut result))
+}
+
 /// Runs a call that must succeed and returns its value.
 fn ok<T>(what: &str, f: impl FnOnce(*mut CResult) -> T) -> T {
     let mut result = new_result();
     let value = f(&mut result as *mut CResult);
     expect_success(&mut result, what);
     value
+}
+
+fn stream_index(message_id: i64) -> usize {
+    MessageId::from_raw(message_id).stream_index()
 }
 const NULL_SDK: &str = "SDK pointer is null";
 const NULL_ARG: &str = "Null pointer passed";
@@ -196,6 +228,10 @@ impl AckLog {
         let mut acks = self.acks.lock().unwrap().clone();
         acks.sort();
         acks
+    }
+
+    fn ack_count(&self) -> usize {
+        self.acks.lock().unwrap().len()
     }
 
     fn errors(&self) -> Vec<(i64, String)> {
@@ -346,6 +382,11 @@ fn with(
 ) -> CStreamConfigurationOptions {
     f(&mut options);
     options
+}
+
+/// `json_options()` with a 500 ms flush, for records that stay unacked.
+fn json_short_flush() -> CStreamConfigurationOptions {
+    with(json_options(), |o| o.flush_timeout_ms = 500)
 }
 
 fn lane_open() -> MockResponse {
@@ -542,10 +583,7 @@ fn create_mux_with(
 /// A mock server (with `responses` injected for `table`), an SDK pointed at
 /// it, and one JSON headers-provider mux over `lanes` lanes.
 struct Fixture {
-    // Held only to keep the mock server running while the test uses the mux.
-    #[allow(dead_code)]
     runtime: Runtime,
-    #[allow(dead_code)]
     server: MockZerobusServer,
     sdk: *mut CZerobusSdk,
     mux: Mux,
@@ -573,9 +611,23 @@ impl Fixture {
         }
     }
 
+    fn writes(&self) -> u64 {
+        self.runtime.block_on(self.server.get_write_count())
+    }
+
+    fn wait_for_writes(&self, expected: u64) {
+        wait_for_writes(&self.runtime, &self.server, expected);
+    }
+
     fn free(self) {
         free_both(self.sdk, self.mux);
     }
+}
+
+fn wait_for_writes(runtime: &Runtime, server: &MockZerobusServer, expected: u64) {
+    wait_until(&format!("server receives {expected} records"), || {
+        runtime.block_on(server.get_write_count()) >= expected
+    });
 }
 
 fn json_record(id: usize) -> CString {
@@ -586,13 +638,256 @@ fn json_records(ids: std::ops::Range<usize>) -> Vec<CString> {
     ids.map(json_record).collect()
 }
 
+fn ingest_json(mux: Mux, json: &CString) -> i64 {
+    Ingest::Json(json.as_ptr()).ok(mux)
+}
+
+/// Returns the payloads of `records`, sorted, and frees the array; checks
+/// each record's JSON flag.
+fn take_payloads(records: CRecordArray, json: bool) -> Vec<Vec<u8>> {
+    let mut payloads: Vec<Vec<u8>> = (0..records.len)
+        .map(|i| {
+            let record = unsafe { &*records.records.add(i) };
+            assert_eq!(record.is_json, json);
+            unsafe { std::slice::from_raw_parts(record.data, record.data_len) }.to_vec()
+        })
+        .collect();
+    zerobus_free_record_array(records);
+    payloads.sort();
+    payloads
+}
+
+fn take_json_payloads(records: CRecordArray) -> Vec<String> {
+    take_payloads(records, true)
+        .into_iter()
+        .map(|p| String::from_utf8(p).unwrap())
+        .collect()
+}
+
+/// Closes `mux` and returns the payloads it never got acknowledged, sorted.
+fn unacked_json_payloads(mux: Mux) -> Vec<String> {
+    take_json_payloads(ok("get_unacked_records", |r| {
+        zerobus_multiplexed_stream_get_unacked_records(mux, r)
+    }))
+}
+
+fn sorted_strings<'a>(records: impl IntoIterator<Item = &'a CString>) -> Vec<String> {
+    let mut strings: Vec<String> = records
+        .into_iter()
+        .map(|s| s.to_str().unwrap().to_owned())
+        .collect();
+    strings.sort();
+    strings
+}
+
 fn close_ok(mux: Mux) {
     assert!(ok("close", |r| zerobus_multiplexed_stream_close(mux, r)));
+}
+
+fn flush_ok(mux: Mux) {
+    assert!(ok("flush", |r| zerobus_multiplexed_stream_flush(mux, r)));
+}
+
+/// Closes `mux`, ignoring the result (used where the close may fail on
+/// unacked records and only what follows matters).
+fn close_quietly(mux: Mux) {
+    outcome(|r| zerobus_multiplexed_stream_close(mux, r));
+}
+
+/// One of the four ingest calls with its input.
+#[derive(Clone, Copy)]
+enum Ingest<'a> {
+    Proto(&'a [u8]),
+    /// Pointers and lengths; the count is the number of pointers.
+    Protos(&'a [*const u8], &'a [usize]),
+    Json(*const c_char),
+    Jsons(&'a [*const c_char]),
+}
+
+impl Ingest<'_> {
+    fn name(self) -> &'static str {
+        match self {
+            Ingest::Proto(_) => "proto_record",
+            Ingest::Protos(..) => "proto_records",
+            Ingest::Json(_) => "json_record",
+            Ingest::Jsons(_) => "json_records",
+        }
+    }
+
+    /// The blocking ingest: `(id, success, retryable, message)`.
+    /// `result.success` starts true, and must be false exactly when the ID is
+    /// -1.
+    fn call(self, mux: Mux) -> (i64, bool, bool, String) {
+        let mut result = CResult {
+            success: true,
+            ..new_result()
+        };
+        let r = &mut result as *mut CResult;
+        let id = match self {
+            Ingest::Proto(d) => proto1(mux, d.as_ptr(), d.len(), r),
+            Ingest::Protos(p, l) => protos(mux, p.as_ptr(), l.as_ptr(), p.len(), r),
+            Ingest::Json(json) => json1(mux, json, r),
+            Ingest::Jsons(j) => jsons(mux, j.as_ptr(), j.len(), r),
+        };
+        assert_eq!(
+            result.success,
+            id != -1,
+            "{}: success vs ID {id}",
+            self.name()
+        );
+        let message = take_message(&mut result);
+        (id, result.success, result.is_retryable, message)
+    }
+
+    /// The blocking ingest, which must succeed; returns its ID.
+    fn ok(self, mux: Mux) -> i64 {
+        let (id, success, _, message) = self.call(mux);
+        assert!(success, "{} failed: {message}", self.name());
+        id
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Blocking calls
 // ---------------------------------------------------------------------------
+
+/// The blocking ingests marshal their input and IDs across the ABI: protobuf
+/// (with NULL options, which select protobuf) and JSON, single and batch; an
+/// empty batch returns -2; `get_unacked_records` returns every unacked
+/// payload exactly once, and a zero-length result array is freed too.
+#[test]
+fn blocking_ingest_paths_marshal_ids_and_payloads() {
+    // Protobuf with NULL options; the server acks both calls.
+    let (runtime, server, url) = start_server();
+    runtime.block_on(server.inject_responses("ffi.mux.proto", lane_with_acks(3)));
+    let ack_log = AckLog::leaked();
+    let sdk = create_sdk(&url);
+    let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
+    let mux = create_mux_with(
+        sdk,
+        "ffi.mux.proto",
+        Some(&descriptor),
+        1,
+        ptr::null(),
+        MuxAck::log(ack_log),
+    );
+    let batch: [&[u8]; 2] = [b"batch-0", b"batch-1"];
+    let (ptrs, lens): (Vec<_>, Vec<_>) = batch.iter().map(|r| (r.as_ptr(), r.len())).unzip();
+    let mut ids = vec![
+        Ingest::Proto(b"single").ok(mux),
+        Ingest::Protos(&ptrs, &lens).ok(mux),
+    ];
+    let empty = Ingest::Protos(&[], &[]).ok(mux);
+    assert_eq!(empty, -2, "an empty batch returns -2, not a message ID");
+    // NULL is valid with length 0: an empty single record, and NULL arrays
+    // for an empty batch.
+    ids.push(ok("proto_record(NULL, 0)", |r| {
+        proto1(mux, ptr::null(), 0, r)
+    }));
+    let null_batch = ok("proto_records(NULL, NULL, 0)", |r| {
+        protos(mux, ptr::null(), ptr::null(), 0, r)
+    });
+    assert_eq!(
+        null_batch, -2,
+        "NULL arrays with count 0 are an empty batch"
+    );
+    flush_ok(mux);
+    assert_eq!(runtime.block_on(server.get_write_count()), 4);
+    close_ok(mux);
+    let records = ok("get_unacked_records", |r| {
+        zerobus_multiplexed_stream_get_unacked_records(mux, r)
+    });
+    assert_eq!(records.len, 0, "every record was acknowledged");
+    zerobus_free_record_array(records);
+    free_both(sdk, mux);
+    // Close drains the callback worker, so every ack has been delivered.
+    ids.sort();
+    assert_eq!(ack_log.sorted_acks(), ids);
+    assert!(ack_log.errors().is_empty());
+
+    // JSON over two lanes; the server never acks, so all of it is recovered.
+    let f = Fixture::new(
+        "ffi.mux.json",
+        vec![],
+        2,
+        &json_short_flush(),
+        MuxAck::none(),
+    );
+    let records = json_records(0..4);
+    let ptrs: Vec<*const c_char> = records.iter().map(|s| s.as_ptr()).collect();
+    ingest_json(f.mux, &records[0]);
+    ingest_json(f.mux, &records[1]);
+    Ingest::Jsons(&ptrs[2..]).ok(f.mux);
+    let empty = Ingest::Jsons(&[]).ok(f.mux);
+    assert_eq!(empty, -2, "an empty batch returns -2, not a message ID");
+    let null_batch = ok("json_records(NULL, 0)", |r| jsons(f.mux, ptr::null(), 0, r));
+    assert_eq!(
+        null_batch, -2,
+        "a NULL array with count 0 is an empty batch"
+    );
+    f.wait_for_writes(4);
+    let recovered = unacked_json_payloads(f.mux);
+    assert_eq!(recovered.len(), 4, "each record returned exactly once");
+    assert_eq!(recovered, sorted_strings(&records));
+    f.free();
+}
+
+/// Message IDs cross the ABI intact: the ack callback gets the IDs ingest
+/// returned, and the wait passes the lane and the sub-offset through, also on
+/// a real lane >= 32, whose IDs are negative.
+#[test]
+fn message_ids_cross_the_abi_for_acks_and_waits() {
+    // No CreateStream entry: the mock opens every lane and each lane acks only
+    // its offset 0.
+    let ack_log = AckLog::leaked();
+    let f = Fixture::new(
+        "ffi.mux.message.ids",
+        vec![ack(0)],
+        2,
+        &json_short_flush(),
+        MuxAck::log(ack_log),
+    );
+    let ids: Vec<i64> = json_records(0..4)
+        .iter()
+        .map(|json| ingest_json(f.mux, json))
+        .collect();
+    assert_eq!(stream_index(ids[1]), 1);
+
+    // (ID, acked): lane 1 offset 0 is acked, lane 1 offset 1 never is, and
+    // lane 63 doesn't exist (its index sets the sign bit).
+    let lane_63 = 63i64 << 58;
+    for (id, acked) in [(ids[1], true), (ids[3], false), (lane_63, false)] {
+        let (waited, retryable, message) =
+            outcome(|r| zerobus_multiplexed_stream_wait_for_message_id(f.mux, id, r));
+        assert_eq!(waited, acked, "wait({id}): {message}");
+        if id == lane_63 {
+            assert!(!retryable && !message.is_empty(), "lane 63: {message}");
+        }
+    }
+
+    close_quietly(f.mux);
+    f.free();
+    let mut expected = vec![ids[0], ids[1]];
+    expected.sort();
+    assert_eq!(ack_log.sorted_acks(), expected);
+
+    // 33 lanes, one record each: a real lane-32 ID is acked and waited on.
+    let ack_log = AckLog::leaked();
+    let log = MuxAck::log(ack_log);
+    let f = Fixture::new("ffi.mux.lane32", vec![ack(0)], 33, &json_short_flush(), log);
+    let ids: Vec<i64> = json_records(0..33)
+        .iter()
+        .map(|json| ingest_json(f.mux, json))
+        .collect();
+    let lane_32 = *ids.iter().find(|&&id| stream_index(id) >= 32).unwrap();
+    assert!(lane_32 < 0, "a lane >= 32 ID is negative: {lane_32}");
+    let (waited, _, message) =
+        outcome(|r| zerobus_multiplexed_stream_wait_for_message_id(f.mux, lane_32, r));
+    assert!(waited, "wait on lane {}: {message}", stream_index(lane_32));
+    close_quietly(f.mux);
+    f.free();
+    assert!(ack_log.sorted_acks().contains(&lane_32));
+}
 
 /// The OAuth create mints a token from Unity Catalog and opens every lane.
 #[test]
@@ -616,6 +911,13 @@ fn oauth_create_mints_token_and_opens_mux() {
         assert_eq!(lane.authorization.as_deref(), Some("Bearer token-1"));
         assert_eq!(lane.table_name.as_deref(), Some(TABLE));
     }
+    // Two ingests land on two lanes, so stream_count reached the core.
+    let lanes: HashSet<usize> = json_records(0..2)
+        .iter()
+        .map(|json| stream_index(ingest_json(mux, json)))
+        .collect();
+    assert_eq!(lanes.len(), 2);
+    flush_ok(mux);
     close_ok(mux);
     free_both(sdk, mux);
 }
@@ -709,32 +1011,101 @@ fn sync_create_failures_report_and_free_once() {
     zerobus_sdk_free(sdk);
 }
 
+/// Invalid C arguments fail only the call that passed them: none of a
+/// rejected batch is queued, sent or recovered, and the mux stays usable.
+#[test]
+fn argument_errors_fail_only_that_call() {
+    let ack_log = AckLog::leaked();
+    let f = Fixture::new(
+        "ffi.mux.bad.args",
+        lane_with_acks(1),
+        1,
+        &json_options(),
+        MuxAck::log(ack_log),
+    );
+    let valid = json_record(0);
+    let invalid_utf8 = c"\xff".as_ptr();
+    let proto = b"proto";
+    let (proto_ptrs, proto_lens) = ([proto.as_ptr(), ptr::null()], [proto.len(), 4]);
+    let null_batch = [valid.as_ptr(), ptr::null()];
+    let utf8_batch = [valid.as_ptr(), invalid_utf8];
+    let rows = [
+        (
+            "json_record(NULL)",
+            Ingest::Json(ptr::null()),
+            "Null pointer passed",
+        ),
+        (
+            "json_record(invalid UTF-8)",
+            Ingest::Json(invalid_utf8),
+            "Invalid UTF-8 string",
+        ),
+        (
+            "json_records([valid, NULL])",
+            Ingest::Jsons(&null_batch),
+            "Null pointer passed",
+        ),
+        (
+            "json_records([valid, invalid UTF-8])",
+            Ingest::Jsons(&utf8_batch),
+            "Invalid UTF-8 string",
+        ),
+        (
+            "proto_records([valid, NULL])",
+            Ingest::Protos(&proto_ptrs, &proto_lens),
+            "Invalid data pointer",
+        ),
+        // A protobuf record on this JSON mux: the core's error, mapped by the
+        // blocking call to -1 and a non-retryable result.
+        (
+            "proto_record on a JSON mux",
+            Ingest::Proto(proto),
+            "Record type does not match",
+        ),
+    ];
+
+    for (what, ingest, expected) in rows {
+        let (id, _, retryable, message) = ingest.call(f.mux);
+        assert_eq!(id, -1, "{what} must be rejected");
+        assert!(!retryable, "{what}: {message}");
+        assert!(message.contains(expected), "{what}: {message}");
+    }
+    assert!(!zerobus_multiplexed_stream_is_closed(f.mux));
+
+    let valid_id = ingest_json(f.mux, &valid);
+    flush_ok(f.mux);
+    assert!(unacked_json_payloads(f.mux).is_empty());
+    assert_eq!(f.writes(), 1, "only the valid record reaches the server");
+    f.free();
+    assert_eq!(ack_log.sorted_acks(), [valid_id]);
+}
+
 /// The FFI frees the headers and ack `user_data` exactly once: on success
 /// only at free; at create when both ack callbacks are NULL;
-/// after a partial open, with no handle.
+/// after a partial open, with no handle. An `on_error`-only callback is
+/// installed too.
 #[test]
 fn ffi_owned_user_data_is_freed_once() {
-    // (a) Success with callbacks: nothing is freed until free. This create
-    // passes a DescriptorProto and NULL options: the FFI decodes it, and the
-    // record type defaults to proto.
+    // (a) Success with callbacks: nothing is freed until free.
     {
         let what = "sync";
         let (runtime, server, url) = start_server();
         // No CreateStream entry: each lane acks its offset 0.
         runtime.block_on(server.inject_responses("ffi.mux.own", vec![ack(0)]));
         let (provider, ack_log) = (FreeCounter::leaked(), AckLog::leaked());
-        let sdk = create_sdk(&url);
-        let descriptor = utils::create_test_descriptor_proto()
-            .unwrap()
-            .encode_to_vec();
+        let (sdk, options) = (create_sdk(&url), json_options());
         let ack = MuxAck::owned(ack_log, true);
         let create = Create::new(sdk, "ffi.mux.own", 2).with(|c| {
-            c.descriptor = Some(descriptor);
-            c.options = None;
+            c.options = Some(options);
             c.provider = Some(provider);
         });
         let mux = ok("create", |r| create.sync(Auth::Headers, ack, r));
         assert!(provider.calls() >= 2, "{what}: every lane fetches headers");
+        json_records(0..2).iter().for_each(|json| {
+            ingest_json(mux, json);
+        });
+        flush_ok(mux);
+        wait_until("both lanes ack", || ack_log.ack_count() >= 2);
         close_ok(mux);
         ack_log.assert_not_freed(&format!("{what} close"));
         assert_eq!(provider.frees(), 0, "{what}: the handle owns user_data");
@@ -788,6 +1159,119 @@ fn ffi_owned_user_data_is_freed_once() {
         provider.assert_freed_once(what);
     }
     zerobus_sdk_free(sdk);
+
+    // (d) Only `on_error` set: a failed record still reaches it. The lane
+    // fails for good: flush and close report it (close still closes), and
+    // the protobuf record is recovered byte for byte (a NUL and a non-UTF-8
+    // byte included).
+    let ack_log = AckLog::leaked();
+    let ack = MuxAck {
+        on_ack: None,
+        ..MuxAck::log(ack_log)
+    };
+    let table = "ffi.mux.ack.error.only";
+    let (runtime, server, url) = start_server();
+    runtime.block_on(server.inject_responses(table, failing_lane()));
+    let sdk = create_sdk(&url);
+    let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
+    let options = with(json_options_terminal(), |o| o.record_type = 1);
+    let mux = create_mux_with(sdk, table, Some(&descriptor), 1, &options, ack);
+    let record: &[u8] = b"a\0\xffb";
+    let id = Ingest::Proto(record).ok(mux);
+    let (flushed, retryable, message) = outcome(|r| zerobus_multiplexed_stream_flush(mux, r));
+    assert!(!flushed && !retryable, "flush: {message}");
+    assert!(message.contains("denied"), "flush: {message}");
+    let (closed, _, message) = outcome(|r| zerobus_multiplexed_stream_close(mux, r));
+    assert!(!closed && !message.is_empty(), "close reports the failure");
+    assert!(
+        zerobus_multiplexed_stream_is_closed(mux),
+        "closed either way"
+    );
+    wait_until("on_error receives the failed record", || {
+        !ack_log.errors().is_empty()
+    });
+    let errors = ack_log.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].0, id);
+    assert!(errors[0].1.contains("denied"), "on_error text: {errors:?}");
+    assert_eq!(ack_log.ack_count(), 0);
+    let recovered = take_payloads(
+        ok("get_unacked_records", |r| {
+            zerobus_multiplexed_stream_get_unacked_records(mux, r)
+        }),
+        false,
+    );
+    assert_eq!(recovered, [record.to_vec()]);
+    free_both(sdk, mux);
+}
+
+/// Pending work keeps the ack `user_data` alive across free: a callback still
+/// running after close stopped waiting.
+#[test]
+fn pending_work_and_running_callbacks_defer_frees() {
+    // A running callback; close stops waiting for it after 50 ms.
+    let ack_log = AckLog::leaked();
+    ack_log.block_callbacks.store(true, Ordering::SeqCst);
+    let options = with(json_options(), |o| {
+        o.callback_max_wait_time_ms = 50;
+        o.has_callback_max_wait_time_ms = true;
+    });
+    let ack = MuxAck::owned(ack_log, true);
+    let f = Fixture::new("ffi.mux.ack.running", lane_with_acks(1), 1, &options, ack);
+    ingest_json(f.mux, &json_record(0));
+    wait_until("the ack callback is running", || {
+        ack_log.callback_entered.load(Ordering::SeqCst)
+    });
+    close_quietly(f.mux);
+    zerobus_multiplexed_stream_free(f.mux);
+    ack_log.assert_not_freed("close and free with a callback still running");
+    ack_log.release_callbacks.store(true, Ordering::SeqCst);
+    ack_log.assert_freed_once();
+    zerobus_sdk_free(f.sdk);
+}
+
+/// Many C threads share one handle, ingesting at the same time: every ID is
+/// distinct, and every record is recovered.
+#[test]
+fn concurrent_callers_share_one_handle() {
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 25;
+    let f = Fixture::new(
+        "ffi.mux.concurrent",
+        vec![],
+        2,
+        &json_short_flush(),
+        MuxAck::none(),
+    );
+    // Raw pointers aren't `Send`; the C contract allows sharing the handle.
+    let mux_addr = f.mux as usize;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let workers: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mux = mux_addr as Mux;
+                let records = json_records(t * PER_THREAD..(t + 1) * PER_THREAD);
+                barrier.wait();
+                records
+                    .iter()
+                    .map(|json| ingest_json(mux, json))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let ids: Vec<i64> = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect();
+
+    let total = THREADS * PER_THREAD;
+    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), total);
+    let lanes: HashSet<usize> = ids.iter().map(|&id| stream_index(id)).collect();
+    assert_eq!(lanes, HashSet::from([0, 1]), "both lanes are used");
+    let all = sorted_strings(&json_records(0..total));
+    assert_eq!(unacked_json_payloads(f.mux), all);
+    f.free();
 }
 
 // ---------------------------------------------------------------------------
