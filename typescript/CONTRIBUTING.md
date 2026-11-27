@@ -38,11 +38,12 @@ This document covers TypeScript-specific development setup and workflow.
 
 4. **Run tests:**
    ```bash
-   npm run build:debug:arrow
+   npm run build:debug:all
    npm test
    ```
 
-   Unit tests import the Arrow API, so they need an Arrow-enabled build.
+   `npm test` runs the unit and integration tests. Unit tests import the Arrow API, and the
+   integration tests include Avro streams, so they need a build with Arrow Flight and Avro.
 
 ## Building
 
@@ -71,7 +72,7 @@ npm run build:debug:arrow
 npm run build:arrow
 ```
 
-`npm test` expects an Arrow-enabled debug build (`npm run build:debug:arrow`).
+`npm test` expects a debug build with Arrow Flight and Avro (`npm run build:debug:all`).
 
 ### Cross-Platform Builds
 
@@ -89,7 +90,8 @@ release), pass the same `--target` to `npm run build:arrow`.
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests (build with Arrow Flight and Avro first)
+npm run build:debug:all
 npm test
 
 # Unit tests only
