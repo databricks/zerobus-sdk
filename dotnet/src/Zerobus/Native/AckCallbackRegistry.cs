@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -73,6 +74,10 @@ internal static class AckCallbackRegistry
 
     /// <summary>The number of registered callbacks (tests).</summary>
     internal static int Count => s_entries.Count;
+
+    /// <summary>Whether <paramref name="callback"/> is still registered under any key (tests).</summary>
+    internal static bool IsRegistered(IAckCallback callback) =>
+        s_entries.Values.Any(entry => ReferenceEquals(entry.Callback, callback));
 
     /// <summary>Wires the trampolines into <paramref name="config"/> for a non-zero key.</summary>
     public static unsafe void Apply(ref CStreamConfigurationOptions config, long key)

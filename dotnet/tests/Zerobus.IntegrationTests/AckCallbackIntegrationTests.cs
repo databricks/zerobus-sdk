@@ -123,13 +123,15 @@ public class AckCallbackIntegrationTests : IntegrationTestBase
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
         using var sdk = CreateDefaultSdk(fixture);
-        var baseline = AckCallbackRegistry.Count;
-        var options = CreateDefaultOptions() with { AckCallback = new ChannelCallback() };
+        // Checks this stream's own entry: the forced collections also finalize
+        // other tests' undisposed streams, so the process-wide Count can drop.
+        var callback = new ChannelCallback();
+        var options = CreateDefaultOptions() with { AckCallback = callback };
 
         var stream = CreateUnreferencedStream(sdk, options);
-        Assert.That(AckCallbackRegistry.Count, Is.EqualTo(baseline + 1));
+        Assert.That(AckCallbackRegistry.IsRegistered(callback), Is.True);
         // Bounded: a few collections let the finalizer run and release the key.
-        for (var i = 0; i < 20 && (stream.IsAlive || AckCallbackRegistry.Count != baseline); i++)
+        for (var i = 0; i < 20 && (stream.IsAlive || AckCallbackRegistry.IsRegistered(callback)); i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -137,7 +139,7 @@ public class AckCallbackIntegrationTests : IntegrationTestBase
             await Task.Delay(50);
         }
         Assert.That(stream.IsAlive, Is.False, "the stream was not collected");
-        Assert.That(AckCallbackRegistry.Count, Is.EqualTo(baseline), "the finalizer releases the key");
+        Assert.That(AckCallbackRegistry.IsRegistered(callback), Is.False, "the finalizer releases the key");
     }
 
     // Creates a stream in its own frame, so no local keeps it alive (Debug
