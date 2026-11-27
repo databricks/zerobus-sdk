@@ -170,6 +170,17 @@ class StreamConfigurationOptions:
 
     def __repr__(self) -> str: ...
 
+class MultiplexedStreamOptions(StreamConfigurationOptions):
+    """Options for a multiplexed stream (Beta).
+
+    The same fields as ``StreamConfigurationOptions``. ``ack_callback`` is shared by every
+    sub-stream, and its ``offset`` argument receives the message ID that the ingest call
+    returned. A plain ``StreamConfigurationOptions`` with ``ack_callback`` set is rejected for
+    multiplexed streams.
+    """
+
+    def __init__(self, **kwargs: Any) -> None: ...
+
 class PersistentStreamSettings:
     """Settings collected by ``PersistentStreamBuilder``. Internal; not for direct use."""
 
@@ -416,6 +427,57 @@ class sync:
             """Flush pending records and close the stream."""
             ...
 
+    class MultiplexedStream:
+        """A stream that distributes records round-robin across several sub-streams (Beta).
+
+        Created by ``ZerobusSdk.create_multiplexed_stream*``. Ingest methods return an opaque
+        message ID, which is not ordered and may be negative. Thread-safe.
+        """
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+
+            A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
+            """
+            ...
+
+        def ingest_record(self, payload: Any) -> int:
+            """Queue a record on the next sub-stream and return its message ID."""
+            ...
+
+        def ingest_records(self, payloads: Any) -> Optional[int]:
+            """Queue a batch on one sub-stream and return its message ID.
+
+            Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+            raises like any other.
+            """
+            ...
+
+        def wait_for_message_id(self, message_id: int) -> None:
+            """Wait until the record or batch behind ``message_id`` is acknowledged."""
+            ...
+
+        def flush(self) -> None:
+            """Wait until every sub-stream's pending records are acknowledged."""
+            ...
+
+        def close(self) -> None:
+            """Flush pending records and close every sub-stream.
+
+            When close returns, all callbacks have run, unless close waited longer than
+            ``callback_max_wait_time_ms`` (default 5 s).
+            """
+            ...
+
+        def get_unacked_records(self) -> List[bytes]:
+            """Unacknowledged records across every sub-stream. Closes the stream first."""
+            ...
+
+        def get_unacked_batches(self) -> List[List[bytes]]:
+            """Unacknowledged batches across every sub-stream. Closes the stream first."""
+            ...
+
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
@@ -551,6 +613,52 @@ class sync:
             """
             ...
 
+        def create_multiplexed_stream(
+            self,
+            client_id: str,
+            client_secret: str,
+            table_properties: TableProperties,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with OAuth authentication.
+
+            ``options`` may be a ``MultiplexedStreamOptions``, whose ``ack_callback`` receives
+            message IDs.
+            """
+            ...
+
+        def create_multiplexed_stream_with_headers_provider(
+            self,
+            table_properties: TableProperties,
+            headers_provider: HeadersProvider,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with a custom headers provider."""
+            ...
+
+        def create_multiplexed_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_supplier: IdpSupplier,
+            databricks_client_id: Optional[str],
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with external-IdP federation."""
+            ...
+
+        def create_multiplexed_stream_pat(
+            self,
+            table_properties: TableProperties,
+            token: str,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with a Databricks personal access token."""
+            ...
+
         def recreate_stream(self, old_stream: "ZerobusStream") -> "ZerobusStream":
             """
             Recreate a closed stream with the same configuration.
@@ -678,6 +786,57 @@ class aio:
 
         async def close(self) -> None:
             """Flush pending records and close the stream."""
+            ...
+
+    class MultiplexedStream:
+        """A stream that distributes records round-robin across several sub-streams (Beta).
+
+        Created by ``ZerobusSdk.create_multiplexed_stream*``. Ingest methods return an opaque
+        message ID, which is not ordered and may be negative. Thread-safe.
+        """
+
+        @property
+        def is_closed(self) -> bool:
+            """Whether the stream is closed, by ``close`` or by a sub-stream failure.
+
+            A ``close`` or ``get_unacked_*`` call that is in progress counts as closed.
+            """
+            ...
+
+        async def ingest_record(self, payload: Any) -> int:
+            """Queue a record on the next sub-stream and return its message ID (async)."""
+            ...
+
+        async def ingest_records(self, payloads: Any) -> Optional[int]:
+            """Queue a batch on one sub-stream and return its message ID (async).
+
+            Returns ``None`` for an empty batch. On a closed or failed stream, an empty batch
+            raises like any other.
+            """
+            ...
+
+        async def wait_for_message_id(self, message_id: int) -> None:
+            """Wait until the record or batch behind ``message_id`` is acknowledged (async)."""
+            ...
+
+        async def flush(self) -> None:
+            """Wait until every sub-stream's pending records are acknowledged (async)."""
+            ...
+
+        async def close(self) -> None:
+            """Flush pending records and close every sub-stream (async).
+
+            When close returns, all callbacks have run, unless close waited longer than
+            ``callback_max_wait_time_ms`` (default 5 s).
+            """
+            ...
+
+        async def get_unacked_records(self) -> List[bytes]:
+            """Unacknowledged records across every sub-stream. Closes the stream first (async)."""
+            ...
+
+        async def get_unacked_batches(self) -> List[List[bytes]]:
+            """Unacknowledged batches across every sub-stream. Closes the stream first (async)."""
             ...
 
     class ZerobusSdk:
@@ -813,6 +972,52 @@ class aio:
             Returns:
                 A new ZerobusStream
             """
+            ...
+
+        async def create_multiplexed_stream(
+            self,
+            client_id: str,
+            client_secret: str,
+            table_properties: TableProperties,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with OAuth authentication (async).
+
+            ``options`` may be a ``MultiplexedStreamOptions``, whose ``ack_callback`` receives
+            message IDs.
+            """
+            ...
+
+        async def create_multiplexed_stream_with_headers_provider(
+            self,
+            table_properties: TableProperties,
+            headers_provider: HeadersProvider,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with a custom headers provider (async)."""
+            ...
+
+        async def create_multiplexed_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_supplier: IdpSupplier,
+            databricks_client_id: Optional[str],
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with external-IdP federation (async)."""
+            ...
+
+        async def create_multiplexed_stream_pat(
+            self,
+            table_properties: TableProperties,
+            token: str,
+            stream_count: int,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "MultiplexedStream":
+            """Open a multiplexed stream (Beta) with a Databricks personal access token (async)."""
             ...
 
         async def recreate_stream(self, old_stream: "ZerobusStream") -> "ZerobusStream":

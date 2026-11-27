@@ -7,6 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
+    MessageId, MultiplexedStream as RustMultiplexedStream,
     PersistentStream as RustPersistentStream, StreamBuilder, ZerobusSdk as RustSdk,
     ZerobusStream as RustStream,
 };
@@ -18,6 +19,7 @@ use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
+use crate::multiplexed::{self, MuxAuth, MuxConfig};
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
 
 // =============================================================================
@@ -25,7 +27,7 @@ use crate::persistent::{PersistentConfig, PersistentStreamSettings};
 // =============================================================================
 
 /// Apply table name + record-format selection (proto/avro/json) to the builder.
-fn apply_table_and_format<'a>(
+pub(crate) fn apply_table_and_format<'a>(
     builder: StreamBuilder<'a>,
     table_properties: &TableProperties,
 ) -> StreamBuilder<'a> {
@@ -456,6 +458,179 @@ impl PersistentStream {
 }
 
 // =============================================================================
+// MULTIPLEXED STREAM
+// =============================================================================
+
+/// Ingest, flush, and wait need only `&MultiplexedStream` and share the read lock;
+/// `close` and the unacked getters need `&mut` and take the write lock, so they wait
+/// for in-progress calls.
+#[pyclass(name = "MultiplexedStream")]
+pub struct MultiplexedStream {
+    inner: Arc<RwLock<RustMultiplexedStream>>,
+    runtime: Arc<Runtime>,
+    format: RecordFormat,
+    /// For a federated stream, a strong reference to the IdP callback holder (the
+    /// native supplier holds only a weak one). Exposed to the cyclic GC via
+    /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
+    /// owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    idp_holder: Option<Py<IdpCallbackHolder>>,
+}
+
+#[pymethods]
+impl MultiplexedStream {
+    /// Let the cyclic GC see the strong reference to the IdP callback holder, so a
+    /// self-referential owner/stream/callback cycle can be collected.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(holder) = &self.idp_holder {
+            visit.call(holder)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference when the GC breaks a cycle (the native supplier's
+    /// weak reference then resolves to `None`; the stream is being torn down).
+    fn __clear__(&mut self) {
+        self.idp_holder = None;
+    }
+
+    /// Whether the stream is closed, by `close` or by a terminal sub-stream failure. A
+    /// `close` or `get_unacked_*` call that is in progress counts as closed.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        match self.inner.try_read() {
+            Ok(guard) => guard.is_closed(),
+            Err(_) => true,
+        }
+    }
+
+    /// Ingest a single record into the next sub-stream and return its message ID once queued
+    fn ingest_record(&self, py: Python, payload: &Bound<'_, PyAny>) -> PyResult<i64> {
+        let record_payload = extract_record_payload(payload, self.format)?;
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let guard = stream.read().await;
+                guard
+                    .ingest_record(record_payload)
+                    .await
+                    .map(|id| id.raw())
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    /// Ingest multiple records into one sub-stream and return one message ID for the
+    /// whole batch. Returns `None` for an empty batch on an open stream; an empty batch on
+    /// a closed or failed stream raises, as the Rust core does.
+    fn ingest_records(&self, py: Python, payloads: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let guard = stream.read().await;
+                guard
+                    .ingest_records(record_payloads)
+                    .await
+                    .map(|id| id.map(|id| id.raw()))
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    /// Wait for the record or batch behind a message ID to be acknowledged
+    fn wait_for_message_id(&self, py: Python, message_id: i64) -> PyResult<()> {
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let guard = stream.read().await;
+                guard
+                    .wait_for_message_id(MessageId::from_raw(message_id))
+                    .await
+                    .map_err(map_error)
+            })
+        })
+    }
+
+    /// Flush every sub-stream, waiting for all pending records to be acknowledged
+    fn flush(&self, py: Python) -> PyResult<()> {
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let guard = stream.read().await;
+                guard.flush().await.map_err(map_error)
+            })
+        })
+    }
+
+    /// Flush and close every sub-stream
+    fn close(&self, py: Python) -> PyResult<()> {
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let mut guard = stream.write().await;
+                guard.close().await.map_err(map_error)
+            })
+        })
+    }
+
+    /// Get unacknowledged records from every sub-stream. Closes the stream first.
+    fn get_unacked_records(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let mut guard = stream.write().await;
+                let records = guard.get_unacked_records().await.map_err(map_error)?;
+
+                Python::attach(|py| {
+                    let out: Vec<Py<PyAny>> = records
+                        .map(|record| encoded_record_to_pybytes(py, record))
+                        .collect::<PyResult<_>>()?;
+                    Ok(out)
+                })
+            })
+        })
+    }
+
+    /// Get unacknowledged batches from every sub-stream. Closes the stream first.
+    fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<Vec<Py<PyAny>>>> {
+        let stream = self.inner.clone();
+        let runtime = self.runtime.clone();
+
+        py.detach(|| {
+            runtime.block_on(async move {
+                let mut guard = stream.write().await;
+                let batches = guard.get_unacked_batches().await.map_err(map_error)?;
+
+                Python::attach(|py| {
+                    let out: Vec<Vec<Py<PyAny>>> = batches
+                        .into_iter()
+                        .map(|batch| {
+                            batch
+                                .into_iter()
+                                .map(|r| encoded_record_to_pybytes(py, r))
+                                .collect::<PyResult<_>>()
+                        })
+                        .collect::<PyResult<_>>()?;
+                    Ok(out)
+                })
+            })
+        })
+    }
+}
+
+// =============================================================================
 // ZEROBUS SDK
 // =============================================================================
 
@@ -714,6 +889,79 @@ impl ZerobusSdk {
         })
     }
 
+    /// Open a multiplexed stream (Beta) of `stream_count` sub-streams with OAuth
+    /// authentication. `options` may be a `MultiplexedStreamOptions`, whose `ack_callback`
+    /// receives message IDs.
+    #[pyo3(signature = (client_id, client_secret, table_properties, stream_count, options = None))]
+    fn create_multiplexed_stream(
+        &self,
+        py: Python,
+        client_id: String,
+        client_secret: String,
+        table_properties: TableProperties,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<MultiplexedStream> {
+        let auth = MuxAuth::OAuth {
+            client_id,
+            client_secret,
+        };
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
+    /// Open a multiplexed stream (Beta) with a custom headers provider.
+    #[pyo3(signature = (table_properties, headers_provider, stream_count, options = None))]
+    fn create_multiplexed_stream_with_headers_provider(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        headers_provider: Py<PyAny>,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<MultiplexedStream> {
+        let auth = MuxAuth::Headers(Arc::new(HeadersProviderWrapper::new(headers_provider)));
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
+    /// Open a multiplexed stream (Beta) with external-IdP federation. As in
+    /// `create_stream_federated`, `idp_supplier` is a fresh handle per call and the stream
+    /// keeps the strong reference to its callback holder.
+    #[pyo3(signature = (table_properties, idp_supplier, databricks_client_id, stream_count, options = None))]
+    fn create_multiplexed_stream_federated(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        idp_supplier: PyRef<'_, IdpSupplier>,
+        databricks_client_id: Option<String>,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<MultiplexedStream> {
+        let holder = multiplexed::idp_holder(py, &idp_supplier)?;
+        let auth = MuxAuth::Federated {
+            supplier: idp_supplier.supplier.clone(),
+            databricks_client_id,
+        };
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, Some(holder))
+    }
+
+    /// Open a multiplexed stream (Beta) with a Databricks personal access token.
+    #[pyo3(signature = (table_properties, token, stream_count, options = None))]
+    fn create_multiplexed_stream_pat(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        token: String,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<MultiplexedStream> {
+        let auth = MuxAuth::PersonalAccessToken(token);
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
     /// Create a new Arrow Flight stream with OAuth authentication.
     ///
     #[pyo3(signature = (table_name, schema_ipc_bytes, client_id, client_secret, options = None))]
@@ -790,6 +1038,32 @@ impl ZerobusSdk {
             // Carry the strong holder reference across recovery, or the native
             // supplier's weak reference would resolve to None on the new stream.
             idp_holder: old_stream.idp_holder.as_ref().map(|h| h.clone_ref(py)),
+        })
+    }
+}
+
+impl ZerobusSdk {
+    /// Open every sub-stream off the GIL and wrap the result.
+    fn open_multiplexed(
+        &self,
+        py: Python,
+        config: MuxConfig,
+        idp_holder: Option<Py<IdpCallbackHolder>>,
+    ) -> PyResult<MultiplexedStream> {
+        let format = config.format();
+        let sdk = self.inner.clone();
+        let runtime = self.runtime.clone();
+        let stream = py.detach(|| {
+            runtime.block_on(async move {
+                let sdk_guard = sdk.read().await;
+                config.open(&sdk_guard).await
+            })
+        })?;
+        Ok(MultiplexedStream {
+            inner: Arc::new(RwLock::new(stream)),
+            runtime: self.runtime.clone(),
+            format,
+            idp_holder,
         })
     }
 }

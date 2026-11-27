@@ -7,6 +7,7 @@ mod arrow;
 mod async_wrapper;
 mod auth;
 mod common;
+mod multiplexed;
 mod persistent;
 mod sync_wrapper;
 
@@ -30,6 +31,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add common types
     m.add_class::<common::RecordType>()?;
     m.add_class::<common::StreamConfigurationOptions>()?;
+    m.add_class::<multiplexed::MultiplexedStreamOptions>()?;
     m.add_class::<common::TableProperties>()?;
     m.add_class::<common::AckCallback>()?;
     m.add_class::<persistent::PersistentStreamSettings>()?;
@@ -65,6 +67,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sync_module.add_class::<sync_wrapper::ZerobusStream>()?;
     sync_module.add_class::<sync_wrapper::PersistentStream>()?;
     sync_module.add_class::<sync_wrapper::RecordAcknowledgment>()?;
+    sync_module.add_class::<sync_wrapper::MultiplexedStream>()?;
     m.add_submodule(&sync_module)?;
     sys_modules.set_item("zerobus._zerobus_core.sync", &sync_module)?;
 
@@ -74,6 +77,7 @@ fn _zerobus_core(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     aio_module.add_class::<async_wrapper::ZerobusStream>()?;
     aio_module.add_class::<async_wrapper::PersistentStream>()?;
     aio_module.add_class::<async_wrapper::PyAckFuture>()?;
+    aio_module.add_class::<async_wrapper::MultiplexedStream>()?;
     m.add_submodule(&aio_module)?;
     sys_modules.set_item("zerobus._zerobus_core.aio", &aio_module)?;
 
