@@ -85,10 +85,20 @@ try
     }
     stream.Flush();
 }
-finally
+catch
 {
-    stream.Dispose();
+    // Dispose, but rethrow the first error: a Dispose error must not hide it.
+    try
+    {
+        stream.Dispose();
+    }
+    catch
+    {
+        // Ignored: the first error is the one to report.
+    }
+    throw;
 }
+stream.Dispose();
 Console.WriteLine($"last acknowledged offset: {tracker.LastAckedOffset}");
 ```
 

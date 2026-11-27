@@ -229,6 +229,22 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
+    // Wraps a newly created native stream. If the wrapper cannot be built (out of
+    // memory), frees the native stream so it does not leak; the caller's catch
+    // then releases the ack key.
+    private static ZerobusStream WrapStream(IntPtr streamPtr, long ackKey)
+    {
+        try
+        {
+            return new ZerobusStream(streamPtr, ackKey);
+        }
+        catch
+        {
+            NativeMethods.StreamFree(streamPtr);
+            throw;
+        }
+    }
+
     private ZerobusStream CreateStreamCore(
         TableProperties tableProperties,
         string clientId,
@@ -251,7 +267,7 @@ public sealed class ZerobusSdk : IDisposable
                 clientSecret,
                 ref nativeOpts);
 
-            return new ZerobusStream(streamPtr, ackKey);
+            return WrapStream(streamPtr, ackKey);
         }
         catch
         {
@@ -282,7 +298,7 @@ public sealed class ZerobusSdk : IDisposable
                     ref nativeOpts)
                 .ConfigureAwait(false);
 
-            return new ZerobusStream(streamPtr, ackKey);
+            return WrapStream(streamPtr, ackKey);
         }
         catch
         {
@@ -467,7 +483,7 @@ public sealed class ZerobusSdk : IDisposable
                 ref nativeOpts);
 
             // The FFI owns the provider handle now; the stream keeps no reference.
-            return new ZerobusStream(streamPtr, ackKey);
+            return WrapStream(streamPtr, ackKey);
         }
         catch
         {
@@ -510,7 +526,7 @@ public sealed class ZerobusSdk : IDisposable
                 .ConfigureAwait(false);
 
             // The FFI owns the provider handle now; the stream keeps no reference.
-            return new ZerobusStream(streamPtr, ackKey);
+            return WrapStream(streamPtr, ackKey);
         }
         catch
         {

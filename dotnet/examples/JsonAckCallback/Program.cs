@@ -54,18 +54,18 @@ try
 {
     stream.Flush();
 }
-catch (ZerobusException flushError)
+catch
 {
-    // Dispose, but report the flush error: a later Dispose error must not hide it.
+    // Dispose, but rethrow the flush error: a Dispose error must not hide it.
     try
     {
         stream.Dispose();
     }
-    catch (ZerobusException)
+    catch
     {
-        // Ignored: the flush error below is the one to report.
+        // Ignored: the flush error is the one to report.
     }
-    throw new InvalidOperationException($"Flush failed: {flushError.RawMessage}", flushError);
+    throw;
 }
 stream.Dispose();
 
