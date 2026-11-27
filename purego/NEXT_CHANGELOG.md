@@ -27,6 +27,7 @@
   `WithWaitForReady` is always on; every other option applies to each lane.
   `WaitForMessageID` waits for one ingest call on its lane. `Close` waits for
   the lane callbacks for at most 5 s, so it must not be called from a callback.
+  `GetUnackedRecords` and `GetUnackedBatches` close the stream first.
 
 ### Bug Fixes
 
@@ -90,3 +91,4 @@
   (Beta).
 - Added `MultiplexedStream.WaitForMessageID` and `WaitForMessageIDContext`
   (Beta).
+- Added `MultiplexedStream.GetUnackedRecords` and `GetUnackedBatches` (Beta).

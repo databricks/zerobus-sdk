@@ -128,7 +128,9 @@ if err := mux.Flush(); err != nil { // wait once for every lane
   healthy lanes still succeed. `WaitForMessageID` reports only on the lane
   named by its ID. `GetUnackedRecords` and `GetUnackedBatches` close the
   stream, blocking as `Close` does, and return the records that were not
-  acknowledged.
+  acknowledged, grouped by lane. Call `Close` afterwards for the close result.
+  On a proto stream, replay JSON-ingested records with `IngestRecord` or
+  `IngestRecords`.
 - `Close` waits for the ingest calls in flight, each for at most the 30-second
   capacity wait, then closes every lane.
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
