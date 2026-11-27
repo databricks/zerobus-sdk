@@ -120,7 +120,12 @@ class _PersistentStreamBuilderBase:
         return self
 
     def recovery_backoff_ms(self, ms: int):
-        """Set the backoff time in milliseconds between recovery retries."""
+        """Set the base backoff time in milliseconds between retries.
+
+        The delay doubles after each consecutive failed attempt, up to 15 s (or this
+        value, if larger), and a random jitter of up to the same amount is added, so a
+        single wait can reach 30 s.
+        """
         self._settings["recovery_backoff_ms"] = _int_in_range("recovery_backoff_ms", ms)
         return self
 

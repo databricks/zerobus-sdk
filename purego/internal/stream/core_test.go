@@ -837,7 +837,7 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 }
 
 func TestCoreStreamImmediateEOFExhaustsRecovery(t *testing.T) {
-	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC()}
+	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()}
 	for _, rpc := range rpcs {
 		rpc.close()
 	}
@@ -849,8 +849,76 @@ func TestCoreStreamImmediateEOFExhaustsRecovery(t *testing.T) {
 	t.Cleanup(func() { cs.Close() })
 
 	waitCondition(t, cs.IsClosed, time.Second)
-	if got := fo.openCount(); got != 3 {
-		t.Fatalf("want 3 Open attempts, got %d", got)
+	// The first open, then RecoveryRetries+1 reconnects: the lost stream that
+	// starts recovery doesn't spend a retry. Opens that make no progress
+	// don't reset the budget, so recovery still runs out.
+	if got := fo.openCount(); got != 4 {
+		t.Fatalf("want 4 Open attempts, got %d", got)
+	}
+}
+
+// The extra reconnect after a lost stream must not overflow a RecoveryRetries
+// of math.MaxInt, which callers use to retry indefinitely.
+func TestCoreStreamMaxRecoveryRetriesKeepsReconnecting(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc.close()
+	// One stream opens and ends; every reconnect then fails to open.
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.RecoveryRetries = math.MaxInt
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return fo.openCount() >= 4 || cs.IsClosed() }, 5*time.Second)
+	if cs.IsClosed() {
+		t.Fatalf("stream gave up after %d Open attempts with RecoveryRetries = MaxInt", fo.openCount())
+	}
+}
+
+// Matches the Rust core's gRPC recovery (rust/sdk/src/stream/grpc/supervisor.rs):
+// once an established stream is lost, recovery makes RecoveryRetries+1
+// reconnect attempts, each after a backoff, before it gives up.
+func TestCoreStreamRecoveryAfterLostStreamGetsRetriesPlusOneReconnects(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc.close()
+	// One stream opens and ends; every reconnect then fails to open.
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := fo.openCount(); got != 1+cfg.RecoveryRetries+1 {
+		t.Fatalf("want %d Open attempts, got %d", 1+cfg.RecoveryRetries+1, got)
+	}
+}
+
+func TestCoreStreamRecoveryBackoffDoubles(t *testing.T) {
+	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()}
+	for _, rpc := range rpcs {
+		rpc.close()
+	}
+	fo := newFakeOpener(rpcs...)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = 20 * time.Millisecond
+	start := time.Now()
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, 5*time.Second)
+	elapsed := time.Since(start)
+	// The first open, then RecoveryRetries+1 reconnects.
+	if got := fo.openCount(); got != 5 {
+		t.Fatalf("want 5 Open attempts, got %d", got)
+	}
+	// Four waits. A fixed 20ms interval waits 80ms in total. Doubling from
+	// 20ms waits at least 20 + 40 + 80 + 160 = 300ms; jitter only adds to that.
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("four retries from a 20ms base must back off exponentially, took %v", elapsed)
 	}
 }
 

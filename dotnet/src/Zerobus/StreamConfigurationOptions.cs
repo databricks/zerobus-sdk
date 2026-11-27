@@ -36,7 +36,10 @@ public sealed record StreamConfigurationOptions
     public ulong? RecoveryTimeoutMs { get; init; }
 
     /// <summary>
-    /// Backoff delay between recovery attempts in milliseconds.
+    /// Base delay between stream creation and recovery retries in milliseconds. The delay doubles
+    /// after each consecutive failed attempt, up to 15 s (or this value, if larger), and a random
+    /// jitter of up to the same amount is added, so a single wait can reach 30 s. 0 retries
+    /// immediately.
     /// <c>null</c> uses the SDK default.
     /// Default: 2,000 (2 seconds).
     /// </summary>

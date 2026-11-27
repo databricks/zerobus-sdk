@@ -1460,6 +1460,34 @@ static zerobus_headers_provider_t *new_counting(counting_t *counting)
     return provider;
 }
 
+/* Retries of a refused open back off exponentially, as in the Rust core: from
+ * a 50 ms base, three retries wait at least 50 + 100 + 200 = 350 ms, where a
+ * fixed interval would wait 150 ms. Jitter only adds to that. */
+static void test_open_retries_back_off_exponentially(void)
+{
+    const fake_zerobus_options_t options = {.refuse_status = 14};
+    fake_zerobus_t *service = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+    zerobus_error_t *err = NULL;
+    const stream_options_t o = {
+        .recovery = true, .backoff_ms = 50, .retries = 3};
+    zb_deadline_t floor = 0;
+    REQUIRE_OK(fake_zerobus_start(&options, &service));
+    sdk = make_sdk_for(service);
+    floor = zb_deadline_after_ms(350);
+    CHECK_EQ_INT(build_stream(sdk, &o, &stream, &err),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    zerobus_error_free(err);
+    CHECK(stream == NULL);
+    CHECK_EQ_INT(fake_zerobus_calls(service), 4);
+    CHECK(zb_deadline_expired(floor));
+zb_cleanup:
+    zerobus_stream_free(stream);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(service);
+}
+
 /* A record ingested after an idle gap longer than the lack-of-ack timeout
  * still gets the whole timeout. */
 static void test_ack_timeout_after_idle(void)
@@ -1563,6 +1591,36 @@ zb_cleanup:
     zerobus_error_free(err);
     zerobus_stream_free(stream);
     zerobus_headers_provider_free(provider);
+    zerobus_sdk_free(sdk);
+    fake_zerobus_stop(service);
+}
+
+/* As in the Rust core, losing an open stream doesn't spend a retry: with 2
+ * retries, recovery makes 3 reconnect attempts before the stream fails. */
+static void test_recovery_after_lost_stream_reconnects_retries_plus_one(void)
+{
+    const fake_zerobus_options_t options = {.fail_after = 1,
+                                            .fail_calls = 1,
+                                            .refuse_status = 14,
+                                            .refuse_from = 2};
+    fake_zerobus_t *service = NULL;
+    zerobus_sdk_t *sdk = NULL;
+    zerobus_stream_t *stream = NULL;
+    uint64_t digest = FAKE_ZEROBUS_DIGEST_SEED;
+    const stream_options_t o = {
+        .recovery = true, .backoff_ms = 1, .retries = 2};
+    REQUIRE_OK(fake_zerobus_start(&options, &service));
+    sdk = make_sdk_for(service);
+    REQUIRE_OK(build_stream(sdk, &o, &stream, NULL));
+
+    REQUIRE_OK(ingest_ids(stream, 0, 1, &digest));
+    CHECK_EQ_INT(zerobus_stream_flush(stream, NULL),
+                 ZEROBUS_STATUS_UNAVAILABLE);
+    /* The first call, then 2 + 1 refused reconnects. */
+    CHECK_EQ_INT(fake_zerobus_calls(service), 4);
+
+zb_cleanup:
+    zerobus_stream_free(stream);
     zerobus_sdk_free(sdk);
     fake_zerobus_stop(service);
 }
@@ -1820,12 +1878,14 @@ int main(void)
     test_batch_recovery();
     test_failure_without_recovery();
     test_open_refused();
+    test_open_retries_back_off_exponentially();
     test_oauth();
     test_flush_timeout();
     test_lack_of_ack();
     test_ack_timeout_after_idle();
     test_close_signal();
     test_provider_failure();
+    test_recovery_after_lost_stream_reconnects_retries_plus_one();
     test_credentials_rejected_on_reopen();
     test_close_during_backoff();
     test_free_during_stalled_open();

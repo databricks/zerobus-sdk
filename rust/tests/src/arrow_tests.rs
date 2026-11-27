@@ -330,6 +330,53 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
+        async fn test_stream_creation_retry_backoff_doubles(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    (0..3)
+                        .map(|_| MockFlightResponse::FailSetup {
+                            status: Status::resource_exhausted("Stream creation rate exceeded"),
+                        })
+                        .collect(),
+                )
+                .await;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let start_time = std::time::Instant::now();
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(create_test_arrow_schema())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(50)
+                .build_arrow()
+                .await?;
+            let elapsed = start_time.elapsed();
+
+            // A fixed 50ms interval waits 150ms in total. Doubling from 50ms waits at
+            // least 50 + 100 + 200 = 350ms; jitter only adds to that.
+            assert!(
+                elapsed >= std::time::Duration::from_millis(350),
+                "three retries from a 50ms base must back off exponentially, took {elapsed:?}"
+            );
+            assert_eq!(mock_server.connection_count(), 4);
+            assert!(!stream.is_closed());
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_repeated_initial_auth_rejection_stops_after_one_refresh(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -1949,6 +1996,69 @@ mod arrow_flight_tests {
                 1,
                 "auth rejection must invalidate cached credentials exactly once"
             );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_recovery_backoff_doubles_per_failed_reconnect(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: retryable error -> recovery. conn2 and conn3: setup rejected.
+            // conn4: no scripted response -> setup succeeds and the batch is replayed.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::resource_exhausted("Stream creation rate exceeded"),
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::resource_exhausted("Stream creation rate exceeded"),
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(50)
+                .recovery_retries(3)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let start_time = std::time::Instant::now();
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch).await?;
+            stream.flush().await?;
+            let elapsed = start_time.elapsed();
+
+            // Three reconnect attempts. A fixed 50ms interval waits 150ms in total;
+            // doubling from 50ms waits at least 50 + 100 + 200 = 350ms.
+            assert!(
+                elapsed >= std::time::Duration::from_millis(350),
+                "recovery from a 50ms base must back off exponentially, took {elapsed:?}"
+            );
+            assert_eq!(mock_server.connection_count(), 4);
 
             Ok(())
         }

@@ -219,6 +219,11 @@ the option to `Some(0)` skips ACK waiting but does not skip transport cleanup.
 When recovery is disabled, the same half-close/drain still runs, but the stream
 then terminates instead of reconnecting.
 
+Before reconnecting after a rotation, the supervisor waits a random time between
+half and 1.5 times `recovery_backoff_ms`. The average stays at
+`recovery_backoff_ms`, and streams rotated together don't all reconnect at once.
+A rotation is not a failure, so this wait does not double.
+
 ## Recovery and replay
 
 Only the supervisor reconnects or publishes a replacement sender.
@@ -226,7 +231,10 @@ Only the supervisor reconnects or publishes a replacement sender.
 On a retryable active failure:
 
 1. Pause ingestion sends and detach the failed sender under `ingest_mutex`.
-2. Wait the configured backoff unless explicit close interrupts it.
+2. Wait the backoff unless explicit close interrupts it. It starts at
+   `recovery_backoff_ms`, doubles per consecutive failed attempt (up to 15 s, or
+   `recovery_backoff_ms` if larger), and adds random jitter of up to the same
+   amount (`crate::backoff`).
 3. Establish a replacement DoPut exchange and wait for READY.
 4. Rebuild pending ranges from the durable record watermark.
 5. Replay every unacknowledged suffix and any batches buffered during replay.

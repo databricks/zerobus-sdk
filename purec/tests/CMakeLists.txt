@@ -49,6 +49,7 @@ zerobus_add_test(internal/network/connection_test)
 zerobus_add_test(internal/network/transport_test)
 zerobus_add_test(internal/network/http_client_test)
 zerobus_add_test(internal/oauth/oauth_test)
+zerobus_add_test(internal/stream/backoff_test)
 
 target_include_directories(internal_proto_zerobus_service_test PRIVATE
   "${GENERATED_DIR}")

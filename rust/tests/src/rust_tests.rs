@@ -3500,6 +3500,54 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_stream_creation_retry_backoff_doubles(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            let mut responses: Vec<_> = (0..3)
+                .map(|_| MockResponse::Error {
+                    status: tonic::Status::resource_exhausted("Stream creation rate exceeded"),
+                    delay_ms: 0,
+                })
+                .collect();
+            responses.push(MockResponse::CreateStream {
+                stream_id: "test_stream_after_backoff".to_string(),
+                delay_ms: 0,
+            });
+            mock_server.inject_responses(TABLE_NAME, responses).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let start_time = std::time::Instant::now();
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(50)
+                .build()
+                .await?;
+            let elapsed = start_time.elapsed();
+
+            // A fixed 50ms interval waits 150ms in total. Doubling from 50ms waits at
+            // least 50 + 100 + 200 = 350ms; jitter only adds to that.
+            assert!(
+                elapsed >= std::time::Duration::from_millis(350),
+                "three retries from a 50ms base must back off exponentially, took {elapsed:?}"
+            );
+            assert!(!stream.is_closed());
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_stream_creation_fails_after_exhausting_retries(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -3651,6 +3699,135 @@ mod failure_scenarios_tests {
                 "Expected max offset of 4 (records 0-4), got {}",
                 max_offset
             );
+
+            Ok(())
+        }
+
+        /// Streams the server drops together must not all reconnect at the same moment,
+        /// so the first reconnect after a failure waits a jittered backoff too, not only
+        /// the retries after it. (A clean close signal still reconnects immediately; see
+        /// `test_immediate_recovery_on_close_signal`.)
+        #[tokio::test]
+        async fn test_first_reconnect_after_failure_waits_backoff(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_dropped".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("Temporary network issue"),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_reconnected".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(300)
+                .build()
+                .await?;
+
+            let start_time = std::time::Instant::now();
+            stream.ingest_record_offset(b"test-record".to_vec()).await?;
+            stream.flush().await?;
+            let elapsed = start_time.elapsed();
+
+            // The reconnect succeeds on its first attempt, so the only wait is the one
+            // before it, drawn from [300ms, 600ms).
+            assert!(
+                elapsed >= std::time::Duration::from_millis(300),
+                "first reconnect after a failure must wait the backoff, took {elapsed:?}"
+            );
+
+            Ok(())
+        }
+
+        /// A server rotation normally ends with the server closing the stream cleanly
+        /// before the client's grace period runs out, while records are still unacked.
+        /// That clean end is not a failure, so the reconnect must not wait the backoff.
+        #[tokio::test]
+        async fn test_clean_server_close_after_signal_reconnects_without_backoff(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_rotated".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CloseStreamSignalThenEnd {
+                            duration_seconds: 30,
+                            end_after_ms: 50,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_after_rotation".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(2000)
+                .build()
+                .await?;
+
+            let start_time = std::time::Instant::now();
+            stream.ingest_record_offset(b"test-record".to_vec()).await?;
+            stream.flush().await?;
+            let elapsed = start_time.elapsed();
+
+            // A failure-style reconnect would wait at least the 2000ms base.
+            assert!(
+                elapsed < std::time::Duration::from_millis(2000),
+                "a clean server close must reconnect without the failure backoff, took {elapsed:?}"
+            );
+            assert_eq!(mock_server.get_write_count().await, 2);
 
             Ok(())
         }

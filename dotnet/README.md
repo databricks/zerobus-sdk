@@ -363,7 +363,7 @@ var options = StreamConfigurationOptions.Default with
 | `MaxInflightRequests`       | 1,000,000 | Backpressure control         |
 | `Recovery`                  | `true`    | Auto-recovery on failures    |
 | `RecoveryTimeoutMs`         | 15,000    | Timeout per recovery attempt |
-| `RecoveryBackoffMs`         | 2,000     | Delay between retries        |
+| `RecoveryBackoffMs`         | 2,000     | Base delay between retry attempts (ms); doubles per failure up to 15 s, plus jitter of up to the same amount (a single wait can reach 30 s) |
 | `RecoveryRetries`           | 4         | Max recovery attempts        |
 | `ServerLackOfAckTimeoutMs`  | 60,000    | Server ack timeout           |
 | `FlushTimeoutMs`            | 300,000   | Flush timeout (5 min)        |

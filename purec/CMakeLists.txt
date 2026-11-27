@@ -94,6 +94,7 @@ set(ZEROBUS_SOURCES
   src/internal/network/http_client.c
   src/internal/oauth/oauth.c
   src/internal/landing_zone.c
+  src/internal/stream/backoff.c
   src/internal/stream/supervisor.c
   src/internal/stream/sender.c
   src/internal/stream/receiver.c

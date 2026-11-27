@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio::time::Duration;
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -22,6 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
+use crate::backoff::{recovery_backoff, recovery_backoff_delay};
 use crate::errors::should_retry_initial_connection;
 use crate::grpc_channel::GrpcChannelSource;
 use crate::grpc_status::{GrpcCode, GrpcStatus};
@@ -69,6 +69,9 @@ impl ZerobusStream {
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
+        // Whether the previous connection ended in a (retryable) failure rather
+        // than a clean server-initiated close.
+        let mut reconnect_after_failure = false;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
         // One-shot budget: initial setup may spend a single recovery retry to refresh a
         // stale credential after an auth rejection. Reconnect iterations never consume it,
@@ -97,9 +100,40 @@ impl ZerobusStream {
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
 
-            // 1. Create a stream.
-            let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-                .take(options.recovery_retries as usize);
+            // 1. Create a stream. Retries back off exponentially with jitter so that
+            // clients rejected together (e.g. by a stream-creation rate limit) don't
+            // all retry together. `RetryIf` runs its first attempt with no delay, so
+            // after a failure wait one jittered backoff first: when the server drops
+            // many streams at once, their first reconnects are spread out too. A clean
+            // server-initiated close still reconnects immediately, as before.
+            let first_retry_index = if reconnect_after_failure {
+                let delay = recovery_backoff_delay(options.recovery_backoff_ms, 0);
+                info!(
+                    backoff_ms = delay.as_millis() as u64,
+                    "Waiting before reconnecting after stream failure"
+                );
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Supervisor task cancelled during recovery backoff, exiting");
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                1
+            } else {
+                0
+            };
+            let strategy = recovery_backoff(
+                options.recovery_backoff_ms,
+                first_retry_index,
+                options.recovery_retries,
+            )
+            .inspect(|delay| {
+                debug!(
+                    backoff_ms = delay.as_millis() as u64,
+                    "Retrying stream creation"
+                )
+            });
 
             // Initial setup may refresh one stale credential (auth rejection consumes the
             // one-shot budget); reconnect keeps the plain `recovery && is_retryable()` rule
@@ -352,6 +386,14 @@ impl ZerobusStream {
             };
 
             // 5. Handle errors.
+            // A clean end of stream from the server, which is how a close signal
+            // normally ends, is not a failure: the next connection opens without
+            // waiting, as before.
+            reconnect_after_failure = match &result {
+                Ok(()) => false,
+                Err(ZerobusError::StreamClosedError(status)) => status.code() != GrpcCode::Ok,
+                Err(_) => true,
+            };
             if let Err(error) = result {
                 error!(stream_id = %stream_id, "Stream failure detected: {}", error);
                 let error = match &error {

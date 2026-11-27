@@ -53,6 +53,7 @@ use proto::databricks;
 #[cfg(doctest)]
 struct GeneratedProtoIsPrivate;
 
+mod backoff;
 mod builder;
 mod callbacks;
 mod client_warnings;

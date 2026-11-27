@@ -83,6 +83,13 @@ pub enum MockResponse {
         duration_seconds: i64,
         delay_ms: u64,
     },
+    /// Close stream signal, then a clean end of the response stream (no error status)
+    /// `end_after_ms` later, as a server does when its close grace period runs out.
+    #[allow(dead_code)]
+    CloseStreamSignalThenEnd {
+        duration_seconds: i64,
+        end_after_ms: u64,
+    },
     /// Error response
     #[allow(dead_code)]
     Error { status: Status, delay_ms: u64 },
@@ -996,6 +1003,29 @@ async fn handle_mock_response(
                 return (false, current_index);
             }
             (true, current_index + 1)
+        }
+        MockResponse::CloseStreamSignalThenEnd {
+            duration_seconds,
+            end_after_ms,
+        } => {
+            info!(
+                "Sending CloseStreamSignal with duration: {}s, ending the stream in {}ms",
+                duration_seconds, end_after_ms
+            );
+            let response = EphemeralStreamResponse {
+                payload: Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
+                    duration: Some(ProtobufDuration {
+                        seconds: *duration_seconds,
+                        nanos: 0,
+                    }),
+                })),
+            };
+            if tx.send(Ok(response)).await.is_err() {
+                return (false, current_index);
+            }
+            sleep(Duration::from_millis(*end_after_ms)).await;
+            // Returning `false` drops the sender, which ends the stream cleanly.
+            (false, current_index + 1)
         }
         MockResponse::Error { status, delay_ms } => {
             if *delay_ms > 0 {

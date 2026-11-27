@@ -63,7 +63,10 @@ pub struct StreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
+    /// Base delay between stream creation and recovery retries in milliseconds. The delay doubles
+    /// after each consecutive failed attempt, up to 15 s (or this value, if larger), and a random
+    /// jitter of up to the same amount is added, so a single wait can reach 30 s. 0 retries
+    /// immediately.
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: Option<u32>,
 
@@ -1309,7 +1312,10 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: Option<u32>,
 
-    /// Delay between recovery retry attempts in milliseconds.
+    /// Base delay between stream creation and recovery retries in milliseconds. The delay doubles
+    /// after each consecutive failed attempt, up to 15 s (or this value, if larger), and a random
+    /// jitter of up to the same amount is added, so a single wait can reach 30 s. 0 retries
+    /// immediately.
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: Option<u32>,
 

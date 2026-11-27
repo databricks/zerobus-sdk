@@ -77,9 +77,13 @@ pub struct StreamConfigurationOptions {
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
 
-    /// Backoff time in milliseconds between stream recovery retry attempts.
+    /// Base backoff time in milliseconds between stream creation and recovery retry attempts.
     ///
-    /// The SDK will wait this duration before attempting another recovery after a failure.
+    /// The SDK waits at least this long before retrying. The delay doubles after each
+    /// consecutive failed attempt, up to 15 seconds (or this value, if larger), and a
+    /// random jitter of up to the same amount is added. With the default, retries wait
+    /// 2–4 s, 4–8 s, 8–16 s, then 15–30 s. The jitter spreads out retries from clients
+    /// that fail at the same time. A value of 0 retries immediately.
     ///
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: u64,

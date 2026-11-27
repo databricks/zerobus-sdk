@@ -133,7 +133,13 @@ public final class StreamBuilder {
   }
 
   /**
-   * Sets the backoff delay between recovery attempts.
+   * Sets the base backoff delay between retry attempts.
+   *
+   * <p>This is the base delay before retrying stream creation or recovery. The SDK waits at least
+   * this long. The delay doubles after each consecutive failed attempt, up to 15 seconds (or this
+   * value, if larger), and a random jitter of up to the same amount is added, so a single wait can
+   * reach 30 seconds. With the default, retries wait 2-4 s, 4-8 s, 8-16 s, then 15-30 s. A value of
+   * 0 retries immediately.
    *
    * @param recoveryBackoffMs the recovery backoff delay in milliseconds
    * @return this builder for method chaining
