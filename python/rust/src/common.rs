@@ -323,8 +323,9 @@ impl RustAckCallback for AckCallbackWrapper {
     }
 }
 
-/// Configuration options for the stream
-#[pyclass(from_py_object)]
+/// Configuration options for the stream. `subclass` lets `MultiplexedStreamOptions` and
+/// Python classes extend it.
+#[pyclass(from_py_object, subclass)]
 pub struct StreamConfigurationOptions {
     #[pyo3(get, set)]
     pub max_inflight_records: i32,
@@ -456,9 +457,18 @@ impl Default for StreamConfigurationOptions {
 #[pymethods]
 impl StreamConfigurationOptions {
     #[new]
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        // Accept and ignore any arguments, as `AckCallback` does, so a Python subclass can
+        // define its own `__init__`. `__init__` applies the options.
+        Self::default()
+    }
+
+    /// Apply the options given as keyword arguments. A Python subclass with its own
+    /// `__init__` calls this through `super().__init__(**kwargs)`.
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut options = Self::default();
+    fn __init__(&mut self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let options = self;
 
         if let Some(kwargs) = kwargs {
             for (key, value) in kwargs.iter() {
@@ -506,10 +516,10 @@ impl StreamConfigurationOptions {
             }
         }
 
-        Ok(options)
+        Ok(())
     }
 
-    fn __repr__(&self) -> String {
+    pub(crate) fn __repr__(&self) -> String {
         format!(
             "StreamConfigurationOptions(max_inflight_records={}, recovery={}, recovery_timeout_ms={}, \
              recovery_backoff_ms={}, recovery_retries={}, server_lack_of_ack_timeout_ms={}, \

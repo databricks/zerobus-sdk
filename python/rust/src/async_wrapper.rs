@@ -8,6 +8,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
+    MessageId, MultiplexedStream as RustMultiplexedStream,
     PersistentStream as RustPersistentStream, StreamBuilder, ZerobusSdk as RustSdk,
     ZerobusStream as RustStream,
 };
@@ -19,6 +20,7 @@ use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, RecordFormat, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
+use crate::multiplexed::{self, MuxAuth, MuxConfig};
 use crate::persistent::{PersistentConfig, PersistentStreamSettings};
 
 // =============================================================================
@@ -414,6 +416,193 @@ impl PersistentStream {
 }
 
 // =============================================================================
+// MULTIPLEXED STREAM (ASYNC)
+// =============================================================================
+
+/// Ingest, flush, and wait need only `&MultiplexedStream` and share the read lock;
+/// `close` and the unacked getters need `&mut` and take the write lock, so they wait
+/// for in-progress calls.
+#[pyclass(name = "MultiplexedStream")]
+pub struct MultiplexedStream {
+    inner: Arc<RwLock<RustMultiplexedStream>>,
+    format: RecordFormat,
+    /// For a federated stream, a strong reference to the IdP callback holder (the
+    /// native supplier holds only a weak one). Exposed to the cyclic GC via
+    /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
+    /// owner` cycle is collectable. `None` for streams without federation.
+    idp_holder: Option<Py<IdpCallbackHolder>>,
+}
+
+impl MultiplexedStream {
+    /// A strong reference to the IdP callback holder for a returned future to carry.
+    /// The future can outlive the Python stream object, and a recovery while it runs
+    /// may need to mint a fresh token through the weakly-held callback.
+    fn idp_holder_ref(&self, py: Python<'_>) -> Option<Py<IdpCallbackHolder>> {
+        self.idp_holder.as_ref().map(|h| h.clone_ref(py))
+    }
+}
+
+#[pymethods]
+impl MultiplexedStream {
+    /// Let the cyclic GC see the strong reference to the IdP callback holder, so a
+    /// self-referential owner/stream/callback cycle can be collected.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(holder) = &self.idp_holder {
+            visit.call(holder)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the strong reference when the GC breaks a cycle (the native supplier's
+    /// weak reference then resolves to `None`; the stream is being torn down).
+    fn __clear__(&mut self) {
+        self.idp_holder = None;
+    }
+
+    /// Whether the stream is closed, by `close` or after a call reports a sub-stream failure.
+    /// A `close` or `get_unacked_*` call that is in progress counts as closed.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        match self.inner.try_read() {
+            Ok(guard) => guard.is_closed(),
+            Err(_) => true,
+        }
+    }
+
+    /// Ingest a single record into the next sub-stream and return its message ID once
+    /// queued (async)
+    fn ingest_record<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payload = extract_record_payload(payload, self.format)?;
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let guard = stream.read().await;
+            let message_id = guard
+                .ingest_record(record_payload)
+                .await
+                .map_err(map_error)?;
+            Ok(message_id.raw())
+        })
+    }
+
+    /// Ingest a batch of records into one sub-stream and return one message ID for the
+    /// whole batch (async). Returns `None` for an empty batch on an open stream; an empty
+    /// batch on a closed or failed stream raises, as the Rust core does.
+    fn ingest_records<'py>(
+        &self,
+        py: Python<'py>,
+        payloads: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let record_payloads = extract_record_payloads(payloads, self.format)?;
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let guard = stream.read().await;
+            let message_id = guard
+                .ingest_records(record_payloads)
+                .await
+                .map_err(map_error)?;
+            Ok(message_id.map(|id| id.raw()))
+        })
+    }
+
+    /// Wait for the record or batch behind a message ID to be acknowledged (async)
+    fn wait_for_message_id<'py>(
+        &self,
+        py: Python<'py>,
+        message_id: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let guard = stream.read().await;
+            guard
+                .wait_for_message_id(MessageId::from_raw(message_id))
+                .await
+                .map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Flush every sub-stream (async)
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let guard = stream.read().await;
+            guard.flush().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Flush and close every sub-stream (async)
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let mut guard = stream.write().await;
+            guard.close().await.map_err(map_error)?;
+            Ok(())
+        })
+    }
+
+    /// Get unacknowledged records from every sub-stream. Closes the stream first (async).
+    fn get_unacked_records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let mut guard = stream.write().await;
+            let records = guard.get_unacked_records().await.map_err(map_error)?;
+
+            Python::attach(|py| {
+                let out: Vec<Py<PyAny>> = records
+                    .map(|r| encoded_record_to_pybytes(py, r))
+                    .collect::<PyResult<_>>()?;
+                Ok(out)
+            })
+        })
+    }
+
+    /// Get unacknowledged batches from every sub-stream. Closes the stream first (async).
+    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let stream = self.inner.clone();
+        let idp_holder = self.idp_holder_ref(py);
+
+        future_into_py(py, async move {
+            let _idp_holder = idp_holder;
+            let mut guard = stream.write().await;
+            let batches = guard.get_unacked_batches().await.map_err(map_error)?;
+
+            Python::attach(|py| {
+                let out: Vec<Vec<Py<PyAny>>> = batches
+                    .into_iter()
+                    .map(|batch| {
+                        batch
+                            .into_iter()
+                            .map(|r| encoded_record_to_pybytes(py, r))
+                            .collect::<PyResult<_>>()
+                    })
+                    .collect::<PyResult<_>>()?;
+                Ok(out)
+            })
+        })
+    }
+}
+
+// =============================================================================
 // ZEROBUS SDK (ASYNC)
 // =============================================================================
 
@@ -629,6 +818,79 @@ impl ZerobusSdk {
         })
     }
 
+    /// Open a multiplexed stream (Beta) of `stream_count` sub-streams with OAuth
+    /// authentication (async). `options` may be a `MultiplexedStreamOptions`, whose
+    /// `ack_callback` receives message IDs.
+    #[pyo3(signature = (client_id, client_secret, table_properties, stream_count, options = None))]
+    fn create_multiplexed_stream<'py>(
+        &self,
+        py: Python<'py>,
+        client_id: String,
+        client_secret: String,
+        table_properties: TableProperties,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let auth = MuxAuth::OAuth {
+            client_id,
+            client_secret,
+        };
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
+    /// Open a multiplexed stream (Beta) with a custom headers provider (async).
+    #[pyo3(signature = (table_properties, headers_provider, stream_count, options = None))]
+    fn create_multiplexed_stream_with_headers_provider<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: TableProperties,
+        headers_provider: Py<PyAny>,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let auth = MuxAuth::Headers(Arc::new(HeadersProviderWrapper::new(headers_provider)));
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
+    /// Open a multiplexed stream (Beta) with external-IdP federation (async). As in
+    /// `create_stream_federated`, `idp_supplier` is a fresh handle per call and the stream
+    /// keeps the strong reference to its callback holder.
+    #[pyo3(signature = (table_properties, idp_supplier, databricks_client_id, stream_count, options = None))]
+    fn create_multiplexed_stream_federated<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: TableProperties,
+        idp_supplier: PyRef<'_, IdpSupplier>,
+        databricks_client_id: Option<String>,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let holder = multiplexed::idp_holder(py, &idp_supplier)?;
+        let auth = MuxAuth::Federated {
+            supplier: idp_supplier.supplier.clone(),
+            databricks_client_id,
+        };
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, Some(holder))
+    }
+
+    /// Open a multiplexed stream (Beta) with a Databricks personal access token (async).
+    #[pyo3(signature = (table_properties, token, stream_count, options = None))]
+    fn create_multiplexed_stream_pat<'py>(
+        &self,
+        py: Python<'py>,
+        table_properties: TableProperties,
+        token: String,
+        stream_count: usize,
+        options: Option<Bound<'_, StreamConfigurationOptions>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let auth = MuxAuth::PersonalAccessToken(token);
+        let config = MuxConfig::new(auth, table_properties, stream_count, options.as_ref())?;
+        self.open_multiplexed(py, config, None)
+    }
+
     /// Create a new Arrow Flight stream with OAuth authentication (async).
     #[pyo3(signature = (table_name, schema_ipc_bytes, client_id, client_secret, options = None))]
     fn create_arrow_stream<'py>(
@@ -703,6 +965,28 @@ impl ZerobusSdk {
 
             Ok(ZerobusStream {
                 inner: Arc::new(RwLock::new(new_stream)),
+                format,
+                idp_holder,
+            })
+        })
+    }
+}
+
+impl ZerobusSdk {
+    /// Open every sub-stream and wrap the result (async).
+    fn open_multiplexed<'py>(
+        &self,
+        py: Python<'py>,
+        config: MuxConfig,
+        idp_holder: Option<Py<IdpCallbackHolder>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let format = config.format();
+        let sdk = self.inner.clone();
+        future_into_py(py, async move {
+            let sdk_guard = sdk.read().await;
+            let stream = config.open(&sdk_guard).await?;
+            Ok(MultiplexedStream {
+                inner: Arc::new(RwLock::new(stream)),
                 format,
                 idp_holder,
             })
