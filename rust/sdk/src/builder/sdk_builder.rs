@@ -166,8 +166,8 @@ impl ZerobusSdkBuilder {
         self
     }
 
-    /// Sets a producer id that the server records as the producer of every
-    /// stream opened from this SDK instance.
+    /// Sets a producer id: the name of the application or component that
+    /// writes the data.
     ///
     /// The SDK sends it as a `producer/<id>` token in the HTTP `user-agent`
     /// header of every request, unary calls included, right after the SDK
@@ -185,14 +185,9 @@ impl ZerobusSdkBuilder {
     /// [`build`](Self::build) returns
     /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument).
     ///
-    /// The server reads the first `producer/` token in the `user-agent`. A
-    /// `user-agent` value returned by a
-    /// [`HeadersProvider`](crate::HeadersProvider) is sent first, so a
-    /// `producer/` token in it takes precedence. The server ignores the whole
-    /// `user-agent`, producer id included, if it holds a non-ASCII byte, e.g.
-    /// from a non-ASCII `application_name`. The server scans only the start of
-    /// the header, so a provider `user-agent` or an `sdk_identifier` that has
-    /// an unclosed `(` or many space-separated parts can hide the producer id.
+    /// A `user-agent` value returned by a
+    /// [`HeadersProvider`](crate::HeadersProvider) is sent before the SDK
+    /// value in the same header.
     ///
     /// # Arguments
     ///
@@ -325,8 +320,7 @@ impl ZerobusSdkBuilder {
         };
 
         // The id must stay one `user-agent` product token: RFC 9110 `tchar`
-        // bytes, plus `/` because the server takes everything after the first
-        // `/` of `producer/<id>`.
+        // bytes, plus `/` so an id can have parts such as `team/app-1`.
         let producer_id = match self.producer_id.as_deref().map(str::trim) {
             Some(id) if !id.is_empty() => {
                 if id.len() > MAX_PRODUCER_ID_BYTES {

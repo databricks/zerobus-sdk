@@ -29,14 +29,14 @@
   (dynamic protobuf) or `arrow_schema_from_uc_schema` (Arrow Flight) to resolve a
   table's schema at runtime without pre-generating a `.proto` file. See the new
   `proto_dynamic_uc_schema` example.
-- Added `ZerobusSdkBuilder::producer_id`, which sets the producer id that the
-  server records for each stream. The SDK sends it as a `producer/<id>` token
-  in the `user-agent` header of every request, unary calls included, after the
-  SDK prefix and before the application name. A blank value means no producer
-  id, and the last call wins. A value longer than 128 bytes or with a
-  character outside ASCII letters, digits and ``!#$%&'*+-.^_`|~/`` is rejected
-  by `build()` with `ZerobusError::InvalidArgument`. The default `user-agent`
-  is unchanged.
+- Added `ZerobusSdkBuilder::producer_id`, which sets a producer id: the name of
+  the application or component that writes the data. The SDK sends it as a
+  `producer/<id>` token in the `user-agent` header of every request, unary
+  calls included, after the SDK prefix and before the application name. A
+  blank value means no producer id, and the last call wins. A value longer
+  than 128 bytes or with a character outside ASCII letters, digits and
+  ``!#$%&'*+-.^_`|~/`` is rejected by `build()` with
+  `ZerobusError::InvalidArgument`. The default `user-agent` is unchanged.
 
 ### Bug Fixes
 
