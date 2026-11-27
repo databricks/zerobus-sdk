@@ -22,6 +22,10 @@
   federation as a service principal. Works with JSON, protobuf, Avro, and Arrow
   streams, and `recreateStream` reuses the stream's `FederatedToken`. See
   `examples/json/FederatedAuthExample.java`.
+- The regular JAR now works with an application-supplied protobuf-java runtime, tested with 3.25.9
+  and 4.33.0. Declare `protobuf-java` in your own build file, and put `slf4j-api` on the classpath
+  through an SLF4J implementation rather than declaring it directly. The regular JAR's POM does not
+  declare either library. The fat JAR still bundles protobuf-java 4.33.0.
 - Add `ZerobusSdk.builder()` returning a `ZerobusSdkBuilder`, which sets the endpoints, application
   name, connection mode, and TLS options. The existing `ZerobusSdk` constructors still work and
   keep their defaults.

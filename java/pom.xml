@@ -33,6 +33,8 @@
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <protobuf.version>4.33.0</protobuf.version>
+    <protoc.version>3.25.9</protoc.version>
     <zerobus.skipNativeLibCheck>false</zerobus.skipNativeLibCheck>
   </properties>
   <dependencies>
@@ -40,7 +42,7 @@
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
-      <version>4.33.0</version>
+      <version>${protobuf.version}</version>
     </dependency>
     <!-- SLF4J API -->
     <dependency>
@@ -112,7 +114,7 @@
         <artifactId>protobuf-maven-plugin</artifactId>
         <version>0.6.1</version>
         <configuration>
-          <protocArtifact>com.google.protobuf:protoc:4.33.0:exe:${os.detected.classifier}</protocArtifact>
+          <protocArtifact>com.google.protobuf:protoc:${protoc.version}:exe:${os.detected.classifier}</protocArtifact>
         </configuration>
         <executions>
           <execution>
@@ -134,6 +136,81 @@
             <goals>
               <goal>test-compile</goal>
             </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- Generated classes compiled against protobuf-java 4.x carry a bridge method that fails
+           verification on 3.25.x, so the generated sources are recompiled against the protoc version's runtime here. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.7.0</version>
+        <executions>
+          <execution>
+            <id>protobuf-3-compile-classpath</id>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <phase>process-classes</phase>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>com.google.protobuf</groupId>
+                  <artifactId>protobuf-java</artifactId>
+                  <version>${protoc.version}</version>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/protobuf-3-compile</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>recompile-generated-against-protobuf-3</id>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <phase>process-classes</phase>
+            <configuration>
+              <target>
+                <delete dir="${project.build.directory}/generated-classes-3"/>
+                <mkdir dir="${project.build.directory}/generated-classes-3"/>
+                <javac debug="true" destdir="${project.build.directory}/generated-classes-3" encoding="UTF-8" includeantruntime="false" release="8" srcdir="${project.build.directory}/generated-sources/protobuf/java">
+                  <classpath>
+                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-${protoc.version}.jar"/>
+                  </classpath>
+                </javac>
+                <copy overwrite="true" todir="${project.build.outputDirectory}">
+                  <fileset dir="${project.build.directory}/generated-classes-3"/>
+                </copy>
+              </target>
+            </configuration>
+          </execution>
+          <execution>
+            <id>recompile-test-generated-against-protobuf-3</id>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <phase>process-test-classes</phase>
+            <configuration>
+              <target>
+                <delete dir="${project.build.directory}/generated-test-classes-3"/>
+                <mkdir dir="${project.build.directory}/generated-test-classes-3"/>
+                <javac debug="true" destdir="${project.build.directory}/generated-test-classes-3" encoding="UTF-8" includeantruntime="false" release="8" srcdir="${project.build.directory}/generated-test-sources/protobuf/java">
+                  <classpath>
+                    <pathelement location="${project.build.directory}/protobuf-3-compile/protobuf-java-${protoc.version}.jar"/>
+                  </classpath>
+                </javac>
+                <copy overwrite="true" todir="${project.build.testOutputDirectory}">
+                  <fileset dir="${project.build.directory}/generated-test-classes-3"/>
+                </copy>
+              </target>
+            </configuration>
           </execution>
         </executions>
       </plugin>

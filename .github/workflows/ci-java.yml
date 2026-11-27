@@ -36,6 +36,58 @@ jobs:
           echo "Code formatting issues detected. Run 'mvn spotless:apply' to fix."
           exit 1
 
+  release-jar:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+      - name: Set up JDK 11
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          java-version: 11
+          distribution: 'temurin'
+          cache: 'maven'
+      - name: Configure Maven registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-maven.sh"
+      - name: Package JAR
+        run: mvn --batch-mode -DskipTests=true package -Dzerobus.skipNativeLibCheck=true
+      - name: Load regular JAR on each protobuf runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          jar=$(ls target/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
+          slf4j=$(find ~/.m2/repository/org/slf4j/slf4j-api/2.0.17 -name 'slf4j-api-2.0.17.jar')
+          [ -n "$slf4j" ] || { echo "slf4j-api 2.0.17 not found"; exit 1; }
+          for version in 3.25.9 4.33.0; do
+            protobuf=$(find ~/.m2/repository/com/google/protobuf/protobuf-java/$version -name "protobuf-java-$version.jar")
+            [ -n "$protobuf" ] || { echo "protobuf-java $version not found"; exit 1; }
+            echo "protobuf-java $version"
+            java -cp "$jar:$protobuf:$slf4j" scripts/RegularJarCheck.java
+          done
+      - name: Check incremental package drops stale generated classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          stale=StaleGeneratedProbe.class
+          staleTest=StaleGeneratedProbeTest.class
+          mkdir -p target/generated-classes-3/com/databricks/zerobus target/generated-test-classes-3/com/databricks/zerobus
+          cp target/classes/com/databricks/zerobus/IngestRecordResponse.class target/generated-classes-3/com/databricks/zerobus/$stale
+          cp target/classes/com/databricks/zerobus/IngestRecordResponse.class target/generated-test-classes-3/com/databricks/zerobus/$staleTest
+          mvn --batch-mode -DskipTests=true package -Dzerobus.skipNativeLibCheck=true
+          jar=$(ls target/zerobus-ingest-sdk-*.jar | grep -v -e -sources.jar -e -javadoc.jar -e -jar-with-dependencies.jar)
+          if [ -e target/classes/com/databricks/zerobus/$stale ] || [ -e target/test-classes/com/databricks/zerobus/$staleTest ] || unzip -l "$jar" | grep -q "$stale"; then
+            echo "stale generated classes survived an incremental package"
+            exit 1
+          fi
+
   test:
     strategy:
       fail-fast: false
@@ -44,15 +96,23 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '11'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '17'
+            protobufVersion: '4.33.0'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             javaVersion: '21'
+            protobufVersion: '4.33.0'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '21'
+            protobufVersion: '3.25.9'
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             javaVersion: '21'
+            protobufVersion: '4.33.0'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -109,15 +169,24 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install maven 2>/dev/null || true
       - name: Build with Maven
-        run: mvn clean compile
+        shell: bash
+        run: mvn clean compile "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Run tests
-        run: mvn test
+        shell: bash
+        run: mvn test "-Dprotobuf.version=${{ matrix.protobufVersion }}"
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}
+          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}-protobuf-${{ matrix.protobufVersion }}
           path: |
             java/target/surefire-reports/
             java/target/test-classes/
           retention-days: 7
+      # No protobuf override in the first command: hand-written classes must compile against the default 4.33.0.
+      - name: Run tests on the shipped class mix with protobuf-java 3.25.9
+        if: matrix.protobufVersion == '3.25.9'
+        shell: bash
+        run: |
+          mvn --batch-mode clean test -DskipTests
+          mvn --batch-mode surefire:test "-Dprotobuf.version=3.25.9"
