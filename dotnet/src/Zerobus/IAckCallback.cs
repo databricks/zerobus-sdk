@@ -12,14 +12,18 @@ namespace Databricks.Zerobus;
 /// <see cref="OnError"/> is called only when the stream fails: once for each
 /// record or batch still pending, with the error text. The stream is then
 /// closed; recover the records with <c>GetUnackedRecords()</c> and send them on a
-/// new stream.
+/// new stream. After a stream failure, some <see cref="OnError"/> calls may not
+/// arrive if the stream is closed before they are delivered, so use the
+/// exception from <c>Flush()</c> and <c>GetUnackedRecords()</c> as the source of
+/// truth for which records failed.
 /// </para>
 /// <para>
-/// <c>Flush()</c> can return before the last <see cref="OnAck"/> has run.
-/// <c>Close()</c> and <c>Dispose()</c> wait for pending callbacks, for up to
-/// <see cref="StreamConfigurationOptions.CallbackMaxWaitTimeMs"/>, so read state
-/// that your callbacks update after them. After <c>Dispose()</c> returns, no new
-/// callback starts; one already running may still finish.
+/// <c>Flush()</c> can return before the last <see cref="OnAck"/> has run. When
+/// <c>Close()</c> returns, all callbacks have run, unless <c>Close()</c> waited
+/// longer than <see cref="StreamConfigurationOptions.CallbackMaxWaitTimeMs"/>
+/// (default 5 s). <c>Dispose()</c> does the same, so read state that your
+/// callbacks update after it. After <c>Dispose()</c> returns, no new callback
+/// starts; one already running may still finish.
 /// </para>
 /// <para>
 /// Callbacks run on the SDK's background threads, not on the thread that

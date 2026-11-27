@@ -66,10 +66,10 @@ move longer work to your own task: a slow or blocking callback can delay `Flush(
 and other streams. Do not call stream methods from a callback. An exception thrown by a
 callback is caught and logged with `Trace.TraceError`.
 
-`Flush()` can return before the last `OnAck` has run. `Close()` and `Dispose()` wait for
-pending callbacks for up to `CallbackMaxWaitTimeMs` (`null`: 5,000 ms;
-`StreamConfigurationOptions.CallbackWaitForever`: no limit), so read the state they update
-after them:
+`Flush()` can return before the last `OnAck` has run. When `Close()` returns, all callbacks
+have run, unless `Close()` waited longer than `CallbackMaxWaitTimeMs` (default 5 s;
+`StreamConfigurationOptions.CallbackWaitForever`: no limit). `Dispose()` does the same, so
+read the state the callbacks update after it:
 
 ```csharp
 var tracker = new AckTracker();   // implements IAckCallback
