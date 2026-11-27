@@ -151,6 +151,9 @@ pub struct CStreamConfigurationOptions {
     /// callback object is destroyed, not merely until close() returns.
     /// error_message is valid only during the call (copy to keep). Callbacks must
     /// not unwind across the C boundary (panics are contained and logged).
+    /// Multiplexed streams reject `ack_on_ack` and `ack_on_error` and ignore
+    /// `ack_user_data`; pass the mux create function's own ack parameters
+    /// instead.
     // Signatures are written inline rather than via the AckOn*Callback aliases
     // so cbindgen emits nullable C function pointers instead of an opaque struct.
     pub ack_on_ack: Option<extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void)>,
@@ -466,9 +469,10 @@ impl CallbackAckCallback {
     }
 }
 
-// Safety: the callback handler is a single sequential task, so on_ack/on_error
-// are never re-entered concurrently. user_data thread-safety is the caller's
-// contract (see the field docs); the raw pointer is only shared, not derefed here.
+// Safety: the struct holds no mutable state. An ordinary stream calls it from a
+// single sequential task; a multiplexed stream shares it across sub-stream
+// tasks, so calls may be concurrent. Either way, user_data thread-safety is the
+// caller's contract; the raw pointer is only shared, not derefed here.
 unsafe impl Send for CallbackAckCallback {}
 unsafe impl Sync for CallbackAckCallback {}
 

@@ -1447,7 +1447,7 @@ async fn test_ack_callback_teardown_no_messages_wait_indefinitely() {
 // When `create_stream` fails, the registered `Arc<CallbackAckCallback>` must
 // drop (with the builder), not leak to a background task. Observed via the
 // `#[cfg(test)]` drop hook in `common.rs`. Hermetic failure trigger: JSON +
-// empty table name registers the Arc in `apply_c_stream_options`, then fails
+// empty table name registers the Arc in `build_stream_from_parts`, then fails
 // in `build()` validation before any network I/O.
 //
 // The Arc is created internally, so these tests can't hold a `Weak` to
@@ -2476,6 +2476,7 @@ fn test_every_extern_c_entry_point_is_guarded() {
     let modules = [
         ("sdk.rs", include_str!("sdk.rs")),
         ("stream.rs", include_str!("stream.rs")),
+        ("multiplexed.rs", include_str!("multiplexed.rs")),
         ("builder.rs", include_str!("builder.rs")),
         ("proto_schema.rs", include_str!("proto_schema.rs")),
         ("arrow.rs", include_str!("arrow.rs")),

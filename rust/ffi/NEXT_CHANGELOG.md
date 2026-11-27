@@ -6,6 +6,8 @@
 
 ### New Features and Improvements
 
+- Add multiplexed gRPC streams (Beta). `zerobus_sdk_create_multiplexed_stream_with_headers_provider` opens `stream_count` sub-streams and returns a `CZerobusMultiplexedStream*`. Ack callbacks receive message IDs and are passed as create parameters, with `free_ack_user_data` releasing `ack_user_data` after the last callback. `zerobus_multiplexed_stream_close`, `zerobus_multiplexed_stream_is_closed` and `zerobus_multiplexed_stream_free` close, inspect and release the handle.
+
 ### Bug Fixes
 
 - The library is now built with `rustls-webpki` 0.103.16 and `webpki-roots`
@@ -41,3 +43,5 @@
 ### Deprecations
 
 ### API Changes
+
+- Add the `CZerobusMultiplexedStream` opaque type, `zerobus_sdk_create_multiplexed_stream_with_headers_provider` and the `zerobus_multiplexed_stream_*` functions to `zerobus.h`. Purely additive.

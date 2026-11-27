@@ -25,6 +25,10 @@ name = "multiplexed_stream_tests"
 path = "src/multiplexed_stream_tests.rs"
 
 [[test]]
+name = "multiplexed_ffi_tests"
+path = "src/multiplexed_ffi_tests.rs"
+
+[[test]]
 name = "persistent_stream_tests"
 path = "src/persistent_stream_tests.rs"
 
