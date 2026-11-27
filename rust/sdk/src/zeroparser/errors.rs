@@ -113,8 +113,8 @@ impl fmt::Display for ParseError {
                     field_num, expected, actual
                 )
             }
-            ParseError::UnknownTypeName { type_name } => {
-                write!(f, "Unknown message type '{}' not in registry", type_name)
+            ParseError::UnknownTypeName { .. } => {
+                f.write_str("Unknown message type not found in registry")
             }
             ParseError::UnsupportedGroupFieldType { field_num } => {
                 write!(f, "Deprecated group field type for field {}", field_num)
@@ -135,6 +135,18 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::ParseError;
+
+    #[test]
+    fn unknown_type_name_display_omits_schema_type_name() {
+        let type_name = ".example.MissingMessage";
+        let error = ParseError::UnknownTypeName {
+            type_name: type_name.to_string(),
+        };
+        let message = error.to_string();
+
+        assert!(!message.contains(type_name));
+        assert!(message.contains("not found in registry"));
+    }
 
     /// Verify ParseError variants are sorted alphabetically.
     ///
