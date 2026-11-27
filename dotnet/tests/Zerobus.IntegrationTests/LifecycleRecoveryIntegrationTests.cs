@@ -1,3 +1,4 @@
+#pragma warning disable CS0618 // Exercises the deprecated Create*Stream methods until they are removed.
 using System.Collections.Concurrent;
 using Grpc.Core;
 using NUnit.Framework;

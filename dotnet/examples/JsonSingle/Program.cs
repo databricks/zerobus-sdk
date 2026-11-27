@@ -18,18 +18,13 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .UnityCatalogUrl(workspaceUrl)
     .Build();
 
-// Configure stream options (optional).
-var options = StreamConfigurationOptions.Default with
-{
-    MaxInflightRequests = 50_000,
-};
-
-// Create JSON stream.
-using var stream = sdk.CreateJsonStream(
-    tableName,
-    clientId,
-    clientSecret,
-    options);
+// Create JSON stream. Configuration overrides are optional.
+using var stream = sdk.CreateStreamBuilder()
+    .Table(tableName)
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .Json()
+    .Build();
 
 Console.WriteLine("Ingesting records...");
 int failed = 0;

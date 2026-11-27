@@ -22,20 +22,15 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .UnityCatalogUrl(workspaceUrl)
     .Build();
 
-// 2. Configure stream options.
-var options = StreamConfigurationOptions.Default with
-{
-    MaxInflightRequests = 50_000,
-};
+// 2. Create stream. Configuration overrides are optional.
+using var stream = sdk.CreateStreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .Json()
+    .Build();
 
-// 3. Create stream.
-using var stream = sdk.CreateJsonStream(
-    "catalog.schema.table",
-    clientId,
-    clientSecret,
-    options);
-
-// 4. Ingest records, then call Flush() once.
+// 3. Ingest records, then call Flush() once.
 for (int id = 1; id <= 100; id++)
 {
     stream.IngestRecord($$"""{"id": {{id}}, "message": "Hello"}""");
@@ -98,78 +93,35 @@ aggregate throughput. Dedicated connections isolate that loss. For many
 smaller, low-throughput streams, call `ConnectionPerStream(false)`; shared
 multiplexing is recommended there to reduce connection overhead.
 
-#### `CreateJsonStream`
+#### `CreateStreamBuilder`
 
-Creates a JSON-only stream with OAuth 2.0 client credentials authentication.
-
-```csharp
-using var stream = sdk.CreateJsonStream(
-    "catalog.schema.table",
-    clientId,
-    clientSecret,
-    options);  // optional, defaults if null
-```
-
-#### `CreateProtoStream`
-
-Creates a protobuf-only stream with OAuth 2.0 client credentials authentication.
+Returns a `StreamBuilder`. Set the table, authentication, and any
+[configuration](#stream-configuration) overrides, then select the record format:
+`Json()` opens a `JsonZerobusStream`, and `Proto(descriptorProto)` opens a
+`ProtoZerobusStream`. Each has `Build()` and `BuildAsync()`.
 
 ```csharp
-using var stream = sdk.CreateProtoStream(
-    "catalog.schema.table",
-    descriptorProto,
-    clientId,
-    clientSecret,
-    options);  // optional, defaults if null
+// JSON with OAuth 2.0 client credentials.
+using var jsonStream = sdk.CreateStreamBuilder()
+    .Table("catalog.schema.json_table")
+    .OAuth(clientId, clientSecret)
+    .Json()
+    .Build();
+
+// Protobuf with custom authentication headers.
+await using var protoStream = await sdk.CreateStreamBuilder()
+    .Table("catalog.schema.proto_table")
+    .HeadersProvider(new MyHeadersProvider())
+    .Proto(descriptorProto)
+    .BuildAsync();
 ```
 
-#### `CreateStream`
+`Build()` throws `InvalidOperationException` if the table or authentication is
+missing. Of `OAuth()` and `HeadersProvider()`, the last call wins.
 
-Creates the legacy untyped stream with OAuth 2.0 client credentials authentication.
-Use this only when you intentionally need access to both JSON and protobuf overloads.
-The SDK now validates the `RecordType`/`DescriptorProto` combination before calling Rust.
-
-```csharp
-using var stream = sdk.CreateStream(
-    new TableProperties("catalog.schema.table"),
-    clientId,
-    clientSecret,
-    options);  // optional, defaults if null
-```
-
-#### `CreateJsonStreamWithHeadersProvider`
-
-Creates a JSON-only stream with custom authentication headers.
-
-```csharp
-using var stream = sdk.CreateJsonStreamWithHeadersProvider(
-    "catalog.schema.table",
-    new MyHeadersProvider(),
-    options);  // optional
-```
-
-#### `CreateProtoStreamWithHeadersProvider`
-
-Creates a protobuf-only stream with custom authentication headers.
-
-```csharp
-using var stream = sdk.CreateProtoStreamWithHeadersProvider(
-    "catalog.schema.table",
-    descriptorProto,
-    new MyHeadersProvider(),
-    options);  // optional
-```
-
-#### `CreateStreamWithHeadersProvider`
-
-Creates a stream with custom authentication headers.
-
-```csharp
-using var stream = sdk.CreateStreamWithHeadersProvider(
-    new TableProperties("catalog.schema.table"),
-    new MyHeadersProvider(),
-    options);  // optional
-```
+The `CreateStream`, `CreateJsonStream`, and `CreateProtoStream` methods and their
+`WithHeadersProvider` and `Async` variants are deprecated in favor of
+`CreateStreamBuilder()`, and will be removed in the next major release.
 
 #### `RecreateStream`
 
@@ -208,49 +160,24 @@ stream.Flush();
 
 ### `ZerobusStream`
 
-The untyped stream remains available for advanced callers. Thread-safe.
+The untyped stream returned by the deprecated `CreateStream` methods. Thread-safe.
+The methods below are shared with `JsonZerobusStream` and `ProtoZerobusStream`.
 
 #### `IngestRecord`
 
 Ingests a single record and returns its assigned offset. The record is queued for background
-sending and acknowledgment. With this untyped API, JSON streams must set
-`RecordType.Json` and use the string overloads; protobuf streams must provide
-`DescriptorProto` and use the byte-oriented overloads.
+sending and acknowledgment.
 
 ```csharp
-var jsonOptions = options with { RecordType = RecordType.Json };
-using var jsonStream = sdk.CreateStream(
-    new TableProperties("catalog.schema.json_table"),
-    clientId,
-    clientSecret,
-    jsonOptions);
-
 for (int id = 1; id <= 100_000; id++)
 {
-    jsonStream.IngestRecord($$"""{"id": {{id}}, "field": "value"}""");
+    stream.IngestRecord($$"""{"id": {{id}}, "field": "value"}""");
 
     // Flush periodically to bound memory on long-running streams.
     if (id % 10_000 == 0)
-        jsonStream.Flush();
+        stream.Flush();
 }
-jsonStream.Flush();
-```
-
-The protobuf stream works the same way, using the byte-oriented overloads:
-
-```csharp
-var protoOptions = options with { RecordType = RecordType.Proto };
-using var protoStream = sdk.CreateStream(
-    new TableProperties("catalog.schema.proto_table", descriptorProto),
-    clientId,
-    clientSecret,
-    protoOptions);
-
-for (int id = 1; id <= 100; id++)
-{
-    protoStream.IngestRecord(myMessage.ToByteArray());
-}
-protoStream.Flush();
+stream.Flush();
 ```
 
 #### `IngestRecords`
@@ -346,19 +273,21 @@ public class CustomHeadersProvider : IHeadersProvider
 }
 ```
 
-### `StreamConfigurationOptions`
+### Stream configuration
 
-Use C# record `with` expressions to customise:
+Set overrides on the `StreamBuilder` before selecting the record format:
 
 ```csharp
-var options = StreamConfigurationOptions.Default with
-{
-    MaxInflightRequests = 50_000,
-    RecoveryRetries = 10,
-};
+using var stream = sdk.CreateStreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .RecoveryRetries(10)
+    .Json()
+    .Build();
 ```
 
-| Property                    | Default   | Description                  |
+| Setter                      | Default   | Description                  |
 | --------------------------- | --------- | ---------------------------- |
 | `MaxInflightRequests`       | 1,000,000 | Backpressure control         |
 | `Recovery`                  | `true`    | Auto-recovery on failures    |
@@ -367,11 +296,10 @@ var options = StreamConfigurationOptions.Default with
 | `RecoveryRetries`           | 4         | Max recovery attempts        |
 | `ServerLackOfAckTimeoutMs`  | 60,000    | Server ack timeout           |
 | `FlushTimeoutMs`            | 300,000   | Flush timeout (5 min)        |
-| `RecordType`                | `Proto`   | Proto / Json / Unspecified   |
 | `StreamPausedMaxWaitTimeMs` | `null`    | Graceful close wait time     |
 
-Typed factories set `RecordType` automatically. You only need to set it manually when using
-the untyped `CreateStream` or `CreateStreamWithHeadersProvider` APIs.
+The deprecated `Create*Stream` methods take the same settings as a
+`StreamConfigurationOptions` record.
 
 ### Error Handling
 
@@ -496,6 +424,7 @@ dotnet/
 │   └── Zerobus/                               # Main SDK library
 │       ├── Zerobus.csproj
 │       ├── ZerobusSdk.cs                      # SDK entry point (IDisposable)
+│       ├── StreamBuilder.cs                   # Fluent stream builder
 │       ├── ZerobusStream.cs                   # Stream for record ingestion (IDisposable)
 │       ├── ZerobusException.cs                # Error type with IsRetryable
 │       ├── IHeadersProvider.cs                # Custom auth interface
