@@ -52,6 +52,8 @@ impl ZerobusStream {
             let _guard = span.enter();
             let mut last_acked_offset = initial_last_acked_offset;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
+            let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
+            let mut last_message_at = tokio::time::Instant::now();
             // Set when we exit because the supervisor signalled close (`recv_drain_token`).
             // On that path we drain the response stream inline so the server sees END_STREAM
             // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
@@ -82,24 +84,28 @@ impl ZerobusStream {
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
                         }
-                        res = tokio::time::timeout(
-                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                            inbound.message(),
-                        ) => res,
+                        // The ack timeout does not apply while paused; a spent ack
+                        // deadline here would otherwise spin with a zero wait.
+                        res = tokio::time::timeout(ack_timeout, inbound.message()) => res,
                     }
                 } else {
+                    let ack_wait = ack_deadline(&landing_zone, last_message_at, ack_timeout)
+                        .map_or(ack_timeout, |deadline| {
+                            deadline.saturating_duration_since(tokio::time::Instant::now())
+                        });
                     tokio::select! {
                         biased;
                         _ = recv_drain_token.cancelled() => {
                             close_initiated = true;
                             break 'recv_loop;
                         }
-                        res = tokio::time::timeout(
-                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                            inbound.message(),
-                        ) => res,
+                        res = tokio::time::timeout(ack_wait, inbound.message()) => res,
                     }
                 };
+
+                if let Ok(Ok(Some(_))) = message_result {
+                    last_message_at = tokio::time::Instant::now();
+                }
 
                 match message_result {
                     Ok(Ok(Some(InboundMessage::Ack(IngestRecordResponse {
@@ -191,8 +197,11 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Err(_timeout) => {
-                        // No message received for server_lack_of_ack_timeout_ms.
-                        if pause_deadline.is_none() && !landing_zone.is_observed_empty() {
+                        // A record sent after the wait started gets its own deadline;
+                        // fail only once the oldest pending record has waited the full timeout.
+                        let expired = ack_deadline(&landing_zone, last_message_at, ack_timeout)
+                            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
+                        if pause_deadline.is_none() && expired {
                             error!(
                                 "Server ack timeout: no response for {}ms",
                                 options.server_lack_of_ack_timeout_ms
@@ -263,6 +272,19 @@ impl ZerobusStream {
         }
         Ok(())
     }
+}
+
+/// When the oldest unacknowledged record has waited `timeout` since both its send
+/// and the last server message. `None` if nothing is pending or the deadline overflows.
+fn ack_deadline(
+    landing_zone: &RecordLandingZone,
+    last_message_at: tokio::time::Instant,
+    timeout: Duration,
+) -> Option<tokio::time::Instant> {
+    landing_zone
+        .oldest_observed_at()?
+        .max(last_message_at)
+        .checked_add(timeout)
 }
 
 /// Reads responses until the server ends the stream or `window` elapses, and applies the
