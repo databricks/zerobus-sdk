@@ -64,6 +64,7 @@ Run from the SDK directory.
 - Don't leak an internal constraint (e.g. ring power-of-two) into the public API.
 - A core guard is unreachable if the wrapper iterates first — guard both (single and batch).
 - Check how a wrapper's default / `0` / `-1` config value maps across the boundary to Rust — a wrapper default can silently become a different Rust value (`0` read as a real limit, a zero-valued enum as "unset").
+- Validate each builder setter the same way as the other setters, type checks included. Conflicting setters either let the last one win, as the Rust builder does, or fail with an error that names the conflict.
 
 ## Errors and retry
 
@@ -72,6 +73,7 @@ Run from the SDK directory.
 - Don't reuse the auth-rejection code for a TLS/cert failure.
 - Keep the typed cause; don't synthesize over it.
 - Pin error messages with a test — wrappers surface them.
+- A retry or backoff change also reaches the non-failure paths that share it (a clean server rotation reconnects through recovery); keep their behavior unless the change means to alter it.
 
 ## Concurrency and lifecycle
 
@@ -102,6 +104,7 @@ Run from the SDK directory.
 
 - Record the event before waking the caller, and emit at completion (not the next poll), so cancel/EOF doesn't drop it.
 - The exporter callback runs in the request poll — don't block, allocate, or panic; mark a retransmit with an attempt.
+- Log the value actually used (the drawn delay, not the configured base), and keep existing log field names; queries depend on them.
 
 ## Client-side encoding
 
@@ -120,6 +123,7 @@ Run from the SDK directory.
 - A user-facing change updates `NEXT_CHANGELOG.md` (template sections vary per SDK), README, `examples/`, and API docs (doc comments / Python `.pyi` stubs / JSDoc / Javadoc / godoc).
 - Call breaking changes out under `### Breaking Changes` (where the template has it) with migration steps; deprecations need a replacement and timeline.
 - Examples must run as written; fix a defect rather than documenting it.
+- Document the real bound of a configured value; if jitter can double a wait, give the maximum.
 - Cloud-specific workspace and Zerobus endpoint URL formats live only in the top-level `README.md` table ("Connection URLs and Workspace ID"); elsewhere, link to it and use placeholders. Examples read `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET`, and docs call the Unity Catalog URL the "workspace URL".
 - Lead every example, doc comment, and test with loop-then-`flush()`, never a per-record wait.
 - Releases are per-SDK, tag-triggered — use the `zerobus-sdk-release:*` skills; finalizing moves `NEXT_CHANGELOG.md` into `CHANGELOG.md` and resets it with the next header.
@@ -149,7 +153,16 @@ FFI, JNI, C++, and Go ship native archives on a GitHub Release, created by the p
 
 ## Review and PR process
 
-- Carry a fix to every sibling path, including other open PRs.
+For reviewers, people and agents alike, and for authors checking their own change.
+
+- Data loss and hot-path performance come first; missing either is worse than anything else here.
+  - Data loss: a record acknowledged before it's durable, dropped on close, cancel or recovery, or written twice by a retry.
+  - Hot path: the per-record path from `ingest` through encoding, the FFI crossing and the send loop to ack handling. Flag any new per-record allocation, copy, lock, blocking call or server round-trip.
+- Then check, in order: breaking changes, changelog, docs and examples, the same logic elsewhere, other correctness, tests. Style, naming and small refactors are nits.
+- Make the same fix wherever the same logic exists: in the other SDKs, in single and batch calls, sync and async APIs, gRPC and Arrow Flight streams, ephemeral and persistent streams, and in other open PRs. A change made for a goal (e.g. spreading reconnects with jitter) covers every path the goal applies to, including code the PR doesn't touch.
+- Blocking means it must change before merge: data loss or duplication, a hot-path slowdown the PR doesn't justify, a bug, a security problem, a breaking change outside a major, or a user-facing change with no changelog entry. A should-fix can land in a follow-up if the author says so. Start a nit with `nit:`.
+- One point per comment, on the line it's about: what goes wrong and when, then the fix. Check the claim against the code first.
+- List what a PR deliberately doesn't do, with a reason, under "Left out on purpose" in its description. Reviewers don't raise a listed item again unless the reason doesn't hold, and then say why.
 
 ## Commit conventions
 
