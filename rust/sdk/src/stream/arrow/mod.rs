@@ -251,8 +251,8 @@ pub struct ZerobusArrowStream {
     /// Pause gate used while draining a close signal or rebuilding after failure; accepted
     /// ingests remain pending until recovery replays or finalizes them.
     is_paused: Arc<AtomicBool>,
-    /// Final value sent as the HTTP `user-agent` header on every request.
-    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    /// Final value sent as the HTTP `user-agent` header on every request,
+    /// composed by [`ZerobusSdkBuilder::build`](crate::ZerobusSdkBuilder::build).
     /// Re-applied to each fresh Channel built during recovery.
     sdk_identifier: Arc<str>,
     /// Optional telemetry sink; when set, the encoder emits `BatchSent` (with byte

@@ -75,8 +75,8 @@ pub struct ZerobusSdk {
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     pub(crate) connector_factory: Option<ConnectorFactory>,
-    /// Final value sent as the HTTP `user-agent` header on every request.
-    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    /// Final value sent as the HTTP `user-agent` header on every request,
+    /// composed by [`ZerobusSdkBuilder::build`](crate::ZerobusSdkBuilder::build).
     pub(crate) sdk_identifier: Arc<str>,
     /// Shared cache of OAuth tokens, keyed per table, reused across all streams
     /// created from this SDK instance via the default OAuth path.
@@ -194,7 +194,7 @@ impl ZerobusSdk {
     /// This is used internally by the builder pattern. `sdk_identifier` is the
     /// fully-resolved value sent as the HTTP `user-agent` header; the builder
     /// is responsible for composing it from the default prefix and any
-    /// caller-supplied `application_name` or override.
+    /// caller-supplied `producer_id`, `application_name` or override.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_config(
         zerobus_endpoint: String,

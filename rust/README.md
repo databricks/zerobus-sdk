@@ -1300,6 +1300,7 @@ Also accepts `0` or `no`.
 | `unity_catalog_url(...)` | Unset | Set the Databricks workspace URL. Required for built-in OAuth or federated authentication (both exchange tokens at this URL). |
 | `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
 | `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
+| `producer_id(...)` | Unset | Set a producer id that names the application or component that writes the data. Sent as a `producer/<id>` token in the `user-agent` header on every request, unary calls included. At most 128 bytes of ASCII letters, digits and ``!#$%&'*+-.^_`\|~/``. |
 | `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
 | `token_cache_enabled(bool)` | `true` | Enable or disable token caching for the built-in OAuth and federated paths. |
 | `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth or federated token is refreshed. |
