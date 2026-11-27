@@ -2,12 +2,13 @@
 //!
 //! These JNI functions are used by `ClassLoaderIsolationTest` to verify that
 //! class references work correctly from daemon threads, even when the system
-//! classloader cannot see the SDK classes, and by the callback native tests to
-//! drive Java callbacks from SDK-owned threads.
+//! classloader cannot see the SDK classes, by the callback native tests to
+//! drive Java callbacks from SDK-owned threads, and by the stream native tests
+//! to run streams against an in-process mock server.
 
 use crate::callbacks::JavaAckCallback;
 use crate::class_cache::{as_jclass, get_class_cache};
-use crate::errors::guard;
+use crate::errors::{guard, throw_zerobus_exception};
 use crate::federated_auth::{get_token_blocking, java_idp_token_supplier};
 use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
 use crate::runtime::{block_on, get_jvm, get_runtime};
@@ -15,10 +16,12 @@ use databricks_zerobus_ingest_sdk::{
     AckCallback, FederatedTokenProvider, HeadersProvider, ZerobusError,
 };
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::jint;
+use jni::sys::{jint, jlong};
 use jni::JNIEnv;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use zerobus_test_support::mock_grpc::{start_mock_server, MockZerobusServer};
 
 /// Test finding a class from a Tokio daemon thread using direct `find_class`.
 ///
@@ -481,6 +484,73 @@ fn native_test_ack_callback_on_runtime_worker<'local>(
     });
 
     test_result(&mut env, result)
+}
+
+/// Mock servers started by Java tests, keyed by URL. They run until the process exits.
+static MOCK_SERVERS: OnceLock<Mutex<HashMap<String, Arc<MockZerobusServer>>>> = OnceLock::new();
+
+fn mock_servers() -> &'static Mutex<HashMap<String, Arc<MockZerobusServer>>> {
+    MOCK_SERVERS.get_or_init(Default::default)
+}
+
+/// Looks up a mock server by URL, throwing a `ZerobusException` if there is none.
+fn mock_server(env: &mut JNIEnv<'_>, url: &JString<'_>) -> Option<Arc<MockZerobusServer>> {
+    let url: String = match env.get_string(url) {
+        Ok(url) => url.into(),
+        Err(error) => {
+            throw_zerobus_exception(env, &format!("Invalid mock server URL: {error}"));
+            return None;
+        }
+    };
+    let server = mock_servers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&url)
+        .cloned();
+    if server.is_none() {
+        throw_zerobus_exception(env, &format!("No mock server at {url}"));
+    }
+    server
+}
+
+/// Starts an in-process mock Zerobus server and returns its `http://` URL.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestStartMockServer<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> JObject<'local> {
+    guard(env, |mut env| {
+        match block_on(async { start_mock_server().await.map_err(|e| e.to_string()) }) {
+            Ok((server, url)) => {
+                mock_servers()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(url.clone(), Arc::new(server));
+                test_result(&mut env, url)
+            }
+            Err(error) => {
+                throw_zerobus_exception(&mut env, &format!("Failed to start mock server: {error}"));
+                JObject::null()
+            }
+        }
+    })
+}
+
+/// Returns how many records the mock server has received, counting each record of a batch.
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestMockServerWriteCount<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    url: JString<'local>,
+) -> jlong {
+    guard(env, |mut env| match mock_server(&mut env, &url) {
+        Some(server) => block_on(server.get_write_count()) as jlong,
+        None => 0,
+    })
 }
 
 fn test_result<'local>(env: &mut JNIEnv<'local>, result: String) -> JObject<'local> {

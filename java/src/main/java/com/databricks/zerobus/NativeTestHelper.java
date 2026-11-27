@@ -3,7 +3,8 @@ package com.databricks.zerobus;
 /**
  * Native test helpers for JNI integration testing.
  *
- * <p>Provides native methods that test callbacks and class resolution from Tokio daemon threads.
+ * <p>Provides native methods that test callbacks and class resolution from Tokio daemon threads,
+ * and an in-process mock server for running streams without credentials.
  *
  * @apiNote This class is not part of the public SDK API. It lives in {@code src/main} because it
  *     must be loadable by the isolated {@link java.net.URLClassLoader} in {@code
@@ -105,4 +106,22 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestFederatedProviderSupplierError(IdpTokenSupplier supplier);
+
+  /**
+   * Starts an in-process mock Zerobus server that runs until the JVM exits. A {@link ZerobusSdk}
+   * created with its URL connects over plaintext; use a {@link HeadersProvider} for authentication.
+   *
+   * @return the server's {@code http://} URL
+   * @throws ZerobusException if the server cannot start
+   */
+  public static native String nativeTestStartMockServer() throws ZerobusException;
+
+  /**
+   * Returns how many records the mock server has received, counting each record of a batch.
+   *
+   * @param url the mock server URL
+   * @return the number of records received
+   * @throws ZerobusException if there is no mock server at {@code url}
+   */
+  public static native long nativeTestMockServerWriteCount(String url) throws ZerobusException;
 }
