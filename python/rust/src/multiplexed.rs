@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -16,7 +16,7 @@ use databricks_zerobus_ingest_sdk::{
     MultiplexedStream as RustMultiplexedStream, ZerobusSdk as RustSdk,
 };
 
-use crate::auth::HeadersProviderWrapper;
+use crate::auth::{HeadersProviderWrapper, IdpCallbackHolder, IdpSupplier};
 use crate::common::{
     apply_grpc_options, map_error, AckCallback, AckCallbackWrapper, RecordFormat,
     StreamConfigurationOptions, TableProperties,
@@ -168,15 +168,13 @@ impl MuxConfig {
 /// to keep (the native supplier holds only a weak one), as `create_stream_federated` does.
 pub(crate) fn idp_holder(
     py: Python<'_>,
-    idp_supplier: &crate::auth::IdpSupplier,
-) -> PyResult<Py<crate::auth::IdpCallbackHolder>> {
+    idp_supplier: &IdpSupplier,
+) -> PyResult<Py<IdpCallbackHolder>> {
     idp_supplier
         .holder
         .as_ref()
         .map(|holder| holder.clone_ref(py))
         .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "federated IdP supplier handle has already been cleared",
-            )
+            PyRuntimeError::new_err("federated IdP supplier handle has already been cleared")
         })
 }

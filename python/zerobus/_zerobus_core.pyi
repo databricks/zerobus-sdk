@@ -792,7 +792,7 @@ class aio:
         """A stream that distributes records round-robin across several sub-streams (Beta).
 
         Created by ``ZerobusSdk.create_multiplexed_stream*``. Ingest methods return an opaque
-        message ID, which is not ordered and may be negative. Thread-safe.
+        message ID, which is not ordered and may be negative. Safe to share across tasks.
         """
 
         @property

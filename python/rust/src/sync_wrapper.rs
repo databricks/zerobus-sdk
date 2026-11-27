@@ -472,7 +472,7 @@ pub struct MultiplexedStream {
     /// For a federated stream, a strong reference to the IdP callback holder (the
     /// native supplier holds only a weak one). Exposed to the cyclic GC via
     /// `__traverse__`/`__clear__` so an `owner -> stream -> holder -> callback ->
-    /// owner` cycle is collectable. `None` for OAuth / headers-provider streams.
+    /// owner` cycle is collectable. `None` for streams without federation.
     idp_holder: Option<Py<IdpCallbackHolder>>,
 }
 
