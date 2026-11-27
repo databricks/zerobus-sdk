@@ -24,8 +24,8 @@ use jni::JNIEnv;
 use std::sync::Arc;
 
 /// Native ABI version; bump in lockstep with Java's `NativeLoader.EXPECTED_NATIVE_ABI` whenever
-/// native method signatures change, so a stale library is rejected at load.
-const NATIVE_ABI_VERSION: jint = 3;
+/// native methods are added or their signatures change, so a stale library is rejected at load.
+const NATIVE_ABI_VERSION: jint = 4;
 
 /// # JNI Signature
 /// ```java
@@ -695,6 +695,8 @@ fn create_stream<'local>(
 }
 
 /// Stream-creation arguments copied off the JNI thread, so the async build task owns them.
+///
+/// Shared by ordinary and multiplexed JSON/protobuf/Avro stream creation.
 pub(crate) struct StreamCreateArgs {
     table_name: String,
     auth: JniStreamAuth,
