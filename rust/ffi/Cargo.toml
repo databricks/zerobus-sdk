@@ -39,6 +39,8 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 [dev-dependencies]
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
+# Mock gRPC server for the multiplexed panic-path tests, which need a live mux.
+zerobus-test-support = { path = "../test-support" }
 
 [build-dependencies]
 cbindgen.workspace = true

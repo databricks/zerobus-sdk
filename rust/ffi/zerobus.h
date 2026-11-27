@@ -254,20 +254,29 @@ typedef struct CZerobusMultiplexedStream {
  * `mux` is non-null on success, and the caller then owns it; it is null on
  * failure.
  *
- * Both multiplexed `_async` creates follow the same contract. Each checks the
- * arguments listed on it and returns at once: false with `result` set if a
- * check fails, in which case its callback never runs; otherwise true, and
- * every other error reaches the callback.
+ * Every multiplexed `_async` function follows the same contract. It checks
+ * its C arguments and returns at once: false with `result` set if a check
+ * fails, in which case its callback never runs; otherwise true, and every
+ * other error, including a closed mux, reaches the callback. Async ingests
+ * report a close in progress as an error; async wait and flush wait for it,
+ * as the blocking calls do.
  * The callback then runs exactly once, on a runtime thread, possibly before
  * the call returns: set up everything its `user_data` points to before the
  * call. The `result` it
  * receives is valid only during the call: do not free
  * `result->error_message` (the FFI frees it when the callback returns), and
  * copy it to keep it. The callback must be thread-safe and must not unwind.
- * It may call the `_async` creates, `zerobus_multiplexed_stream_is_closed`
+ * It may call the `_async` functions, `zerobus_multiplexed_stream_is_closed`
  * and `zerobus_multiplexed_stream_free`, but no blocking function: no other
  * `zerobus_multiplexed_stream_*` call, no sync create, and no blocking
- * `zerobus_stream_*` call.
+ * `zerobus_stream_*` call. Call `zerobus_multiplexed_stream_free` from a
+ * callback only after the `_async` call that started it has returned, since
+ * free must not overlap another call on the handle.
+ * For an `_async` ingest, the record's ack callback can run before its
+ * completion callback. Flush and close wait until accepted `_async` ingests
+ * are queued, not for their completion callbacks, and a failed `_async`
+ * ingest is not returned by `zerobus_multiplexed_stream_get_unacked_records`:
+ * keep your copy of a record until its callback reports success.
  * The callback must not be NULL, and the `user_data` passed with it must
  * stay valid until it runs.
  * Callbacks run on a runtime worker thread: one that blocks holds that
@@ -277,6 +286,19 @@ typedef struct CZerobusMultiplexedStream {
 typedef void (*CreateMultiplexedStreamAsyncCallback)(struct CZerobusMultiplexedStream *mux,
                                                      const struct CResult *result,
                                                      void *user_data);
+
+/**
+ * Completion callback for the multiplexed `_async` ingests (Beta).
+ *
+ * `message_id` is what the blocking ingest would return: an opaque message
+ * ID (it can be negative and is not ordered, so do not compare IDs), -2 with
+ * success for an empty batch, or -1 with the error in `result`. Same ABI as
+ * `OffsetAsyncCallback`. Follows the multiplexed `_async` contract described
+ * on `CreateMultiplexedStreamAsyncCallback`.
+ */
+typedef void (*MessageIdAsyncCallback)(int64_t message_id,
+                                       const struct CResult *result,
+                                       void *user_data);
 
 /**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
@@ -930,7 +952,8 @@ struct CStreamConfigurationOptions zerobus_get_default_config(void);
  * pass the `ack_user_data` parameter instead. When close returns, all ack
  * callbacks have run, unless close waited longer than
  * `callback_max_wait_time_ms` (default 5 s; see
- * `zerobus_multiplexed_stream_close`).
+ * `zerobus_multiplexed_stream_close`). `_async` completion callbacks can still
+ * run after close returns.
  *
  * Once this function is called, the FFI owns `ack_user_data` and invokes
  * `free_ack_user_data` (when set) exactly once, from any thread, after the
@@ -1005,8 +1028,9 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_hea
  * Free a multiplexed stream handle (Beta).
  *
  * Call `zerobus_multiplexed_stream_close` first to flush pending records;
- * freeing an open stream abandons them. Must not run concurrently with any
- * other call on `mux` (it may be called from an async create's completion
+ * freeing an open stream abandons them. Pending `_async` operations keep the
+ * stream alive and still call back exactly once. Must not run concurrently
+ * with any other call on `mux` (it may be called from an `_async` completion
  * callback), and `mux` must not be used afterwards.
  */
 void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
@@ -1095,8 +1119,17 @@ bool zerobus_multiplexed_stream_wait_for_message_id(struct CZerobusMultiplexedSt
 /**
  * Wait until every record queued on every sub-stream is acknowledged (Beta).
  *
- * Covers every ingest that returned before this call, and waits up to
- * `flush_timeout_ms`.
+ * Covers blocking ingests that have returned and every `_async` ingest
+ * accepted before this call: it first waits, up to `flush_timeout_ms`, for
+ * their background tasks to queue them, then waits up to `flush_timeout_ms`
+ * again for the acknowledgments, so a flush can take up to twice
+ * `flush_timeout_ms`. If the first wait times out, the flush still flushes
+ * what is queued, then reports a timeout. A timeout does not mean the
+ * records are lost: some may be acknowledged already, so recover with
+ * `zerobus_multiplexed_stream_get_unacked_records`, which returns only the
+ * ones that are not, instead of re-sending everything. `_async` ingests
+ * submitted during the flush may not be covered; the next flush or close
+ * covers them.
  *
  * Returns false with `result` set on a timeout, on a closed mux, or once any
  * sub-stream has failed, even if the other sub-streams flushed. Check
@@ -1114,17 +1147,20 @@ bool zerobus_multiplexed_stream_flush(struct CZerobusMultiplexedStream *mux,
  * Flush and close every sub-stream (Beta).
  *
  * Waits for in-progress ingest, flush, and wait calls on this mux to return,
- * then flushes. On error, call `zerobus_multiplexed_stream_get_unacked_records`
- * to recover unacknowledged records. The handle must still be released with
+ * and for every accepted `_async` ingest to be queued, then flushes those too.
+ * On error, call `zerobus_multiplexed_stream_get_unacked_records` to recover
+ * unacknowledged records. The handle must still be released with
  * `zerobus_multiplexed_stream_free`.
  *
  * Returns false with `result` set on failure; the mux is closed either way.
  * When close returns, all ack callbacks have run, unless close waited longer
  * than `callback_max_wait_time_ms` (default 5 s). With
  * `has_callback_max_wait_time_ms` false there is no limit. After it, queued
- * callbacks are dropped and a running one can outlive close. Close runs its
- * own flush, also after a flush that timed out, so a flush followed by a close
- * can wait up to twice `flush_timeout_ms`.
+ * callbacks are dropped and a running one can outlive close. `_async`
+ * completion callbacks can still run after close returns. Close runs its own
+ * flush, also after a flush that timed out, and a flush can itself take twice
+ * `flush_timeout_ms`, so a flush followed by a close can wait up to three
+ * times `flush_timeout_ms`.
  */
 bool zerobus_multiplexed_stream_close(struct CZerobusMultiplexedStream *mux,
                                       struct CResult *result);
@@ -1222,6 +1258,160 @@ bool zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(struct CZ
                                                                        CreateMultiplexedStreamAsyncCallback callback,
                                                                        void *callback_user_data,
                                                                        struct CResult *result);
+
+/**
+ * Ingest a protobuf record on a background task and report its message ID
+ * via `callback` (Beta).
+ *
+ * Copies the record before returning. `callback` receives the message ID, or
+ * -1 with the error, exactly as `zerobus_multiplexed_stream_ingest_proto_record`
+ * would return it; a failed ingest queued nothing. Records accepted before a
+ * call to flush, close or `get_unacked_records` (blocking or async) are
+ * queued before it proceeds, so it covers them. A closed or closing mux is
+ * reported through `callback`. `data` may be NULL only when `data_len` is 0.
+ *
+ * `_async` ingests have no back-pressure: each accepted call starts a task,
+ * so limit how many are outstanding. One that waits for capacity longer
+ * than 30 seconds fails in its callback. Tasks can queue records in a
+ * different order than the calls were made.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_ingest_proto_record_async(struct CZerobusMultiplexedStream *mux,
+                                                          const uint8_t *data,
+                                                          uintptr_t data_len,
+                                                          MessageIdAsyncCallback callback,
+                                                          void *user_data,
+                                                          struct CResult *result);
+
+/**
+ * Ingest a JSON record on a background task and report its message ID via
+ * `callback` (Beta).
+ *
+ * Same contract as `zerobus_multiplexed_stream_ingest_proto_record_async`.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_ingest_json_record_async(struct CZerobusMultiplexedStream *mux,
+                                                         const char *json_data,
+                                                         MessageIdAsyncCallback callback,
+                                                         void *user_data,
+                                                         struct CResult *result);
+
+/**
+ * Ingest a batch of protobuf records on a background task and report its
+ * message ID via `callback` (Beta).
+ *
+ * Copies every record before returning. `callback` receives what
+ * `zerobus_multiplexed_stream_ingest_proto_records` would return: the
+ * batch's message ID, -2 with success for an empty batch (not a message ID),
+ * or -1 with the error. Otherwise as
+ * `zerobus_multiplexed_stream_ingest_proto_record_async`.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_ingest_proto_records_async(struct CZerobusMultiplexedStream *mux,
+                                                           const uint8_t *const *records,
+                                                           const uintptr_t *record_lens,
+                                                           uintptr_t num_records,
+                                                           MessageIdAsyncCallback callback,
+                                                           void *user_data,
+                                                           struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records on a background task and report its
+ * message ID via `callback` (Beta).
+ *
+ * Same contract as `zerobus_multiplexed_stream_ingest_proto_records_async`.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_ingest_json_records_async(struct CZerobusMultiplexedStream *mux,
+                                                          const char *const *json_records,
+                                                          uintptr_t num_records,
+                                                          MessageIdAsyncCallback callback,
+                                                          void *user_data,
+                                                          struct CResult *result);
+
+/**
+ * Wait for a message ID on a background task and report completion via
+ * `callback` (Beta).
+ *
+ * `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
+ * would return. Like it, the wait starts after a close in progress
+ * finishes, and then reports the result on the closed mux. For high
+ * throughput, prefer one flush after an ingest loop over waiting on every
+ * message ID.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_wait_for_message_id_async(struct CZerobusMultiplexedStream *mux,
+                                                          int64_t message_id,
+                                                          BoolAsyncCallback callback,
+                                                          void *user_data,
+                                                          struct CResult *result);
+
+/**
+ * Flush on a background task and report completion via `callback` (Beta).
+ *
+ * Covers the same records as `zerobus_multiplexed_stream_flush`: every
+ * blocking and `_async` ingest accepted before this call. Like
+ * the blocking flush, it starts after a close in progress finishes, and then
+ * reports the result on the closed mux.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_flush_async(struct CZerobusMultiplexedStream *mux,
+                                            BoolAsyncCallback callback,
+                                            void *user_data,
+                                            struct CResult *result);
+
+/**
+ * Flush and close every sub-stream on a background task and report
+ * completion via `callback` (Beta).
+ *
+ * Behaves like `zerobus_multiplexed_stream_close`, waiting for in-flight calls
+ * and accepted `_async` ingests first. The close starts when its background
+ * task runs, so right after this returns
+ * `zerobus_multiplexed_stream_is_closed` can still be false, and calls made
+ * then are accepted and covered by the close. Once the close has started,
+ * `_async` ingests fail at once, and other calls wait for it and then report
+ * on the closed mux. The handle must still be released with
+ * `zerobus_multiplexed_stream_free`, which may happen before `callback`
+ * runs.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_close_async(struct CZerobusMultiplexedStream *mux,
+                                            BoolAsyncCallback callback,
+                                            void *user_data,
+                                            struct CResult *result);
+
+/**
+ * Close the mux on a background task and report every unacknowledged record
+ * via `callback` (Beta).
+ *
+ * Behaves like `zerobus_multiplexed_stream_get_unacked_records`. On success
+ * the callback owns the array and frees it with `zerobus_free_record_array`.
+ * Like `zerobus_multiplexed_stream_close_async`, it starts when its
+ * background task runs: calls made right after it returns can still be
+ * accepted, and once it has started, `_async` ingests fail at once and other
+ * calls wait for it.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_multiplexed_stream_get_unacked_records_async(struct CZerobusMultiplexedStream *mux,
+                                                          RecordArrayAsyncCallback callback,
+                                                          void *user_data,
+                                                          struct CResult *result);
 
 /**
  * Build a protobuf schema from Unity Catalog table metadata JSON.
