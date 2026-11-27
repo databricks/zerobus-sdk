@@ -1,11 +1,12 @@
 """
 Alternative authentication methods for Zerobus streams.
 
-This module defines the opt-in values for the ``auth`` argument of
-``create_stream``, used instead of a Databricks OAuth client_id/client_secret:
-:class:`FederatedToken` authenticates with an external identity provider (for
-example Entra ID), and :class:`PersonalAccessToken` with a Databricks personal
-access token.
+This module defines the values for the ``auth`` argument of ``create_stream`` and
+``create_multiplexed_stream``: :class:`FederatedToken` authenticates with an external
+identity provider (for example Entra ID), and :class:`PersonalAccessToken` with a
+Databricks personal access token. ``create_stream`` uses them instead of a Databricks
+OAuth client_id/client_secret; ``create_multiplexed_stream`` takes OAuth credentials as
+:class:`OAuth`.
 """
 
 import uuid
@@ -21,7 +22,7 @@ IdpTokenSupplier = Callable[[], Union[str, Awaitable[str]]]
 @dataclass(frozen=True)
 class FederatedToken:
     """Authenticate a Zerobus stream by federating an external IdP token, passed as
-    the ``auth`` argument to ``create_stream``.
+    the ``auth`` argument to ``create_stream`` or ``create_multiplexed_stream``.
 
     Immutable: a distinct callback is a distinct ``FederatedToken``. Because
     ``_cache_identity`` is fixed at construction and partitions the account-level
@@ -70,7 +71,7 @@ def _require_non_empty_token(token: str) -> str:
 @dataclass(frozen=True)
 class PersonalAccessToken:
     """Authenticate a Zerobus stream with a Databricks personal access token (PAT),
-    passed as the ``auth`` argument to ``create_stream``.
+    passed as the ``auth`` argument to ``create_stream`` or ``create_multiplexed_stream``.
 
     Private Preview: PAT authentication for Zerobus requires server-side
     enablement.
@@ -80,10 +81,10 @@ class PersonalAccessToken:
     it: once it expires or is revoked, creating or recovering a stream fails with an
     authentication error.
 
-    Works with ``create_stream`` only; persistent streams take the token through
-    ``PersistentStreamBuilder.personal_access_token`` instead, and Arrow Flight streams
-    do not support PAT authentication yet. ``ZerobusSdk`` still needs the workspace URL,
-    but PAT authentication does not use it.
+    Works with ``create_stream`` and ``create_multiplexed_stream``; persistent streams take
+    the token through ``PersistentStreamBuilder.personal_access_token`` instead, and Arrow
+    Flight streams do not support PAT authentication yet. ``ZerobusSdk`` still needs the
+    workspace URL, but PAT authentication does not use it.
 
     The token is left out of ``repr()``, so printing or logging the object does not
     reveal it.
@@ -101,8 +102,35 @@ class PersonalAccessToken:
         _require_non_empty_token(self.token)
 
 
+@dataclass(frozen=True)
+class OAuth:
+    """Authenticate a multiplexed stream with OAuth client credentials, passed as the
+    ``auth`` argument to ``create_multiplexed_stream``.
+
+    ``create_stream`` takes the same credentials as its ``client_id`` and ``client_secret``
+    arguments. The client secret is left out of ``repr()``, so printing or logging the
+    object does not reveal it.
+
+    Args:
+        client_id: The OAuth client ID. Must be a non-empty string.
+        client_secret: The OAuth client secret. Must be a non-empty string.
+
+    Raises:
+        ValueError: If ``client_id`` or ``client_secret`` is empty or not a string.
+    """
+
+    client_id: str
+    client_secret: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        for name, value in (("client_id", self.client_id), ("client_secret", self.client_secret)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+
+
 __all__ = [
     "FederatedToken",
     "IdpTokenSupplier",
+    "OAuth",
     "PersonalAccessToken",
 ]

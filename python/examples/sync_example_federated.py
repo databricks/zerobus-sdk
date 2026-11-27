@@ -16,6 +16,10 @@ Two federation modes, selected by `databricks_client_id`:
 
 Record Type Mode: JSON (omitting a descriptor from TableProperties selects JSON).
 
+The same FederatedToken works with `create_stream(auth=...)` and with
+`create_multiplexed_stream(..., auth=...)`. This example opens an ordinary stream, then a
+multiplexed stream (Beta) with the same token, which shares its cached Databricks token.
+
 Note: the existing client_id/client_secret and headers_provider authentication
 paths are unchanged; `auth=FederatedToken(...)` is a new, opt-in argument.
 """
@@ -28,7 +32,7 @@ import requests
 from example_config import required_env
 
 from zerobus import FederatedToken
-from zerobus.sdk.shared import StreamConfigurationOptions, TableProperties
+from zerobus.sdk.shared import MultiplexedStreamOptions, StreamConfigurationOptions, TableProperties
 from zerobus.sdk.sync import ZerobusSdk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -51,6 +55,7 @@ ENTRA_SCOPE = os.getenv("ENTRA_SCOPE", "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.de
 DATABRICKS_SP_CLIENT_ID = os.getenv("DATABRICKS_SP_CLIENT_ID") or None
 
 NUM_RECORDS = 100
+STREAM_COUNT = 4
 
 
 def get_entra_token():
@@ -115,6 +120,27 @@ def main():
             stream.ingest_record_offset(json.dumps(create_sample_json_record(i)))
         stream.flush()
         logger.info("Ingested and acknowledged %d records", NUM_RECORDS)
+    finally:
+        stream.close()
+
+    ingest_multiplexed(sdk, table_properties, auth)
+
+
+def ingest_multiplexed(sdk, table_properties, auth):
+    """Federate a multiplexed stream (Beta) with the same token, which shares its cached token."""
+    logger.info("Opening a multiplexed stream of %d sub-streams with the same token", STREAM_COUNT)
+    stream = sdk.create_multiplexed_stream(
+        table_properties,
+        STREAM_COUNT,
+        auth=auth,
+        options=MultiplexedStreamOptions(max_inflight_records=100_000, recovery=True),
+    )
+    try:
+        # Records go round-robin across sub-streams. Queue them in a loop, then flush once.
+        for i in range(NUM_RECORDS):
+            stream.ingest_record(json.dumps(create_sample_json_record(i)))
+        stream.flush()
+        logger.info("Ingested and acknowledged %d records across %d sub-streams", NUM_RECORDS, STREAM_COUNT)
     finally:
         stream.close()
 

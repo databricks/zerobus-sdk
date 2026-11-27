@@ -6,6 +6,8 @@ This module provides high-performance synchronous ingestion backed by a Rust cor
 
 from zerobus.sdk.sync.zerobus_sdk import (
     HeadersProvider,
+    MultiplexedStream,
+    MultiplexedStreamOptions,
     NonRetriableException,
     PersistentStream,
     PersistentStreamBuilder,
@@ -28,6 +30,8 @@ __all__ = [
     "RecordAcknowledgment",
     "TableProperties",
     "StreamConfigurationOptions",
+    "MultiplexedStream",
+    "MultiplexedStreamOptions",
     "RecordType",
     "HeadersProvider",
     "ZerobusException",

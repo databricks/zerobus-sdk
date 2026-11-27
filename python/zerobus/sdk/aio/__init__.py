@@ -7,6 +7,8 @@ with native async/await support.
 
 from zerobus.sdk.aio.zerobus_sdk import (
     HeadersProvider,
+    MultiplexedStream,
+    MultiplexedStreamOptions,
     NonRetriableException,
     PersistentStream,
     PersistentStreamBuilder,
@@ -27,6 +29,8 @@ __all__ = [
     "ZerobusArrowStream",
     "TableProperties",
     "StreamConfigurationOptions",
+    "MultiplexedStream",
+    "MultiplexedStreamOptions",
     "RecordType",
     "HeadersProvider",
     "ZerobusException",

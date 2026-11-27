@@ -85,6 +85,20 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_async_create_stream_with_headers_provider_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream_with_headers_provider, "options")
 
+    def test_create_multiplexed_stream_auth_and_options_are_keyword_only(self):
+        from zerobus.sdk import aio, sync
+
+        for sdk_type in (sync.ZerobusSdk, aio.ZerobusSdk):
+            params = inspect.signature(sdk_type.create_multiplexed_stream).parameters
+            self.assertEqual(list(params)[1:3], ["table_properties", "stream_count"])
+            for name in ("table_properties", "stream_count"):
+                self.assertEqual(params[name].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for name in ("auth", "options"):
+                self.assertEqual(params[name].kind, inspect.Parameter.KEYWORD_ONLY)
+            # auth is required: a multiplexed stream has no unauthenticated mode.
+            self.assertIs(params["auth"].default, inspect.Parameter.empty)
+            self.assertIs(params["options"].default, None)
+
     def test_async_wait_for_offset_accepts_offset_only(self):
         sig = inspect.signature(core.aio.ZerobusStream.wait_for_offset)
         try:
