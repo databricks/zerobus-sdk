@@ -632,4 +632,150 @@ mod tests {
         let expected = format!("{} my-app/1.0", crate::DEFAULT_SDK_IDENTIFIER);
         assert_eq!(&*sdk.sdk_identifier, expected);
     }
+
+    fn build_with_producer_id(id: &str) -> ZerobusResult<ZerobusSdk> {
+        ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .producer_id(id)
+            .build()
+    }
+
+    #[test]
+    fn test_sdk_identifier_producer_id_goes_after_prefix_and_before_application_name() {
+        let d = crate::DEFAULT_SDK_IDENTIFIER;
+        for (override_id, app, expected) in [
+            (None, None, format!("{d} producer/team/app-1")),
+            (
+                None,
+                Some("my-app/1.0"),
+                format!("{d} producer/team/app-1 my-app/1.0"),
+            ),
+            (
+                Some("custom-agent/2.0"),
+                None,
+                "custom-agent/2.0 producer/team/app-1".to_string(),
+            ),
+            (
+                Some("custom-agent/2.0"),
+                Some("my-app/1.0"),
+                "custom-agent/2.0 producer/team/app-1 my-app/1.0".to_string(),
+            ),
+        ] {
+            // Setters run in the order app, producer id, override, so the
+            // wire order does not follow the call order.
+            let mut builder =
+                ZerobusSdkBuilder::new().endpoint("https://workspace.zerobus.databricks.com");
+            if let Some(app) = app {
+                builder = builder.application_name(app);
+            }
+            builder = builder.producer_id("team/app-1");
+            if let Some(override_id) = override_id {
+                builder = builder.sdk_identifier(override_id);
+            }
+            let sdk = builder.build().expect("should build");
+
+            assert_eq!(&*sdk.sdk_identifier, expected);
+        }
+    }
+
+    #[test]
+    fn test_sdk_identifier_trims_producer_id() {
+        // `str::trim` removes Unicode whitespace too, not only ASCII.
+        for id in ["  \tteam/app-1\n ", "\u{a0}team/app-1\u{2003}"] {
+            let sdk = build_with_producer_id(id).expect("should build");
+
+            let expected = format!("{} producer/team/app-1", crate::DEFAULT_SDK_IDENTIFIER);
+            assert_eq!(&*sdk.sdk_identifier, expected, "for {:?}", id);
+        }
+    }
+
+    #[test]
+    fn test_sdk_identifier_blank_producer_id_falls_back_to_default() {
+        for id in ["", "   ", " \t\n", "\u{a0}\u{2003}"] {
+            let sdk = build_with_producer_id(id).expect("should build");
+
+            assert_eq!(
+                &*sdk.sdk_identifier,
+                crate::DEFAULT_SDK_IDENTIFIER,
+                "for {:?}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_producer_id_with_every_allowed_byte_class_is_accepted() {
+        let id = "AZaz09!#$%&'*+-.^_`|~/";
+        let sdk = build_with_producer_id(id).expect("should build");
+
+        let expected = format!("{} producer/{}", crate::DEFAULT_SDK_IDENTIFIER, id);
+        assert_eq!(&*sdk.sdk_identifier, expected);
+    }
+
+    #[test]
+    fn test_producer_id_with_invalid_bytes_is_rejected() {
+        for bad in [
+            " ", "\t", "(", ")", "\"", ",", ";", ":", "<", "=", ">", "?", "@", "[", "\\", "]", "{",
+            "}", "\n", "\r", "\u{0}", "\u{1}", "\u{7f}", "é", "日",
+        ] {
+            let id = format!("team{}a", bad);
+            let result = build_with_producer_id(&id);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ZerobusError::InvalidArgument(ref msg)) if msg.contains("producer_id")
+                ),
+                "expected InvalidArgument for {:?}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_producer_id_length_limit_counts_trimmed_bytes() {
+        let max = "a".repeat(128);
+        for id in [max.clone(), format!("  {}  ", max)] {
+            let sdk = build_with_producer_id(&id).expect("should build");
+
+            let expected = format!("{} producer/{}", crate::DEFAULT_SDK_IDENTIFIER, max);
+            assert_eq!(&*sdk.sdk_identifier, expected);
+        }
+
+        let result = build_with_producer_id(&"a".repeat(129));
+        assert!(matches!(
+            result,
+            Err(ZerobusError::InvalidArgument(ref msg)) if msg.contains("producer_id")
+        ));
+    }
+
+    #[test]
+    fn test_producer_id_error_messages() {
+        let allowed = "only ASCII letters, digits and !#$%&'*+-.^_`|~/ are allowed";
+        for (id, expected) in [
+            // The first UTF-8 byte of `é`, not the code point.
+            (
+                "teaméa".to_string(),
+                format!("producer_id contains the byte 0xc3; {allowed}"),
+            ),
+            // The first bad byte, not the last.
+            (
+                "team;a b".to_string(),
+                format!("producer_id contains the byte 0x3b; {allowed}"),
+            ),
+            (
+                "a".repeat(129),
+                "producer_id is 129 bytes; the maximum is 128 bytes".to_string(),
+            ),
+        ] {
+            match build_with_producer_id(&id) {
+                Err(ZerobusError::InvalidArgument(msg)) => assert_eq!(msg, expected),
+                other => panic!(
+                    "expected InvalidArgument for {:?}, got {:?}",
+                    id,
+                    other.err()
+                ),
+            }
+        }
+    }
 }
