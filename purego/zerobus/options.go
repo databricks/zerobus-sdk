@@ -202,9 +202,10 @@ func WithLackOfAckTimeout(d time.Duration) StreamOption {
 	return func(c *streamConfig) { c.cfg.LackOfAckTimeout = d }
 }
 
-// WithFlushTimeout sets the upper bound on how long Flush and WaitForOffset wait
-// for acknowledgement. A caller context may shorten this budget but cannot
-// extend it. A non-positive value keeps the default (5 minutes).
+// WithFlushTimeout sets the upper bound on how long Flush and WaitForOffset,
+// or Flush and WaitForMessageID on a multiplexed stream, wait for
+// acknowledgement. A caller context may shorten this budget but cannot extend
+// it. A non-positive value keeps the default (5 minutes).
 func WithFlushTimeout(d time.Duration) StreamOption {
 	return func(c *streamConfig) { c.cfg.FlushTimeout = d }
 }

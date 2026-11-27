@@ -530,8 +530,9 @@ func (m *MultiplexedStream) FlushContext(ctx context.Context) error {
 // returns a non-retryable error. If the lane fails or closes before the ID is
 // acknowledged, it returns that lane's error, even when another lane failed
 // first. A lane that closed without a failure, for example through SDK.Close,
-// gives a non-retryable lane closed error. Prefer Flush for bulk durability
-// checks; use a per-record wait only for low-volume strict confirmation flows.
+// gives a non-retryable lane closed error. Pass only an ID that this stream
+// returned without an error. Prefer Flush for bulk durability checks; use a
+// per-record wait only for low-volume strict confirmation flows.
 func (m *MultiplexedStream) WaitForMessageID(id MessageID) error {
 	return m.WaitForMessageIDContext(context.Background(), id)
 }

@@ -25,6 +25,8 @@
   returns a `MessageID`. `WithMaxInflight` is the budget for the whole
   multiplexed stream, and the lanes split it. `WithAckCallback` is rejected, and
   `WithWaitForReady` is always on; every other option applies to each lane.
+  `WaitForMessageID` waits for one ingest call on its lane. `Close` waits for
+  the lane callbacks for at most 5 s, so it must not be called from a callback.
 
 ### Bug Fixes
 
@@ -85,4 +87,6 @@
   `WithMultiplexedAckCallback` with a non-retryable error.
 - Added `MultiplexedStream.IngestRecord`, `IngestRecords`, `IngestJSONRecord`,
   `IngestJSONRecords`, their `Context` forms, `Flush`, and `FlushContext`
+  (Beta).
+- Added `MultiplexedStream.WaitForMessageID` and `WaitForMessageIDContext`
   (Beta).

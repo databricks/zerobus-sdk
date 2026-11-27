@@ -1319,7 +1319,7 @@ func TestMultiplexedSDKCloseClosesStream(t *testing.T) {
 			if err := sdk.Close(); err != nil {
 				t.Fatalf("SDK.Close: %v", err)
 			}
-			// Flush stores the lowest-index lane.
+			// Flush stores the lowest-index lane; a wait stores its own lane.
 			lane := max(tc.lane, 0)
 			assertLaneClosed(t, receive(t, done, tc.op), tc.op, lane)
 			if !mux.IsClosed() {
@@ -1360,7 +1360,8 @@ func TestMultiplexedFlush(t *testing.T) {
 			t.Fatalf("WaitForMessageID(%v): %v", id0, err)
 		}
 
-		// Offset 0 of lane 0 is acked, so a wait on the wrong offset returns nil.
+		// Offset 0 of lane 0 is acked, but the wait on offset 1 still waits for
+		// its own ack.
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if err := mux.WaitForMessageIDContext(ctx, id2); !errors.Is(err, context.DeadlineExceeded) {

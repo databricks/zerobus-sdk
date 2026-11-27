@@ -132,9 +132,10 @@ if err := mux.Flush(); err != nil { // wait once for every lane
 - Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
   call the callback concurrently and in no global order, so it must be safe for
   concurrent use. A callback may call the ingest methods, `Flush`, and
-  `WaitForMessageID`, but not `Close`. When `Close` returns, all callbacks have
-  run, unless `Close` waited longer than the callback limit (5 s). A panic in a
-  callback is logged with the standard `log` package.
+  `WaitForMessageID`, but not `Close`. To close from a callback, call `Close`
+  in a new goroutine. When `Close` returns, all callbacks have run, unless
+  `Close` waited longer than the callback limit (5 s). A panic in a callback is
+  logged with the standard `log` package.
 
 ## Authentication
 

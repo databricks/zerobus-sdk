@@ -17,13 +17,15 @@ const (
 // Multiplexed streams are a Beta API.
 const MaxMultiplexedStreams = 1 << messageIDStreamBits
 
-// MessageID identifies one ingest call on a multiplexed stream. Pass it to
-// WaitForMessageID, or match it with the IDs that a MultiplexedAckCallback
-// receives. int64(id) is the raw value.
+// MessageID identifies one ingest call on a multiplexed stream. Match it with
+// the IDs that a MultiplexedAckCallback receives, or pass it to
+// WaitForMessageID. int64(id) is the raw value.
 //
 // Unlike a Stream offset, MessageID values are not ordered. Use an ID only
-// with the multiplexed stream that returned it. An ID that the stream did not
-// return can make a wait block until its timeout.
+// with the multiplexed stream that returned it. Pass only an ID that the
+// stream returned without an error: a zero ID from a failed or empty call, or
+// an ID from another stream, can make a wait block until its timeout or return
+// nil for a record that is not durable.
 //
 // Multiplexed streams are a Beta API.
 type MessageID int64
@@ -91,9 +93,9 @@ func Headers(provider HeadersProvider) Auth {
 // the standard log package, and later callbacks still run.
 //
 // A callback may call the ingest methods, Flush, and WaitForMessageID. It must
-// not call Close: Close waits for the callbacks to finish. When Close returns,
-// all callbacks have run, unless Close waited longer than the callback limit
-// (5 s).
+// not call Close: Close waits for the callbacks to finish. To close from a
+// callback, call Close in a new goroutine. When Close returns, all callbacks
+// have run, unless Close waited longer than the callback limit (5 s).
 //
 // Multiplexed streams are a Beta API.
 type MultiplexedAckCallback interface {
