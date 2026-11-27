@@ -110,6 +110,8 @@ public class NativeInteropTests
         Assert.That(converted.RecordType, Is.EqualTo(nativeDefaults.RecordType));
         Assert.That(converted.HasStreamPausedMaxWaitTimeMs, Is.EqualTo(nativeDefaults.HasStreamPausedMaxWaitTimeMs));
         Assert.That(converted.StreamPausedMaxWaitTimeMs, Is.EqualTo(nativeDefaults.StreamPausedMaxWaitTimeMs));
+        Assert.That(converted.HasCallbackMaxWaitTimeMs, Is.EqualTo(nativeDefaults.HasCallbackMaxWaitTimeMs));
+        Assert.That(converted.CallbackMaxWaitTimeMs, Is.EqualTo(nativeDefaults.CallbackMaxWaitTimeMs));
     }
 
     [Test]

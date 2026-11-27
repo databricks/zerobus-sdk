@@ -79,5 +79,6 @@ examples: build
 	@echo "Building examples..."
 	dotnet build examples/JsonSingle
 	dotnet build examples/JsonBatch
+	dotnet build examples/JsonAckCallback
 	dotnet build examples/ProtoSingle
 	@echo "✓ Examples built successfully"

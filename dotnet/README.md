@@ -53,6 +53,50 @@ run, or periodically for a long-running stream. Each ingest also returns an offs
 Use it for targeted waits, but avoid waiting after every record: doing so limits throughput
 to one record per round-trip.
 
+### Ack callback (Beta)
+
+To track acknowledgments without waiting, set `AckCallback` in the options to an
+`IAckCallback`. The SDK calls `OnAck` once per ingest call that queued records, in offset
+order. It calls `OnError` only when the stream fails: once for each pending record or batch,
+with the error text. The stream is then closed, so send `GetUnackedRecords()` on a new stream.
+
+Callbacks run on the SDK's background threads. One stream's callbacks run one at a time; a
+callback shared by several streams can run concurrently. Keep them short and thread-safe, and
+move longer work to your own task: a slow or blocking callback can delay `Flush()`, `Close()`
+and other streams. Do not call stream or `ZerobusSdk` methods (such as `CreateStream` or
+`RecreateStream`) from a callback; do recovery on your own task. A stream method called from
+a callback while `Close()` runs stalls `Close()` until its callback wait ends. An exception
+thrown by a callback is caught and logged with `Trace.TraceError`.
+
+`Flush()` can return before the last `OnAck` has run. When `Close()` returns, all callbacks
+have run, unless its wait for them took longer than `CallbackMaxWaitTimeMs` (default 5 s;
+`StreamConfigurationOptions.CallbackWaitForever`: no limit). `Dispose()` does the same, so
+read the state the callbacks update after it:
+
+```csharp
+var tracker = new AckTracker();   // implements IAckCallback
+var options = StreamConfigurationOptions.Default with { AckCallback = tracker };
+using (var stream = sdk.CreateJsonStream(tableName, clientId, clientSecret, options))
+{
+    foreach (var record in records)
+    {
+        stream.IngestRecord(record);
+    }
+    stream.Flush();
+}
+// Dispose at the end of the using block waited for pending callbacks.
+Console.WriteLine($"last acknowledged offset: {tracker.LastAckedOffset}");
+```
+
+Call `Dispose()` on every stream that has a callback: the SDK holds the callback strongly, so a
+callback that references its stream keeps it alive, and its finalizer never runs. After
+`Dispose()` returns, a callback that was about to start may still start, but no other callback
+runs. After the stream fails, `Close()` can
+return before pending callbacks run: they may still run until `Dispose()`, and `Dispose()`
+drops the rest. So some `OnError` calls may not arrive; use the error from `Flush()` and
+`GetUnackedRecords()` as the source of truth for which records failed. See
+[`examples/JsonAckCallback/`](examples/JsonAckCallback/).
+
 ## Installation
 
 ### NuGet (when published)
@@ -179,6 +223,10 @@ Important: `RecreateStream(stream)` transfers ownership from `stream` to the ret
 stream. The input `stream` is disposed during recreation and must not be used afterward.
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
+
+With an ack callback, the new stream uses the same callback. Its offsets restart, so
+replayed records are acked again with new offsets. Pending `OnError` calls of the old
+stream may be lost or arrive late, mixed with the new stream's acks.
 
 ### `JsonZerobusStream` and `ProtoZerobusStream`
 
@@ -321,7 +369,8 @@ readable for recovery (`GetUnackedRecords`, `RecreateStream`).
 If you call `RecreateStream(stream)`, the original stream object is disposed and
 no longer usable.
 `Dispose()` frees native resources and should be called when recovery work is done.
-`using` calls `Dispose()` automatically.
+`using` calls `Dispose()` automatically. With an ack callback, `Close()`, `CloseAsync()` and
+`Dispose()` also wait up to `CallbackMaxWaitTimeMs` for pending callbacks.
 
 ```csharp
 stream.Close();
@@ -343,6 +392,18 @@ public class CustomHeadersProvider : IHeadersProvider
             ["x-databricks-zerobus-table-name"] = "catalog.schema.table",
         };
     }
+}
+```
+
+### `IAckCallback`
+
+Receives acknowledgments in the background (Beta). See [Ack callback](#ack-callback-beta).
+
+```csharp
+public interface IAckCallback
+{
+    void OnAck(long offset);
+    void OnError(long offset, string errorMessage);
 }
 ```
 
@@ -369,6 +430,8 @@ var options = StreamConfigurationOptions.Default with
 | `FlushTimeoutMs`            | 300,000   | Flush timeout (5 min)        |
 | `RecordType`                | `Proto`   | Proto / Json / Unspecified   |
 | `StreamPausedMaxWaitTimeMs` | `null`    | Graceful close wait time     |
+| `AckCallback`               | `null`    | Ack/error callback (Beta); see [Ack callback](#ack-callback-beta) |
+| `CallbackMaxWaitTimeMs`     | `null`    | Close wait for pending callbacks (`null` = 5,000 ms, `CallbackWaitForever` = no limit) (Beta) |
 
 Typed factories set `RecordType` automatically. You only need to set it manually when using
 the untyped `CreateStream` or `CreateStreamWithHeadersProvider` APIs.
@@ -499,6 +562,7 @@ dotnet/
 │       ├── ZerobusStream.cs                   # Stream for record ingestion (IDisposable)
 │       ├── ZerobusException.cs                # Error type with IsRetryable
 │       ├── IHeadersProvider.cs                # Custom auth interface
+│       ├── IAckCallback.cs                    # Ack callback interface (Beta)
 │       ├── RecordType.cs                      # Proto / Json / Unspecified enum
 │       ├── StreamConfigurationOptions.cs      # Config record with defaults
 │       ├── TableProperties.cs                 # Table name + optional descriptor
@@ -507,12 +571,18 @@ dotnet/
 │       └── Native/                            # P/Invoke layer (internal)
 │           ├── NativeBindings.cs              # Raw DllImport declarations
 │           ├── NativeInterop.cs               # Safe wrappers + marshalling
-│           └── HeadersProviderBridge.cs       # Managed→native callback bridge
+│           ├── HeadersProviderBridge.cs       # Managed→native callback bridge
+│           └── AckCallbackRegistry.cs         # Ack callback registry + trampolines
 ├── tests/
 │   ├── Zerobus.Tests/                         # Unit tests (NUnit)
 │   └── Zerobus.IntegrationTests/              # Integration tests (NUnit + gRPC mock)
 │       ├── Zerobus.IntegrationTests.csproj
-│       ├── IntegrationTests.cs                # 11 integration tests
+│       ├── IntegrationTestBase.cs             # Shared mock-server setup
+│       ├── StreamCreationIntegrationTests.cs  # Stream creation
+│       ├── IngestionIntegrationTests.cs       # Ingestion and flush
+│       ├── LifecycleRecoveryIntegrationTests.cs # Close, dispose and recovery
+│       ├── HeadersProviderIntegrationTests.cs # Custom headers provider
+│       ├── AckCallbackIntegrationTests.cs     # Ack callback (Beta)
 │       ├── MockZerobusServer.cs               # Mock gRPC server
 │       ├── TestHelpers.cs                     # Fixtures, response builders, interceptor
 │       └── Protos/
@@ -521,6 +591,7 @@ dotnet/
     ├── JsonSingle/                            # Single JSON record ingestion
     ├── JsonBatch/                             # Batch JSON record ingestion
     ├── ProtoSingle/                           # Single protobuf record ingestion
+    ├── JsonAckCallback/                       # Ack callback (Beta)
 ```
 
 ## Architecture

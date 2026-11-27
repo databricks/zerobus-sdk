@@ -85,6 +85,37 @@ public sealed record StreamConfigurationOptions
     public ulong? StreamPausedMaxWaitTimeMs { get; init; }
 
     /// <summary>
+    /// Receives acknowledgments and errors for ingested records in the background (Beta).
+    /// <c>null</c> means no callback; use <c>Flush()</c> or <c>WaitForOffset()</c>.
+    /// See <see cref="IAckCallback"/> for when and where it is called. After a
+    /// stream failure, callbacks can still run after <c>Close()</c> returns, until
+    /// <c>Dispose()</c>, and some <c>OnError</c> calls may not arrive. Call
+    /// <c>Dispose()</c> on every stream that has a callback.
+    /// Default: null.
+    /// </summary>
+    public IAckCallback? AckCallback { get; init; }
+
+    /// <summary>
+    /// Maximum time in milliseconds that <c>Close()</c> and <c>Dispose()</c> wait for
+    /// pending <see cref="AckCallback"/> calls before they drop them (Beta).
+    /// <list type="bullet">
+    ///   <item><c>null</c> — The SDK default, 5,000 (5 seconds).</item>
+    ///   <item>A value — Wait up to that many milliseconds (<c>0</c> drops them at once).</item>
+    ///   <item><see cref="CallbackWaitForever"/> — Wait until every pending callback has run.</item>
+    /// </list>
+    /// When <c>Close()</c> returns, all callbacks have run, unless its wait for
+    /// them took longer than this (default 5 s).
+    /// Has no effect without an <see cref="AckCallback"/>.
+    /// Default: null.
+    /// </summary>
+    public ulong? CallbackMaxWaitTimeMs { get; init; }
+
+    /// <summary>
+    /// Set as <see cref="CallbackMaxWaitTimeMs"/> to wait for every pending ack callback (Beta).
+    /// </summary>
+    public const ulong CallbackWaitForever = ulong.MaxValue;
+
+    /// <summary>
     /// Returns the default configuration options.
     /// This is the idiomatic starting point — use C# record <c>with</c> expressions to override.
     /// </summary>

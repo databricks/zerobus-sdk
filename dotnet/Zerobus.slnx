@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/examples/">
+    <Project Path="examples/JsonAckCallback/JsonAckCallback.csproj" />
     <Project Path="examples/JsonBatch/JsonBatch.csproj" />
     <Project Path="examples/JsonSingle/JsonSingle.csproj" />
     <Project Path="examples/ProtoSingle/ProtoSingle.csproj" />
