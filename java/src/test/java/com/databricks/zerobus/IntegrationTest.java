@@ -6,11 +6,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import com.databricks.test.table.AirQualityRow.AirQuality;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumWriter;
@@ -1256,6 +1261,75 @@ public class IntegrationTest {
     } finally {
       recreated.close();
       sdk.close();
+    }
+  }
+
+  // ===================================================================================
+  // Multiplexed streams (Beta)
+  // ===================================================================================
+
+  @Test
+  @Order(18)
+  @DisplayName("Multiplexed proto stream - singles and batches, each ACKed with its message ID")
+  void testMultiplexedProtoStream() throws Exception {
+    MuxAckRecorder callback = new MuxAckRecorder();
+    Set<Long> ingestedIds = new HashSet<>();
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        ZerobusMultiplexedProtoStream stream =
+            sdk.streamBuilder()
+                .table(tableName)
+                .oauth(clientId, clientSecret)
+                .compiledProto(AirQuality.getDescriptor().toProto())
+                .multiplexed(4)
+                .ackCallback(callback)
+                .build()
+                .join()) {
+      List<AirQuality> batch = new ArrayList<>();
+      List<byte[]> encodedBatch = new ArrayList<>();
+      for (int i = 0; i < BATCH_SIZE; i++) {
+        ingestedIds.add(stream.ingestRecord(muxRecord("test-mux-proto-" + i)));
+        batch.add(muxRecord("test-mux-proto-batch-" + i));
+        encodedBatch.add(muxRecord("test-mux-proto-bytes-" + i).toByteArray());
+      }
+      ingestedIds.add(stream.ingestRecords(batch).get());
+      ingestedIds.add(stream.ingestRecords(encodedBatch).get());
+      stream.flush();
+
+      callback.awaitAcked(ingestedIds);
+      stream.close();
+      assertTrue(stream.getUnackedRecords().isEmpty());
+    }
+  }
+
+  private static AirQuality muxRecord(String deviceName) {
+    return AirQuality.newBuilder().setDeviceName(deviceName).setTemp(21).setHumidity(55).build();
+  }
+
+  /** Records the message IDs a multiplexed stream acknowledges, and any error. */
+  private static final class MuxAckRecorder implements AckCallback {
+    final Set<Long> acked = ConcurrentHashMap.newKeySet();
+    final List<String> errors = Collections.synchronizedList(new ArrayList<>());
+
+    @Override
+    public void onAck(long messageId) {
+      if (!acked.add(messageId)) {
+        errors.add("duplicate ACK for " + messageId);
+      }
+    }
+
+    @Override
+    public void onError(long messageId, String errorMessage) {
+      errors.add(messageId + ": " + errorMessage);
+    }
+
+    /** Waits until exactly {@code expected} has been acknowledged, once each. */
+    void awaitAcked(Set<Long> expected) throws InterruptedException {
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+      while (acked.size() < expected.size() && System.nanoTime() < deadline) {
+        Thread.sleep(50);
+      }
+      assertEquals(expected, new HashSet<>(acked), "ACKed message IDs must match ingested IDs");
+      assertTrue(errors.isEmpty(), "unexpected ACK errors: " + errors);
     }
   }
 }

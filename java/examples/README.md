@@ -23,7 +23,8 @@ examples/
 │   ├── README.md
 │   ├── air_quality.proto     (compile with protoc --java_out=proto)
 │   ├── SingleRecordExample.java
-│   └── BatchIngestionExample.java
+│   ├── BatchIngestionExample.java
+│   └── MultiplexedIngestionExample.java
 ├── json/                  (JSON examples - ZerobusJsonStream)
 │   ├── README.md
 │   ├── SingleRecordExample.java
@@ -47,6 +48,7 @@ examples/
 |---------|--------------|-------------|
 | `proto/SingleRecordExample` | `ZerobusProtoStream` | Single record ingestion (Message + byte[]) |
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
+| `proto/MultiplexedIngestionExample` | `ZerobusMultiplexedProtoStream` | Multiplexed ingestion across several sub-streams (Beta) |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
 | `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close |

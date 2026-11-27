@@ -2,6 +2,7 @@ package com.databricks.zerobus;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -476,5 +477,127 @@ public class StreamBuilderTest {
     assertFalse(opts.getValue().recovery());
     verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any(), any());
     verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any(), any());
+  }
+
+  // ==================== Multiplexed streams ====================
+
+  private static AckCallback noopCallback() {
+    return new AckCallback() {
+      @Override
+      public void onAck(long offsetId) {}
+
+      @Override
+      public void onError(long offsetId, String errorMessage) {}
+    };
+  }
+
+  @Test
+  void multiplexedRejectsOutOfRangeStreamCount() {
+    DescriptorProto descriptor = DescriptorProto.newBuilder().setName("Rec").build();
+
+    for (int count : new int[] {0, -1, 65}) {
+      assertThrows(IllegalArgumentException.class, () -> builder().json().multiplexed(count));
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> builder().compiledProto(descriptor).multiplexed(count));
+    }
+    assertDoesNotThrow(() -> builder().json().multiplexed(1));
+    assertDoesNotThrow(() -> builder().json().multiplexed(64));
+  }
+
+  @Test
+  void multiplexedBuildRejectsOrdinaryAckCallback() {
+    StreamBuilder.MultiplexedStreamBuilder<ZerobusMultiplexedJsonStream> mux =
+        builder()
+            .table("catalog.schema.table")
+            .oauth("client-id", "client-secret")
+            .ackCallback(noopCallback())
+            .json()
+            .multiplexed(2);
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, mux::build);
+    assertTrue(ex.getMessage().contains("multiplexed(n).ackCallback()"));
+  }
+
+  @Test
+  void multiplexedBuildRoutesToCreateMultiplexedStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    DescriptorProto descriptor = DescriptorProto.newBuilder().setName("Rec").build();
+    AckCallback callback = noopCallback();
+    HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.proto")
+        .oauth("proto-id", "proto-secret")
+        .maxInflightRecords(800)
+        .compiledProto(descriptor)
+        .multiplexed(8)
+        .ackCallback(callback)
+        .build();
+    new StreamBuilder(sdk)
+        .table("cat.sch.json")
+        .headersProvider(provider)
+        .json()
+        .multiplexed(3)
+        .build();
+
+    ArgumentCaptor<StreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(StreamConfigurationOptions.class);
+    verify(sdk)
+        .createMultiplexedStreamInternal(
+            eq("cat.sch.proto"),
+            eq(RecordFormat.PROTO),
+            aryEq(descriptor.toByteArray()),
+            eq(null),
+            eq("proto-id"),
+            eq("proto-secret"),
+            eq(null),
+            opts.capture(),
+            eq(callback),
+            eq(8),
+            any());
+    assertEquals(800, opts.getValue().maxInflightRecords());
+    verify(sdk)
+        .createMultiplexedStreamInternal(
+            eq("cat.sch.json"),
+            eq(RecordFormat.JSON),
+            eq(null),
+            eq(null),
+            eq(null),
+            eq(null),
+            eq(provider),
+            any(),
+            eq(null),
+            eq(3),
+            any());
+    verifyNoMoreInteractions(sdk);
+  }
+
+  @Test
+  void federatedMultiplexedBuildRoutesTokenThroughHeadersProviderSlot() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    FederatedToken token = FederatedToken.accountLevel(() -> "idp-token");
+
+    new StreamBuilder(sdk).table("cat.sch.fed").federatedAuth(token).json().multiplexed(2).build();
+
+    ArgumentCaptor<HeadersProvider> provider = ArgumentCaptor.forClass(HeadersProvider.class);
+    verify(sdk)
+        .createMultiplexedStreamInternal(
+            eq("cat.sch.fed"),
+            eq(RecordFormat.JSON),
+            eq(null),
+            eq(null),
+            eq(null),
+            eq(null),
+            provider.capture(),
+            any(),
+            eq(null),
+            eq(2),
+            any());
+    assertTrue(provider.getValue() instanceof FederatedAuthHeadersProvider);
+    assertSame(token, ((FederatedAuthHeadersProvider) provider.getValue()).token());
+    verifyNoMoreInteractions(sdk);
   }
 }

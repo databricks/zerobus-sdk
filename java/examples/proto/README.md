@@ -1,6 +1,7 @@
 # Protocol Buffer Examples
 
-This directory contains examples for ingesting data using `ZerobusProtoStream`.
+This directory contains examples for ingesting data using `ZerobusProtoStream` and, for
+multiplexed streams (Beta), `ZerobusMultiplexedProtoStream`.
 
 ## Overview
 
@@ -25,7 +26,8 @@ protoc --java_out=proto proto/air_quality.proto
 javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   proto/SingleRecordExample.java \
-  proto/BatchIngestionExample.java
+  proto/BatchIngestionExample.java \
+  proto/MultiplexedIngestionExample.java
 
 # Set environment variables
 export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
@@ -41,6 +43,10 @@ java -cp ".:$SDK_JAR" \
 # Run batch example
 java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
+
+# Run multiplexed example (Beta)
+java -cp ".:$SDK_JAR" \
+  com.databricks.zerobus.examples.proto.MultiplexedIngestionExample
 ```
 
 ## API Overview
@@ -119,6 +125,14 @@ Demonstrates both batch ingestion methods plus recreateStream:
 3. **RecreateStream demo** - 5 records
 
 **Total: 225 records**
+
+### MultiplexedIngestionExample
+
+Demonstrates a multiplexed stream (Beta) with 4 sub-streams and a thread-safe ACK callback:
+1. **Single records** - 1,000 records, then flush
+2. **Batches** - 10 batches × 10 records = 100 records, then flush
+
+**Total: 1,100 records**
 
 ## Schema
 

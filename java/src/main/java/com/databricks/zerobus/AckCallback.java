@@ -19,7 +19,16 @@ package com.databricks.zerobus;
  * {@code close}, {@code isClosed}, {@code getUnackedRecords}, and {@code getUnackedBatches}, as
  * well as {@code ZerobusSdk.recreateStream} and {@code recreateArrowStream}, which can call them.
  * Called from a callback, these throw {@link IllegalStateException}; hand such work to another
- * thread instead.
+ * thread instead. On multiplexed streams, {@code ingestRecord}, {@code ingestRecords}, and {@code
+ * waitForMessageId} block too.
+ *
+ * <h3>Multiplexed streams</h3>
+ *
+ * <p>On a multiplexed stream (Beta), registered with {@code multiplexed(n).ackCallback(...)}, the
+ * {@code long} argument of both methods is a message ID returned by the stream's ingest methods,
+ * not an offset. Message IDs are not ordered and may be negative, so an acknowledgment covers only
+ * the record or batch with that ID: the callback is invoked once for each of them, in no global
+ * order, and sub-streams may invoke it concurrently.
  *
  * <p>Example usage:
  *
@@ -49,7 +58,9 @@ public interface AckCallback {
    * Called when a logical ingest submission has been durably acknowledged by the server.
    *
    * <p>The offset ID represents the durability acknowledgment up to and including this offset. All
-   * records with offset IDs less than or equal to this value have been durably stored.
+   * records with offset IDs less than or equal to this value have been durably stored. On a
+   * multiplexed stream, the argument is instead the message ID of the one record or batch that was
+   * acknowledged; see the class documentation.
    *
    * <p>Implementations should not throw. An exception thrown from this method is normally logged at
    * ERROR level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging,
@@ -64,7 +75,8 @@ public interface AckCallback {
    * Called when an error occurs for a logical ingest submission.
    *
    * <p>This method is called when the SDK encounters an error that affects a specific submission
-   * offset. The error may be retryable or non-retryable depending on the nature of the failure.
+   * offset. The error may be retryable or non-retryable depending on the nature of the failure. On
+   * a multiplexed stream, the argument is the message ID of the affected record or batch.
    *
    * <p>Implementations should not throw. An exception thrown from this method is normally logged at
    * ERROR level with its stack trace through the SDK's SLF4J logger, which, like all SDK logging,

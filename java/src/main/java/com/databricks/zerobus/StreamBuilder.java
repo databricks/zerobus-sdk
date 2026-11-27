@@ -13,7 +13,9 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * Java cannot return different stream types from a single {@code build()}, the record format is
  * selected with a terminal method that returns a typed sub-builder: {@link #json()}, {@link
  * #compiledProto(DescriptorProto)}, {@link #avro(String)}, or {@link #arrow(Schema)}. Each
- * sub-builder exposes a {@code build()} that returns the matching stream type.
+ * sub-builder exposes a {@code build()} that returns the matching stream type. The JSON and
+ * Protocol Buffer sub-builders also offer {@code multiplexed(int)}, which selects a multiplexed
+ * stream (Beta) built by a {@link MultiplexedStreamBuilder}.
  *
  * <h3>Thread Safety</h3>
  *
@@ -204,7 +206,9 @@ public final class StreamBuilder {
    *
    * <p>Applies to JSON, Protocol Buffer, and Avro streams. Arrow Flight streams do not support ACK
    * callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws {@link
-   * IllegalStateException}.
+   * IllegalStateException}. Multiplexed streams take their callback through {@link
+   * MultiplexedStreamBuilder#ackCallback(AckCallback)} instead; configuring one here and calling
+   * {@link MultiplexedStreamBuilder#build()} throws {@link IllegalStateException}.
    *
    * @param ackCallback the acknowledgment callback
    * @return this builder for method chaining
@@ -377,6 +381,29 @@ public final class StreamBuilder {
           base.headersProvider,
           base.toStreamOptions());
     }
+
+    /**
+     * Selects a multiplexed stream (Beta) of {@code streamCount} sub-streams.
+     *
+     * <p>Use multiplexing when one stream is the throughput bottleneck and global ordering is not
+     * required. Records keep their order within a sub-stream, but there is no order across
+     * sub-streams. The {@link StreamBuilder#maxInflightRecords(int)} budget is divided evenly
+     * across sub-streams and must be at least {@code streamCount}; otherwise the future returned by
+     * {@link MultiplexedStreamBuilder#build()} fails with a {@link NonRetriableException}.
+     *
+     * @param streamCount the number of sub-streams, from 1 to 64
+     * @return a {@link MultiplexedStreamBuilder} that builds a {@link ZerobusMultiplexedJsonStream}
+     * @throws IllegalArgumentException if {@code streamCount} is not between 1 and 64
+     */
+    public MultiplexedStreamBuilder<ZerobusMultiplexedJsonStream> multiplexed(int streamCount) {
+      return new MultiplexedStreamBuilder<>(
+          base,
+          requireStreamCount(streamCount),
+          RecordFormat.JSON,
+          null,
+          null,
+          ZerobusMultiplexedJsonStream::new);
+    }
   }
 
   /** Builds a {@link ZerobusAvroStream}. Created via {@link StreamBuilder#avro(String)}. */
@@ -448,7 +475,7 @@ public final class StreamBuilder {
      *     ZerobusMultiplexedProtoStream}
      * @throws IllegalArgumentException if {@code streamCount} is not between 1 and 64
      */
-    MultiplexedStreamBuilder<ZerobusMultiplexedProtoStream> multiplexed(int streamCount) {
+    public MultiplexedStreamBuilder<ZerobusMultiplexedProtoStream> multiplexed(int streamCount) {
       return new MultiplexedStreamBuilder<>(
           base,
           requireStreamCount(streamCount),
@@ -461,15 +488,51 @@ public final class StreamBuilder {
 
   /**
    * Builds a multiplexed stream (Beta). Created via {@code multiplexed(int)} on {@link
-   * ProtoStreamBuilder}.
+   * JsonStreamBuilder} or {@link ProtoStreamBuilder}.
    *
    * <p>Construction opens every sub-stream concurrently, each after a random delay of up to one
    * second when more than one is requested. It is atomic: if any sub-stream fails to open, the
    * others are closed and the returned future fails.
    *
+   * <h3>Message IDs</h3>
+   *
+   * <p>Ingest methods return a message ID: an opaque {@code long} that identifies the sub-stream
+   * and the record's position in it. Message IDs are not ordered and may be negative. Pass one to
+   * {@code waitForMessageId(long)} on the stream that returned it; do not compare them or use them
+   * with another stream.
+   *
+   * <h3>Failures</h3>
+   *
+   * <p>After any exception, check {@code isClosed()}: a retryable error is also terminal when
+   * recovery is off or exhausted. If it returns true, a sub-stream failed terminally and the stream
+   * rejects new ingestion: recover the records that were never acknowledged with {@code
+   * getUnackedRecords()} or {@code getUnackedBatches()}, call {@code close()}, and ingest them into
+   * a new stream. If it returns false, only that call failed.
+   *
+   * <h3>Resource Management</h3>
+   *
+   * <p>Multiplexed streams hold native resources that are not automatically released by the garbage
+   * collector. You <b>must</b> call {@code close()} when done to avoid native memory leaks, even if
+   * {@code isClosed()} returns true or the unacknowledged records were already read. Use
+   * try-with-resources for automatic cleanup.
+   *
+   * <h3>Thread Safety</h3>
+   *
+   * <p>Multiplexed streams are <b>thread-safe</b>, unlike the other stream types. Several threads
+   * can ingest, wait for message IDs, and flush the same stream concurrently. Records from
+   * different threads have no order relative to each other. {@code close()} and the
+   * unacknowledged-record getters can be called from any thread. {@code close()} waits for calls
+   * already in progress to return, and later ingest, wait, and flush calls throw {@link
+   * NonRetriableException}. When {@code close()} returns, all callbacks have run, unless it waited
+   * longer than the callback wait time (up to 5 seconds; sub-streams wait in parallel; not
+   * configurable in Java). After a failed {@code close()}, a second call returns without an error,
+   * unless reading the unacknowledged records failed: then the stream keeps its native resources
+   * and {@code close()} can be called again. An {@link AckCallback} must still not call the
+   * stream's blocking methods.
+   *
    * @param <S> the multiplexed stream type
    */
-  static final class MultiplexedStreamBuilder<S> {
+  public static final class MultiplexedStreamBuilder<S> {
     private final StreamBuilder base;
     private final int streamCount;
     private final RecordFormat format;
