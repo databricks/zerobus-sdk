@@ -190,6 +190,13 @@ zerobus_multiplexed_stream_free(mux);
   `zerobus_multiplexed_stream_get_unacked_records`, and send them, plus any
   record whose ingest call failed, on a new stream. Every call returns the
   same records, so re-send them once, from one caller.
+- `zerobus_sdk_create_multiplexed_stream_async` and
+  `zerobus_sdk_create_multiplexed_stream_with_headers_provider_async` return at
+  once and report the new handle through a completion callback on a runtime
+  thread, possibly before the call returns. Its `result` is valid only
+  during the callback: do not free its
+  `error_message` (the FFI frees it), and copy it to keep it. The callback
+  must not make blocking calls.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.
 
 ### Dynamic protobuf from a Unity Catalog schema (pure C)

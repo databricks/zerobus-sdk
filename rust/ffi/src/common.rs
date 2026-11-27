@@ -596,7 +596,7 @@ pub(crate) fn write_success_result(result: *mut CResult) {
 }
 
 /// Best-effort human-readable message extracted from a caught panic payload.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         format!("Rust panic caught at FFI boundary: {s}")
     } else if let Some(s) = payload.downcast_ref::<String>() {

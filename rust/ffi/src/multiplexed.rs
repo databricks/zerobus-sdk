@@ -10,7 +10,9 @@
 //! Thread-safety and callback rules are on `CZerobusMultiplexedStream`.
 
 use crate::common::*;
-use crate::stream::{configure_stream_builder, encoded_records_to_c_array, StreamCreateAuth};
+use crate::stream::{
+    configure_stream_builder, encoded_records_to_c_array, SendPtr, StreamCreateAuth,
+};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
     AckCallback, EncodedRecord, HeadersProvider, MessageId, MultiplexedStream, ZerobusError,
@@ -18,6 +20,7 @@ use databricks_zerobus_ingest_sdk::{
 };
 use prost::Message;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -30,9 +33,9 @@ const INGEST_ERROR: i64 = -1;
 const EMPTY_BATCH: i64 = -2;
 
 /// Opaque handle for a multiplexed stream (Beta). Created by
-/// `zerobus_sdk_create_multiplexed_stream` or
-/// `zerobus_sdk_create_multiplexed_stream_with_headers_provider` and released
-/// by `zerobus_multiplexed_stream_free`.
+/// `zerobus_sdk_create_multiplexed_stream`,
+/// `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, or their
+/// `_async` variants, and released by `zerobus_multiplexed_stream_free`.
 ///
 /// Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
 /// run concurrently on the same handle from any thread. `_free` must not
@@ -264,6 +267,11 @@ fn reject_options_ack_value(options: Option<&CStreamConfigurationOptions>) -> Ze
     Ok(())
 }
 
+/// `reject_options_ack_value` for a C pointer that may be NULL.
+fn reject_options_ack(options: *const CStreamConfigurationOptions) -> ZerobusResult<()> {
+    reject_options_ack_value((!options.is_null()).then(|| unsafe { &*options }))
+}
+
 async fn build_mux_from_parts(
     sdk_ref: &ZerobusSdk,
     table_name: String,
@@ -487,7 +495,8 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
 ///
 /// Call `zerobus_multiplexed_stream_close` first to flush pending records;
 /// freeing an open stream abandons them. Must not run concurrently with any
-/// other call on `mux`, and `mux` must not be used afterwards.
+/// other call on `mux` (it may be called from an async create's completion
+/// callback), and `mux` must not be used afterwards.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedStream) {
     ffi_guard(ptr::null_mut(), (), move || {
@@ -821,11 +830,303 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
     })
 }
 
+// Async variants of the multiplexed stream functions.
+
+/// Spawns `work`, which ends by invoking a C completion callback. If `work`
+/// panics first, `on_panic` reports the panic instead, so the callback still
+/// runs exactly once and the caller is not left waiting. Guards and tickets
+/// held by `work` are released while it unwinds.
+fn spawn_with_panic_report<W>(work: W, on_panic: impl FnOnce(CResult) + Send + 'static)
+where
+    W: std::future::Future<Output = ()> + Send + 'static,
+{
+    RUNTIME.spawn(async move {
+        if let Err(err) = RUNTIME.spawn(work).await {
+            if err.is_panic() {
+                let message = panic_message(err.into_panic().as_ref());
+                on_panic(CResult {
+                    success: false,
+                    error_message: CString::new(message)
+                        .unwrap_or_else(|_| {
+                            CString::new("Rust panic caught at FFI boundary").unwrap()
+                        })
+                        .into_raw(),
+                    is_retryable: false,
+                });
+            }
+        }
+    });
+}
+
+/// Completion callback for the async multiplexed creates (Beta).
+///
+/// `mux` is non-null on success, and the caller then owns it; it is null on
+/// failure.
+///
+/// Both multiplexed `_async` creates follow the same contract. Each checks the
+/// arguments listed on it and returns at once: false with `result` set if a
+/// check fails, in which case its callback never runs; otherwise true, and
+/// every other error reaches the callback.
+/// The callback then runs exactly once, on a runtime thread, possibly before
+/// the call returns: set up everything its `user_data` points to before the
+/// call. The `result` it
+/// receives is valid only during the call: do not free
+/// `result->error_message` (the FFI frees it when the callback returns), and
+/// copy it to keep it. The callback must be thread-safe and must not unwind.
+/// It may call the `_async` creates, `zerobus_multiplexed_stream_is_closed`
+/// and `zerobus_multiplexed_stream_free`, but no blocking function: no other
+/// `zerobus_multiplexed_stream_*` call, no sync create, and no blocking
+/// `zerobus_stream_*` call.
+/// The callback must not be NULL, and the `user_data` passed with it must
+/// stay valid until it runs.
+/// Callbacks run on a runtime worker thread: one that blocks holds that
+/// thread, delaying other stream work scheduled on it, so return quickly and
+/// hand slow work to your own thread.
+pub type CreateMultiplexedStreamAsyncCallback = extern "C" fn(
+    mux: *mut CZerobusMultiplexedStream,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+fn invoke_create_mux_async_callback(
+    callback: CreateMultiplexedStreamAsyncCallback,
+    mux: *mut CZerobusMultiplexedStream,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    if catch_unwind(AssertUnwindSafe(|| callback(mux, &result, user_data))).is_err() {
+        tracing::error!("async multiplexed create callback panicked; contained at FFI boundary");
+    }
+    if !result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(result.error_message);
+        }
+    }
+}
+
+/// Builds the mux on a runtime task and reports it through `callback`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_create(
+    sdk: *mut CZerobusSdk,
+    table_name: String,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    auth: StreamCreateAuth,
+    stream_count: usize,
+    options: Option<CStreamConfigurationOptions>,
+    ack_callback: MultiplexedCallbackAckCallback,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+) {
+    let sdk = SendPtr::new(sdk);
+    let callback_user_data = SendPtr::new(callback_user_data);
+    spawn_with_panic_report(
+        async move {
+            let res = match validate_sdk_ptr(sdk.get()) {
+                Ok(sdk_ref) => {
+                    build_mux_from_parts(
+                        sdk_ref,
+                        table_name,
+                        descriptor_proto,
+                        auth,
+                        stream_count,
+                        options,
+                        ack_callback,
+                    )
+                    .await
+                }
+                Err(msg) => Err(ZerobusError::InvalidArgument(msg.to_string())),
+            };
+            let (mux, result) = match res {
+                Ok(mux) => (mux, CResult::success()),
+                Err(err) => (ptr::null_mut(), CResult::error(err)),
+            };
+            invoke_create_mux_async_callback(callback, mux, result, callback_user_data.get());
+        },
+        move |result| {
+            invoke_create_mux_async_callback(
+                callback,
+                ptr::null_mut(),
+                result,
+                callback_user_data.get(),
+            )
+        },
+    );
+}
+
+/// Create a multiplexed stream with OAuth authentication on a background
+/// task (Beta).
+///
+/// Same arguments and ack-callback ownership as
+/// `zerobus_sdk_create_multiplexed_stream`; strings, the descriptor, and
+/// `options` are copied before this returns, but `sdk` must stay valid until
+/// `callback` runs. A null `sdk`, invalid strings, an undecodable descriptor
+/// and a set `options->ack_on_ack`/`ack_on_error` return false. Everything
+/// else, including an out-of-range `stream_count`, `max_inflight_requests`
+/// below `stream_count`, and a failed connect, reaches `callback` with a
+/// null `mux`. `free_ack_user_data` can run before or after `callback`, so
+/// do not share `callback_user_data` with `ack_user_data`.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_multiplexed_stream_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        // Take ownership of `ack_user_data` before any fallible work, so an
+        // early return frees it exactly once.
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+        if let Err(err) = reject_options_ack(options) {
+            return complete(result, Err(err), false);
+        }
+        let parts = (|| {
+            let auth = StreamCreateAuth::OAuth {
+                client_id: unsafe { c_str_arg(client_id)? },
+                client_secret: unsafe { c_str_arg(client_secret)? },
+            };
+            ZerobusResult::Ok((
+                unsafe { c_str_arg(table_name)? },
+                unsafe { decode_descriptor(descriptor_proto_bytes, descriptor_proto_len)? },
+                auth,
+            ))
+        })();
+        let (table_name, descriptor_proto, auth) = match parts {
+            Ok(parts) => parts,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        write_success_result(result);
+        spawn_create(
+            sdk,
+            table_name,
+            descriptor_proto,
+            auth,
+            stream_count,
+            (!options.is_null()).then(|| unsafe { *options }),
+            ack_callback,
+            callback,
+            callback_user_data,
+        );
+        true
+    })
+}
+
+/// Create a multiplexed stream with a custom headers provider on a background
+/// task (Beta).
+///
+/// Same arguments and ownership of `user_data` and `ack_user_data` as
+/// `zerobus_sdk_create_multiplexed_stream_with_headers_provider`; otherwise
+/// behaves like `zerobus_sdk_create_multiplexed_stream_async`.
+/// `free_user_data` and `free_ack_user_data` can run before or after
+/// `callback`, so do not share `callback_user_data` with `user_data` or
+/// `ack_user_data`.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    stream_count: usize,
+    options: *const CStreamConfigurationOptions,
+    ack_on_ack: Option<extern "C" fn(message_id: i64, user_data: *mut std::ffi::c_void)>,
+    ack_on_error: Option<
+        extern "C" fn(
+            message_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    ack_user_data: *mut std::ffi::c_void,
+    free_ack_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    callback: CreateMultiplexedStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        // Construct the provider and the ack callback before any fallible
+        // work: they own `user_data` and `ack_user_data`, so dropping them on
+        // an early return frees each exactly once.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(SerializedHeadersProvider::new(
+            CallbackHeadersProvider::new(headers_callback, user_data, free_user_data),
+        ));
+        let ack_callback = MultiplexedCallbackAckCallback::new(
+            ack_on_ack,
+            ack_on_error,
+            ack_user_data,
+            free_ack_user_data,
+        );
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+        if let Err(err) = reject_options_ack(options) {
+            return complete(result, Err(err), false);
+        }
+        let parts = (|| {
+            ZerobusResult::Ok((unsafe { c_str_arg(table_name)? }, unsafe {
+                decode_descriptor(descriptor_proto_bytes, descriptor_proto_len)?
+            }))
+        })();
+        let (table_name, descriptor_proto) = match parts {
+            Ok(parts) => parts,
+            Err(err) => return complete(result, Err(err), false),
+        };
+        write_success_result(result);
+        spawn_create(
+            sdk,
+            table_name,
+            descriptor_proto,
+            StreamCreateAuth::HeadersProvider { headers_provider },
+            stream_count,
+            (!options.is_null()).then(|| unsafe { *options }),
+            ack_callback,
+            callback,
+            callback_user_data,
+        );
+        true
+    })
+}
+
 #[cfg(test)]
 mod multiplexed_tests {
     //! Pure FFI-layer tests: C argument checks, record copying, the ack
-    //! bridge, and the serialized headers provider. Create tests run against
-    //! the mock server in `rust/tests/src/multiplexed_ffi_tests.rs`.
+    //! bridge, the serialized headers provider, and the panic report of
+    //! background work. Create tests run against the mock server in
+    //! `rust/tests/src/multiplexed_ffi_tests.rs`.
     use super::*;
     use crate::zerobus_free_error_message;
     use std::ffi::{c_void, CStr, CString};
@@ -1085,5 +1386,35 @@ mod multiplexed_tests {
             }
         });
         assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1);
+    }
+
+    /// A panic in background work reaches its callback once as a
+    /// non-retryable error. (A panicking async create is in the mock suite.)
+    #[test]
+    fn panics_in_background_work_are_reported_once() {
+        const PANIC: &str = "Rust panic caught at FFI boundary";
+
+        // Any async op: on_panic runs only for a panic, and once.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ok_tx = tx.clone();
+        spawn_with_panic_report(async {}, move |result| {
+            let _ = ok_tx.send(("normal work", result.success, String::new()));
+        });
+        spawn_with_panic_report(async { panic!("boom") }, move |mut result| {
+            let (success, retryable, message) = take_full(&mut result);
+            assert!(!retryable, "{message}");
+            let _ = tx.send(("panicking work", success, message));
+        });
+        let reported = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the panic is reported");
+        assert_eq!(
+            reported,
+            ("panicking work", false, format!("{PANIC}: boom"))
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "on_panic runs only for a panic, and once"
+        );
     }
 }

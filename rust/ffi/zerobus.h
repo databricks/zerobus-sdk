@@ -230,9 +230,9 @@ typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
 
 /**
  * Opaque handle for a multiplexed stream (Beta). Created by
- * `zerobus_sdk_create_multiplexed_stream` or
- * `zerobus_sdk_create_multiplexed_stream_with_headers_provider` and released
- * by `zerobus_multiplexed_stream_free`.
+ * `zerobus_sdk_create_multiplexed_stream`,
+ * `zerobus_sdk_create_multiplexed_stream_with_headers_provider`, or their
+ * `_async` variants, and released by `zerobus_multiplexed_stream_free`.
  *
  * Thread safety: every `zerobus_multiplexed_stream_*` call except `_free` may
  * run concurrently on the same handle from any thread. `_free` must not
@@ -247,6 +247,36 @@ typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
 typedef struct CZerobusMultiplexedStream {
   uint8_t _private[0];
 } CZerobusMultiplexedStream;
+
+/**
+ * Completion callback for the async multiplexed creates (Beta).
+ *
+ * `mux` is non-null on success, and the caller then owns it; it is null on
+ * failure.
+ *
+ * Both multiplexed `_async` creates follow the same contract. Each checks the
+ * arguments listed on it and returns at once: false with `result` set if a
+ * check fails, in which case its callback never runs; otherwise true, and
+ * every other error reaches the callback.
+ * The callback then runs exactly once, on a runtime thread, possibly before
+ * the call returns: set up everything its `user_data` points to before the
+ * call. The `result` it
+ * receives is valid only during the call: do not free
+ * `result->error_message` (the FFI frees it when the callback returns), and
+ * copy it to keep it. The callback must be thread-safe and must not unwind.
+ * It may call the `_async` creates, `zerobus_multiplexed_stream_is_closed`
+ * and `zerobus_multiplexed_stream_free`, but no blocking function: no other
+ * `zerobus_multiplexed_stream_*` call, no sync create, and no blocking
+ * `zerobus_stream_*` call.
+ * The callback must not be NULL, and the `user_data` passed with it must
+ * stay valid until it runs.
+ * Callbacks run on a runtime worker thread: one that blocks holds that
+ * thread, delaying other stream work scheduled on it, so return quickly and
+ * hand slow work to your own thread.
+ */
+typedef void (*CreateMultiplexedStreamAsyncCallback)(struct CZerobusMultiplexedStream *mux,
+                                                     const struct CResult *result,
+                                                     void *user_data);
 
 /**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
@@ -976,7 +1006,8 @@ struct CZerobusMultiplexedStream *zerobus_sdk_create_multiplexed_stream_with_hea
  *
  * Call `zerobus_multiplexed_stream_close` first to flush pending records;
  * freeing an open stream abandons them. Must not run concurrently with any
- * other call on `mux`, and `mux` must not be used afterwards.
+ * other call on `mux` (it may be called from an async create's completion
+ * callback), and `mux` must not be used afterwards.
  */
 void zerobus_multiplexed_stream_free(struct CZerobusMultiplexedStream *mux);
 
@@ -1121,6 +1152,76 @@ bool zerobus_multiplexed_stream_is_closed(struct CZerobusMultiplexedStream *mux)
  */
 struct CRecordArray zerobus_multiplexed_stream_get_unacked_records(struct CZerobusMultiplexedStream *mux,
                                                                    struct CResult *result);
+
+/**
+ * Create a multiplexed stream with OAuth authentication on a background
+ * task (Beta).
+ *
+ * Same arguments and ack-callback ownership as
+ * `zerobus_sdk_create_multiplexed_stream`; strings, the descriptor, and
+ * `options` are copied before this returns, but `sdk` must stay valid until
+ * `callback` runs. A null `sdk`, invalid strings, an undecodable descriptor
+ * and a set `options->ack_on_ack`/`ack_on_error` return false. Everything
+ * else, including an out-of-range `stream_count`, `max_inflight_requests`
+ * below `stream_count`, and a failed connect, reaches `callback` with a
+ * null `mux`. `free_ack_user_data` can run before or after `callback`, so
+ * do not share `callback_user_data` with `ack_user_data`.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_sdk_create_multiplexed_stream_async(struct CZerobusSdk *sdk,
+                                                 const char *table_name,
+                                                 const uint8_t *descriptor_proto_bytes,
+                                                 uintptr_t descriptor_proto_len,
+                                                 const char *client_id,
+                                                 const char *client_secret,
+                                                 uintptr_t stream_count,
+                                                 const struct CStreamConfigurationOptions *options,
+                                                 void (*ack_on_ack)(int64_t message_id,
+                                                                    void *user_data),
+                                                 void (*ack_on_error)(int64_t message_id,
+                                                                      const char *error_message,
+                                                                      void *user_data),
+                                                 void *ack_user_data,
+                                                 void (*free_ack_user_data)(void *user_data),
+                                                 CreateMultiplexedStreamAsyncCallback callback,
+                                                 void *callback_user_data,
+                                                 struct CResult *result);
+
+/**
+ * Create a multiplexed stream with a custom headers provider on a background
+ * task (Beta).
+ *
+ * Same arguments and ownership of `user_data` and `ack_user_data` as
+ * `zerobus_sdk_create_multiplexed_stream_with_headers_provider`; otherwise
+ * behaves like `zerobus_sdk_create_multiplexed_stream_async`.
+ * `free_user_data` and `free_ack_user_data` can run before or after
+ * `callback`, so do not share `callback_user_data` with `user_data` or
+ * `ack_user_data`.
+ *
+ * Follows the multiplexed `_async` contract described on
+ * `CreateMultiplexedStreamAsyncCallback`.
+ */
+bool zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
+                                                                       const char *table_name,
+                                                                       const uint8_t *descriptor_proto_bytes,
+                                                                       uintptr_t descriptor_proto_len,
+                                                                       HeadersProviderCallback headers_callback,
+                                                                       void *user_data,
+                                                                       void (*free_user_data)(void *user_data),
+                                                                       uintptr_t stream_count,
+                                                                       const struct CStreamConfigurationOptions *options,
+                                                                       void (*ack_on_ack)(int64_t message_id,
+                                                                                          void *user_data),
+                                                                       void (*ack_on_error)(int64_t message_id,
+                                                                                            const char *error_message,
+                                                                                            void *user_data),
+                                                                       void *ack_user_data,
+                                                                       void (*free_ack_user_data)(void *user_data),
+                                                                       CreateMultiplexedStreamAsyncCallback callback,
+                                                                       void *callback_user_data,
+                                                                       struct CResult *result);
 
 /**
  * Build a protobuf schema from Unity Catalog table metadata JSON.
