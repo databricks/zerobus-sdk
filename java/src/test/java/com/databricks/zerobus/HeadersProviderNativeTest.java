@@ -35,8 +35,10 @@ class HeadersProviderNativeTest {
                 return nonStringMap();
               case 5:
                 return Collections.singletonMap("invalid header", "value");
-              default:
+              case 6:
                 return Collections.singletonMap(oversizedHeaderName(), "value");
+              default:
+                return Collections.singletonMap("x-context-bin", "AAE=");
             }
           }
 

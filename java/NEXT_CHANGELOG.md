@@ -22,6 +22,20 @@
   federation as a service principal. Works with JSON, protobuf, Avro, and Arrow
   streams, and `recreateStream` reuses the stream's `FederatedToken`. See
   `examples/json/FederatedAuthExample.java`.
+- Add `ZerobusSdk.builder()` returning a `ZerobusSdkBuilder`, which sets the endpoints, application
+  name, connection mode, and TLS options. The existing `ZerobusSdk` constructors still work and
+  keep their defaults.
+- Add `TlsOptions` to configure TLS: trust only the CA certificates you add
+  (`trustSystemRoots(false)`), add CA certificates as PEM text or as files, present a client
+  certificate for mutual TLS as PEM text or as files, and override the server domain name.
+  Certificate files are read on each new connection, so rotated files take effect without a restart.
+  Previously the SDK always used the operating system's CA certificates. These settings apply to the
+  Zerobus gRPC connection only. OAuth and federated token requests to the workspace URL trust the
+  operating system's CA certificates and the SDK's bundled public roots, ignore TlsOptions, and
+  present no client certificate.
+- `HeadersProvider` header names ending in `-bin` are now accepted. The value must be the standard
+  base64 encoding of the bytes, and the SDK sends the decoded bytes as binary gRPC metadata. Names
+  beginning with `grpc-` and ending in `-bin` are reserved and rejected.
 
 ### Bug Fixes
 
@@ -39,10 +53,10 @@
 
 ### Internal Changes
 
-- Bumped the native JNI ABI version to 2 for the new federated stream-creation
-  methods. Release a `jni/v*` build from this source before the Java release,
-  and rebuild any laptop-built macOS dylibs that `release-java.yml` imports
-  through `macos-binaries-release`.
+- Bumped the native JNI ABI version to 3 for the new federated stream-creation
+  methods and the TLS-options constructor. Release a `jni/v*` build from this
+  source before the Java release, and rebuild any laptop-built macOS dylibs that
+  `release-java.yml` imports through `macos-binaries-release`.
 
 ### Breaking Changes
 
@@ -53,3 +67,6 @@
 - The JAR now includes the generated `InsertRecordsRequest` and
   `InsertRecordsResponse` classes from the shared service proto. They are wire
   types, not a supported API.
+- New public API: `ZerobusSdk.builder()` returning `ZerobusSdkBuilder`; `TlsOptions` and
+  `TlsOptions.Builder` (created with `TlsOptions.builder()`). `ZerobusSdkBuilder.tlsOptions(...)` takes
+  a `TlsOptions`.

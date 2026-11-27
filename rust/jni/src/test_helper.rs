@@ -256,11 +256,18 @@ fn native_test_headers_provider_callbacks<'local>(
                 return "invalid header name was not rejected clearly".to_string();
             }
 
-            let seventh = get_headers_blocking(provider_ref);
+            let seventh = get_headers_blocking(provider_ref.clone());
             if !seventh.is_err_and(|error| {
                 matches!(error, ZerobusError::InvalidArgument(message) if message.contains("maximum length"))
             }) {
                 return "oversized header name was not rejected clearly".to_string();
+            }
+
+            let eighth = get_headers_blocking(provider_ref);
+            if !eighth.is_ok_and(|headers| {
+                headers.get("x-context-bin").map(String::as_str) == Some("AAE=")
+            }) {
+                return "binary header name or base64 value did not reach Rust unchanged".to_string();
             }
 
             "OK".to_string()

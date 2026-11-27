@@ -1,0 +1,39 @@
+# TLS Examples
+
+This directory shows how to configure TLS with `TlsOptions` and `ZerobusSdk.builder()`.
+
+## Building and Running
+
+Find the endpoint values in the [connection URL table](https://github.com/databricks/zerobus-sdk/blob/main/README.md#1-connection-urls-and-workspace-id).
+
+```bash
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+
+# Compile
+javac -d . -cp "$SDK_JAR" tls/TlsConfigurationExample.java
+
+# Set environment variables
+export ZEROBUS_SERVER_ENDPOINT="<your-zerobus-server-endpoint>"
+export DATABRICKS_WORKSPACE_URL="<your-databricks-workspace-url>"
+export ZEROBUS_TABLE_NAME="catalog.schema.table"
+export DATABRICKS_CLIENT_ID="your-client-id"
+export DATABRICKS_CLIENT_SECRET="your-client-secret"
+
+# Optional: trust only a private CA. Unset, the operating system's CA certificates are used.
+export ZEROBUS_CA_CERT_FILE="/etc/zerobus/ca.pem"
+
+# Optional: present a client certificate for mutual TLS. Set both or neither.
+export ZEROBUS_CLIENT_CERT_FILE="/etc/zerobus/tls.crt"
+export ZEROBUS_CLIENT_KEY_FILE="/etc/zerobus/tls.key"
+
+java -cp ".:$SDK_JAR" com.databricks.zerobus.examples.tls.TlsConfigurationExample
+```
+
+Leave the `ZEROBUS_CA_CERT_FILE`, `ZEROBUS_CLIENT_CERT_FILE`, and `ZEROBUS_CLIENT_KEY_FILE`
+variables unset to use the operating system's CA certificates.
+
+## API
+
+See the [TLS Configuration](../../README.md#tls-configuration) section of the SDK README for the
+`TlsOptions` API and how certificate files are reloaded.
