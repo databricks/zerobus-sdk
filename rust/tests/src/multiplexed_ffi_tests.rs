@@ -25,6 +25,7 @@ use zerobus_ffi::{
     zerobus_multiplexed_stream_free, zerobus_multiplexed_stream_is_closed,
     zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
     zerobus_sdk_builder_new, zerobus_sdk_builder_unity_catalog_url,
+    zerobus_sdk_create_multiplexed_stream,
     zerobus_sdk_create_multiplexed_stream_with_headers_provider, zerobus_sdk_free, CHeaders,
     CResult, CStreamConfigurationOptions, CZerobusMultiplexedStream, CZerobusSdk,
 };
@@ -383,15 +384,19 @@ fn failing_lane() -> Vec<MockResponse> {
 /// Which create function a `Create` calls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Auth {
+    OAuth,
     Headers,
 }
 
-/// One mux create call. A NULL `sdk`, a `None` table, and `None` options are
-/// passed as NULL, so the argument checks can be driven too.
+/// One mux create call. A NULL `sdk`, a `None` table, client ID or client
+/// secret, and `None` options are passed as NULL, so the argument checks can
+/// be driven too.
 struct Create {
     sdk: *mut CZerobusSdk,
     table: Option<CString>,
     descriptor: Option<Vec<u8>>,
+    client_id: Option<CString>,
+    client_secret: Option<CString>,
     stream_count: usize,
     options: Option<CStreamConfigurationOptions>,
     /// Counts the headers provider's calls and its `user_data` frees.
@@ -405,6 +410,8 @@ impl Create {
             sdk,
             table: Some(CString::new(table).unwrap()),
             descriptor: None,
+            client_id: Some(CString::new("client-id").unwrap()),
+            client_secret: Some(CString::new("client-secret").unwrap()),
             stream_count,
             options: Some(json_options()),
             provider: None,
@@ -430,11 +437,36 @@ impl Create {
         self.options.as_ref().map_or(ptr::null(), |o| o)
     }
 
+    fn client_id(&self) -> *const c_char {
+        self.client_id.as_ref().map_or(ptr::null(), |c| c.as_ptr())
+    }
+
+    fn client_secret(&self) -> *const c_char {
+        self.client_secret
+            .as_ref()
+            .map_or(ptr::null(), |c| c.as_ptr())
+    }
+
     /// The sync create; the outcome is in `result`.
     fn sync(&self, auth: Auth, ack: MuxAck, result: *mut CResult) -> Mux {
-        let (descriptor, len) = self.descriptor();
+        let ((descriptor, len), secret) = (self.descriptor(), self.client_secret());
         let (callback, user_data, free) = headers_args(self.provider);
         match auth {
+            Auth::OAuth => zerobus_sdk_create_multiplexed_stream(
+                self.sdk,
+                self.table(),
+                descriptor,
+                len,
+                self.client_id(),
+                secret,
+                self.stream_count,
+                self.options(),
+                ack.on_ack,
+                ack.on_error,
+                ack.user_data,
+                ack.free_user_data,
+                result,
+            ),
             Auth::Headers => zerobus_sdk_create_multiplexed_stream_with_headers_provider(
                 self.sdk,
                 self.table(),
@@ -562,8 +594,36 @@ fn close_ok(mux: Mux) {
 // Blocking calls
 // ---------------------------------------------------------------------------
 
+/// The OAuth create mints a token from Unity Catalog and opens every lane.
+#[test]
+fn oauth_create_mints_token_and_opens_mux() {
+    const TABLE: &str = "ffi.mux.oauth";
+    let (runtime, server, url) = start_server();
+    let (oauth, uc_url) = runtime.block_on(start_mock_oauth_server());
+    runtime.block_on(oauth.set_responses(vec![MockTokenResponse::ok("token-1")]));
+    // No CreateStream entry: the mock opens every lane and each lane acks its
+    // offset 0.
+    runtime.block_on(server.inject_responses(TABLE, vec![ack(0)]));
+    let sdk = create_sdk_with_uc(&url, &uc_url);
+    let create = Create::new(sdk, TABLE, 2);
+    let mux = ok("OAuth create", |r| {
+        create.sync(Auth::OAuth, MuxAck::none(), r)
+    });
+    assert_eq!(oauth.mint_count(), 1, "the lanes share one token");
+    let auth = runtime.block_on(server.get_auth_headers());
+    assert_eq!(auth.len(), 2, "one stream per lane: {auth:?}");
+    for lane in &auth {
+        assert_eq!(lane.authorization.as_deref(), Some("Bearer token-1"));
+        assert_eq!(lane.table_name.as_deref(), Some(TABLE));
+    }
+    close_ok(mux);
+    free_both(sdk, mux);
+}
+
 /// Every failing sync create reports its error (retryable only for a
-/// connect failure) and frees the headers and ack `user_data` once.
+/// connect failure) and frees the headers and ack `user_data` once. Each
+/// export checks its SDK pointer; the string, descriptor and options checks
+/// are shared, so they have one row each.
 #[test]
 fn sync_create_failures_report_and_free_once() {
     use Auth::*;
@@ -574,18 +634,26 @@ fn sync_create_failures_report_and_free_once() {
         bool,
         &'static str,
     );
-    let rows: [Row; 6] = [
+    let rows: [Row; 8] = [
         (
             "sdk=NULL",
             |c| c.sdk = ptr::null_mut(),
-            &[Headers],
+            &[OAuth, Headers],
             false,
             NULL_SDK,
         ),
+        ("table=NULL", |c| c.table = None, &[OAuth], false, NULL_ARG),
         (
-            "table=NULL",
-            |c| c.table = None,
-            &[Headers],
+            "client_id=NULL",
+            |c| c.client_id = None,
+            &[OAuth],
+            false,
+            NULL_ARG,
+        ),
+        (
+            "client_secret=NULL",
+            |c| c.client_secret = None,
+            &[OAuth],
             false,
             NULL_ARG,
         ),
@@ -593,25 +661,25 @@ fn sync_create_failures_report_and_free_once() {
         (
             "bad descriptor",
             |c| c.descriptor = Some(vec![0xff; 3]),
-            &[Headers],
+            &[OAuth],
             false,
             "failed to decode Protobuf message",
         ),
         (
             "options->ack_on_ack",
             |c| c.options.as_mut().unwrap().ack_on_ack = Some(log_ack),
-            &[Headers],
+            &[OAuth],
             false,
             OPTIONS_ACK,
         ),
         (
             "options->ack_on_error",
             |c| c.options.as_mut().unwrap().ack_on_error = Some(log_error),
-            &[Headers],
+            &[OAuth],
             false,
             OPTIONS_ACK,
         ),
-        ("connect failure", |_| {}, &[Headers], true, ""),
+        ("connect failure", |_| {}, &[OAuth, Headers], true, ""),
     ];
     let sdk = unreachable_sdk();
     for (case, edit, auths, retryable, expected) in rows {
@@ -632,13 +700,11 @@ fn sync_create_failures_report_and_free_once() {
     let log = AckLog::default();
     let mut result = new_result();
     let create = failing_create(sdk, |c| c.table = None);
-    assert!(create
-        .sync(Headers, MuxAck::log(&log), &mut result)
-        .is_null());
+    assert!(create.sync(OAuth, MuxAck::log(&log), &mut result).is_null());
     take_message(&mut result);
     let create = failing_create(sdk, |c| c.stream_count = 0);
     assert!(create
-        .sync(Headers, MuxAck::none(), ptr::null_mut())
+        .sync(OAuth, MuxAck::none(), ptr::null_mut())
         .is_null());
     zerobus_sdk_free(sdk);
 }
