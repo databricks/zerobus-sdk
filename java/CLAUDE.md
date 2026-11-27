@@ -63,6 +63,8 @@ Run from `java/`:
     toolchain** (enforced by `maven-enforcer`); the artifact still targets Java 8.
   - The JNI crate's `avro` cargo feature forwards to the SDK's; `make build-jni` passes it. Never
     enable it in a plain `--workspace` build, or unification turns Avro on for the FFI crate too.
+  - A multiplexed Avro stream shares one `AvroEncoder.threadSafe(...)` across threads, so the
+    encoder and its `CheckedDatumWriter` must keep no unsynchronized per-call state.
 
 ## FFI boundary: JNI
 

@@ -14,9 +14,11 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.DecoderFactory;
 import org.apache.avro.io.EncoderFactory;
 
 /** Records and helpers shared by the native tests that run streams against the mock server. */
@@ -99,6 +101,11 @@ final class MockServerTestSupport {
     new GenericDatumWriter<GenericRecord>(AVRO_SCHEMA).write(record, encoder);
     encoder.flush();
     return out.toByteArray();
+  }
+
+  static GenericRecord decode(byte[] bytes) throws IOException {
+    return new GenericDatumReader<GenericRecord>(AVRO_SCHEMA)
+        .read(null, DecoderFactory.get().binaryDecoder(bytes, null));
   }
 
   static String base64(byte[] bytes) {

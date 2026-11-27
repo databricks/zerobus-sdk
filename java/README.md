@@ -39,7 +39,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
 - **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
 - **Avro** *(Beta)*: Ingest Avro record objects (need Java 11+) or pre-encoded datums (see [Avro Examples](#avro-examples))
-- **Multiplexed streams** *(Beta)*: Spread JSON or Protocol Buffer ingestion across up to 64 sub-streams (see [Multiplexed Streams](#multiplexed-streams-beta))
+- **Multiplexed streams** *(Beta)*: Spread JSON, Protocol Buffer, or Avro ingestion across up to 64 sub-streams (see [Multiplexed Streams](#multiplexed-streams-beta))
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
@@ -775,7 +775,7 @@ though metadata such as `avro.java.string` or docs is ignored.
 A single stream is ordered, which caps its throughput. When one stream is the bottleneck and you do
 not need a global order, a multiplexed stream opens several sub-streams and spreads records across
 them round-robin. Records keep their order within a sub-stream, but there is no order across
-sub-streams. JSON and Protocol Buffers are supported; for JSON, first migrate to Protocol
+sub-streams. JSON, Protocol Buffers, and Avro are supported; for JSON, first migrate to Protocol
 Buffers and measure again before multiplexing.
 
 Select it with `multiplexed(streamCount)` after choosing the format:
@@ -824,8 +824,9 @@ try (ZerobusMultiplexedProtoStream stream = sdk.streamBuilder()
   terminal when recovery is off or exhausted. If `isClosed()` returns true, a sub-stream failed
   terminally and the stream rejects new records: recover the unacknowledged ones with
   `getUnackedRecords()` or `getUnackedBatches()`, call `close()`, and ingest them into a new
-  stream. If it returns false, only that call failed and the stream stays usable. There is no
-  `recreateStream` for multiplexed streams.
+  stream. If it returns false, only that call failed and the stream stays usable; for example, an
+  Avro record that cannot be encoded fails its `ingestRecord` or `ingestRecords` call with
+  `NonRetriableException` and sends nothing. There is no `recreateStream` for multiplexed streams.
 
 ---
 
@@ -1490,11 +1491,12 @@ CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()
 
 `ArrowStreamBuilder` additionally supports `maxInflightBatches(int)`, `connectionTimeoutMs(long)`, `ipcCompression(IPCCompressionType)`, and `streamPausedMaxWaitTimeMs(long)`.
 
-`JsonStreamBuilder` and `ProtoStreamBuilder` also select a multiplexed stream (Beta), built by a `MultiplexedStreamBuilder`:
+`JsonStreamBuilder`, `ProtoStreamBuilder`, and `AvroStreamBuilder` also select a multiplexed stream (Beta), built by a `MultiplexedStreamBuilder`:
 
 ```java
 MultiplexedStreamBuilder<ZerobusMultiplexedJsonStream>  StreamBuilder.JsonStreamBuilder.multiplexed(int streamCount)
 MultiplexedStreamBuilder<ZerobusMultiplexedProtoStream> StreamBuilder.ProtoStreamBuilder.multiplexed(int streamCount)
+MultiplexedStreamBuilder<ZerobusMultiplexedAvroStream>  StreamBuilder.AvroStreamBuilder.multiplexed(int streamCount)
 
 MultiplexedStreamBuilder<S> ackCallback(AckCallback callback)  // receives message IDs
 CompletableFuture<S>        build()
@@ -1640,9 +1642,9 @@ Returns unacknowledged records as raw Avro datums, or grouped by batch.
 
 ---
 
-### ZerobusMultiplexedProtoStream / ZerobusMultiplexedJsonStream
+### ZerobusMultiplexedProtoStream / ZerobusMultiplexedJsonStream / ZerobusMultiplexedAvroStream
 
-Multiplexed streams (Beta). Create them with `multiplexed(int)` on the `compiledProto(...)` or `json()` sub-builder; see [Multiplexed Streams](#multiplexed-streams-beta).
+Multiplexed streams (Beta). Create them with `multiplexed(int)` on the `compiledProto(...)`, `json()`, or `avro(...)` sub-builder; see [Multiplexed Streams](#multiplexed-streams-beta).
 
 **Ingest Methods:** the same inputs as the ordinary stream of that format, named `ingestRecord` and `ingestRecords`, returning message IDs instead of offsets:
 
