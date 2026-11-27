@@ -18,8 +18,17 @@
   descriptor declares, so callers can inspect a table's columns without parsing
   the descriptor themselves. It accepts the bytes returned by
   `FetchProtoDescriptorFromUC` or passed to `WithProto`.
+- Added multiplexed streams (Beta). `SDK.CreateMultiplexedStream` opens up to
+  `MaxMultiplexedStreams` lanes, with `OAuth` or `Headers` auth, which send in
+  parallel on their own gRPC streams. `WithMaxInflight` is the budget for the
+  whole multiplexed stream, and the lanes split it. `WithAckCallback` is
+  rejected, and `WithWaitForReady` is always on; every other option applies to
+  each lane.
 
 ### Bug Fixes
+
+- Log a panic recovered from an `AckCallback` with the standard `log` package
+  instead of discarding it. Later callbacks still run.
 
 ### Documentation
 
@@ -67,3 +76,9 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `SDK.CreateMultiplexedStream`, `Auth`, `OAuth`, `Headers`,
+  `MultiplexedStream`, `MessageID`, `MaxMultiplexedStreams`,
+  `MultiplexedAckCallback`, and `WithMultiplexedAckCallback` (Beta).
+  `CreateStream` and `CreateStreamWithProvider` reject
+  `WithMultiplexedAckCallback` with a non-retryable error.

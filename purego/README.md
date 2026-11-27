@@ -58,8 +58,8 @@ Use `IngestRecordOffsetContext` / `IngestRecordsOffsetContext` to bound admissio
 ## Multiple streams and connections
 
 Each stream gets its own gRPC connection by default, so concurrent streams do
-not compete for one HTTP/2 connection. To multiplex many smaller, low-throughput
-streams over one shared connection, pass `WithConnectionPerStream(false)`:
+not compete for one HTTP/2 connection. To share one connection among many
+smaller, low-throughput streams, pass `WithConnectionPerStream(false)`:
 
 ```go
 sdk, err := zerobus.New(serverEndpoint, workspaceURL,
@@ -69,6 +69,39 @@ sdk, err := zerobus.New(serverEndpoint, workspaceURL,
 Pass `WithConnectionPerStream(true)` to select dedicated connections explicitly.
 A stream keeps its assigned connection through recovery, so ordering within
 that stream is unchanged.
+
+## Multiplexed streams (Beta)
+
+A multiplexed stream opens several ordinary streams, called lanes, for one
+table. The lanes send in parallel on their own gRPC streams. Pass
+`zerobus.OAuth(clientID, clientSecret)` or `zerobus.Headers(provider)` as the
+auth:
+
+```go
+mux, err := sdk.CreateMultiplexedStream(ctx, "catalog.schema.table",
+    zerobus.OAuth(clientID, clientSecret), 4, zerobus.WithJSON())
+if err != nil {
+    log.Fatal(err)
+}
+defer mux.Close()
+```
+
+- The lane count is between 1 and `MaxMultiplexedStreams` (64).
+  `CreateMultiplexedStream` opens all lanes, each after a random delay of up to
+  1 second, and waits until every lane is open. If one lane fails to open, it
+  closes the others and returns the error.
+- `WithMaxInflight` is the budget for the whole multiplexed stream. It counts
+  ingest calls, not records, and the lanes split it evenly, so it must be at
+  least the lane count. `WithAckCallback` is rejected, and `WithWaitForReady`
+  is always on. Every other option applies to each lane.
+  `WithMaxBufferedPayloadBytes` is a per-lane limit, so a stream with N lanes
+  can buffer up to N times that value.
+- Each lane opens its own gRPC connection, unless the SDK was created with
+  `WithConnectionPerStream(false)`.
+- Register a `MultiplexedAckCallback` with `WithMultiplexedAckCallback`. Lanes
+  call the callback concurrently and in no global order, so it must be safe for
+  concurrent use. Callbacks can still run after `Close` returns. A panic in a
+  callback is logged with the standard `log` package.
 
 ## Authentication
 

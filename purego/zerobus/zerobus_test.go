@@ -212,6 +212,10 @@ type echoServer struct {
 	creates  chan *zerobuspb.CreateIngestStreamRequest
 	ingests  chan *zerobuspb.EphemeralStreamRequest
 	peers    chan string
+
+	// readyStreams, with noReady, lets the first readyStreams creates finish.
+	readyStreams int
+	readied      atomic.Int32
 }
 
 func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -232,7 +236,7 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	if s.creates != nil {
 		s.creates <- proto.Clone(req.GetCreateStream()).(*zerobuspb.CreateIngestStreamRequest)
 	}
-	if s.noReady {
+	if s.noReady && int(s.readied.Add(1)) > s.readyStreams {
 		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
@@ -540,6 +544,15 @@ func TestCreateStreamRejectsInvalidArguments(t *testing.T) {
 			name:  "proto without descriptor",
 			table: "main.sales.orders",
 			opts:  []zerobus.StreamOption{zerobus.WithProto(nil)},
+		},
+		{
+			name:  "multiplexed ack callback set after nil",
+			table: "main.sales.orders",
+			opts: []zerobus.StreamOption{
+				zerobus.WithJSON(),
+				zerobus.WithMultiplexedAckCallback(nil),
+				zerobus.WithMultiplexedAckCallback(&recordingMuxCallback{}),
+			},
 		},
 	}
 	for _, tc := range tests {

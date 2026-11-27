@@ -1,6 +1,7 @@
 package zerobus
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"time"
@@ -57,8 +58,9 @@ func WithHTTPClient(client *http.Client) Option {
 }
 
 // WithConnectionPerStream controls whether each ingestion stream receives a
-// dedicated gRPC connection. This is enabled by default. Pass false to
-// multiplex all streams from the SDK over one shared connection.
+// dedicated gRPC connection. This is enabled by default. Pass false to share
+// one connection among all streams from the SDK. Each lane of a multiplexed
+// stream counts as one stream.
 func WithConnectionPerStream(enabled bool) Option {
 	return func(c *sdkConfig) { c.connectionPerStream = enabled }
 }
@@ -78,13 +80,16 @@ const (
 // notifications. Register one with WithAckCallback as an alternative to blocking
 // on Flush or WaitForOffset. Callbacks run on a dedicated worker, so
 // implementations should return promptly to avoid delaying later notifications.
-// Stream methods, including Close, may be called from a callback.
+// A panic in a callback is recovered and logged with the standard log package,
+// and later callbacks still run. Stream methods, including Close, may be
+// called from a callback. A multiplexed stream takes a MultiplexedAckCallback
+// instead.
 type AckCallback = stream.AckCallback
 
-// StreamOption configures a stream created with CreateStream or
-// CreateStreamWithProvider. Record type, recovery behavior, buffering limits,
-// and the ack callback are all set through these options; unset options take
-// their defaults.
+// StreamOption configures a stream created with CreateStream,
+// CreateStreamWithProvider, or CreateMultiplexedStream. Record type, recovery
+// behavior, buffering limits, and the ack callback are all set through these
+// options; unset options take their defaults.
 type StreamOption func(*streamConfig)
 
 type streamConfig struct {
@@ -93,6 +98,13 @@ type streamConfig struct {
 	callback   AckCallback
 	waitReady  bool
 	cfg        stream.Config
+
+	// muxCallback is kept apart from callback so CreateStream can reject it.
+	// A multiplexed stream wraps it in a per-lane callback.
+	muxCallback MultiplexedAckCallback
+	// muxJitter replaces the wait before each lane of a multiplexed stream
+	// opens. Only tests set it.
+	muxJitter func(ctx context.Context, lane int) error
 }
 
 func defaultStreamConfig() streamConfig {
@@ -149,14 +161,16 @@ func WithRecovery(r RecoverySetting) StreamOption {
 // WithMaxInflight caps the number of unacknowledged ingest calls buffered before
 // IngestRecordOffset / IngestRecordsOffset block for backpressure. One call
 // occupies one slot regardless of how many records it carries. A non-positive
-// value keeps the default.
+// value keeps the default. A multiplexed stream splits it evenly across its
+// lanes.
 func WithMaxInflight(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.MaxInflight = n }
 }
 
 // WithMaxBufferedPayloadBytes caps the estimated encoded memory retained by
 // queued and in-flight payloads. Whichever of this and WithMaxInflight binds
-// first applies backpressure. A non-positive value keeps the default.
+// first applies backpressure. A non-positive value keeps the default. On a
+// multiplexed stream it applies to each lane.
 func WithMaxBufferedPayloadBytes(n int64) StreamOption {
 	return func(c *streamConfig) { c.cfg.MaxBufferedPayloadBytes = n }
 }

@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -68,12 +69,18 @@ func (d *callbackDispatcher) run() {
 	}
 }
 
-// invoke prevents callback panics from stopping later callback delivery.
-// Recovered values are intentionally discarded until the public SDK exposes a
-// logger or callback-error sink; this internal package must not write to the
-// process-global standard logger.
+// invoke prevents callback panics from stopping later callback delivery. It
+// logs a recovered panic.
 func (d *callbackDispatcher) invoke(event callbackEvent) {
-	defer func() { _ = recover() }()
+	method := "OnAck"
+	if event.err != nil {
+		method = "OnError"
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("zerobus: AckCallback.%s(offset %d) panicked: %v", method, event.offset, r)
+		}
+	}()
 	if event.err == nil {
 		d.callback.OnAck(event.offset)
 		return

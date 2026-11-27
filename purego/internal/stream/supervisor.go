@@ -156,10 +156,11 @@ superviseLoop:
 		failedAttempts++
 	}
 
-	// Terminal failure path.
+	// Terminal failure path. Store the cause first, so every waiter that
+	// signalReady or wm.fail wakes can read it through TerminalErr.
+	cs.setTerminalErr(err)
 	cs.signalReady(err)
 	cs.wm.fail(err)
-	cs.setTerminalErr(err)
 
 	if cs.dispatcher != nil {
 		// Retain records and queue one callback range.

@@ -34,8 +34,9 @@ const version = "0.1.0"
 const userAgentPrefix = "zerobus-sdk-go-purego/" + version
 
 // HeadersProvider supplies the gRPC authentication metadata for a stream.
-// Implement it to plug in custom authentication with CreateStreamWithProvider;
-// the built-in OAuth path (CreateStream) provides one for you.
+// Implement it to plug in custom authentication with CreateStreamWithProvider,
+// or with Headers for a multiplexed stream; the built-in OAuth path
+// (CreateStream, or OAuth for a multiplexed stream) provides one for you.
 //
 // GetHeaders may block on token minting (bounded by ctx).
 // Invalidate should drop cached credentials and return quickly.
@@ -142,8 +143,9 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	return sdk, nil
 }
 
-// Close terminates open streams and releases their connections.
-// It is idempotent; CreateStream fails after Close.
+// Close terminates open streams, including the lanes of multiplexed streams,
+// and releases their connections. It is idempotent; CreateStream and
+// CreateMultiplexedStream fail after Close.
 func (s *SDK) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -185,6 +187,16 @@ func (s *SDK) CreateStream(
 	tableName, clientID, clientSecret string,
 	opts ...StreamOption,
 ) (*Stream, error) {
+	provider, err := s.newOAuthProvider(clientID, clientSecret)
+	if err != nil {
+		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
+	}
+	return s.createStream(ctx, "CreateStream", tableName, provider, opts...)
+}
+
+// newOAuthProvider builds an OAuth headers provider that shares the SDK's
+// token cache.
+func (s *SDK) newOAuthProvider(clientID, clientSecret string) (HeadersProvider, error) {
 	authOpts := []auth.OAuthOption{auth.WithSharedTokenCache(s.tokenCache)}
 	if s.httpClient != nil {
 		authOpts = append(authOpts, auth.WithHTTPClient(s.httpClient))
@@ -194,9 +206,9 @@ func (s *SDK) CreateStream(
 		authOpts...,
 	)
 	if err != nil {
-		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
+		return nil, err
 	}
-	return s.createStream(ctx, "CreateStream", tableName, provider, opts...)
+	return provider, nil
 }
 
 // CreateStreamWithProvider opens a stream with a custom HeadersProvider.
@@ -261,7 +273,15 @@ func (s *SDK) createStream(
 	provider HeadersProvider,
 	opts ...StreamOption,
 ) (*Stream, error) {
-	return s.createStreamConfigured(ctx, op, tableName, provider, streamConfigFromOptions(opts))
+	sc := streamConfigFromOptions(opts)
+	if sc.muxCallback != nil {
+		return nil, &Error{
+			Op:        op,
+			cause:     fmt.Errorf("WithMultiplexedAckCallback is only valid with CreateMultiplexedStream"),
+			retryable: false,
+		}
+	}
+	return s.createStreamConfigured(ctx, op, tableName, provider, sc)
 }
 
 func streamConfigFromOptions(opts []StreamOption) streamConfig {
