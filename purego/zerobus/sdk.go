@@ -185,6 +185,16 @@ func (s *SDK) CreateStream(
 	tableName, clientID, clientSecret string,
 	opts ...StreamOption,
 ) (*Stream, error) {
+	provider, err := s.newOAuthProvider(clientID, clientSecret)
+	if err != nil {
+		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
+	}
+	return s.createStream(ctx, "CreateStream", tableName, provider, opts...)
+}
+
+// newOAuthProvider builds an OAuth headers provider that shares the SDK's
+// token cache.
+func (s *SDK) newOAuthProvider(clientID, clientSecret string) (HeadersProvider, error) {
 	authOpts := []auth.OAuthOption{auth.WithSharedTokenCache(s.tokenCache)}
 	if s.httpClient != nil {
 		authOpts = append(authOpts, auth.WithHTTPClient(s.httpClient))
@@ -194,9 +204,9 @@ func (s *SDK) CreateStream(
 		authOpts...,
 	)
 	if err != nil {
-		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
+		return nil, err
 	}
-	return s.createStream(ctx, "CreateStream", tableName, provider, opts...)
+	return provider, nil
 }
 
 // CreateStreamWithProvider opens a stream with a custom HeadersProvider.
@@ -261,7 +271,15 @@ func (s *SDK) createStream(
 	provider HeadersProvider,
 	opts ...StreamOption,
 ) (*Stream, error) {
-	return s.createStreamConfigured(ctx, op, tableName, provider, streamConfigFromOptions(opts))
+	sc := streamConfigFromOptions(opts)
+	if sc.muxCallback != nil {
+		return nil, &Error{
+			Op:        op,
+			cause:     fmt.Errorf("WithMultiplexedAckCallback is only valid with CreateMultiplexedStream"),
+			retryable: false,
+		}
+	}
+	return s.createStreamConfigured(ctx, op, tableName, provider, sc)
 }
 
 func streamConfigFromOptions(opts []StreamOption) streamConfig {
