@@ -2,8 +2,9 @@
 //!
 //! The FFI blocks on its own global runtime, so these tests call it from plain
 //! threads and run the mock server on a separate runtime. They test the FFI
-//! layer only: C arguments, ID passing, ownership, and error mapping. The core mux
-//! behavior is tested in `multiplexed_stream_tests.rs`.
+//! layer only: C arguments, ID passing, ownership, locks, the async creates,
+//! and error mapping. The core mux behavior is tested in
+//! `multiplexed_stream_tests.rs`.
 
 #[allow(dead_code)]
 mod mock_oauth;
@@ -33,6 +34,10 @@ use zerobus_ffi::{
     zerobus_sdk_create_multiplexed_stream,
     zerobus_sdk_create_multiplexed_stream_with_headers_provider, zerobus_sdk_free, CHeaders,
     CRecordArray, CResult, CStreamConfigurationOptions, CZerobusMultiplexedStream, CZerobusSdk,
+};
+use zerobus_ffi::{
+    zerobus_sdk_create_multiplexed_stream_async,
+    zerobus_sdk_create_multiplexed_stream_with_headers_provider_async,
 };
 use zerobus_ffi::{
     zerobus_sdk_create_stream_with_headers_provider, zerobus_stream_close, zerobus_stream_flush,
@@ -121,6 +126,10 @@ const NULL_SDK: &str = "SDK pointer is null";
 const NULL_ARG: &str = "Null pointer passed";
 const OPTIONS_ACK: &str =
     "options->ack_on_ack and options->ack_on_error are not supported for multiplexed streams";
+/// How long a create may take to report a connect failure to `127.0.0.1:1`.
+/// On Windows a closed local port is not refused at once (each SYN is
+/// retried), and the OAuth path connects more than once.
+const CONNECT_FAILURE_WAIT: Duration = Duration::from_secs(60);
 
 /// Polls `condition` until it holds, failing after 5 seconds.
 fn wait_until(what: &str, condition: impl Fn() -> bool) {
@@ -442,6 +451,8 @@ struct Create {
     options: Option<CStreamConfigurationOptions>,
     /// Counts the headers provider's calls and its `user_data` frees.
     provider: Option<&'static FreeCounter>,
+    /// The `_async` create's callback frees the new handle inside it.
+    free_in_callback: bool,
 }
 
 impl Create {
@@ -456,6 +467,7 @@ impl Create {
             stream_count,
             options: Some(json_options()),
             provider: None,
+            free_in_callback: false,
         }
     }
 
@@ -525,6 +537,54 @@ impl Create {
                 result,
             ),
         }
+    }
+
+    /// The `_async` create: `(returned, retryable, message)`.
+    fn start(&self, auth: Auth, ack: MuxAck, sink: &'static AsyncSink) -> (bool, bool, String) {
+        let ((descriptor, len), secret) = (self.descriptor(), self.client_secret());
+        let (callback, user_data, free) = headers_args(self.provider);
+        let sink_create = if self.free_in_callback {
+            sink_create_and_free
+        } else {
+            sink_create
+        };
+        outcome(|r| match auth {
+            Auth::OAuth => zerobus_sdk_create_multiplexed_stream_async(
+                self.sdk,
+                self.table(),
+                descriptor,
+                len,
+                self.client_id(),
+                secret,
+                self.stream_count,
+                self.options(),
+                ack.on_ack,
+                ack.on_error,
+                ack.user_data,
+                ack.free_user_data,
+                sink_create,
+                sink.user_data(),
+                r,
+            ),
+            Auth::Headers => zerobus_sdk_create_multiplexed_stream_with_headers_provider_async(
+                self.sdk,
+                self.table(),
+                descriptor,
+                len,
+                callback,
+                user_data,
+                free,
+                self.stream_count,
+                self.options(),
+                ack.on_ack,
+                ack.on_error,
+                ack.user_data,
+                ack.free_user_data,
+                sink_create,
+                sink.user_data(),
+                r,
+            ),
+        })
     }
 }
 
@@ -694,7 +754,7 @@ fn close_quietly(mux: Mux) {
     outcome(|r| zerobus_multiplexed_stream_close(mux, r));
 }
 
-/// One of the four ingest calls with its input.
+/// One of the four ingest calls with its input, run blocking or `_async`.
 #[derive(Clone, Copy)]
 enum Ingest<'a> {
     Proto(&'a [u8]),
@@ -745,6 +805,104 @@ impl Ingest<'_> {
         assert!(success, "{} failed: {message}", self.name());
         id
     }
+}
+
+// ---------------------------------------------------------------------------
+// `_async` helpers
+// ---------------------------------------------------------------------------
+
+/// One reported `_async` completion.
+#[derive(Clone, Debug, Default)]
+struct Completion {
+    success: bool,
+    retryable: bool,
+    message: String,
+    mux: usize,
+}
+
+/// `user_data` for `_async` callbacks: records every completion.
+#[derive(Default)]
+struct AsyncSink {
+    completions: Mutex<Vec<Completion>>,
+}
+
+impl Leaked for AsyncSink {}
+
+impl AsyncSink {
+    fn count(&self) -> usize {
+        self.completions.lock().unwrap().len()
+    }
+
+    /// Waits for `n` callbacks, then checks no extra one arrives.
+    fn wait_for(&self, n: usize, what: &str) -> Vec<Completion> {
+        wait_until(what, || self.count() >= n);
+        // Let a late extra callback land before asserting the count.
+        std::thread::sleep(Duration::from_millis(100));
+        let completions = self.completions.lock().unwrap().clone();
+        assert_eq!(completions.len(), n, "{what}: wrong number of callbacks");
+        completions
+    }
+
+    fn one(&self, what: &str) -> Completion {
+        self.wait_for(1, what).remove(0)
+    }
+
+    /// `one`, waiting up to `bound` for the callback to start.
+    fn one_within(&self, bound: Duration, what: &str) -> Completion {
+        wait_until_within(bound, what, || self.count() >= 1);
+        self.one(what)
+    }
+
+    fn assert_never_called(&self, what: &str) {
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(self.count(), 0, "{what}: callback must not run");
+    }
+
+    fn push(user_data: *mut c_void, result: *const CResult, completion: Completion) {
+        let sink = unsafe { &*(user_data as *const AsyncSink) };
+        let result = unsafe { &*result };
+        let message = if result.error_message.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(result.error_message) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        sink.completions.lock().unwrap().push(Completion {
+            success: result.success,
+            retryable: result.is_retryable,
+            message,
+            ..completion
+        });
+    }
+}
+
+extern "C" fn sink_create(mux: Mux, result: *const CResult, user_data: *mut c_void) {
+    let completion = Completion {
+        mux: mux as usize,
+        ..Default::default()
+    };
+    AsyncSink::push(user_data, result, completion);
+}
+
+/// A create callback that frees the new handle inside the callback, which the
+/// docs allow.
+extern "C" fn sink_create_and_free(mux: Mux, result: *const CResult, user_data: *mut c_void) {
+    if !mux.is_null() {
+        zerobus_multiplexed_stream_free(mux);
+    }
+    sink_create(mux, result, user_data);
+}
+
+/// Waits for an async create's callback; returns the handle it brought.
+fn created(sink: &AsyncSink, what: &str) -> Mux {
+    let created = sink.one(&format!("{what} create callback"));
+    assert!(
+        created.success && created.mux != 0,
+        "{what}: {}",
+        created.message
+    );
+    created.mux as Mux
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,14 +1239,14 @@ fn argument_errors_fail_only_that_call() {
 }
 
 /// The FFI frees the headers and ack `user_data` exactly once: on success
-/// only at free; at create when both ack callbacks are NULL;
+/// only at free, sync and async; at create when both ack callbacks are NULL;
 /// after a partial open, with no handle. An `on_error`-only callback is
 /// installed too.
 #[test]
 fn ffi_owned_user_data_is_freed_once() {
-    // (a) Success with callbacks: nothing is freed until free.
-    {
-        let what = "sync";
+    // (a) Success with callbacks, sync and async: nothing is freed until free.
+    for use_async in [false, true] {
+        let what = if use_async { "async" } else { "sync" };
         let (runtime, server, url) = start_server();
         // No CreateStream entry: each lane acks its offset 0.
         runtime.block_on(server.inject_responses("ffi.mux.own", vec![ack(0)]));
@@ -1099,7 +1257,13 @@ fn ffi_owned_user_data_is_freed_once() {
             c.options = Some(options);
             c.provider = Some(provider);
         });
-        let mux = ok("create", |r| create.sync(Auth::Headers, ack, r));
+        let mux = if use_async {
+            let sink = AsyncSink::leaked();
+            assert!(create.start(Auth::Headers, ack, sink).0);
+            created(sink, what)
+        } else {
+            ok("create", |r| create.sync(Auth::Headers, ack, r))
+        };
         assert!(provider.calls() >= 2, "{what}: every lane fetches headers");
         json_records(0..2).iter().for_each(|json| {
             ingest_json(mux, json);
@@ -1140,23 +1304,44 @@ fn ffi_owned_user_data_is_freed_once() {
     runtime.block_on(oauth.set_responses(vec![MockTokenResponse::ok("token-1")]));
     let sdk = create_sdk_with_uc(&url, &uc_url);
     let options = json_options_terminal();
-    {
-        let what = "sync headers";
-        let table = "ffi.mux.partial_sync_headers";
-        runtime.block_on(server.inject_responses(table, failing_lane()));
+    for (what, use_async, use_oauth) in [
+        ("sync headers", false, false),
+        ("async headers", true, false),
+        ("async OAuth", true, true),
+    ] {
+        let table = format!("ffi.mux.partial_{}", what.replace(' ', "_"));
+        runtime.block_on(server.inject_responses(&table, failing_lane()));
         let (provider, ack_log) = (FreeCounter::leaked(), AckLog::leaked());
         let ack = MuxAck::owned(ack_log, true);
-        let create = Create::new(sdk, table, 2).with(|c| {
+        let auth = if use_oauth {
+            Auth::OAuth
+        } else {
+            Auth::Headers
+        };
+        let create = Create::new(sdk, &table, 2).with(|c| {
             c.options = Some(options);
-            c.provider = Some(provider);
+            c.provider = (!use_oauth).then_some(provider);
         });
-        let mut result = new_result();
-        let mux = create.sync(Auth::Headers, ack, &mut result);
-        let message = expect_permanent_failure(&mut result, what);
-        assert!(mux.is_null(), "{what}: {message}");
+        let (mux, failed, message) = if use_async {
+            let sink = AsyncSink::leaked();
+            assert!(create.start(auth, ack, sink).0);
+            let done = sink.one(&format!("{what} create callback"));
+            (done.mux, !done.success && !done.retryable, done.message)
+        } else {
+            let mut result = new_result();
+            let mux = create.sync(auth, ack, &mut result);
+            (
+                mux as usize,
+                true,
+                expect_permanent_failure(&mut result, what),
+            )
+        };
+        assert!(mux == 0 && failed, "{what}: {message}");
         assert!(message.contains("denied"), "{what}: {message}");
         ack_log.assert_freed_once();
-        provider.assert_freed_once(what);
+        if !use_oauth {
+            provider.assert_freed_once(what);
+        }
     }
     zerobus_sdk_free(sdk);
 
@@ -1272,6 +1457,198 @@ fn concurrent_callers_share_one_handle() {
     let all = sorted_strings(&json_records(0..total));
     assert_eq!(unacked_json_payloads(f.mux), all);
     f.free();
+}
+
+// ---------------------------------------------------------------------------
+// `_async` calls
+// ---------------------------------------------------------------------------
+
+/// Bad C arguments make an async create return false at once, never call
+/// back, and free its `user_data` once.
+#[test]
+fn async_calls_fail_fast_on_invalid_arguments() {
+    use Auth::*;
+    type Row = (&'static str, fn(&mut Create), &'static [Auth], &'static str);
+    let rows: [Row; 4] = [
+        (
+            "sdk=NULL",
+            |c| c.sdk = ptr::null_mut(),
+            &[OAuth, Headers],
+            NULL_SDK,
+        ),
+        ("table=NULL", |c| c.table = None, &[OAuth], NULL_ARG),
+        ("client_id=NULL", |c| c.client_id = None, &[OAuth], NULL_ARG),
+        // A truncated varint, not a DescriptorProto.
+        (
+            "bad descriptor",
+            |c| c.descriptor = Some(vec![0xff; 3]),
+            &[OAuth],
+            "failed to decode Protobuf message",
+        ),
+    ];
+    let sdk = unreachable_sdk();
+    for (case, edit, auths, expected) in rows {
+        for &auth in auths {
+            let what = format!("{auth:?} async {case}");
+            let (create, provider, ack_log, ack) = owned_user_data(failing_create(sdk, edit), auth);
+            let sink = AsyncSink::leaked();
+            let (returned, retryable, message) = create.start(auth, ack, sink);
+            assert!(!returned && !retryable, "{what}: {message}");
+            assert!(message.contains(expected), "{what}: {message}");
+            assert_row_freed(auth, provider, ack_log, &what);
+            sink.assert_never_called(&what);
+        }
+    }
+    zerobus_sdk_free(sdk);
+}
+
+/// Async create failures: `options->ack_on_*` is rejected at once (false,
+/// no callback); a core build error, a connect failure and a panic in the
+/// create task return true and reach the callback once with a NULL mux.
+/// Either way both `user_data` are freed once.
+#[test]
+fn async_create_failures_report_and_free_once() {
+    use Auth::*;
+    const PANIC: &str = "Rust panic caught at FFI boundary";
+    // (case, edit, auths, reported in the task, retryable, message part)
+    type Row = (
+        &'static str,
+        fn(&mut Create),
+        &'static [Auth],
+        bool,
+        bool,
+        &'static str,
+    );
+    let rows: [Row; 5] = [
+        (
+            "options->ack_on_ack",
+            |c| c.options.as_mut().unwrap().ack_on_ack = Some(log_ack),
+            &[OAuth],
+            false,
+            false,
+            OPTIONS_ACK,
+        ),
+        // Core build errors reach the callback (matched by the core text's
+        // prefix): both ends of the stream_count range.
+        (
+            "stream_count=0",
+            |c| c.stream_count = 0,
+            &[OAuth],
+            true,
+            false,
+            "stream_count must be",
+        ),
+        (
+            "stream_count=65",
+            |c| c.stream_count = 65,
+            &[OAuth],
+            true,
+            false,
+            "stream_count must be",
+        ),
+        ("connect failure", |_| {}, &[OAuth, Headers], true, true, ""),
+        // max_inflight usize::MAX overflows in the core: the task panics.
+        (
+            "panic in the task",
+            |c| {
+                c.stream_count = 1;
+                c.options.as_mut().unwrap().max_inflight_requests = usize::MAX;
+            },
+            &[OAuth],
+            true,
+            false,
+            PANIC,
+        ),
+    ];
+    let sdk = unreachable_sdk();
+    for (case, edit, auths, in_task, retryable, expected) in rows {
+        for &auth in auths {
+            let what = format!("{auth:?} async {case}");
+            let (create, provider, ack_log, ack) = owned_user_data(failing_create(sdk, edit), auth);
+            let sink = AsyncSink::leaked();
+            let (returned, sync_retryable, message) = create.start(auth, ack, sink);
+            let (got_retryable, message) = if in_task {
+                assert!(returned, "{what}: {message}");
+                let bound = if retryable {
+                    CONNECT_FAILURE_WAIT
+                } else {
+                    Duration::from_secs(5)
+                };
+                let done = sink.one_within(bound, &what);
+                assert!(done.mux == 0 && !done.success, "{what}: {done:?}");
+                (done.retryable, done.message)
+            } else {
+                assert!(!returned, "{what}: {message}");
+                sink.assert_never_called(&what);
+                (sync_retryable, message)
+            };
+            assert_eq!(got_retryable, retryable, "{what}: {message}");
+            assert!(message.contains(expected), "{what}: {message}");
+            assert_row_freed(auth, provider, ack_log, &what);
+        }
+    }
+    zerobus_sdk_free(sdk);
+}
+
+/// Async creates return at once; the callback brings a working handle whose
+/// acks carry the returned IDs.
+#[test]
+fn async_creates_return_before_lanes_open() {
+    let (runtime, server, url) = start_server();
+    let (oauth, uc_url) = runtime.block_on(start_mock_oauth_server());
+    runtime.block_on(oauth.set_responses(vec![MockTokenResponse::ok("token-1")]));
+    let sdk = create_sdk_with_uc(&url, &uc_url);
+    for (table, auth) in [
+        ("ffi.mux.async_headers", Auth::Headers),
+        ("ffi.mux.async_oauth", Auth::OAuth),
+    ] {
+        // Each lane's open takes a second; each lane acks its offset 0.
+        let open = MockResponse::CreateStream {
+            stream_id: "lane".into(),
+            delay_ms: 1000,
+        };
+        runtime.block_on(server.inject_responses(table, vec![open, ack(0)]));
+        let (ack_log, sink) = (AckLog::leaked(), AsyncSink::leaked());
+        let ack = MuxAck::log(ack_log);
+        let (returned, _, message) = Create::new(sdk, table, 2).start(auth, ack, sink);
+        // The lanes open only after a second, so no callback yet means the
+        // create returned before they opened.
+        assert_eq!(
+            sink.count(),
+            0,
+            "{table}: create blocked until the lanes opened"
+        );
+        assert!(returned, "{table}: {message}");
+
+        let mux = created(sink, table);
+        let mut ids: Vec<i64> = json_records(0..2)
+            .iter()
+            .map(|json| ingest_json(mux, json))
+            .collect();
+        flush_ok(mux);
+        close_ok(mux);
+        zerobus_multiplexed_stream_free(mux);
+        ids.sort();
+        assert_eq!(
+            ack_log.sorted_acks(),
+            ids,
+            "{table}: acks carry the returned IDs"
+        );
+    }
+
+    // A DescriptorProto with NULL options, and the handle freed inside its
+    // own success callback (the docs allow it).
+    let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
+    let create = Create::new(sdk, "ffi.mux.async_proto", 1).with(|c| {
+        c.descriptor = Some(descriptor);
+        c.options = None;
+        c.free_in_callback = true;
+    });
+    let sink = AsyncSink::leaked();
+    let (returned, _, message) = create.start(Auth::Headers, MuxAck::none(), sink);
+    assert!(returned, "async proto create: {message}");
+    created(sink, "async proto create");
+    zerobus_sdk_free(sdk);
 }
 
 // ---------------------------------------------------------------------------

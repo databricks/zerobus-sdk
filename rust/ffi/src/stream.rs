@@ -52,15 +52,23 @@ fn c_ack_callback(c: &CStreamConfigurationOptions) -> Option<CallbackAckCallback
     }
 }
 
-#[derive(Clone, Copy)]
-struct SendPtr<T>(*mut T);
+pub(crate) struct SendPtr<T>(*mut T);
+
+// Written out because `derive` would require `T: Copy`; only the pointer is copied.
+impl<T> Clone for SendPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for SendPtr<T> {}
 
 impl<T> SendPtr<T> {
-    const fn new(ptr: *mut T) -> Self {
+    pub(crate) const fn new(ptr: *mut T) -> Self {
         Self(ptr)
     }
 
-    const fn get(self) -> *mut T {
+    pub(crate) const fn get(self) -> *mut T {
         self.0
     }
 }
