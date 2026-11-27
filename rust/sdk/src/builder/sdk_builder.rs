@@ -146,9 +146,10 @@ impl ZerobusSdkBuilder {
     /// in the same header.
     ///
     /// If [`producer_id`](Self::producer_id) is set, its token comes before
-    /// this value. If [`sdk_identifier`](Self::sdk_identifier) is also set, the override
-    /// replaces the SDK prefix but this value is still appended — the wire
-    /// value becomes `<sdk_identifier> <application_name>`.
+    /// this value. If [`sdk_identifier`](Self::sdk_identifier) is also set,
+    /// the override replaces the SDK prefix but this value is still appended —
+    /// the wire value becomes
+    /// `<sdk_identifier> [producer/<id> ]<application_name>`.
     ///
     /// The value is trimmed of surrounding whitespace; a blank value is ignored
     /// and the default identifier is used. A value that is not a valid
@@ -187,7 +188,9 @@ impl ZerobusSdkBuilder {
     /// [`HeadersProvider`](crate::HeadersProvider) is sent first, so a
     /// `producer/` token in it takes precedence. The server ignores the whole
     /// `user-agent`, producer id included, if it holds a non-ASCII byte, e.g.
-    /// from a non-ASCII `application_name`.
+    /// from a non-ASCII `application_name`. The server scans only the start of
+    /// the header, so an `sdk_identifier` with an unclosed `(` or many
+    /// space-separated parts can hide the producer id.
     ///
     /// # Arguments
     ///
@@ -205,7 +208,7 @@ impl ZerobusSdkBuilder {
     /// Empty values are ignored and the default identifier is used. If
     /// [`application_name`](Self::application_name) is also set, it is still
     /// appended after this override — the wire value becomes
-    /// `<sdk_identifier> <application_name>`.
+    /// `<sdk_identifier> [producer/<id> ]<application_name>`.
     ///
     /// # Arguments
     ///
