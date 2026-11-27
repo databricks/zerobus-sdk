@@ -80,6 +80,7 @@
     "example:json:batch": "tsx examples/json/batch.ts",
     "example:proto:single": "tsx examples/proto/single.ts",
     "example:proto:batch": "tsx examples/proto/batch.ts",
+    "example:proto:multiplexed": "tsx examples/proto/multiplexed.ts",
     "example:arrow": "tsx examples/arrow/batch.ts",
     "example:avro:single": "tsx examples/avro/single.ts",
     "example:avro:batch": "tsx examples/avro/batch.ts",
