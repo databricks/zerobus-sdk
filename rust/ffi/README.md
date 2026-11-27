@@ -190,13 +190,22 @@ zerobus_multiplexed_stream_free(mux);
   `zerobus_multiplexed_stream_get_unacked_records`, and send them, plus any
   record whose ingest call failed, on a new stream. Every call returns the
   same records, so re-send them once, from one caller.
-- `zerobus_sdk_create_multiplexed_stream_async` and
-  `zerobus_sdk_create_multiplexed_stream_with_headers_provider_async` return at
-  once and report the new handle through a completion callback on a runtime
-  thread, possibly before the call returns. Its `result` is valid only
-  during the callback: do not free its
-  `error_message` (the FFI frees it), and copy it to keep it. The callback
-  must not make blocking calls.
+- Every call except `is_closed` and `free` has an `_async` variant that
+  returns at once and reports through a completion callback on a runtime
+  thread (`zerobus_sdk_create_multiplexed_stream_async`,
+  `zerobus_multiplexed_stream_ingest_proto_record_async`, ...). A callback can
+  run before its call returns. Its `result` is valid only during the call: do not free its
+  `error_message` (the FFI frees it), and copy it to keep it. A callback may
+  call the `_async` functions, `is_closed` and `free`, but no blocking call.
+  Call `free` from a callback only after the `_async` call that started it
+  has returned.
+- Flush and close wait for every `_async` ingest accepted before them to be
+  queued, but not for its completion callback; a failed `_async` ingest is not
+  in `get_unacked_records`, so keep each record until its callback reports
+  success. `_async` ingests have no back-pressure, so limit how many are
+  outstanding: one that waits for capacity longer than 30 seconds fails in
+  its callback. They can be queued in a different order than called. The
+  multiplexed stream has no `_nowait` ingest; use the `_async` calls instead.
 - Arrow Flight multiplexing is not yet exposed through the C FFI.
 
 ### Dynamic protobuf from a Unity Catalog schema (pure C)

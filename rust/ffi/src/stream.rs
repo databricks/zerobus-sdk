@@ -193,7 +193,7 @@ fn invoke_create_stream_async_callback(
     }
 }
 
-fn invoke_offset_async_callback(
+pub(crate) fn invoke_offset_async_callback(
     callback: OffsetAsyncCallback,
     offset: i64,
     result: CResult,
@@ -220,7 +220,7 @@ fn invoke_offset_async_callback(
     }
 }
 
-fn invoke_bool_async_callback(
+pub(crate) fn invoke_bool_async_callback(
     callback: BoolAsyncCallback,
     value: bool,
     result: CResult,
@@ -247,7 +247,7 @@ fn invoke_bool_async_callback(
     }
 }
 
-fn invoke_record_array_async_callback(
+pub(crate) fn invoke_record_array_async_callback(
     callback: RecordArrayAsyncCallback,
     records: CRecordArray,
     result: CResult,

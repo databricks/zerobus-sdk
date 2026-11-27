@@ -2,8 +2,8 @@
 //!
 //! The FFI blocks on its own global runtime, so these tests call it from plain
 //! threads and run the mock server on a separate runtime. They test the FFI
-//! layer only: C arguments, ID passing, ownership, locks, the async creates,
-//! and error mapping. The core mux behavior is tested in
+//! layer only: C arguments, ID passing, ownership, locks, the pending-ingest
+//! tracker, `_async`, and error mapping. The core mux behavior is tested in
 //! `multiplexed_stream_tests.rs`.
 
 #[allow(dead_code)]
@@ -36,6 +36,9 @@ use zerobus_ffi::{
     CRecordArray, CResult, CStreamConfigurationOptions, CZerobusMultiplexedStream, CZerobusSdk,
 };
 use zerobus_ffi::{
+    zerobus_multiplexed_stream_close_async, zerobus_multiplexed_stream_flush_async,
+    zerobus_multiplexed_stream_get_unacked_records_async,
+    zerobus_multiplexed_stream_wait_for_message_id_async,
     zerobus_sdk_create_multiplexed_stream_async,
     zerobus_sdk_create_multiplexed_stream_with_headers_provider_async,
 };
@@ -43,13 +46,19 @@ use zerobus_ffi::{
     zerobus_sdk_create_stream_with_headers_provider, zerobus_stream_close, zerobus_stream_flush,
     zerobus_stream_free, zerobus_stream_ingest_json_record,
 };
-use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse, MockZerobusServer};
+use zerobus_test_support::mock_grpc::{
+    start_mock_server, MockResponse, MockResponseGate, MockZerobusServer,
+};
 // Short names for the ingest exports, so each call fits on one line.
 use zerobus_ffi::{
     zerobus_multiplexed_stream_ingest_json_record as json1,
+    zerobus_multiplexed_stream_ingest_json_record_async as json1_a,
     zerobus_multiplexed_stream_ingest_json_records as jsons,
+    zerobus_multiplexed_stream_ingest_json_records_async as jsons_a,
     zerobus_multiplexed_stream_ingest_proto_record as proto1,
+    zerobus_multiplexed_stream_ingest_proto_record_async as proto1_a,
     zerobus_multiplexed_stream_ingest_proto_records as protos,
+    zerobus_multiplexed_stream_ingest_proto_records_async as protos_a,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,6 +120,18 @@ fn outcome(f: impl FnOnce(*mut CResult) -> bool) -> (bool, bool, String) {
     (returned, result.is_retryable, take_message(&mut result))
 }
 
+/// Runs a call whose outcome shows only in its `CResult`: `(success,
+/// retryable, message)`.
+fn blocking(f: impl FnOnce(*mut CResult)) -> (bool, bool, String) {
+    let mut result = new_result();
+    f(&mut result as *mut CResult);
+    (
+        result.success,
+        result.is_retryable,
+        take_message(&mut result),
+    )
+}
+
 /// Runs a call that must succeed and returns its value.
 fn ok<T>(what: &str, f: impl FnOnce(*mut CResult) -> T) -> T {
     let mut result = new_result();
@@ -122,8 +143,15 @@ fn ok<T>(what: &str, f: impl FnOnce(*mut CResult) -> T) -> T {
 fn stream_index(message_id: i64) -> usize {
     MessageId::from_raw(message_id).stream_index()
 }
+
+/// Prefix of the core message for a record whose type does not match the
+/// stream (matched by prefix so a core rewording of the tail does not break it).
+const RECORD_TYPE_MISMATCH: &str = "Record type does not match";
+const NULL_HANDLE: &str = "Multiplexed stream pointer is null";
 const NULL_SDK: &str = "SDK pointer is null";
 const NULL_ARG: &str = "Null pointer passed";
+const BAD_DATA: &str = "Invalid data pointer";
+const BAD_RECORDS: &str = "Invalid records pointer";
 const OPTIONS_ACK: &str =
     "options->ack_on_ack and options->ack_on_error are not supported for multiplexed streams";
 /// How long a create may take to report a connect failure to `127.0.0.1:1`.
@@ -142,6 +170,45 @@ fn wait_until_within(bound: Duration, what: &str, condition: impl Fn() -> bool) 
         assert!(Instant::now() < deadline, "timed out waiting: {what}");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Runs `f` on a thread; fails the test unless it returns within `bound`.
+fn within<T: Send + 'static>(
+    bound: Duration,
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(bound)
+        .unwrap_or_else(|_| panic!("{what} did not return within {bound:?}"))
+}
+
+/// Runs `f` here and fails unless it returns within 1 s: for calls that must
+/// not block.
+fn prompt<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = f();
+    assert!(started.elapsed() < Duration::from_secs(1), "{what} blocked");
+    value
+}
+
+type MuxCall = extern "C" fn(Mux, *mut CResult) -> bool;
+
+/// A flush or close on a thread, bounded by `bound`: `(returned, retryable,
+/// message)`.
+fn call_within(bound: Duration, mux: Mux, call: MuxCall, what: &str) -> (bool, bool, String) {
+    let mux_addr = mux as usize;
+    within(bound, what, move || {
+        outcome(|r| call(mux_addr as *mut _, r))
+    })
+}
+
+fn expect_returned_true(outcome: (bool, bool, String), what: &str) {
+    let (returned, _, message) = outcome;
+    assert!(returned, "{what} failed: {message}");
 }
 
 /// Leaked test state whose address is handed to the FFI as `user_data`; the
@@ -412,6 +479,13 @@ fn ack(offset: i64) -> MockResponse {
     }
 }
 
+fn gated_ack(offset: i64, gate: &Arc<MockResponseGate>) -> MockResponse {
+    MockResponse::GatedRecordAck {
+        ack_up_to_offset: offset,
+        gate: Arc::clone(gate),
+    }
+}
+
 fn lane_error(status: Status) -> MockResponse {
     MockResponse::Error {
         status,
@@ -640,6 +714,37 @@ fn create_mux_with(
     mux
 }
 
+fn create_mux(
+    sdk: *mut CZerobusSdk,
+    table: &str,
+    descriptor: Option<&[u8]>,
+    stream_count: usize,
+    options: &CStreamConfigurationOptions,
+) -> Mux {
+    create_mux_with(
+        sdk,
+        table,
+        descriptor,
+        stream_count,
+        options,
+        MuxAck::none(),
+    )
+}
+
+/// A JSON mux whose server acks offsets `0..acks`.
+fn json_mux_with_acks(
+    runtime: &Runtime,
+    server: &MockZerobusServer,
+    url: &str,
+    table: &str,
+    acks: i64,
+) -> (*mut CZerobusSdk, Mux) {
+    runtime.block_on(server.inject_responses(table, lane_with_acks(acks)));
+    let sdk = create_sdk(url);
+    let mux = create_mux(sdk, table, None, 1, &json_options());
+    (sdk, mux)
+}
+
 /// A mock server (with `responses` injected for `table`), an SDK pointed at
 /// it, and one JSON headers-provider mux over `lanes` lanes.
 struct Fixture {
@@ -684,6 +789,47 @@ impl Fixture {
     }
 }
 
+/// A 1-lane JSON mux whose first record r0 is ingested and has its ack held
+/// by `gate`; `then` follows the gated ack in the injected responses.
+struct GatedMux {
+    fixture: Fixture,
+    gate: Arc<MockResponseGate>,
+    r0_id: i64,
+}
+
+impl std::ops::Deref for GatedMux {
+    type Target = Fixture;
+
+    fn deref(&self) -> &Fixture {
+        &self.fixture
+    }
+}
+
+impl GatedMux {
+    fn new(
+        table: &str,
+        options: &CStreamConfigurationOptions,
+        ack: MuxAck,
+        then: Vec<MockResponse>,
+    ) -> Self {
+        let gate = Arc::new(MockResponseGate::new());
+        let mut responses = vec![lane_open(), gated_ack(0, &gate)];
+        responses.extend(then);
+        let fixture = Fixture::new(table, responses, 1, options, ack);
+        let r0_id = ingest_json(fixture.mux, &json_record(0));
+        fixture.wait_for_writes(1);
+        Self {
+            fixture,
+            gate,
+            r0_id,
+        }
+    }
+
+    fn free(self) {
+        self.fixture.free();
+    }
+}
+
 fn wait_for_writes(runtime: &Runtime, server: &MockZerobusServer, expected: u64) {
     wait_until(&format!("server receives {expected} records"), || {
         runtime.block_on(server.get_write_count()) >= expected
@@ -700,6 +846,13 @@ fn json_records(ids: std::ops::Range<usize>) -> Vec<CString> {
 
 fn ingest_json(mux: Mux, json: &CString) -> i64 {
     Ingest::Json(json.as_ptr()).ok(mux)
+}
+
+/// Overwrites a NUL-terminated buffer, keeping the NUL, so a late read would
+/// still see a valid string.
+fn scrub(buf: &mut [u8]) {
+    let len = buf.len();
+    buf[..len - 1].fill(b'x');
 }
 
 /// Returns the payloads of `records`, sorted, and frees the array; checks
@@ -805,6 +958,27 @@ impl Ingest<'_> {
         assert!(success, "{} failed: {message}", self.name());
         id
     }
+
+    /// The `_async` ingest: `(returned, retryable, message)`.
+    fn call_async(self, mux: Mux, sink: &'static AsyncSink) -> (bool, bool, String) {
+        let (ud, cb) = (sink.user_data(), sink_offset);
+        outcome(|r| match self {
+            Ingest::Proto(d) => proto1_a(mux, d.as_ptr(), d.len(), cb, ud, r),
+            Ingest::Protos(p, l) => protos_a(mux, p.as_ptr(), l.as_ptr(), p.len(), cb, ud, r),
+            Ingest::Json(json) => json1_a(mux, json, cb, ud, r),
+            Ingest::Jsons(j) => jsons_a(mux, j.as_ptr(), j.len(), cb, ud, r),
+        })
+    }
+
+    /// The `_async` ingest, which must be accepted.
+    fn start(self, mux: Mux, sink: &'static AsyncSink) {
+        let (returned, _, message) = self.call_async(mux, sink);
+        assert!(
+            returned && message.is_empty(),
+            "{}_async: {message}",
+            self.name()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -814,21 +988,36 @@ impl Ingest<'_> {
 /// One reported `_async` completion.
 #[derive(Clone, Debug, Default)]
 struct Completion {
+    /// Message ID, bool as 0/1, or record count, depending on the call.
+    value: i64,
     success: bool,
     retryable: bool,
     message: String,
+    /// JSON payloads of a `get_unacked_records_async` result, sorted.
+    payloads: Vec<String>,
     mux: usize,
 }
 
-/// `user_data` for `_async` callbacks: records every completion.
+/// `user_data` for `_async` callbacks: records every completion, and can hold
+/// a callback until released.
 #[derive(Default)]
 struct AsyncSink {
     completions: Mutex<Vec<Completion>>,
+    block: AtomicBool,
+    entered: AtomicBool,
+    release: AtomicBool,
 }
 
 impl Leaked for AsyncSink {}
 
 impl AsyncSink {
+    /// A sink that holds its callback (for at most 5 s) until released.
+    fn blocking() -> &'static Self {
+        let sink = Self::leaked();
+        sink.block.store(true, Ordering::SeqCst);
+        sink
+    }
+
     fn count(&self) -> usize {
         self.completions.lock().unwrap().len()
     }
@@ -858,6 +1047,16 @@ impl AsyncSink {
         assert_eq!(self.count(), 0, "{what}: callback must not run");
     }
 
+    fn wait_entered(&self) {
+        wait_until("the callback is running", || {
+            self.entered.load(Ordering::SeqCst)
+        });
+    }
+
+    fn release(&self) {
+        self.release.store(true, Ordering::SeqCst);
+    }
+
     fn push(user_data: *mut c_void, result: *const CResult, completion: Completion) {
         let sink = unsafe { &*(user_data as *const AsyncSink) };
         let result = unsafe { &*result };
@@ -874,7 +1073,40 @@ impl AsyncSink {
             message,
             ..completion
         });
+        if sink.block.load(Ordering::SeqCst) {
+            sink.entered.store(true, Ordering::SeqCst);
+            // Bounded, so a missing release fails the test instead of hanging it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !sink.release.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
+}
+
+extern "C" fn sink_offset(id: i64, result: *const CResult, user_data: *mut c_void) {
+    let completion = Completion {
+        value: id,
+        ..Default::default()
+    };
+    AsyncSink::push(user_data, result, completion);
+}
+
+extern "C" fn sink_bool(value: bool, result: *const CResult, user_data: *mut c_void) {
+    let completion = Completion {
+        value: value as i64,
+        ..Default::default()
+    };
+    AsyncSink::push(user_data, result, completion);
+}
+
+extern "C" fn sink_records(records: CRecordArray, result: *const CResult, user_data: *mut c_void) {
+    let completion = Completion {
+        value: records.len as i64,
+        payloads: take_json_payloads(records),
+        ..Default::default()
+    };
+    AsyncSink::push(user_data, result, completion);
 }
 
 extern "C" fn sink_create(mux: Mux, result: *const CResult, user_data: *mut c_void) {
@@ -892,6 +1124,95 @@ extern "C" fn sink_create_and_free(mux: Mux, result: *const CResult, user_data: 
         zerobus_multiplexed_stream_free(mux);
     }
     sink_create(mux, result, user_data);
+}
+
+fn wait_async(mux: Mux, message_id: i64, sink: &'static AsyncSink) -> (bool, bool, String) {
+    outcome(|r| {
+        zerobus_multiplexed_stream_wait_for_message_id_async(
+            mux,
+            message_id,
+            sink_bool,
+            sink.user_data(),
+            r,
+        )
+    })
+}
+
+/// `flush_async`, `close_async` or `get_unacked_records_async` by name.
+fn async_op(op: &str, mux: Mux, sink: &'static AsyncSink) -> (bool, bool, String) {
+    let ud = sink.user_data();
+    outcome(|r| match op {
+        "flush_async" => zerobus_multiplexed_stream_flush_async(mux, sink_bool, ud, r),
+        "close_async" => zerobus_multiplexed_stream_close_async(mux, sink_bool, ud, r),
+        "get_unacked_records_async" => {
+            zerobus_multiplexed_stream_get_unacked_records_async(mux, sink_records, ud, r)
+        }
+        _ => unreachable!("{op}"),
+    })
+}
+
+/// One of the six calls that need the read lock: four ingests, a wait, and a
+/// flush.
+#[derive(Clone, Copy)]
+enum Reader {
+    Ingest(Ingest<'static>),
+    Wait(i64),
+    Flush,
+}
+
+impl Reader {
+    fn name(self) -> &'static str {
+        match self {
+            Reader::Ingest(Ingest::Proto(_)) => "proto_record_async",
+            Reader::Ingest(Ingest::Protos(..)) => "proto_records_async",
+            Reader::Ingest(Ingest::Json(_)) => "json_record_async",
+            Reader::Ingest(Ingest::Jsons(_)) => "json_records_async",
+            Reader::Wait(_) => "wait_for_message_id_async",
+            Reader::Flush => "flush_async",
+        }
+    }
+
+    fn call_async(self, mux: Mux, sink: &'static AsyncSink) -> (bool, bool, String) {
+        match self {
+            Reader::Ingest(ingest) => ingest.call_async(mux, sink),
+            Reader::Wait(id) => wait_async(mux, id, sink),
+            Reader::Flush => async_op("flush_async", mux, sink),
+        }
+    }
+
+    /// The blocking counterpart: `(success, retryable, message)`.
+    fn call_blocking(self, mux: Mux) -> (bool, bool, String) {
+        match self {
+            Reader::Ingest(ingest) => {
+                let (_, success, retryable, message) = ingest.call(mux);
+                (success, retryable, message)
+            }
+            Reader::Wait(id) => blocking(|r| {
+                zerobus_multiplexed_stream_wait_for_message_id(mux, id, r);
+            }),
+            Reader::Flush => blocking(|r| {
+                zerobus_multiplexed_stream_flush(mux, r);
+            }),
+        }
+    }
+}
+
+/// The six readers, each ingest with one protobuf or JSON record; the wait is
+/// on `message_id`.
+fn readers(message_id: i64) -> [Reader; 6] {
+    let proto: &'static [u8] = b"proto";
+    let json: &'static CString = Box::leak(Box::new(CString::new(r#"{"id": "async"}"#).unwrap()));
+    let proto_ptrs: &'static [*const u8] = Box::leak(Box::new([proto.as_ptr()]));
+    let proto_lens: &'static [usize] = Box::leak(Box::new([proto.len()]));
+    let jsons: &'static [*const c_char] = Box::leak(Box::new([json.as_ptr()]));
+    [
+        Reader::Ingest(Ingest::Proto(proto)),
+        Reader::Ingest(Ingest::Json(json.as_ptr())),
+        Reader::Ingest(Ingest::Protos(proto_ptrs, proto_lens)),
+        Reader::Ingest(Ingest::Jsons(jsons)),
+        Reader::Wait(message_id),
+        Reader::Flush,
+    ]
 }
 
 /// Waits for an async create's callback; returns the handle it brought.
@@ -991,7 +1312,7 @@ fn blocking_ingest_paths_marshal_ids_and_payloads() {
 }
 
 /// Message IDs cross the ABI intact: the ack callback gets the IDs ingest
-/// returned, and the wait passes the lane and the sub-offset through, also on
+/// returned, and both waits pass the lane and the sub-offset through, also on
 /// a real lane >= 32, whose IDs are negative.
 #[test]
 fn message_ids_cross_the_abi_for_acks_and_waits() {
@@ -1018,8 +1339,13 @@ fn message_ids_cross_the_abi_for_acks_and_waits() {
         let (waited, retryable, message) =
             outcome(|r| zerobus_multiplexed_stream_wait_for_message_id(f.mux, id, r));
         assert_eq!(waited, acked, "wait({id}): {message}");
+        let sink = AsyncSink::leaked();
+        assert!(wait_async(f.mux, id, sink).0);
+        let done = sink.one(&format!("wait_async({id})"));
+        assert_eq!((done.value == 1, done.success), (acked, acked), "{done:?}");
         if id == lane_63 {
             assert!(!retryable && !message.is_empty(), "lane 63: {message}");
+            assert!(done.value == 0 && !done.retryable, "{done:?}");
         }
     }
 
@@ -1169,8 +1495,9 @@ fn sync_create_failures_report_and_free_once() {
     zerobus_sdk_free(sdk);
 }
 
-/// Invalid C arguments fail only the call that passed them: none of a
-/// rejected batch is queued, sent or recovered, and the mux stays usable.
+/// Invalid C arguments fail only the call that passed them, sync or async:
+/// an async call returns false and never calls back, none of a rejected batch
+/// is queued, sent or recovered, and the mux stays usable.
 #[test]
 fn argument_errors_fail_only_that_call() {
     let ack_log = AckLog::leaked();
@@ -1187,46 +1514,70 @@ fn argument_errors_fail_only_that_call() {
     let (proto_ptrs, proto_lens) = ([proto.as_ptr(), ptr::null()], [proto.len(), 4]);
     let null_batch = [valid.as_ptr(), ptr::null()];
     let utf8_batch = [valid.as_ptr(), invalid_utf8];
+    // (what, call, message part, also run `_async`)
     let rows = [
         (
             "json_record(NULL)",
             Ingest::Json(ptr::null()),
             "Null pointer passed",
+            true,
         ),
         (
             "json_record(invalid UTF-8)",
             Ingest::Json(invalid_utf8),
             "Invalid UTF-8 string",
+            false,
         ),
         (
             "json_records([valid, NULL])",
             Ingest::Jsons(&null_batch),
             "Null pointer passed",
+            true,
         ),
         (
             "json_records([valid, invalid UTF-8])",
             Ingest::Jsons(&utf8_batch),
             "Invalid UTF-8 string",
+            true,
         ),
         (
             "proto_records([valid, NULL])",
             Ingest::Protos(&proto_ptrs, &proto_lens),
             "Invalid data pointer",
+            true,
         ),
         // A protobuf record on this JSON mux: the core's error, mapped by the
-        // blocking call to -1 and a non-retryable result.
+        // blocking call to -1 and a non-retryable result. (The async path
+        // reports it in its task.)
         (
             "proto_record on a JSON mux",
             Ingest::Proto(proto),
             "Record type does not match",
+            false,
         ),
     ];
 
-    for (what, ingest, expected) in rows {
+    let mut sinks = Vec::new();
+    for (what, ingest, expected, with_async) in rows {
         let (id, _, retryable, message) = ingest.call(f.mux);
+        let mut messages = vec![(what.to_string(), retryable, message)];
         assert_eq!(id, -1, "{what} must be rejected");
-        assert!(!retryable, "{what}: {message}");
-        assert!(message.contains(expected), "{what}: {message}");
+        if with_async {
+            let sink = AsyncSink::leaked();
+            let (returned, async_retryable, message) = ingest.call_async(f.mux, sink);
+            assert!(!returned, "{what} async must be rejected");
+            messages.push((format!("{what} async"), async_retryable, message));
+            sinks.push((what, sink));
+        }
+        for (what, retryable, message) in messages {
+            assert!(!retryable, "{what}: {message}");
+            assert!(message.contains(expected), "{what}: {message}");
+        }
+    }
+    // Let a wrongly scheduled callback land before checking.
+    std::thread::sleep(Duration::from_millis(200));
+    for (what, sink) in &sinks {
+        assert_eq!(sink.count(), 0, "{what} async: callback must not run");
     }
     assert!(!zerobus_multiplexed_stream_is_closed(f.mux));
 
@@ -1390,8 +1741,10 @@ fn ffi_owned_user_data_is_freed_once() {
     free_both(sdk, mux);
 }
 
-/// Pending work keeps the ack `user_data` alive across free: a callback still
-/// running after close stopped waiting.
+/// Pending work keeps the ack `user_data` (and the handle) alive across
+/// free: a callback still running after close stopped waiting, and a pending
+/// `flush_async`, `close_async` or `get_unacked_records_async`, which still
+/// calls back once with the right result.
 #[test]
 fn pending_work_and_running_callbacks_defer_frees() {
     // A running callback; close stops waiting for it after 50 ms.
@@ -1413,10 +1766,48 @@ fn pending_work_and_running_callbacks_defer_frees() {
     ack_log.release_callbacks.store(true, Ordering::SeqCst);
     ack_log.assert_freed_once();
     zerobus_sdk_free(f.sdk);
+
+    // A pending async call (r0's ack is gated; with one slot, the async
+    // ingest waits for capacity).
+    for op in [
+        "flush_async",
+        "close_async",
+        "get_unacked_records_async",
+        "json_record_async",
+        "wait_for_message_id_async",
+    ] {
+        let ack_log = AckLog::leaked();
+        let ack = MuxAck::owned(ack_log, true);
+        let options = with(json_options(), |o| o.max_inflight_requests = 1);
+        let gated = GatedMux::new("ffi.mux.async.free", &options, ack, vec![]);
+        let sink = AsyncSink::leaked();
+        let r1 = json_record(1);
+        let started = match op {
+            "json_record_async" => Ingest::Json(r1.as_ptr()).call_async(gated.mux, sink),
+            "wait_for_message_id_async" => wait_async(gated.mux, gated.r0_id, sink),
+            _ => async_op(op, gated.mux, sink),
+        };
+        expect_returned_true(started, op);
+        zerobus_multiplexed_stream_free(gated.mux);
+        ack_log.assert_not_freed(&format!("free with a pending {op}"));
+
+        gated.gate.release();
+        let done = sink.one(op);
+        assert!(done.success, "{op}: {}", done.message);
+        match op {
+            "get_unacked_records_async" => assert!(done.payloads.is_empty(), "{done:?}"),
+            // An ID, not a bool.
+            "json_record_async" => {}
+            _ => assert_eq!(done.value, 1, "{op}: {done:?}"),
+        }
+        ack_log.assert_freed_once();
+        zerobus_sdk_free(gated.sdk);
+    }
 }
 
-/// Many C threads share one handle, ingesting at the same time: every ID is
-/// distinct, and every record is recovered.
+/// Many C threads share one handle, with blocking and async ingests at the
+/// same time: every ID is distinct, every async callback fires once, and
+/// every record is recovered.
 #[test]
 fn concurrent_callers_share_one_handle() {
     const THREADS: usize = 4;
@@ -1430,6 +1821,7 @@ fn concurrent_callers_share_one_handle() {
     );
     // Raw pointers aren't `Send`; the C contract allows sharing the handle.
     let mux_addr = f.mux as usize;
+    let sink = AsyncSink::leaked();
     let barrier = Arc::new(Barrier::new(THREADS));
     let workers: Vec<_> = (0..THREADS)
         .map(|t| {
@@ -1438,19 +1830,28 @@ fn concurrent_callers_share_one_handle() {
                 let mux = mux_addr as Mux;
                 let records = json_records(t * PER_THREAD..(t + 1) * PER_THREAD);
                 barrier.wait();
-                records
-                    .iter()
-                    .map(|json| ingest_json(mux, json))
-                    .collect::<Vec<_>>()
+                // Even threads ingest blocking, odd ones async.
+                let mut ids = Vec::new();
+                for json in &records {
+                    if t % 2 == 0 {
+                        ids.push(ingest_json(mux, json));
+                    } else {
+                        Ingest::Json(json.as_ptr()).start(mux, sink);
+                    }
+                }
+                ids
             })
         })
         .collect();
-    let ids: Vec<i64> = workers
+    let mut ids: Vec<i64> = workers
         .into_iter()
         .flat_map(|worker| worker.join().unwrap())
         .collect();
 
     let total = THREADS * PER_THREAD;
+    let completions = sink.wait_for(total / 2, "every async ingest calls back");
+    assert!(completions.iter().all(|c| c.success));
+    ids.extend(completions.iter().map(|c| c.value));
     assert_eq!(ids.iter().collect::<HashSet<_>>().len(), total);
     let lanes: HashSet<usize> = ids.iter().map(|&id| stream_index(id)).collect();
     assert_eq!(lanes, HashSet::from([0, 1]), "both lanes are used");
@@ -1460,11 +1861,280 @@ fn concurrent_callers_share_one_handle() {
 }
 
 // ---------------------------------------------------------------------------
+// Locks: calls racing a writer
+// ---------------------------------------------------------------------------
+
+/// Runs `writer` ("close" or "get_unacked_records") on a thread; the thread
+/// returns `(success, message, recovered payloads)`.
+fn spawn_writer(
+    writer: &'static str,
+    mux: Mux,
+) -> std::thread::JoinHandle<(bool, String, Vec<String>)> {
+    let mux_addr = mux as usize;
+    std::thread::spawn(move || {
+        let mux = mux_addr as Mux;
+        let mut result = new_result();
+        let recovered = if writer == "close" {
+            zerobus_multiplexed_stream_close(mux, &mut result);
+            Vec::new()
+        } else {
+            take_json_payloads(zerobus_multiplexed_stream_get_unacked_records(
+                mux,
+                &mut result,
+            ))
+        };
+        (result.success, take_message(&mut result), recovered)
+    })
+}
+
+/// A flush on a thread, which then holds the read lock.
+fn spawn_flush(mux: Mux) -> std::thread::JoinHandle<()> {
+    let mux_addr = mux as usize;
+    let flusher = std::thread::spawn(move || {
+        outcome(|r| zerobus_multiplexed_stream_flush(mux_addr as Mux, r));
+    });
+    // No hook shows when the flush holds the lock; give it time to.
+    std::thread::sleep(Duration::from_millis(100));
+    flusher
+}
+
+/// Calls racing `close`, queued behind a flush or holding the lock in its
+/// own flush. The readers return at once: async ingests report "closing"
+/// through one callback before the writer finishes; the async wait and flush
+/// wait for the writer, then report the real outcome; a blocking ingest
+/// fails. No rejected record is sent or recovered. An async wait on the
+/// record the writer is flushing succeeds. `get_unacked_records` takes the
+/// same write path, so it gets one row (an async ingest sees "closing").
+/// With no writer, a flush holding the read lock doesn't block async readers.
+#[test]
+fn calls_racing_a_close() {
+    for (writer, queued) in [
+        ("close", true),
+        ("close", false),
+        ("get_unacked_records", false),
+    ] {
+        let what = format!("{writer}, {}", if queued { "queued" } else { "held" });
+        let only_close = writer == "close";
+        let gated = GatedMux::new("ffi.mux.closing", &json_options(), MuxAck::none(), vec![]);
+        // Queued: a flush holds the read lock and the writer waits.
+        // Held: the writer holds the lock, blocked in its own flush.
+        let flusher = queued.then(|| spawn_flush(gated.mux));
+        let writer_thread = spawn_writer(writer, gated.mux);
+        wait_until("the writer takes or queues for the lock", || {
+            zerobus_multiplexed_stream_is_closed(gated.mux)
+        });
+
+        let mut waiting = Vec::new();
+        let readers = readers(gated.r0_id);
+        let readers = if only_close {
+            &readers[..]
+        } else {
+            &readers[1..2]
+        };
+        for &reader in readers {
+            let name = reader.name();
+            let sink = AsyncSink::leaked();
+            let (returned, _, message) = prompt(name, || reader.call_async(gated.mux, sink));
+            assert!(returned, "{what}: {name} must return true: {message}");
+            if matches!(reader, Reader::Wait(_) | Reader::Flush) {
+                waiting.push((name, sink));
+                continue;
+            }
+            // The gate is still closed, so the writer has not finished.
+            let done = sink.one(name);
+            assert!(!done.success && !done.retryable, "{what}: {name}: {done:?}");
+            assert!(
+                done.message.contains("MultiplexedStream is closing"),
+                "{what}: {name}: {done:?}"
+            );
+        }
+        for (name, sink) in &waiting {
+            sink.assert_never_called(&format!("{what}: {name} before release"));
+        }
+
+        // Decides only whether the blocking ingest below waits behind the
+        // writer or finds the mux already closed; both must fail.
+        let gate = Arc::clone(&gated.gate);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            gate.release();
+        });
+        if only_close {
+            let late = json_record(2);
+            let (id, _, retryable, message) = Ingest::Json(late.as_ptr()).call(gated.mux);
+            assert!(
+                id == -1 && !retryable && !message.is_empty(),
+                "{what}: {message}"
+            );
+        }
+        releaser.join().unwrap();
+        let (_, _, recovered) = writer_thread.join().unwrap();
+        if let Some(flusher) = flusher {
+            flusher.join().unwrap();
+        }
+
+        for (name, sink) in waiting {
+            let done = sink.one(name);
+            if name == "wait_for_message_id_async" {
+                // The writer's flush acked r0, and the wait checks the
+                // acked offset first.
+                assert!(done.success && done.value == 1, "{what}: {done:?}");
+                continue;
+            }
+            let (_, retryable, message) = Reader::Flush.call_blocking(gated.mux);
+            assert!(!done.success && done.value == 0, "{what}: {done:?}");
+            assert_eq!(
+                (done.retryable, done.message.as_str()),
+                (retryable, message.as_str()),
+                "{what}: flush_async must match the blocking flush"
+            );
+            assert!(message.contains("MultiplexedStream is closed"), "{message}");
+        }
+        // Only r0 was ever sent (and acked); no rejected record is
+        // recoverable.
+        assert!(recovered.is_empty(), "{what}: {recovered:?}");
+        assert!(unacked_json_payloads(gated.mux).is_empty(), "{what}");
+        assert_eq!(gated.writes(), 1, "{what}: a rejected record was sent");
+        gated.free();
+    }
+
+    // An async wait made while close holds the lock, on r0 (acked before)
+    // and on r1 (the record close's flush waits for).
+    for target in ["r0", "r1"] {
+        let what = format!("close, wait on {target}");
+        let gate = Arc::new(MockResponseGate::new());
+        let responses = vec![lane_open(), ack(0), gated_ack(1, &gate)];
+        let f = Fixture::new(
+            "ffi.mux.wait.closing",
+            responses,
+            1,
+            &json_options(),
+            MuxAck::none(),
+        );
+        let r0_id = ingest_json(f.mux, &json_record(0));
+        assert!(ok("wait r0", |r| {
+            zerobus_multiplexed_stream_wait_for_message_id(f.mux, r0_id, r)
+        }));
+        let r1_id = ingest_json(f.mux, &json_record(1));
+        f.wait_for_writes(2);
+        let writer_thread = spawn_writer("close", f.mux);
+        wait_until("the writer takes the lock", || {
+            zerobus_multiplexed_stream_is_closed(f.mux)
+        });
+        // No hook shows when the writer is inside its flush; give it time to.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let sink = AsyncSink::leaked();
+        let id = if target == "r0" { r0_id } else { r1_id };
+        let (returned, _, message) = prompt(&what, || wait_async(f.mux, id, sink));
+        assert!(returned, "{what}: {message}");
+        sink.assert_never_called(&format!("{what}: before release"));
+        gate.release();
+        let (success, message, recovered) = writer_thread.join().unwrap();
+        assert!(success, "{what}: {message}");
+        assert!(recovered.is_empty(), "{what}: {recovered:?}");
+        let done = sink.one(&what);
+        assert!(done.success && done.value == 1, "{what}: {done:?}");
+        f.free();
+    }
+
+    // No writer: a flush holds the read lock, and every async reader still
+    // returns at once. The two JSON ingests get offsets 1 and 2.
+    let options = json_short_flush();
+    let gated = GatedMux::new(
+        "ffi.mux.reader",
+        &options,
+        MuxAck::none(),
+        vec![ack(1), ack(2)],
+    );
+    let flusher = spawn_flush(gated.mux);
+    let sinks: Vec<_> = readers(gated.r0_id)
+        .into_iter()
+        .map(|reader| {
+            let sink = AsyncSink::leaked();
+            let returned = prompt(reader.name(), || reader.call_async(gated.mux, sink));
+            expect_returned_true(returned, reader.name());
+            (reader, sink)
+        })
+        .collect();
+    gated.gate.release();
+    flusher.join().unwrap();
+    for (reader, sink) in sinks {
+        let (name, done) = (reader.name(), sink.one(reader.name()));
+        match reader {
+            // A protobuf record on the JSON mux, rejected in the task.
+            Reader::Ingest(Ingest::Proto(_) | Ingest::Protos(..)) => assert!(
+                done.value == -1 && done.message.contains(RECORD_TYPE_MISMATCH),
+                "{name}: {done:?}"
+            ),
+            Reader::Ingest(_) => assert!(done.success, "{name}: {done:?}"),
+            _ => assert!(done.success && done.value == 1, "{name}: {done:?}"),
+        }
+    }
+    close_ok(gated.mux);
+    gated.free();
+}
+
+/// `close_async` and `get_unacked_records_async` don't block the caller
+/// while a reader holds the lock, and finish after it; they release the
+/// write lock before their callback, so a flush during it isn't blocked.
+#[test]
+fn async_close_and_unacked_wait_for_readers() {
+    for writer in ["close_async", "get_unacked_records_async"] {
+        let options = with(json_short_flush(), |o| o.max_inflight_requests = 1);
+        // The close variant acks r1; get_unacked_records leaves it unacked.
+        let then = if writer == "close_async" {
+            vec![ack(1)]
+        } else {
+            vec![]
+        };
+        let gated = GatedMux::new("ffi.mux.async.writer", &options, MuxAck::none(), then);
+
+        // r1 waits for the only in-flight slot, holding the read lock.
+        let (r1_sink, writer_sink) = (AsyncSink::leaked(), AsyncSink::leaked());
+        let r1 = json_record(1);
+        Ingest::Json(r1.as_ptr()).start(gated.mux, r1_sink);
+        let (returned, _, message) = prompt(writer, || async_op(writer, gated.mux, writer_sink));
+        assert!(returned, "{writer}: {message}");
+        writer_sink.assert_never_called(&format!("{writer} while r1 holds the lock"));
+
+        gated.gate.release();
+        assert!(r1_sink.one("r1 callback").success);
+        let done = writer_sink.one(writer);
+        assert!(done.success, "{done:?}");
+        if writer == "close_async" {
+            assert_eq!(done.value, 1, "{done:?}");
+        } else {
+            assert_eq!(done.payloads, sorted_strings([&r1]));
+        }
+        gated.free();
+
+        // The callback blocks; a flush meanwhile returns within 1 s.
+        let f = Fixture::new(
+            "ffi.mux.async.guard",
+            vec![],
+            1,
+            &json_options(),
+            MuxAck::none(),
+        );
+        let sink = AsyncSink::blocking();
+        expect_returned_true(async_op(writer, f.mux, sink), writer);
+        sink.wait_entered();
+        let flush = zerobus_multiplexed_stream_flush;
+        let (flushed, _, message) = call_within(Duration::from_secs(1), f.mux, flush, "flush");
+        assert!(!flushed, "{writer}: flush on a closed mux: {message}");
+        sink.release();
+        f.free();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `_async` calls
 // ---------------------------------------------------------------------------
 
-/// Bad C arguments make an async create return false at once, never call
-/// back, and free its `user_data` once.
+/// Bad C arguments make every `_async` call return false at once and never
+/// call back; an async create frees its `user_data` once. One row per
+/// argument check per export.
 #[test]
 fn async_calls_fail_fast_on_invalid_arguments() {
     use Auth::*;
@@ -1500,6 +2170,57 @@ fn async_calls_fail_fast_on_invalid_arguments() {
         }
     }
     zerobus_sdk_free(sdk);
+
+    // The other `_async` calls: a NULL handle, and a NULL pointer argument,
+    // which is checked first.
+    let null: Mux = ptr::null_mut();
+    let mut results = Vec::new();
+    for reader in readers(0) {
+        let sink = AsyncSink::leaked();
+        let outcome = reader.call_async(null, sink);
+        results.push((reader.name().to_owned(), outcome, NULL_HANDLE, sink));
+    }
+    for op in ["close_async", "get_unacked_records_async"] {
+        let sink = AsyncSink::leaked();
+        results.push((op.to_owned(), async_op(op, null, sink), NULL_HANDLE, sink));
+    }
+    let (data, lens, cb) = ([1u8], [1usize], sink_offset);
+    let records = [data.as_ptr()];
+    type Call<'a> = Box<dyn Fn(*mut c_void, *mut CResult) -> bool + 'a>;
+    let null_pointer: [(&str, Call, &str); 4] = [
+        (
+            "proto_record_async data=NULL",
+            Box::new(|ud, r| proto1_a(null, ptr::null(), 1, cb, ud, r)),
+            BAD_DATA,
+        ),
+        (
+            "proto_records_async records=NULL",
+            Box::new(|ud, r| protos_a(null, ptr::null(), lens.as_ptr(), 1, cb, ud, r)),
+            BAD_RECORDS,
+        ),
+        (
+            "proto_records_async record_lens=NULL",
+            Box::new(|ud, r| protos_a(null, records.as_ptr(), ptr::null(), 1, cb, ud, r)),
+            BAD_RECORDS,
+        ),
+        (
+            "json_records_async records=NULL",
+            Box::new(|ud, r| jsons_a(null, ptr::null(), 1, cb, ud, r)),
+            BAD_RECORDS,
+        ),
+    ];
+    for (name, call, expected) in null_pointer {
+        let sink = AsyncSink::leaked();
+        let outcome = outcome(|r| call(sink.user_data(), r));
+        results.push((name.to_owned(), outcome, expected, sink));
+    }
+    // Let a wrongly spawned callback land.
+    std::thread::sleep(Duration::from_millis(200));
+    for (name, (returned, retryable, message), expected, sink) in results {
+        assert!(!returned && !retryable, "{name}: {message}");
+        assert!(message.contains(expected), "{name}: {message}");
+        assert_eq!(sink.count(), 0, "{name}: callback must not run");
+    }
 }
 
 /// Async create failures: `options->ack_on_*` is rejected at once (false,
@@ -1649,6 +2370,526 @@ fn async_creates_return_before_lanes_open() {
     assert!(returned, "async proto create: {message}");
     created(sink, "async proto create");
     zerobus_sdk_free(sdk);
+}
+
+/// The four async ingests report distinct IDs, copy their input before
+/// returning, report an empty batch as (-2, success), and return while their
+/// record still waits for capacity.
+#[test]
+fn async_ingests_report_ids_copy_input_and_return_early() {
+    // JSON: single and batch, then an empty batch; input scrubbed on return.
+    let f = Fixture::new(
+        "ffi.mux.async.json",
+        vec![],
+        2,
+        &json_short_flush(),
+        MuxAck::none(),
+    );
+    let originals = json_records(0..3);
+    let mut bufs: Vec<Vec<u8>> = originals
+        .iter()
+        .map(|s| s.as_bytes_with_nul().to_vec())
+        .collect();
+    let mut ptrs: Vec<*const c_char> = bufs.iter().map(|b| b.as_ptr() as *const c_char).collect();
+    let sinks = [
+        AsyncSink::leaked(),
+        AsyncSink::leaked(),
+        AsyncSink::leaked(),
+    ];
+    Ingest::Json(ptrs[0]).start(f.mux, sinks[0]);
+    Ingest::Jsons(&ptrs[1..]).start(f.mux, sinks[1]);
+    ptrs.fill(ptr::null());
+    bufs.iter_mut().for_each(|b| scrub(b));
+    Ingest::Jsons(&[]).start(f.mux, sinks[2]);
+    let ids: HashSet<i64> = sinks[..2]
+        .iter()
+        .map(|sink| {
+            let done = sink.one("JSON ingest callback");
+            assert!(done.success, "{}", done.message);
+            done.value
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "distinct IDs: {ids:?}");
+    let empty = sinks[2].one("empty JSON batch callback");
+    assert!(empty.success && empty.value == -2, "{empty:?}");
+    let null_sink = AsyncSink::leaked();
+    let ud = null_sink.user_data();
+    expect_returned_true(
+        outcome(|r| jsons_a(f.mux, ptr::null(), 0, sink_offset, ud, r)),
+        "json_records_async(NULL, 0)",
+    );
+    let null_batch = null_sink.one("json_records_async(NULL, 0)");
+    assert!(
+        null_batch.success && null_batch.value == -2,
+        "{null_batch:?}"
+    );
+    assert_eq!(unacked_json_payloads(f.mux), sorted_strings(&originals));
+    f.free();
+
+    // Protobuf: single and batch copy bytes, pointers and lengths.
+    let (_runtime, _server, url) = start_server();
+    let options = with(zerobus_get_default_config(), |o| {
+        o.recovery = false;
+        o.flush_timeout_ms = 500;
+    });
+    let sdk = create_sdk(&url);
+    let descriptor = create_test_descriptor_proto().unwrap().encode_to_vec();
+    let mux = create_mux(sdk, "ffi.mux.async.proto", Some(&descriptor), 1, &options);
+    let originals: Vec<Vec<u8>> = vec![vec![0x00, 0xff, 0x01], vec![0x7f], vec![0x10, 0x20]];
+    let mut bufs = originals.clone();
+    let (mut ptrs, mut lens): (Vec<_>, Vec<_>) =
+        bufs[1..].iter().map(|b| (b.as_ptr(), b.len())).unzip();
+    let sinks = [
+        AsyncSink::leaked(),
+        AsyncSink::leaked(),
+        AsyncSink::leaked(),
+    ];
+    Ingest::Proto(&bufs[0]).start(mux, sinks[0]);
+    Ingest::Protos(&ptrs, &lens).start(mux, sinks[1]);
+    ptrs.fill(ptr::null());
+    lens.fill(0);
+    bufs.iter_mut().for_each(|b| b.fill(0xee));
+    Ingest::Protos(&[], &[]).start(mux, sinks[2]);
+    // NULL is valid with length 0: NULL arrays for an empty batch.
+    let null_sink = AsyncSink::leaked();
+    let ud = null_sink.user_data();
+    expect_returned_true(
+        outcome(|r| protos_a(mux, ptr::null(), ptr::null(), 0, sink_offset, ud, r)),
+        "proto_records_async(NULL, NULL, 0)",
+    );
+    let null_batch = null_sink.one("proto_records_async(NULL, NULL, 0)");
+    assert!(
+        null_batch.success && null_batch.value == -2,
+        "{null_batch:?}"
+    );
+    let (first, batch) = (sinks[0].one("proto single"), sinks[1].one("proto batch"));
+    assert!(first.success && batch.success, "{first:?} {batch:?}");
+    assert_ne!(first.value, batch.value);
+    let empty = sinks[2].one("empty proto batch callback");
+    assert!(empty.success && empty.value == -2, "{empty:?}");
+    let records = ok("get_unacked_records", |r| {
+        zerobus_multiplexed_stream_get_unacked_records(mux, r)
+    });
+    let mut expected = originals;
+    expected.sort();
+    assert_eq!(take_payloads(records, false), expected);
+    free_both(sdk, mux);
+
+    // Returns while blocked on capacity: r0's ack is gated, one slot.
+    let options = with(json_options(), |o| o.max_inflight_requests = 1);
+    let gated = GatedMux::new(
+        "ffi.mux.async.capacity",
+        &options,
+        MuxAck::none(),
+        vec![ack(1)],
+    );
+    let sink = AsyncSink::leaked();
+    let mux_addr = gated.mux as usize;
+    let returned = within(
+        Duration::from_secs(1),
+        "an async ingest blocked on capacity",
+        move || {
+            let r1 = json_record(1);
+            Ingest::Json(r1.as_ptr())
+                .call_async(mux_addr as Mux, sink)
+                .0
+        },
+    );
+    assert!(returned);
+    sink.assert_never_called("an ingest still waiting for capacity");
+    gated.gate.release();
+    assert!(sink.one("r1 callback").success);
+    close_ok(gated.mux);
+    gated.free();
+}
+
+/// Each async call reports through its callback what its blocking
+/// counterpart returns: on a mux closed by `close` or by a retryable lane
+/// failure, and an in-task wrong record type is reported to that call only,
+/// not stored for the next flush.
+#[test]
+fn async_errors_are_reported_per_call() {
+    for lane_failure in [false, true] {
+        let what = if lane_failure {
+            "lane failure"
+        } else {
+            "plain close"
+        };
+        // The lane failure must stay terminal; the plain close needs recovery on.
+        let (table, responses, options) = if lane_failure {
+            let failing = vec![lane_open(), lane_error(Status::unavailable("lane down"))];
+            (
+                "ffi.mux.async.closed.failure",
+                failing,
+                json_options_terminal(),
+            )
+        } else {
+            ("ffi.mux.async.closed", vec![], json_options())
+        };
+        let options = with(options, |o| o.flush_timeout_ms = 500);
+        let f = Fixture::new(table, responses, 1, &options, MuxAck::none());
+        let r0 = json_record(0);
+        let r0_id = if lane_failure {
+            let id = ingest_json(f.mux, &r0);
+            let (flushed, retryable, message) =
+                outcome(|r| zerobus_multiplexed_stream_flush(f.mux, r));
+            assert!(!flushed, "flush after the lane failure");
+            assert!(
+                retryable,
+                "an Unavailable lane failure is retryable: {message}"
+            );
+            id
+        } else {
+            close_ok(f.mux);
+            0
+        };
+        assert!(zerobus_multiplexed_stream_is_closed(f.mux));
+        let writes_before = f.writes();
+
+        for reader in readers(r0_id) {
+            let name = reader.name();
+            let sink = AsyncSink::leaked();
+            let (returned, _, message) = reader.call_async(f.mux, sink);
+            assert!(returned, "{what}: {name} must return true: {message}");
+            let done = sink.one(&format!("{what}: {name}"));
+            let (success, retryable, expected) = reader.call_blocking(f.mux);
+            assert!(!success, "{what}: blocking {name} succeeded");
+            assert!(!done.success, "{what}: {name}: {}", done.message);
+            assert_eq!(
+                (done.retryable, done.message.as_str()),
+                (retryable, expected.as_str()),
+                "{what}: {name} must report what its blocking counterpart returns"
+            );
+        }
+        assert_eq!(
+            f.writes(),
+            writes_before,
+            "{what}: a rejected record reached the server"
+        );
+        if lane_failure {
+            let sink = AsyncSink::leaked();
+            expect_returned_true(async_op("close_async", f.mux, sink), "close_async");
+            let done = sink.one(&format!("{what}: close_async"));
+            assert!(
+                !done.success && done.message.contains("lane down"),
+                "{what}: close_async reports the cause: {done:?}"
+            );
+        }
+        let expected = if lane_failure {
+            sorted_strings([&r0])
+        } else {
+            Vec::new()
+        };
+        assert_eq!(unacked_json_payloads(f.mux), expected, "{what}");
+        f.free();
+    }
+
+    // A wrong record type, found in the task: one callback for that call.
+    let (runtime, server, url) = start_server();
+    let (sdk, mux) = json_mux_with_acks(&runtime, &server, &url, "ffi.mux.async.wrong.type", 1);
+    let proto: &[u8] = b"proto";
+    let (ptrs, lens) = ([proto.as_ptr()], [proto.len()]);
+    for ingest in [Ingest::Proto(proto), Ingest::Protos(&ptrs, &lens)] {
+        let sink = AsyncSink::leaked();
+        ingest.start(mux, sink);
+        let (what, done) = (ingest.name(), sink.one(ingest.name()));
+        assert!(
+            done.value == -1 && !done.success && !done.retryable,
+            "{what}: {done:?}"
+        );
+        assert!(
+            done.message.contains(RECORD_TYPE_MISMATCH),
+            "{what}: {done:?}"
+        );
+    }
+    ingest_json(mux, &json_record(0));
+    let flush = call_within(
+        Duration::from_secs(2),
+        mux,
+        zerobus_multiplexed_stream_flush,
+        "flush",
+    );
+    expect_returned_true(flush, "flush after per-call errors");
+    close_ok(mux);
+    free_both(sdk, mux);
+}
+
+/// A terminal lane failure that arrives after the async drain used most of
+/// flush_timeout_ms: the flush still reports the lane's own non-retryable
+/// error, not a timeout, because the core flush gets its own budget after the
+/// drain; and the mux is closed afterwards. Both the blocking flush and
+/// `flush_async`.
+#[test]
+fn flush_reports_terminal_failure_during_async_drain() {
+    for use_async in [false, true] {
+        let what = if use_async { "flush_async" } else { "flush" };
+        // Timeline from the flush's start (flush_timeout_ms = 2,000): r0's ack
+        // at about 1.5 s ends the drain (r1 is then sent); r1's request gets
+        // the lane error 1 s later, at about 2.5 s. A drain and core flush
+        // sharing one 2 s budget would report a timeout instead.
+        let responses = vec![
+            lane_open(),
+            MockResponse::RecordAck {
+                ack_up_to_offset: 0,
+                delay_ms: 1500,
+            },
+            MockResponse::Error {
+                status: Status::permission_denied("lane denied"),
+                delay_ms: 1000,
+            },
+        ];
+        let options = with(json_options_terminal(), |o| {
+            o.max_inflight_requests = 1;
+            o.flush_timeout_ms = 2000;
+        });
+        let f = Fixture::new(
+            "ffi.mux.flush.terminal",
+            responses,
+            1,
+            &options,
+            MuxAck::none(),
+        );
+        let [r0, r1]: [CString; 2] = json_records(0..2).try_into().unwrap();
+        ingest_json(f.mux, &r0);
+        f.wait_for_writes(1);
+        // r1 waits for capacity, so the flush has a pending async ingest.
+        let ingest_sink = AsyncSink::leaked();
+        Ingest::Json(r1.as_ptr()).start(f.mux, ingest_sink);
+
+        let (returned, retryable, message) = if use_async {
+            let sink = AsyncSink::leaked();
+            expect_returned_true(async_op("flush_async", f.mux, sink), what);
+            let done = sink.one_within(Duration::from_secs(5), what);
+            (done.success, done.retryable, done.message)
+        } else {
+            call_within(
+                Duration::from_secs(5),
+                f.mux,
+                zerobus_multiplexed_stream_flush,
+                what,
+            )
+        };
+        assert!(!returned && !retryable, "{what}: {message}");
+        assert!(message.contains("lane denied"), "{what}: {message}");
+        assert!(
+            !message.contains("timed out"),
+            "{what}: a timeout instead of the lane's error: {message}"
+        );
+        assert!(
+            zerobus_multiplexed_stream_is_closed(f.mux),
+            "{what}: the mux must be closed after a terminal failure"
+        );
+        ingest_sink.one("r1 async ingest");
+        f.free();
+    }
+}
+
+/// A flush covers the async ingests accepted before it, through the shared
+/// ingest tracker: every record of a loop is sent before it returns, an
+/// ingest still waiting for capacity is covered by `flush_async`, and a flush
+/// under a concurrent producer still returns. The epoch rule is a unit test
+/// in rust/ffi/src/multiplexed.rs.
+#[test]
+fn flush_covers_async_ingests_accepted_before_it() {
+    const RECORDS: usize = 50;
+    let ack_log = AckLog::leaked();
+    let responses = lane_with_acks(RECORDS as i64);
+    let ack = MuxAck::log(ack_log);
+    let f = Fixture::new("ffi.mux.async.flush", responses, 1, &json_options(), ack);
+    let sink = AsyncSink::leaked();
+    for json in json_records(0..RECORDS) {
+        Ingest::Json(json.as_ptr()).start(f.mux, sink);
+    }
+    flush_ok(f.mux);
+    assert_eq!(
+        f.writes(),
+        RECORDS as u64,
+        "flush returns only after every accepted async ingest is sent"
+    );
+    let completions = sink.wait_for(RECORDS, "every async ingest calls back");
+    assert!(completions.iter().all(|c| c.success));
+    let mut ids: Vec<i64> = completions.iter().map(|c| c.value).collect();
+    assert!(ok("wait_for_message_id", |r| {
+        zerobus_multiplexed_stream_wait_for_message_id(f.mux, ids[0], r)
+    }));
+    wait_until("every record is acknowledged", || {
+        ack_log.ack_count() >= RECORDS
+    });
+    close_ok(f.mux);
+    f.free();
+    ids.sort();
+    assert_eq!(
+        ack_log.sorted_acks(),
+        ids,
+        "the acks carry the async ingest IDs"
+    );
+
+    // One still waiting for capacity: flush_async covers it.
+    let (gate_r0, gate_r1) = (
+        Arc::new(MockResponseGate::new()),
+        Arc::new(MockResponseGate::new()),
+    );
+    let responses = vec![lane_open(), gated_ack(0, &gate_r0), gated_ack(1, &gate_r1)];
+    let options = with(json_options(), |o| o.max_inflight_requests = 1);
+    let f = Fixture::new(
+        "ffi.mux.flush.async.capacity",
+        responses,
+        1,
+        &options,
+        MuxAck::none(),
+    );
+    let [r0, r1]: [CString; 2] = json_records(0..2).try_into().unwrap();
+    ingest_json(f.mux, &r0);
+    f.wait_for_writes(1);
+    let (ingest_sink, flush_sink) = (AsyncSink::leaked(), AsyncSink::leaked());
+    Ingest::Json(r1.as_ptr()).start(f.mux, ingest_sink);
+    expect_returned_true(async_op("flush_async", f.mux, flush_sink), "flush_async");
+    // r0's ack lets r1 be sent; r1's ack is still held.
+    gate_r0.release();
+    f.wait_for_writes(2);
+    flush_sink.assert_never_called("flush_async before r1 is acked");
+    gate_r1.release();
+    let done = flush_sink.one("flush_async");
+    assert!(done.success && done.value == 1, "{done:?}");
+    assert!(ingest_sink.one("r1 async ingest").success);
+    close_ok(f.mux);
+    f.free();
+
+    // A concurrent producer: the flush returns within 5 s.
+    let options = with(json_options(), |o| o.flush_timeout_ms = 1000);
+    let f = Fixture::new(
+        "ffi.mux.async.producer",
+        vec![],
+        1,
+        &options,
+        MuxAck::none(),
+    );
+    let mux_addr = f.mux as usize;
+    let sink = AsyncSink::leaked();
+    let stop = Arc::new(AtomicBool::new(false));
+    let produced = Arc::new(AtomicUsize::new(0));
+    let producer = {
+        let (stop, produced) = (Arc::clone(&stop), Arc::clone(&produced));
+        std::thread::spawn(move || {
+            let mut accepted = Vec::new();
+            for i in 0.. {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let json = json_record(i);
+                if Ingest::Json(json.as_ptr())
+                    .call_async(mux_addr as Mux, sink)
+                    .0
+                {
+                    accepted.push(json.into_string().unwrap());
+                }
+                produced.fetch_add(1, Ordering::SeqCst);
+                // Paces the producer so the recovered set stays small.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            accepted
+        })
+    };
+    wait_until("the producer is running", || {
+        produced.load(Ordering::SeqCst) > 0
+    });
+    let flush = zerobus_multiplexed_stream_flush;
+    // Nothing is acked, so the flush ends at its 1 s timeout.
+    let (flushed, _, message) = call_within(
+        Duration::from_secs(5),
+        f.mux,
+        flush,
+        "flush under a concurrent producer",
+    );
+    assert!(!flushed && message.contains("timed out"), "{message}");
+    stop.store(true, Ordering::SeqCst);
+    let mut accepted = producer.join().unwrap();
+    accepted.sort();
+    assert!(!accepted.is_empty());
+    assert_eq!(unacked_json_payloads(f.mux), accepted);
+    sink.wait_for(accepted.len(), "every accepted async ingest calls back");
+    f.free();
+
+    // flush_timeout_ms bounds the wait for a pending async ingest, then the
+    // core flush times out on its own, so the flush ends within twice the
+    // timeout: r0 is never acked and r1 waits for capacity.
+    let options = with(json_options(), |o| {
+        o.max_inflight_requests = 1;
+        o.flush_timeout_ms = 300;
+    });
+    let f = Fixture::new("ffi.mux.async.timeout", vec![], 1, &options, MuxAck::none());
+    ingest_json(f.mux, &json_record(0));
+    let r1 = json_record(1);
+    Ingest::Json(r1.as_ptr()).start(f.mux, AsyncSink::leaked());
+    let (flushed, _, message) = call_within(
+        Duration::from_secs(2),
+        f.mux,
+        flush,
+        "flush with a pending async ingest",
+    );
+    assert!(!flushed, "the flush times out");
+    assert!(message.contains("Flush timed out"), "{message}");
+    f.free();
+}
+
+/// A blocking `_async` ingest callback holds nothing the mux needs: with an
+/// in-task rejection (nothing queued), the ticket and read guard are released,
+/// so a flush and a close during the callback return within 1 s; with a
+/// queued record (single and batch), the record is still sent and a flush
+/// still returns within 1 s.
+#[test]
+fn blocking_async_callback_holds_nothing_back() {
+    let json = json_records(0..2);
+    let ptrs: Vec<*const c_char> = json.iter().map(|r| r.as_ptr()).collect();
+    let rows = [
+        // A protobuf record on a JSON mux: rejected in the task.
+        (Ingest::Proto(b"proto"), 0),
+        (Ingest::Json(ptrs[0]), 1),
+        (Ingest::Jsons(&ptrs), 2),
+    ];
+    for (ingest, records) in rows {
+        let what = ingest.name();
+        let acks = lane_with_acks(1);
+        let f = Fixture::new(
+            "ffi.mux.async.blocking",
+            acks,
+            1,
+            &json_options(),
+            MuxAck::none(),
+        );
+        let sink = AsyncSink::blocking();
+        ingest.start(f.mux, sink);
+        sink.wait_entered();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while f.writes() < records {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: the record wasn't sent while its callback ran"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut calls = vec![("flush", zerobus_multiplexed_stream_flush as MuxCall)];
+        if records == 0 {
+            calls.push(("close", zerobus_multiplexed_stream_close));
+        }
+        for (call_name, call) in calls {
+            let during = format!("{what}: {call_name} during the callback");
+            let (returned, _, message) = call_within(Duration::from_secs(1), f.mux, call, &during);
+            assert!(returned, "{during}: {message}");
+        }
+        sink.release();
+        let done = sink.one(what);
+        if records == 0 {
+            assert!(
+                done.value == -1 && done.message.contains(RECORD_TYPE_MISMATCH),
+                "{done:?}"
+            );
+        } else {
+            assert!(done.success, "{what}: {done:?}");
+            close_ok(f.mux);
+        }
+        f.free();
+    }
 }
 
 // ---------------------------------------------------------------------------

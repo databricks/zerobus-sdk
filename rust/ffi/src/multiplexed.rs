@@ -11,21 +11,25 @@
 
 use crate::common::*;
 use crate::stream::{
-    configure_stream_builder, encoded_records_to_c_array, SendPtr, StreamCreateAuth,
+    configure_stream_builder, encoded_records_to_c_array, invoke_bool_async_callback,
+    invoke_offset_async_callback, invoke_record_array_async_callback, SendPtr, StreamCreateAuth,
 };
 use async_trait::async_trait;
+use databricks_zerobus_ingest_sdk::stream_options::defaults;
 use databricks_zerobus_ingest_sdk::{
-    AckCallback, EncodedRecord, HeadersProvider, MessageId, MultiplexedStream, ZerobusError,
-    ZerobusResult, ZerobusSdk,
+    AckCallback, EncodedRecord, GrpcCode, GrpcStatus, HeadersProvider, MessageId,
+    MultiplexedStream, ZerobusError, ZerobusResult, ZerobusSdk,
 };
 use prost::Message;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
+use std::future::Future;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use std::time::Duration;
+use tokio::sync::{Mutex, Notify, OwnedRwLockReadGuard, RwLock};
 
 /// Returned by ingest calls on failure; `result` carries the error.
 const INGEST_ERROR: i64 = -1;
@@ -53,12 +57,104 @@ pub struct CZerobusMultiplexedStream {
 
 /// Concrete type behind `*mut CZerobusMultiplexedStream`, owned by a `Box`.
 ///
+/// Background tasks clone `stream` and `pending`, never the handle, so they
+/// keep working after `zerobus_multiplexed_stream_free` drops it.
 struct MuxHandle {
     /// `close` and `get_unacked_records` need `&mut MultiplexedStream`, while
-    /// ingest, flush, and wait need only `&`. The lock lets those share the mux
-    /// and makes a close wait for them instead of aliasing a `&mut` with live
-    /// `&` borrows.
+    /// ingest, flush, and wait need only `&`, possibly from `_async` tasks that
+    /// hold their own owned read guard. The lock lets those
+    /// share the mux and makes a close wait for them instead of aliasing a
+    /// `&mut` with live `&` borrows.
     stream: Arc<RwLock<MultiplexedStream>>,
+    /// `_async` ingests not yet queued into the core, so flush can wait for
+    /// them.
+    pending: Arc<PendingIngests>,
+    /// `flush_timeout_ms`, which bounds a flush's wait for `pending`; the core
+    /// flush then has its own `flush_timeout_ms`.
+    flush_timeout: Duration,
+}
+
+/// Counts `_async` ingests per flush epoch.
+///
+/// A flush starts a new epoch and waits only for submissions from earlier
+/// epochs, so producers that keep submitting cannot hold it off indefinitely.
+#[derive(Default)]
+struct PendingIngests {
+    epochs: std::sync::Mutex<PendingEpochs>,
+    drained: Notify,
+}
+
+#[derive(Default)]
+struct PendingEpochs {
+    current: u64,
+    /// Submissions not yet queued, by epoch; empty epochs are removed.
+    pending: BTreeMap<u64, usize>,
+}
+
+impl PendingIngests {
+    fn epochs(&self) -> std::sync::MutexGuard<'_, PendingEpochs> {
+        // The state stays consistent even if a holder panicked.
+        self.epochs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a submission in the current epoch.
+    fn begin(self: &Arc<Self>) -> PendingTicket {
+        let mut epochs = self.epochs();
+        let epoch = epochs.current;
+        *epochs.pending.entry(epoch).or_default() += 1;
+        PendingTicket {
+            tracker: Arc::clone(self),
+            epoch,
+        }
+    }
+
+    /// Closes the current epoch for a flush and returns it.
+    fn start_flush(&self) -> u64 {
+        let mut epochs = self.epochs();
+        let target = epochs.current;
+        epochs.current += 1;
+        target
+    }
+
+    /// Waits until every submission from epoch `target` or earlier is queued.
+    async fn wait_drained(&self, target: u64) {
+        loop {
+            let mut notified = std::pin::pin!(self.drained.notified());
+            // Register before checking, so a drain in between is not missed.
+            notified.as_mut().enable();
+            if self.epochs().pending.range(..=target).next().is_none() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Marks one `_async` submission as queued (or rejected) when dropped.
+struct PendingTicket {
+    tracker: Arc<PendingIngests>,
+    epoch: u64,
+}
+
+impl Drop for PendingTicket {
+    fn drop(&mut self) {
+        let drained = {
+            let mut epochs = self.tracker.epochs();
+            match epochs.pending.get_mut(&self.epoch) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                _ => {
+                    epochs.pending.remove(&self.epoch);
+                    true
+                }
+            }
+        };
+        if drained {
+            self.tracker.drained.notify_waiters();
+        }
+    }
 }
 
 fn validate_mux_ptr<'a>(
@@ -174,9 +270,8 @@ type MuxAckFree = extern "C" fn(user_data: *mut std::ffi::c_void);
 ///
 /// Owns `user_data` when `free_user_data` is set: `Drop` releases it once,
 /// after the last sub-stream and background task holding the callback is
-/// gone. The C caller cannot observe that moment otherwise, since sub-streams
-/// are torn down in the background and can outlive
-/// `zerobus_multiplexed_stream_free`.
+/// gone. The C caller cannot observe that moment otherwise, since `_async`
+/// tasks can outlive `zerobus_multiplexed_stream_free`.
 struct MultiplexedCallbackAckCallback {
     inner: CallbackAckCallback,
     has_callback: bool,
@@ -282,6 +377,11 @@ async fn build_mux_from_parts(
     ack_callback: MultiplexedCallbackAckCallback,
 ) -> ZerobusResult<*mut CZerobusMultiplexedStream> {
     reject_options_ack_value(options.as_ref())?;
+    let flush_timeout = Duration::from_millis(
+        options
+            .as_ref()
+            .map_or(defaults::FLUSH_TIMEOUT_MS, |c| c.flush_timeout_ms),
+    );
     let mut builder = configure_stream_builder(
         sdk_ref,
         table_name,
@@ -298,6 +398,8 @@ async fn build_mux_from_parts(
     let mux = builder.multiplexed(stream_count).build().await?;
     let handle = MuxHandle {
         stream: Arc::new(RwLock::new(mux)),
+        pending: Arc::default(),
+        flush_timeout,
     };
     Ok(Box::into_raw(Box::new(handle)) as *mut CZerobusMultiplexedStream)
 }
@@ -334,7 +436,8 @@ async fn build_mux_from_parts(
 /// pass the `ack_user_data` parameter instead. When close returns, all ack
 /// callbacks have run, unless close waited longer than
 /// `callback_max_wait_time_ms` (default 5 s; see
-/// `zerobus_multiplexed_stream_close`).
+/// `zerobus_multiplexed_stream_close`). `_async` completion callbacks can still
+/// run after close returns.
 ///
 /// Once this function is called, the FFI owns `ack_user_data` and invokes
 /// `free_ack_user_data` (when set) exactly once, from any thread, after the
@@ -494,8 +597,9 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider(
 /// Free a multiplexed stream handle (Beta).
 ///
 /// Call `zerobus_multiplexed_stream_close` first to flush pending records;
-/// freeing an open stream abandons them. Must not run concurrently with any
-/// other call on `mux` (it may be called from an async create's completion
+/// freeing an open stream abandons them. Pending `_async` operations keep the
+/// stream alive and still call back exactly once. Must not run concurrently
+/// with any other call on `mux` (it may be called from an `_async` completion
 /// callback), and `mux` must not be used afterwards.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_free(mux: *mut CZerobusMultiplexedStream) {
@@ -681,6 +785,41 @@ pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records(
     })
 }
 
+enum IngestPayload {
+    Record(EncodedRecord),
+    Batch(Vec<EncodedRecord>),
+    /// Panics in `ingest`, so tests can reach the panic paths.
+    #[cfg(test)]
+    PanicForTest,
+}
+
+impl IngestPayload {
+    /// Ingests the payload; returns its raw message ID, or `EMPTY_BATCH`.
+    async fn ingest(self, mux: &MultiplexedStream) -> ZerobusResult<i64> {
+        match self {
+            IngestPayload::Record(record) => mux.ingest_record(record).await.map(|id| id.raw()),
+            IngestPayload::Batch(batch) => mux
+                .ingest_records(batch)
+                .await
+                .map(|id| id.map_or(EMPTY_BATCH, |id| id.raw())),
+            #[cfg(test)]
+            IngestPayload::PanicForTest => panic!("IngestPayload::PanicForTest"),
+        }
+    }
+}
+
+/// Takes a shared lock on the mux for a background task without blocking.
+///
+/// The guard is taken before the call returns to C, so a later close or
+/// `get_unacked_records` waits until the spawned task is done with the mux.
+/// `try_read_owned` fails only while one of those holds or waits for the write
+/// lock; both close the mux, so the call reports it as closing.
+fn read_now(handle: &MuxHandle) -> ZerobusResult<OwnedRwLockReadGuard<MultiplexedStream>> {
+    Arc::clone(&handle.stream)
+        .try_read_owned()
+        .map_err(|_| ZerobusError::InvalidStateError("MultiplexedStream is closing".to_string()))
+}
+
 /// Wait until the record or batch behind `message_id` is acknowledged (Beta).
 ///
 /// Returns false with `result` set if the sub-stream that owns `message_id`
@@ -717,10 +856,42 @@ pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id(
     })
 }
 
+/// Waits up to `timeout` for `drained` (the `_async` ingests a flush covers
+/// to be queued), then runs the core flush with its own `flush_timeout_ms`.
+/// The core flush is never cancelled, so a sub-stream failure keeps its
+/// typed cause and closes the mux. If the drain timed out but the core flush
+/// succeeded, some covered ingests were not flushed: reports the core's
+/// flush-timeout error.
+async fn drain_then_flush(
+    timeout: Duration,
+    drained: impl Future<Output = ()>,
+    mux: &MultiplexedStream,
+) -> ZerobusResult<()> {
+    let drained = tokio::time::timeout(timeout, drained).await.is_ok();
+    mux.flush().await?;
+    if drained {
+        Ok(())
+    } else {
+        Err(ZerobusError::StreamClosedError(GrpcStatus::new(
+            GrpcCode::DeadlineExceeded,
+            "Flush timed out",
+        )))
+    }
+}
+
 /// Wait until every record queued on every sub-stream is acknowledged (Beta).
 ///
-/// Covers every ingest that returned before this call, and waits up to
-/// `flush_timeout_ms`.
+/// Covers blocking ingests that have returned and every `_async` ingest
+/// accepted before this call: it first waits, up to `flush_timeout_ms`, for
+/// their background tasks to queue them, then waits up to `flush_timeout_ms`
+/// again for the acknowledgments, so a flush can take up to twice
+/// `flush_timeout_ms`. If the first wait times out, the flush still flushes
+/// what is queued, then reports a timeout. A timeout does not mean the
+/// records are lost: some may be acknowledged already, so recover with
+/// `zerobus_multiplexed_stream_get_unacked_records`, which returns only the
+/// ones that are not, instead of re-sending everything. `_async` ingests
+/// submitted during the flush may not be covered; the next flush or close
+/// covers them.
 ///
 /// Returns false with `result` set on a timeout, on a closed mux, or once any
 /// sub-stream has failed, even if the other sub-streams flushed. Check
@@ -743,7 +914,13 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
                 return false;
             }
         };
-        let res = RUNTIME.block_on(async { handle.stream.read().await.flush().await });
+        let res = RUNTIME.block_on(async {
+            let target = handle.pending.start_flush();
+            // Queues behind a close in progress; the timeout starts after it.
+            let mux = handle.stream.read().await;
+            let drained = handle.pending.wait_drained(target);
+            drain_then_flush(handle.flush_timeout, drained, &mux).await
+        });
         complete(result, res.map(|()| true), false)
     })
 }
@@ -751,17 +928,20 @@ pub extern "C" fn zerobus_multiplexed_stream_flush(
 /// Flush and close every sub-stream (Beta).
 ///
 /// Waits for in-progress ingest, flush, and wait calls on this mux to return,
-/// then flushes. On error, call `zerobus_multiplexed_stream_get_unacked_records`
-/// to recover unacknowledged records. The handle must still be released with
+/// and for every accepted `_async` ingest to be queued, then flushes those too.
+/// On error, call `zerobus_multiplexed_stream_get_unacked_records` to recover
+/// unacknowledged records. The handle must still be released with
 /// `zerobus_multiplexed_stream_free`.
 ///
 /// Returns false with `result` set on failure; the mux is closed either way.
 /// When close returns, all ack callbacks have run, unless close waited longer
 /// than `callback_max_wait_time_ms` (default 5 s). With
 /// `has_callback_max_wait_time_ms` false there is no limit. After it, queued
-/// callbacks are dropped and a running one can outlive close. Close runs its
-/// own flush, also after a flush that timed out, so a flush followed by a close
-/// can wait up to twice `flush_timeout_ms`.
+/// callbacks are dropped and a running one can outlive close. `_async`
+/// completion callbacks can still run after close returns. Close runs its own
+/// flush, also after a flush that timed out, and a flush can itself take twice
+/// `flush_timeout_ms`, so a flush followed by a close can wait up to three
+/// times `flush_timeout_ms`.
 #[no_mangle]
 pub extern "C" fn zerobus_multiplexed_stream_close(
     mux: *mut CZerobusMultiplexedStream,
@@ -832,6 +1012,12 @@ pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records(
 
 // Async variants of the multiplexed stream functions.
 
+/// Lets the work this task just woke, such as a sub-stream's sender parked in
+/// this worker's LIFO slot, run before a completion callback, which may block.
+async fn yield_before_callback() {
+    tokio::task::yield_now().await;
+}
+
 /// Spawns `work`, which ends by invoking a C completion callback. If `work`
 /// panics first, `on_panic` reports the panic instead, so the callback still
 /// runs exactly once and the caller is not left waiting. Guards and tickets
@@ -863,20 +1049,29 @@ where
 /// `mux` is non-null on success, and the caller then owns it; it is null on
 /// failure.
 ///
-/// Both multiplexed `_async` creates follow the same contract. Each checks the
-/// arguments listed on it and returns at once: false with `result` set if a
-/// check fails, in which case its callback never runs; otherwise true, and
-/// every other error reaches the callback.
+/// Every multiplexed `_async` function follows the same contract. It checks
+/// its C arguments and returns at once: false with `result` set if a check
+/// fails, in which case its callback never runs; otherwise true, and every
+/// other error, including a closed mux, reaches the callback. Async ingests
+/// report a close in progress as an error; async wait and flush wait for it,
+/// as the blocking calls do.
 /// The callback then runs exactly once, on a runtime thread, possibly before
 /// the call returns: set up everything its `user_data` points to before the
 /// call. The `result` it
 /// receives is valid only during the call: do not free
 /// `result->error_message` (the FFI frees it when the callback returns), and
 /// copy it to keep it. The callback must be thread-safe and must not unwind.
-/// It may call the `_async` creates, `zerobus_multiplexed_stream_is_closed`
+/// It may call the `_async` functions, `zerobus_multiplexed_stream_is_closed`
 /// and `zerobus_multiplexed_stream_free`, but no blocking function: no other
 /// `zerobus_multiplexed_stream_*` call, no sync create, and no blocking
-/// `zerobus_stream_*` call.
+/// `zerobus_stream_*` call. Call `zerobus_multiplexed_stream_free` from a
+/// callback only after the `_async` call that started it has returned, since
+/// free must not overlap another call on the handle.
+/// For an `_async` ingest, the record's ack callback can run before its
+/// completion callback. Flush and close wait until accepted `_async` ingests
+/// are queued, not for their completion callbacks, and a failed `_async`
+/// ingest is not returned by `zerobus_multiplexed_stream_get_unacked_records`:
+/// keep your copy of a record until its callback reports success.
 /// The callback must not be NULL, and the `user_data` passed with it must
 /// stay valid until it runs.
 /// Callbacks run on a runtime worker thread: one that blocks holds that
@@ -1121,11 +1316,455 @@ pub extern "C" fn zerobus_sdk_create_multiplexed_stream_with_headers_provider_as
     })
 }
 
+/// Completion callback for the multiplexed `_async` ingests (Beta).
+///
+/// `message_id` is what the blocking ingest would return: an opaque message
+/// ID (it can be negative and is not ordered, so do not compare IDs), -2 with
+/// success for an empty batch, or -1 with the error in `result`. Same ABI as
+/// `OffsetAsyncCallback`. Follows the multiplexed `_async` contract described
+/// on `CreateMultiplexedStreamAsyncCallback`.
+pub type MessageIdAsyncCallback =
+    extern "C" fn(message_id: i64, result: *const CResult, user_data: *mut std::ffi::c_void);
+
+/// Queues an ingest on a background task and reports its message ID.
+///
+/// The read guard and a flush ticket are taken before the call returns, so
+/// flush, close and `get_unacked_records` cover the submission.
+/// Both are released before `callback` runs.
+fn spawn_ingest_async(
+    handle: &MuxHandle,
+    payload: IngestPayload,
+    callback: MessageIdAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+) {
+    let user_data = SendPtr::new(user_data);
+    let guard = match read_now(handle) {
+        Ok(guard) => guard,
+        Err(err) => {
+            RUNTIME.spawn(async move {
+                invoke_offset_async_callback(
+                    callback,
+                    INGEST_ERROR,
+                    CResult::error(err),
+                    user_data.get(),
+                );
+            });
+            return;
+        }
+    };
+    let ticket = handle.pending.begin();
+    spawn_with_panic_report(
+        async move {
+            let res = payload.ingest(&guard).await;
+            drop(ticket);
+            drop(guard);
+            yield_before_callback().await;
+            let (id, result) = match res {
+                Ok(id) => (id, CResult::success()),
+                Err(err) => (INGEST_ERROR, CResult::error(err)),
+            };
+            invoke_offset_async_callback(callback, id, result, user_data.get());
+        },
+        move |result| invoke_offset_async_callback(callback, INGEST_ERROR, result, user_data.get()),
+    );
+}
+
+/// Ingest a protobuf record on a background task and report its message ID
+/// via `callback` (Beta).
+///
+/// Copies the record before returning. `callback` receives the message ID, or
+/// -1 with the error, exactly as `zerobus_multiplexed_stream_ingest_proto_record`
+/// would return it; a failed ingest queued nothing. Records accepted before a
+/// call to flush, close or `get_unacked_records` (blocking or async) are
+/// queued before it proceeds, so it covers them. A closed or closing mux is
+/// reported through `callback`. `data` may be NULL only when `data_len` is 0.
+///
+/// `_async` ingests have no back-pressure: each accepted call starts a task,
+/// so limit how many are outstanding. One that waits for capacity longer
+/// than 30 seconds fails in its callback. Tasks can queue records in a
+/// different order than the calls were made.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_record_async(
+    mux: *mut CZerobusMultiplexedStream,
+    data: *const u8,
+    data_len: usize,
+    callback: MessageIdAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if data.is_null() && data_len != 0 {
+            write_error_result(result, "Invalid data pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let record = match unsafe { copy_bytes(data, data_len) } {
+            Ok(bytes) => EncodedRecord::Proto(bytes),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        write_success_result(result);
+        spawn_ingest_async(handle, IngestPayload::Record(record), callback, user_data);
+        true
+    })
+}
+
+/// Ingest a JSON record on a background task and report its message ID via
+/// `callback` (Beta).
+///
+/// Same contract as `zerobus_multiplexed_stream_ingest_proto_record_async`.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_json_record_async(
+    mux: *mut CZerobusMultiplexedStream,
+    json_data: *const c_char,
+    callback: MessageIdAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let record = match unsafe { c_str_to_string(json_data) } {
+            Ok(json) => EncodedRecord::Json(json),
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        write_success_result(result);
+        spawn_ingest_async(handle, IngestPayload::Record(record), callback, user_data);
+        true
+    })
+}
+
+/// Ingest a batch of protobuf records on a background task and report its
+/// message ID via `callback` (Beta).
+///
+/// Copies every record before returning. `callback` receives what
+/// `zerobus_multiplexed_stream_ingest_proto_records` would return: the
+/// batch's message ID, -2 with success for an empty batch (not a message ID),
+/// or -1 with the error. Otherwise as
+/// `zerobus_multiplexed_stream_ingest_proto_record_async`.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_proto_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    callback: MessageIdAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if num_records != 0 && (records.is_null() || record_lens.is_null()) {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let batch = match unsafe { copy_proto_records(records, record_lens, num_records) } {
+            Ok(batch) => batch,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        write_success_result(result);
+        spawn_ingest_async(handle, IngestPayload::Batch(batch), callback, user_data);
+        true
+    })
+}
+
+/// Ingest a batch of JSON records on a background task and report its
+/// message ID via `callback` (Beta).
+///
+/// Same contract as `zerobus_multiplexed_stream_ingest_proto_records_async`.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_ingest_json_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    json_records: *const *const c_char,
+    num_records: usize,
+    callback: MessageIdAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if num_records != 0 && json_records.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let batch = match unsafe { copy_json_records(json_records, num_records) } {
+            Ok(batch) => batch,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        write_success_result(result);
+        spawn_ingest_async(handle, IngestPayload::Batch(batch), callback, user_data);
+        true
+    })
+}
+
+/// Wait for a message ID on a background task and report completion via
+/// `callback` (Beta).
+///
+/// `callback` receives what `zerobus_multiplexed_stream_wait_for_message_id`
+/// would return. Like it, the wait starts after a close in progress
+/// finishes, and then reports the result on the closed mux. For high
+/// throughput, prefer one flush after an ingest loop over waiting on every
+/// message ID.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_wait_for_message_id_async(
+    mux: *mut CZerobusMultiplexedStream,
+    message_id: i64,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let stream = Arc::clone(&handle.stream);
+        let user_data = SendPtr::new(user_data);
+        write_success_result(result);
+        spawn_with_panic_report(
+            async move {
+                // Queues behind a close in progress, as the blocking wait does.
+                let res = stream
+                    .read_owned()
+                    .await
+                    .wait_for_message_id(MessageId::from_raw(message_id))
+                    .await;
+                yield_before_callback().await;
+                let (value, result) = match res {
+                    Ok(()) => (true, CResult::success()),
+                    Err(err) => (false, CResult::error(err)),
+                };
+                invoke_bool_async_callback(callback, value, result, user_data.get());
+            },
+            move |result| invoke_bool_async_callback(callback, false, result, user_data.get()),
+        );
+        true
+    })
+}
+
+/// Flush on a background task and report completion via `callback` (Beta).
+///
+/// Covers the same records as `zerobus_multiplexed_stream_flush`: every
+/// blocking and `_async` ingest accepted before this call. Like
+/// the blocking flush, it starts after a close in progress finishes, and then
+/// reports the result on the closed mux.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_flush_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        // Fix the epoch now, so submissions accepted later are not waited for.
+        let target = handle.pending.start_flush();
+        let pending = Arc::clone(&handle.pending);
+        let stream = Arc::clone(&handle.stream);
+        let flush_timeout = handle.flush_timeout;
+        let user_data = SendPtr::new(user_data);
+        write_success_result(result);
+        spawn_with_panic_report(
+            async move {
+                // Queues behind a close in progress, as the blocking flush does.
+                let mux = stream.read_owned().await;
+                let res = drain_then_flush(flush_timeout, pending.wait_drained(target), &mux).await;
+                drop(mux);
+                yield_before_callback().await;
+                let (value, result) = match res {
+                    Ok(()) => (true, CResult::success()),
+                    Err(err) => (false, CResult::error(err)),
+                };
+                invoke_bool_async_callback(callback, value, result, user_data.get());
+            },
+            move |result| invoke_bool_async_callback(callback, false, result, user_data.get()),
+        );
+        true
+    })
+}
+
+/// Flush and close every sub-stream on a background task and report
+/// completion via `callback` (Beta).
+///
+/// Behaves like `zerobus_multiplexed_stream_close`, waiting for in-flight calls
+/// and accepted `_async` ingests first. The close starts when its background
+/// task runs, so right after this returns
+/// `zerobus_multiplexed_stream_is_closed` can still be false, and calls made
+/// then are accepted and covered by the close. Once the close has started,
+/// `_async` ingests fail at once, and other calls wait for it and then report
+/// on the closed mux. The handle must still be released with
+/// `zerobus_multiplexed_stream_free`, which may happen before `callback`
+/// runs.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_close_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let stream = Arc::clone(&handle.stream);
+        let user_data = SendPtr::new(user_data);
+        write_success_result(result);
+        spawn_with_panic_report(
+            async move {
+                let res = stream.write_owned().await.close().await;
+                yield_before_callback().await;
+                let (value, result) = match res {
+                    Ok(()) => (true, CResult::success()),
+                    Err(err) => (false, CResult::error(err)),
+                };
+                invoke_bool_async_callback(callback, value, result, user_data.get());
+            },
+            move |result| invoke_bool_async_callback(callback, false, result, user_data.get()),
+        );
+        true
+    })
+}
+
+/// Close the mux on a background task and report every unacknowledged record
+/// via `callback` (Beta).
+///
+/// Behaves like `zerobus_multiplexed_stream_get_unacked_records`. On success
+/// the callback owns the array and frees it with `zerobus_free_record_array`.
+/// Like `zerobus_multiplexed_stream_close_async`, it starts when its
+/// background task runs: calls made right after it returns can still be
+/// accepted, and once it has started, `_async` ingests fail at once and other
+/// calls wait for it.
+///
+/// Follows the multiplexed `_async` contract described on
+/// `CreateMultiplexedStreamAsyncCallback`.
+#[no_mangle]
+pub extern "C" fn zerobus_multiplexed_stream_get_unacked_records_async(
+    mux: *mut CZerobusMultiplexedStream,
+    callback: RecordArrayAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let handle = match validate_mux_ptr(mux) {
+            Ok(h) => h,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return false;
+            }
+        };
+        let stream = Arc::clone(&handle.stream);
+        let user_data = SendPtr::new(user_data);
+        write_success_result(result);
+        spawn_with_panic_report(
+            async move {
+                let res = async {
+                    let mut mux = stream.write_owned().await;
+                    Ok(mux.get_unacked_records().await?.collect::<Vec<_>>())
+                }
+                .await;
+                yield_before_callback().await;
+                let (records, result) = match res.and_then(encoded_records_to_c_array) {
+                    Ok(records) => (records, CResult::success()),
+                    Err(err) => (
+                        CRecordArray {
+                            records: ptr::null_mut(),
+                            len: 0,
+                        },
+                        CResult::error(err),
+                    ),
+                };
+                invoke_record_array_async_callback(callback, records, result, user_data.get());
+            },
+            move |result| {
+                invoke_record_array_async_callback(
+                    callback,
+                    CRecordArray {
+                        records: ptr::null_mut(),
+                        len: 0,
+                    },
+                    result,
+                    user_data.get(),
+                )
+            },
+        );
+        true
+    })
+}
+
 #[cfg(test)]
 mod multiplexed_tests {
     //! Pure FFI-layer tests: C argument checks, record copying, the ack
-    //! bridge, the serialized headers provider, and the panic report of
-    //! background work. Create tests run against the mock server in
+    //! bridge, the serialized headers provider, the pending-ingest tracker,
+    //! and the panic paths (they need the `cfg(test)` seam). Create and
+    //! `_async` argument tests run against the mock server in
     //! `rust/tests/src/multiplexed_ffi_tests.rs`.
     use super::*;
     use crate::zerobus_free_error_message;
@@ -1175,6 +1814,74 @@ mod multiplexed_tests {
             count: 0,
             error_message: ptr::null_mut(),
         }
+    }
+
+    /// A blocking flush or close on `mux` on a thread, bounded to 2 s:
+    /// `(returned, retryable, message)`.
+    fn blocking_within_2s(
+        mux: *mut CZerobusMultiplexedStream,
+        call: extern "C" fn(*mut CZerobusMultiplexedStream, *mut CResult) -> bool,
+        what: &str,
+    ) -> (bool, bool, String) {
+        let mux_addr = mux as usize;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut result = unwritten_result();
+            let returned = call(mux_addr as *mut _, &mut result);
+            let (_, retryable, message) = take_full(&mut result);
+            let _ = tx.send((returned, retryable, message));
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{what} did not return within 2 s"))
+    }
+
+    /// A live 1-lane JSON mux on the mock server, for the panic-path tests.
+    fn live_mux() -> (
+        tokio::runtime::Runtime,
+        *mut CZerobusSdk,
+        *mut CZerobusMultiplexedStream,
+    ) {
+        use zerobus_test_support::mock_grpc::{start_mock_server, MockResponse};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (server, url) = runtime.block_on(start_mock_server()).unwrap();
+        // The mock opens the lane itself; offset 0 is acked.
+        let ack = MockResponse::RecordAck {
+            ack_up_to_offset: 0,
+            delay_ms: 0,
+        };
+        runtime.block_on(server.inject_responses("ffi.mux.panic", vec![ack]));
+        let endpoint = CString::new(url).unwrap();
+        let builder = crate::zerobus_sdk_builder_new();
+        crate::zerobus_sdk_builder_endpoint(builder, endpoint.as_ptr());
+        crate::zerobus_sdk_builder_unity_catalog_url(builder, endpoint.as_ptr());
+        crate::zerobus_sdk_builder_disable_tls(builder);
+        let mut result = unwritten_result();
+        let sdk = crate::zerobus_sdk_builder_build(builder, &mut result);
+        assert!(result.success && !sdk.is_null());
+        // JSON records; recovery stays on: with it off, close can report the
+        // lane's end-of-stream as its own error.
+        let mut options = crate::zerobus_get_default_config();
+        options.record_type = 2;
+        let table = CString::new("ffi.mux.panic").unwrap();
+        let mux = zerobus_sdk_create_multiplexed_stream_with_headers_provider(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            ptr::null_mut(),
+            None,
+            1,
+            &options,
+            None,
+            None,
+            ptr::null_mut(),
+            None,
+            &mut result,
+        );
+        let (success, _, message) = take_full(&mut result);
+        assert!(success && !mux.is_null(), "{message}");
+        (runtime, sdk, mux)
     }
 
     /// Which argument a C-argument row passes as NULL (the mux is always
@@ -1388,8 +2095,76 @@ mod multiplexed_tests {
         assert_eq!(MAX_ACTIVE.load(Ordering::SeqCst), 1);
     }
 
-    /// A panic in background work reaches its callback once as a
-    /// non-retryable error. (A panicking async create is in the mock suite.)
+    /// A flush waits only for submissions from its own epoch or earlier: a
+    /// submission accepted after the flush began does not hold it off.
+    #[test]
+    fn pending_ingests_wait_only_for_earlier_epochs() {
+        let tracker = Arc::new(PendingIngests::default());
+        let wait = |target| {
+            RUNTIME.block_on(async {
+                tokio::time::timeout(Duration::from_millis(200), tracker.wait_drained(target))
+                    .await
+                    .is_ok()
+            })
+        };
+        let before = tracker.begin();
+        let target = tracker.start_flush();
+        let after = tracker.begin();
+        assert!(!wait(target), "an earlier submission holds the flush");
+        drop(before);
+        assert!(wait(target), "a later submission must not hold the flush");
+        drop(after);
+        assert!(wait(tracker.start_flush()));
+
+        // Two flushes waiting on one target both wake when it drains.
+        let pending = tracker.begin();
+        let target = tracker.start_flush();
+        std::thread::scope(|scope| {
+            let waiters: Vec<_> = (0..2)
+                .map(|_| {
+                    let tracker = Arc::clone(&tracker);
+                    scope.spawn(move || {
+                        RUNTIME.block_on(async {
+                            tokio::time::timeout(
+                                Duration::from_secs(2),
+                                tracker.wait_drained(target),
+                            )
+                            .await
+                            .is_ok()
+                        })
+                    })
+                })
+                .collect();
+            // Let both waiters register before the target drains.
+            std::thread::sleep(Duration::from_millis(100));
+            drop(pending);
+            for waiter in waiters {
+                assert!(waiter.join().unwrap(), "every waiter on the target wakes");
+            }
+        });
+    }
+
+    type Report = (i64, bool, bool, String);
+
+    /// `_async` ingest callback for the panic test: sends what it got to the
+    /// `Sender` behind `user_data`.
+    extern "C" fn send_report(id: i64, result: *const CResult, user_data: *mut c_void) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<Report>) };
+        let result = unsafe { &*result };
+        // The FFI owns the message and frees it after the callback.
+        let message = if result.error_message.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(result.error_message) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let _ = tx.send((id, result.success, result.is_retryable, message));
+    }
+
+    /// A panic in background work (any async op, an async ingest) reaches
+    /// its callback once as a non-retryable error, and releases what the
+    /// work held. (A panicking async create is in the mock suite.)
     #[test]
     fn panics_in_background_work_are_reported_once() {
         const PANIC: &str = "Rust panic caught at FFI boundary";
@@ -1416,5 +2191,28 @@ mod multiplexed_tests {
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "on_panic runs only for a panic, and once"
         );
+
+        // Async ingest: the callback gets INGEST_ERROR; the ticket and the
+        // read guard are released, so flush and close don't hang.
+        let (_runtime, sdk, mux) = live_mux();
+        let (tx, rx) = std::sync::mpsc::channel::<Report>();
+        let user_data = Box::leak(Box::new(tx)) as *mut _ as *mut c_void;
+        let handle = validate_mux_ptr(mux).unwrap();
+        spawn_ingest_async(handle, IngestPayload::PanicForTest, send_report, user_data);
+        let (id, success, retryable, message) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the panicking async ingest calls back");
+        assert!(id == INGEST_ERROR && !success && !retryable, "{message}");
+        assert!(message.starts_with(PANIC), "async ingest: {message}");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the callback runs once"
+        );
+        let (flushed, _, message) = blocking_within_2s(mux, flush, "flush after the panic");
+        assert!(flushed, "{message}");
+        let (closed, _, message) = blocking_within_2s(mux, close, "close after the panic");
+        assert!(closed, "{message}");
+        zerobus_multiplexed_stream_free(mux);
+        crate::zerobus_sdk_free(sdk);
     }
 }

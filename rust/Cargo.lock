@@ -4409,6 +4409,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zerobus-test-support",
 ]
 
 [[package]]
